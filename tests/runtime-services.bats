@@ -2682,6 +2682,7 @@ pw_run() {
     PW_CALLS="$root/calls" PW_USERS="$root/passwd.d/users" PW_GROUPS="$root/passwd.d/groups" \
     PW_FAKE_UID="${PW_FAKE_UID:-970}" \
     CERALIVE_RUNTIME_SRC="${PW_RUNTIME_SRC:-$PIPELINE_DIR/mkosi/runtime}" \
+    HDMIRX_AUDIO_BIN_DIR="$root/usr/local/sbin" \
     PIPEWIRE_UNIT_DIR="$root/etc/systemd/system" \
     PIPEWIRE_USER_UNIT_DIR="$root/etc/systemd/user" \
     PIPEWIRE_CONF_DIR="$root/etc/pipewire/pipewire.conf.d" \
@@ -3121,4 +3122,21 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   grep -Fq 'setup_pipewire_system_mode' "$PIPELINE_DIR/ci/postinst-drift-check.sh"
   run grep -cE '^setup_pipewire_system_mode\(\) \{' "$POSTINST_LIB"
   [ "$output" -eq 1 ]
+}
+
+@test "pipewire: HDMI audio policy exercises signal transitions and scoped runtime profiles" {
+  run python3 "$PIPELINE_DIR/tests/test_hdmirx_audio.py"
+  [ "$status" -eq 0 ]
+}
+
+@test "pipewire: signal-driven HDMI helper and service reach the image" {
+  local root="$BATS_TEST_TMPDIR/pw-hdmi-audio"
+  pw_install_env "$root"
+  run pw_run "$root"
+  [ "$status" -eq 0 ]
+  [ -x "$root/usr/local/sbin/ceralive-hdmirx-audio" ]
+  [ -f "$root/etc/systemd/system/ceralive-hdmirx-audio.service" ]
+  run cat "$root/calls"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"enable ceralive-hdmirx-audio.service"* ]]
 }

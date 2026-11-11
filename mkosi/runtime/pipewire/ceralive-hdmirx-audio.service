@@ -1,0 +1,23 @@
+[Unit]
+Description=HDMI-RX signal-driven audio profile
+After=wireplumber.service
+Wants=wireplumber.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/ceralive-hdmirx-audio
+User=pipewire
+Group=pipewire
+SupplementaryGroups=audio video
+Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+
+[Install]
+WantedBy=multi-user.target
