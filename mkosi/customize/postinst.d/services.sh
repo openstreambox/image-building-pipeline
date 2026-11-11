@@ -247,8 +247,7 @@ setup_pipewire_system_mode() {
   for artifact in pipewire.socket pipewire.service wireplumber.service \
                   10-ceralive-system.conf 10-ceralive-headless.conf \
                   ceralive-pipewire.tmpfiles.conf ceralive-pipewire-bluez.dbus.conf \
-                  ceralive-cerastream-pipewire.dropin.conf \
-                  ceralive-hdmirx-audio.sh ceralive-hdmirx-audio.service; do
+                  ceralive-cerastream-pipewire.dropin.conf; do
     [[ -f "${src}/${artifact}" ]] \
       || die "pipewire artifact not found: ${src}/${artifact} (is \$SRCDIR/runtime mounted?)"
   done
@@ -287,12 +286,6 @@ setup_pipewire_system_mode() {
   install -D -m 0644 "${src}/ceralive-pipewire-bluez.dbus.conf" "${dbus_dir}/ceralive-pipewire-bluez.conf"
   install -D -m 0644 "${src}/ceralive-cerastream-pipewire.dropin.conf" \
     "${cerastream_dropin_dir}/40-pipewire.conf"
-
-  install -D -m 0755 "${src}/ceralive-hdmirx-audio.sh" \
-    "${HDMIRX_AUDIO_BIN_DIR:-/usr/local/sbin}/ceralive-hdmirx-audio"
-  install -D -m 0644 "${src}/ceralive-hdmirx-audio.service" \
-    "${unit_dir}/ceralive-hdmirx-audio.service"
-  enable_service ceralive-hdmirx-audio.service
 
   # 3. Mask the packaged USER units. There is no user session on this appliance, so
   # they cannot start today — but "cannot start today" is a property of the image's

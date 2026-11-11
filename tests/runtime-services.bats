@@ -2682,7 +2682,6 @@ pw_run() {
     PW_CALLS="$root/calls" PW_USERS="$root/passwd.d/users" PW_GROUPS="$root/passwd.d/groups" \
     PW_FAKE_UID="${PW_FAKE_UID:-970}" \
     CERALIVE_RUNTIME_SRC="${PW_RUNTIME_SRC:-$PIPELINE_DIR/mkosi/runtime}" \
-    HDMIRX_AUDIO_BIN_DIR="$root/usr/local/sbin" \
     PIPEWIRE_UNIT_DIR="$root/etc/systemd/system" \
     PIPEWIRE_USER_UNIT_DIR="$root/etc/systemd/user" \
     PIPEWIRE_CONF_DIR="$root/etc/pipewire/pipewire.conf.d" \
@@ -2960,42 +2959,13 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   [ "$status" -ne 0 ]
 }
 
-@test "pipewire: the HDMI-RX profile rule selects the real input profile and NEVER pro-audio" {
-  # An ACP profile set is built ONCE at device creation. A live OPi 5+ enumerated
-  # `off`+`pro-audio` ONLY when the card was probed with no HDMI audio present, and
-  # `scripts/device/find-best-profile.lua` excludes `pro-audio` BY NAME — so the
-  # fallback chain reached `off`, no node was published, and the engine refused
-  # `hw:CARD=HDMIIN` with `audio-device-unavailable` for the whole uptime.
-  # `device.profile.priority.rules` is read by `find-preferred-profile.lua`, which
-  # runs `before` that chooser and has no such exclusion. That half is kept.
-  local wp="$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+@test "pipewire: HDMI-RX selects Pro Audio for capture for late sources" {
   local body="$BATS_TEST_TMPDIR/wp-profile-body"
-  grep -vE '^[[:space:]]*#' "$wp" >"$body"
-
-  grep -Eq '^device\.profile\.priority\.rules[[:space:]]*=[[:space:]]*\[' "$body"
-
-  # EXACTLY ONE entry. The real stereo input profile is the whole list, so the good
-  # path is bit-for-bit what it was and the degraded set is left to park at `off`.
-  grep -Fq 'priorities = [ "input:stereo-fallback" ]' "$body"
-
-  # `pro-audio` MAY NOT APPEAR ANYWHERE IN THIS RULE, in any position. Selecting it
-  # publishes an `Audio/Source` whose I2S PCM cannot `set_hw_params` without an HDMI
-  # signal (ENOLINK -> `suspended -> error`), and cerastream's always-on meter then
-  # builds and abandons one PipeWire capture stream every 30 s against it: measured
-  # +15.6 fds/min idle on a Rock 5B+ (2026-09-20), exhausting the engine unit's
-  # default soft RLIMIT_NOFILE of 1024 and SIGABRT-ing cerastream at ~66 minutes.
-  # Restoring it requires an engine that bounds a failed sidecar open — see the
-  # conf's own ordered-list section.
-  run grep -E 'priorities[[:space:]]*=.*pro-audio' "$body"
-  [ "$status" -ne 0 ]
-
-  # Three OR-ed match alternatives so one missing key cannot silently disable it.
+  grep -vE '^[[:space:]]*#' "$(PW_RUNTIME_DIR)/10-ceralive-headless.conf" >"$body"
+  grep -Fq 'priorities = [ "pro-audio" ]' "$body"
   grep -Fq 'alsa.id = "HDMIIN"' "$body"
   grep -Fq 'device.name = "~alsa_card.platform-hdmi-receiver-sound.*"' "$body"
   grep -Fq 'device.name = "~alsa_card.platform-hdmirx-sound.*"' "$body"
-
-  # SCOPE: the analog card and the two HDMI TRANSMITTER cards keep whatever the
-  # automatic policy picks for them, so they must never be named here.
   run grep -E 'alsa_card\.platform-sound|platform-hdmi0-sound|platform-hdmi1-sound' "$body"
   [ "$status" -ne 0 ]
 }
@@ -3124,19 +3094,16 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   [ "$output" -eq 1 ]
 }
 
-@test "pipewire: HDMI audio policy exercises signal transitions and scoped runtime profiles" {
+@test "pipewire: HDMI audio preference covers late profiles and unrelated cards" {
   run python3 "$PIPELINE_DIR/tests/test_hdmirx_audio.py"
   [ "$status" -eq 0 ]
 }
 
-@test "pipewire: signal-driven HDMI helper and service reach the image" {
+@test "pipewire: HDMI preference reaches the image without a polling service" {
   local root="$BATS_TEST_TMPDIR/pw-hdmi-audio"
   pw_install_env "$root"
   run pw_run "$root"
   [ "$status" -eq 0 ]
-  [ -x "$root/usr/local/sbin/ceralive-hdmirx-audio" ]
-  [ -f "$root/etc/systemd/system/ceralive-hdmirx-audio.service" ]
-  run cat "$root/calls"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"enable ceralive-hdmirx-audio.service"* ]]
+  grep -Fq 'priorities = [ "pro-audio" ]' "$root/etc/wireplumber/wireplumber.conf.d/10-ceralive-headless.conf"
+  [ ! -e "$root/etc/systemd/system/ceralive-hdmirx-audio.service" ]
 }

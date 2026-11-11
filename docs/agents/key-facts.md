@@ -6201,11 +6201,11 @@ The 2026-09-15 Rock RGA candidate booted with the unit, but that receipt does no
 record heartbeat blink or card-activity flicker. Those visual checks remain
 separate from kernel-pin acceptance; no fleet release is inferred.
 
-## Signal-driven HDMI receiver audio profiles
+## HDMI receiver default profile
 
-The static no-Pro-Audio-floor policy remains. The runtime image now installs
-`ceralive-hdmirx-audio.service`, which selects profiles only while receiver audio
-is confirmed and returns HDMI-RX to Off otherwise. See
-[policy and hardware acceptance](../hdmirx-audio.md). The existing static rule's
-historical floor removal must not be interpreted as forbidding this bounded,
-signal-driven policy; no unconditional profile floor is restored.
+The HDMI preference rule now selects Pro Audio, enabling late sources without
+a manual profile command. Its priority is nested in `actions.update-props`,
+which the WirePlumber rule parser requires. This supersedes the historical floor
+removal with the current engine's bounded meter lifecycle. No signal polling
+service is installed. Requalify idle cost/resource growth on engine updates; see
+[policy and hardware acceptance](../hdmirx-audio.md).
