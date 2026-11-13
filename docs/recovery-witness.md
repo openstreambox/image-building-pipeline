@@ -102,12 +102,10 @@ claim that a rescue mode exists. Any storage/identity error exits nonzero and
 prints a safe denial without paths or exception text. `intent reset` returns
 exit 3 on a denied reset and never records that refused reset intent (storage or
 argument errors return 1). Consumers must check exit
-status and deny reset on failure. Status is advisory: a disruptive reset must
-follow a successful current-boot `intent reset` transaction returning permission,
-not a cached/read-only grant. This is only the budget’s vote: consumers must
-separately prove action, stream and rollback admission. A positive budget never
-proves that a watchdog or rollback is armed. No cached permission is authority
-for a later boot.
+status and deny reset on failure. Status, `intent` and healthy re-arm never grant rollback-dependent admission.
+`reset_budget_available` reports only the budget vote. The fresh `Store.rollback`
+transaction below durably records an admitted action. Standalone reset/trial
+intent commands return exit 3 and do not record a refused action.
 
 The lowest working local console can run:
 
@@ -119,24 +117,107 @@ python3 /path/to/recovery_witness.py --state-dir /path/to/private-state \
 Those numbers are examples, not production defaults. API callers supply measured
 slot/counters, bootloader digest, watchdog bootstatus classification and detector
 evidence to `begin`; the CLI's `begin` leaves those observations unknown. Use
-`export` for the boot-keyed evidence and `intent reset` before a reset submission.
+`export` for the boot-keyed evidence; use `Store.rollback` before a reset or trial.
 Wire this projection to the management UI/log export and independent console in
 the enabling change. Rescue must retain management/update/export while suppressing
 media, but this module neither stops a stream nor falsely announces active rescue.
 
+## Rollback refusal and terminal state (host contract)
+
+`Store.rollback(boot, pinned_bootloader=..., probe=..., action="reset")`
+checks a trusted, read-only collector under the writer lock and durably writes the
+intent before returning an immediate admission. `action="activate-other-slot"`
+is the other supported action. No default pin or hardware collector is provided:
+without these integration-owned inputs, admission remains REFUSE. Collectors
+must raise OSError/ValueError on failed reads, never substitute a configured value
+for an observation. The returned reasons contain fixed actionable messages, never
+exception text or paths. No bootloader write is implemented or permitted here.
+
+Production callers omit `now`: the store samples CLOCK_BOOTTIME after collection
+and again after persistence, refusing if the write outlasts freshness. The optional
+`now` argument supplies deterministic host-test time only.
+
+The collector returns this exact evidence contract (extra fields confer no trust):
+
+- `boot_id`, `observed_uptime`: the current kernel boot ID and CLOCK_BOOTTIME at
+  collection, at most 5 seconds old at admission; future or cross-boot evidence refuses.
+- `counter_source="independent-readback"`, integer `counter_before`,
+  `counter_after`, `counter_readback`: positive pre-decrement count, exactly one
+  decrement, and a separate reread of the persisted bootloader counter matching
+  that decrement. Neither the witness counter nor this module's successful fsync
+  is independent evidence. The collector must verify storage provenance and
+  bootloader write/read ordering; setting the source string is not that proof.
+- `bootloader`: measured running bootloader software SHA-256, equal to the
+  caller's immutable known-build SHA-256 pin. Package presence/version alone is
+  insufficient. Unknown/mismatch warns and refuses; service must be manual.
+- `watchdog="armed"`: a fresh observation of an actually live watchdog, including
+  its ownership/handoff, not a device node, config file or prior boot's flag.
+
+The collector is a trusted integration boundary, not arbitrary UI input. A false
+collector can lie; no host-only code qualifies these hardware facts. Collect
+immediately before the action and bind execution to this boot. Recheck if the
+consumer delays or the evidence changes. CLI commands intentionally have no way
+to claim these proofs and always refuse rollback-dependent admission.
+
+The durable `rescue` latch has `required`, `entries` and `entered_boot`. Exhaustion
+enters once, repeated producers/reboots do not add entries, and only explicit
+continuous-health requalification clears it. Missing/invalid/old-schema storage
+starts with no automatic reset credit, separately from an exhausted rescue episode; it never migrates into a fresh allowance.
+A person can recover using known-good boot media and then explicitly requalify
+health. There is no unauthenticated clear command. No further automatic reset or
+update/trial is admitted while latched, even with good rollback evidence.
+
+Every successful mutation publishes `recovery-status.json` using mode 0600,
+atomic replacement and file/directory fsync, after committing `recovery.json`.
+It is a versioned projection for a privileged UI/LED reader, with `state`,
+`console_marker`, `announcement`, `rescue_required` and `rescue_active`. Console
+JSON exposes the same fields. `RESCUE_REQUIRED` means stop media and preserve
+management/export; it explicitly says rescue is **not active**. This layer does
+not implement a rescue service, stop media, drive LEDs or reset the machine.
+Consumers must implement suppression and retain the announcement across restarts.
+No generic promise that inserting a card will boot is made.
+
+The status file is advisory and never carries a rollback/reset grant. A crash
+between ledger and projection replacement can leave it stale: consumers must
+check boot ID and the canonical ledger, treat unavailable/stale status as refusal,
+and republish via a successful transaction before displaying a cleared latch.
+Failure of either fsync/write denies the operation. Never authorize from status.
+
+## Previous-release observations and update-path obligations
+
+`release` persists across boots and healthy re-arm. Its fields are software digests
+`new_release`/`previous_release`, trusted activation timestamp `activated_at`,
+nullable `full_healthy_stream`, latest trusted timestamp `trusted_now`, and
+`minimum_retention_seconds=604800`. Unknown fields remain null. The trusted update
+owner records these through `Store.release`; this is evidence storage only.
+`release_retirement_allowed` is always false: this layer implements no release
+retention, slot copying, deletion, selection, or wall-clock eligibility logic.
+
+The update path must provide authenticated exact release identities, preserve the
+previous release and its boot artifacts/selector entry, record activation once,
+and supply a complete real healthy stream verdict bound to that new release.
+Two health snapshots or budget re-arm are not a full healthy stream. It must
+supply trusted elapsed calendar time across boots (NTP jumps alone cannot prove
+seven days), retain the prior release until **both** one full healthy stream and
+seven days since activation are proven, and prevent slot-sync/mirror from erasing
+it sooner. Replacing an activation resets its release-specific evidence. Unknown
+or failed evidence must retain the previous release. The update owner must
+serialize and bind these observations to the matching activation; this generic
+recording API does not enforce release lifecycle or authorize retirement.
+
 ## Enabling work still required
 
-- Select/verify the durable medium and extraction floor, with missing/full/corrupt
-  storage drills. Bootloader, early-kernel and PID-1 callers are not yet wired.
-- Choose exhausted-budget behaviour during a stream before wiring media suppression
-  or a terminal-mode transition. This status is useful under either answer.
-- Previous-release retention affects the selector/mirror, not this ledger.
-- Pinning/writing bootloader or SPI affects evidence collection and refusal policy;
-  a digest here is observation, not a pinned-bootloader proof.
-- Remote export transport and authentication belong to the consumer.
-- Boot-time update/trial admission, management-path confirmation, reset triggers
-  and missing-root handling are outside this module. Hardware acceptance requires
-  separate boot, storage and power-cut drills.
+- Verify the SD boot/storage and known-good recovery-media floor with missing,
+  full/corrupt storage, medium-priority and power-cut drills.
+- Supply independently measured counter, running bootloader pin and live watchdog
+  collectors, plus image-owned Python and boot-time callers. Never auto-write SPI.
+- Wire rescue-required to media suppression and persistent UI/LED announcements,
+  keeping management/update repair/log export available without claiming rescue
+  activation until that mechanism is implemented and measured.
+- Implement previous-release retention in selector/update/mirror owners.
+- Management-path commit-confirm, reset triggers, missing-root timeouts and remote
+  companion/export authentication remain separate work. Hardware acceptance still
+  requires boot, storage and power-cut drills; this module enables no services.
 
 Run `tests/recovery-witness.test.sh`; it is also registered in `./run-tests`.
 

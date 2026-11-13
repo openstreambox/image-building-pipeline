@@ -12,7 +12,7 @@ import re
 import tempfile
 import time
 
-VERSION = 3
+VERSION = 4
 MAX_WITNESSES = 64
 MAX_BYTES = 4 * 1024 * 1024
 INTENTS = {"none", "reset", "activate-other-slot", "unbind-adapter"}
@@ -82,7 +82,11 @@ class Store:
     def empty(self, source):
         return {"version": VERSION, "limit": self.limit, "healthy_seconds": self.healthy_seconds,
                 "remaining": 0, "current_boot": None, "boots": {}, "source": source, "exhausted": False,
-                "pruned_boots": 0, "max_health_gap": self.max_health_gap}
+                "pruned_boots": 0, "max_health_gap": self.max_health_gap,
+                "rescue": {"required": False, "entries": 0, "entered_boot": None},
+                "release": {"new_release": None, "previous_release": None,
+                            "activated_at": None, "full_healthy_stream": None,
+                            "trusted_now": None, "minimum_retention_seconds": 604800}}
 
     def validate(self, record):
         if set(record) != set(self.empty("missing")):
@@ -100,6 +104,14 @@ class Store:
                 or record["pruned_boots"] < 0 or type(record["max_health_gap"]) is not int
                 or not 1 <= record["max_health_gap"] <= 30):
             raise ValueError("invalid recovery policy")
+        rescue = record["rescue"]
+        if (not isinstance(rescue, dict) or set(rescue) != {"required", "entries", "entered_boot"}
+                or type(rescue["required"]) is not bool or type(rescue["entries"]) is not int
+                or rescue["entries"] < 0 or rescue["required"] != record["exhausted"]):
+            raise ValueError("invalid rescue state")
+        if rescue["entered_boot"] is not None:
+            boot_id(rescue["entered_boot"])
+        self.validate_release(record["release"])
         for key, witness in record["boots"].items():
             boot_id(key)
             if set(witness) != {"state_source", "budget_at_start", "previous_boot", "slot", "counters", "bootloader", "reset_cause", "detectors", "console_tail", "health", "intent", "granted", "last_uptime", "healthy_since", "budget_remaining"}:
@@ -164,13 +176,18 @@ class Store:
         raw = encoded({"record": record, "sha256": hashlib.sha256(encoded(record)).hexdigest()})
         if len(raw) > MAX_BYTES:
             raise ValueError("witness storage full; export and service required")
+        self.atomic_file(self.path, raw)
+        # A durable status projection for UI/LED consumers. Cached evidence never grants.
+        self.atomic_file(self.root / "recovery-status.json", encoded(self.view(record)))
+
+    def atomic_file(self, path, raw):
         fd, name = tempfile.mkstemp(prefix=".write-", dir=self.root)
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(raw)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(name, self.path)
+            os.replace(name, path)
             directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 os.fsync(directory)
@@ -180,17 +197,118 @@ class Store:
             Path(name).unlink(missing_ok=True)
 
     @staticmethod
+    def validate_release(value):
+        if not isinstance(value, dict) or set(value) != {"new_release", "previous_release",
+                "activated_at", "full_healthy_stream", "trusted_now", "minimum_retention_seconds"}:
+            raise ValueError("invalid release record")
+        for key in ("new_release", "previous_release"):
+            if value[key] is not None and (not isinstance(value[key], str) or
+                    not re.fullmatch(r"sha256:[0-9a-f]{64}", value[key])):
+                raise ValueError("invalid release digest")
+        for key in ("activated_at", "trusted_now"):
+            if value[key] is not None:
+                uptime(value[key])
+        if (value["full_healthy_stream"] is not None and type(value["full_healthy_stream"]) is not bool
+                or type(value["minimum_retention_seconds"]) is not int
+                or value["minimum_retention_seconds"] != 604800):
+            raise ValueError("invalid release evidence")
+
+    @staticmethod
     def view(record, current_boot=None):
         remaining = record["remaining"]
         if current_boot is not None and record["current_boot"] != current_boot:
             remaining = 0
+        rescue = record["rescue"]["required"]
         return {"version": VERSION, "boot_id": record["current_boot"], "remaining": remaining,
-                "automatic_reset_allowed": remaining > 0,
-                "rescue_required": record["exhausted"],
-                "rescue_active": False,
-                "announcement": ("Rescue required: reset budget exhausted. Automatic resets denied; management and log export must remain available."
-                                 if record["exhausted"] else ("Recovery reset budget unavailable; confirm continuous health." if remaining == 0 else "Recovery reset budget available.")),
+                "reset_budget_available": remaining > 0 and not rescue,
+                "automatic_reset_allowed": False, "rollback_armed": False, "decision": "REFUSE",
+                "update_trial_allowed": False,
+                "refusal_reasons": ["Recheck independent counter persistence, pinned bootloader and live watchdog before relying on rollback."],
+                "rescue_required": rescue, "rescue_active": False,
+                "state": "rescue-required" if rescue else "rollback-not-armed",
+                "console_marker": "RESCUE_REQUIRED" if rescue else "ROLLBACK_NOT_ARMED",
+                "announcement": ("Rescue required: automatic resets denied. Stop media; retain management and log export. Rescue is not active. Ask a helper to recover using known-good boot media."
+                                 if rescue else "Rollback not armed: verify counter persistence, pinned bootloader and live watchdog; updates and trials refused."),
+                "release_retirement_allowed": False,
                 "state_source": record["source"]}
+
+    @staticmethod
+    def latch(record):
+        rescue = record["rescue"]
+        if record["exhausted"] and not rescue["required"]:
+            rescue.update(required=True, entries=rescue["entries"] + 1,
+                          entered_boot=record["current_boot"])
+        elif rescue["required"] and rescue["entered_boot"] is None:
+            rescue["entered_boot"] = record["current_boot"]
+
+    def rollback(self, boot, now=None, *, pinned_bootloader, probe, action="reset"):
+        """Fresh trusted read-only collector; never use ledger/cached evidence.
+
+        The collector must independently reread the bootloader's persisted counter,
+        identify the running bootloader and check the currently running watchdog.
+        No hardware collector or production pin is supplied by this host layer.
+        """
+        if now is not None:
+            uptime(now)
+        if action not in {"reset", "activate-other-slot"}:
+            raise ValueError("invalid rollback action")
+        reasons = []
+        observed_times = []
+        def change(record, witness):
+            try:
+                proof = probe()
+            except (OSError, ValueError):
+                proof = {}
+            if not isinstance(proof, dict):
+                proof = {}
+            try:
+                observed = uptime(proof.get("observed_uptime"))
+                checked_now = time.clock_gettime(time.CLOCK_BOOTTIME) if now is None else now
+                observed_times.append(observed)
+                fresh = proof.get("boot_id") == boot and 0 <= checked_now - observed <= 5
+            except ValueError:
+                fresh = False
+            if not fresh:
+                reasons.append("Read fresh evidence from this boot (maximum age 5 seconds).")
+            values = [proof.get(k) for k in ("counter_before", "counter_after", "counter_readback")]
+            if (proof.get("counter_source") != "independent-readback"
+                    or any(type(v) is not int or not 0 <= v <= 2147483647 for v in values)
+                    or values[0] < 1 or values[1] != values[0] - 1 or values[2] != values[1]):
+                reasons.append("Verify the bootloader decremented its counter and independently reread the persisted value.")
+            if (not isinstance(pinned_bootloader, str)
+                    or not re.fullmatch(r"sha256:[0-9a-f]{64}", pinned_bootloader)
+                    or proof.get("bootloader") != pinned_bootloader):
+                reasons.append("Check the running bootloader against the known pinned build; arrange manual service if different. Never write it automatically.")
+            if proof.get("watchdog") != "armed":
+                reasons.append("Verify the watchdog is running; an installed device or configuration alone is insufficient.")
+            witness["detectors"] = {"rollback": "not-armed" if reasons else "armed",
+                                    "watchdog": "armed" if fresh and proof.get("watchdog") == "armed" else "unknown"}
+            if not reasons:
+                witness["bootloader"] = pinned_bootloader
+            witness["intent"] = action if not reasons and record["remaining"] > 0 else "none"
+        result = self.update(boot, change)
+        if now is None and observed_times and not 0 <= time.clock_gettime(time.CLOCK_BOOTTIME) - observed_times[0] <= 5:
+            reasons.append("Evidence expired during persistence; collect fresh evidence before the action.")
+        result["rollback_armed"] = not reasons
+        result["refusal_reasons"] = reasons + (["Reset budget exhausted or uncertain; recover and explicitly requalify health."]
+                                                if not result["reset_budget_available"] else [])
+        allowed = not reasons and result["reset_budget_available"]
+        result["decision"] = "ALLOW" if allowed else "REFUSE"
+        result["automatic_reset_allowed"] = allowed and action == "reset"
+        result["update_trial_allowed"] = allowed and action == "activate-other-slot"
+        if allowed:
+            result.update(state="rollback-armed", console_marker="ROLLBACK_ARMED",
+                          announcement="Rollback evidence verified for this immediate admission only.")
+        return result
+
+    def release(self, boot, *, new_release, previous_release, activated_at,
+                full_healthy_stream, trusted_now):
+        """Record trusted update-path observations, never prune or authorize pruning."""
+        value = dict(new_release=new_release, previous_release=previous_release,
+                     activated_at=activated_at, full_healthy_stream=full_healthy_stream,
+                     trusted_now=trusted_now, minimum_retention_seconds=604800)
+        self.validate_release(value)
+        return self.update(boot, lambda record, witness: record.update(release=value))
 
     def begin(self, boot, now, *, slot="unknown", counters=None, bootloader="unknown",
               reset_cause="unknown", detectors=None, console_tail=None):
@@ -217,6 +335,7 @@ class Store:
                     raise ValueError("stale boot")
                 # A prior writer may have died after rename but before directory fsync.
                 # Recommit before returning a successful idempotent admission.
+                self.latch(record)
                 self.write(record)
                 return self.view(record)
             previous_boot = record["current_boot"]
@@ -245,6 +364,7 @@ class Store:
             for key in removed:
                 del record["boots"][key]
             record["boots"][keep[-1]]["previous_boot"] = None
+            self.latch(record)
             self.write(record)
             return self.view(record)
 
@@ -255,6 +375,7 @@ class Store:
             if record["current_boot"] != boot:
                 raise ValueError("current boot witness unavailable")
             change(record, record["boots"][boot])
+            self.latch(record)
             self.write(record)
             return self.view(record)
 
@@ -263,11 +384,8 @@ class Store:
         if action not in INTENTS:
             raise ValueError("invalid intent")
         def change(record, witness):
-            if action == "reset":
-                if record["remaining"] == 0:
-                    return
-                # Sticky for this boot: later intents cannot erase the grant.
-                witness["granted"] = "reset"
+            if action in {"reset", "activate-other-slot"}:
+                return
             witness["intent"] = action
         return self.update(boot, change)
 
@@ -298,8 +416,10 @@ class Store:
             witness.update(last_uptime=now, health=verdict, healthy_since=anchor)
             if rearm:
                 record.update(remaining=self.limit, source="valid", exhausted=False)
+                record["rescue"]["required"] = False
                 self._health[boot] = (now, now, verdict)
             witness["budget_remaining"] = record["remaining"]
+            self.latch(record)
             self.write(record)
             return self.view(record)
 
@@ -332,12 +452,15 @@ def main():
             else:
                 result = store.health(boot, now, args.verdict)
         print(json.dumps(result, sort_keys=True))
-        if args.command == "intent" and args.action == "reset" and not result["automatic_reset_allowed"]:
+        if args.command == "intent" and args.action in {"reset", "activate-other-slot"}:
             return 3
     except (OSError, ValueError):
         # Do not echo paths, raw input or exception text into a support report.
-        print(json.dumps({"automatic_reset_allowed": False, "rescue_required": True,
-                          "rescue_active": False, "announcement": "Recovery state unavailable; automatic resets denied."}))
+        print(json.dumps({"automatic_reset_allowed": False, "rescue_required": None,
+                          "rescue_active": False, "state": "recovery-unavailable",
+                          "console_marker": "RECOVERY_UNAVAILABLE", "rollback_armed": False, "decision": "REFUSE",
+                          "update_trial_allowed": False,
+                          "announcement": "Recovery state unavailable; automatic resets denied. Ask a helper to recover using known-good boot media."}))
         return 1
     return 0
 
