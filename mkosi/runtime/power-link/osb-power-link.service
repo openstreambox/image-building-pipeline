@@ -1,0 +1,52 @@
+[Unit]
+Description=Read-only supervisor telemetry
+After=systemd-udevd.service systemd-tmpfiles-setup.service data.mount
+
+[Service]
+Type=simple
+User=osb-power
+Group=osb-power
+ExecStartPre=+-/bin/sh -c 'mountpoint -q /data && exec install -d -o osb-power -g osb-power -m 0755 /data/osb-power'
+ExecStart=/usr/libexec/osb-power-link
+Restart=always
+RestartSec=2
+RuntimeDirectory=ceralive/power
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0022
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=none
+ProtectProc=invisible
+ProcSubset=pid
+PrivateIPC=yes
+RemoveIPC=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @reboot @swap
+DevicePolicy=closed
+DeviceAllow=char-ttyACM r
+ReadWritePaths=/run/ceralive/power -/data/osb-power
+MemoryMax=32M
+CPUQuota=10%
+TasksMax=4
+LimitNOFILE=32
+
+[Install]
+WantedBy=multi-user.target

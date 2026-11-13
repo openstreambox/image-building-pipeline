@@ -1,0 +1,11 @@
+OSB1 EVT up=0 armed seq=0 boot=1234abcd rst=brownout alive=0 hot=none shutdowns=0 fw=test-flavour crc=F941
+OSB1 EVT up=0 boot field armed=1 pack_cal=datasheet restart=cold seq=1 boot=1234abcd rst=brownout alive=0 hot=none shutdowns=0 fw=test-flavour crc=D7B6
+OSB1 EVT up=0 boot field armed=1 pack_cal=datasheet restart=cold seq=2 boot=1234abcd rst=brownout alive=0 hot=none shutdowns=0 fw=test-flavour crc=4BF7
+OSB1 up=1 armed=1 power=low redundant=0 thermal=normal a=fault/na/na/25.0C/80 b=fault/na/na/25.0C/80 pack=fault/25.0C/14 load=0.0W sbc=run last_shutdown=none pack_charge=no_inhibit_required fan=unmonitored pack_cal=datasheet start=settling gaps=0844 gaps2=0000 seq=14 boot=1234abcd rst=wdt alive=1 hot=none shutdowns=0 fw=test-flavour crc=2706
+OSB1 up=2 armed=1 power=low redundant=0 thermal=normal a=fault/na/na/25.0C/80 b=fault/na/na/25.0C/80 pack=fault/25.0C/14 load=0.0W sbc=run last_shutdown=none pack_charge=no_inhibit_required fan=unmonitored pack_cal=datasheet start=settling gaps=0844 gaps2=0000 seq=15 boot=1234abcd rst=wdt alive=1 hot=none shutdowns=0 fw=test-flavour crc=2600
+OSB1 up=3 armed=1 power=low redundant=0 thermal=normal a=fault/na/na/25.0C/80 b=fault/na/na/25.0C/80 pack=fault/29.0C/14 load=0.0W sbc=run last_shutdown=none pack_charge=no_inhibit_required fan=unmonitored pack_cal=datasheet start=no_bank gaps=0844 gaps2=0000 seq=16 boot=1234abcd rst=wdt alive=1 hot=none shutdowns=0 fw=test-flavour crc=CAEE
+OSB1 EVT up=0 boot field armed=1 pack_cal=datasheet restart=warm left-out=ina seq=1 boot=1234abcd rst=wdt alive=0 hot=none shutdowns=0 fw=test-flavour crc=5F04
+OSB1 EVT up=0 boot field armed=1 pack_cal=datasheet restart=warm left-out=ina seq=2 boot=1234abcd rst=wdt alive=0 hot=none shutdowns=0 fw=test-flavour crc=101D
+OSB1 EVT up=0 boot field armed=1 pack_cal=datasheet restart=warm left-out=storage seq=1 boot=1234abcd rst=wdt alive=0 hot=none shutdowns=0 fw=test-flavour crc=3273
+OSB1 EVT up=0 boot field armed=1 pack_cal=datasheet restart=cold restart-record=stale seq=1 boot=1234abcd rst=panic alive=0 hot=none shutdowns=0 fw=test-flavour crc=95A9
+OSB1 EVT up=0 boot field armed=1 pack_cal=datasheet restart=cold restart-record=stale seq=2 boot=1234abcd rst=panic alive=0 hot=none shutdowns=0 fw=test-flavour crc=0B43
