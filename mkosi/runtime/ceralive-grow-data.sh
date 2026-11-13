@@ -45,7 +45,7 @@ grow_data_definitions() {
 grow_data_is_block_device() { [[ -b "$1" ]]; }
 
 grow_data_main() {
-  local data_label="$1" root parent disk table root_label prefix
+  local data_label="$1" root parent disk table root_label prefix media root_bytes minimum ro
   case "$data_label" in data) prefix="" ;; xdata) prefix=x ;; *) return 1 ;; esac
   root="$(findmnt -nro SOURCE /)"
   root="$(readlink -f "$root")"
@@ -56,6 +56,15 @@ grow_data_main() {
   [[ "$parent" =~ ^[a-zA-Z0-9._-]+$ ]] || return 1
   disk="/dev/$parent"
   grow_data_is_block_device "$disk" || return 1
+  # Refuse before repart can write GPT or touch an already failing card.
+  root_bytes=$(lsblk -bdnro SIZE "$root")
+  [[ "$root_bytes" == 3221225472 ]] || return 1
+  minimum=8589934592
+  media=$(lsblk -bdnro SIZE "$disk")
+  [[ "$media" =~ ^[1-9][0-9]{0,14}$ ]] || return 1
+  (( media >= minimum )) || { echo 'Refusing to grow data: card too small' >&2; return 78; }
+  ro=$(lsblk -dnro RO "$disk")
+  [[ "$ro" == 0 ]] || { echo 'Refusing to grow data: card read-only or unknown' >&2; return 78; }
   table="$(lsblk --bytes --noheadings --raw --paths --sort PARTN --output TYPE,PARTLABEL,PARTTYPE,SIZE,PARTN,START "$disk")"
   GROW_DATA_DEFS="$(mktemp -d /run/ceralive-grow-data.XXXXXX)"
   trap 'rm -rf -- "$GROW_DATA_DEFS"' EXIT

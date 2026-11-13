@@ -70,7 +70,7 @@ setup_data_persistence() {
   log "persisting CeraLive state on ${data_root} (config/logs/wifi/srtla)"
 
   local grow_order=""
-  [[ "${BOARD_ID:-}" != rock-5b-plus ]] || grow_order=",x-systemd.after=ceralive-grow-data.service"
+  [[ "${BOARD_ID:-}" != rock-5b-plus ]] || grow_order=",x-systemd.after=ceralive-grow-data.service,x-systemd.requires=ceralive-grow-data.service"
   if ! grep -qE "^[^#]*[[:space:]]${data_root}[[:space:]]" /etc/fstab 2>/dev/null; then
     mkdir -p "${data_root}"
     printf 'PARTLABEL=%s\t%s\text4\tdefaults,noatime,nofail,x-systemd.growfs%s\t0\t2\n' \
@@ -111,6 +111,16 @@ ExecStart=/usr/libexec/ceralive/ceralive-data-ready
 TimeoutStartSec=30s
 Restart=no
 RemainAfterExit=yes
+UNIT
+    # fstab starts fsck as a sibling of the mount. It must not repair-write a
+    # refused card while the mount itself is still waiting for partition growth.
+    local data_fsck
+    data_fsck=$(systemd-escape --path --template=systemd-fsck@.service "/dev/disk/by-partlabel/${data_partlabel}")
+    mkdir -p "/etc/systemd/system/${data_fsck}.d"
+    cat >"/etc/systemd/system/${data_fsck}.d/data-growth.conf" <<'UNIT'
+[Unit]
+Requires=ceralive-grow-data.service
+After=ceralive-grow-data.service
 UNIT
     # Gate update owners without adding a hard SSH/rescue dependency.
     # SSH still requires enablement and a successful persistent-identity guard.
@@ -249,6 +259,10 @@ Description=CeraLive one-time data migration + /data skeleton
 DefaultDependencies=no
 Conflicts=shutdown.target
 RequiresMountsFor=${data_root}
+# Do not seed or expose writable state until online filesystem growth succeeds.
+# Keep this in local-fs; the late readiness service has default dependencies.
+Requires=systemd-growfs@data.service
+After=systemd-growfs@data.service
 Before=local-fs.target shutdown.target ceralive-hostname.service ceralive.service
 ConditionPathIsMountPoint=${data_root}
 
