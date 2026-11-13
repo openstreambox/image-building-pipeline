@@ -124,3 +124,11 @@ setup() {
   [ "$(stat -c %a "$file")" = 600 ]
   [ "$(stat -c %a "$(dirname "$file")")" = 700 ]
 }
+@test "failed production data mount stops before accessing evidence sources" {
+  mkdir "$BATS_TEST_TMPDIR/bin"
+  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/mountpoint"
+  chmod +x "$BATS_TEST_TMPDIR/bin/mountpoint"
+  run env CERALIVE_EVIDENCE_ROOT=/ PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash "$TOOL" collect
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'/data is not mounted; preserving pstore'* ]]
+}
