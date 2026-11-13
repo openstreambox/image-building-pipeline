@@ -9,7 +9,6 @@
         __overlay__ {
             #address-cells = <2>;
             #size-cells = <2>;
-            ranges;
             ramoops@1f000000 {
                 compatible = "ramoops";
                 reg = <0x0 0x1f000000 0x0 0x100000>;
