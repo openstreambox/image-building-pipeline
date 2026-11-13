@@ -116,7 +116,7 @@ configure_layout() {
   AB_MIN_TOTAL_MB=$(( GAP_MB + BOOT_MB + ROOTFS_MB * 2 + DATA_FLOOR_MB + GPT_TAIL_MB ))
   SINGLE_MIN_TOTAL_MB=$(( GAP_MB + BOOT_MB + ROOTFS_MB + DATA_FLOOR_MB + GPT_TAIL_MB ))
   DEFAULT_TOTAL_MB=14800
-  [[ "${BOARD_ID:-}" != rock-5b-plus ]] || DEFAULT_TOTAL_MB="${AB_MIN_TOTAL_MB}"
+  [[ "${BOARD_ID:-}" != rock-5b-plus ]] || DEFAULT_TOTAL_MB=8192
 }
 SINGLESLOT_TOTAL_MB=8192 #  8 GiB reference medium for single-slot verify
 
