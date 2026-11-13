@@ -6,7 +6,7 @@ import pathlib
 import socket
 import errno
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('ingress', ROOT / 'mkosi/runtime/button-ingress/ingress.py')
@@ -87,6 +87,51 @@ class Contract(unittest.TestCase):
 
 
 class Transport(unittest.IsolatedAsyncioTestCase):
+    async def test_event_loss_retires_all_before_identical_snapshot(self):
+        # The remove/readd events were lost: the replacement dump is identical.
+        snapshot = b'[{"ifname":"eth7","ifindex":7,"link_type":"ether","flags":["UP"],"addr_info":[{"family":"inet","local":"192.168.2.1","prefixlen":24}]}]'
+        for loss in (OSError(errno.ENOBUFS, 'overflow'),
+                     (b'lost', [], socket.MSG_TRUNC, None),
+                     (b'\x10\x00\x00\x00\x04\x00' + b'\0' * 10, [], 0, None),
+                     (b'\x10\x00\x00\x00\x03\x00\x10\x00' + b'\0' * 8, [], 0, None)):
+            with self.subTest(loss=loss):
+                front = m.FrontDoor([])
+                front.monitor.close()
+                old_monitor, fresh_monitor = Mock(), Mock()
+                front.monitor = old_monitor
+                front.loop = Mock()
+                old_monitor.recvmsg.side_effect = [loss] if isinstance(loss, OSError) else [loss, BlockingIOError()]
+                fresh_monitor.recvmsg.side_effect = BlockingIOError()
+                front.trusted_ready = True
+                old_client, old_backend = Mock(), Mock()
+                front.state.writers.update((old_client, old_backend))
+                front.schedule = Mock()
+                try:
+                    front.event()
+                    old_client.close.assert_called_once()
+                    old_backend.close.assert_called_once()
+                    self.assertFalse(front.trusted_ready)
+                    generation = front.state.number
+                    def dump(*args, **kwargs):
+                        # A new subscription must exist before taking the dump.
+                        fresh_monitor.bind.assert_called_once_with((0, 1 | 0x10 | 0x100))
+                        self.assertIs(front.monitor, fresh_monitor)
+                        return snapshot
+                    with patch.object(m.socket, 'socket', return_value=fresh_monitor), patch.object(m.subprocess, 'check_output', side_effect=dump):
+                        await front.reconcile()
+                    old_monitor.close.assert_called_once()
+                    front.loop.remove_reader.assert_called_once_with(old_monitor)
+                    front.loop.add_reader.assert_called_once_with(fresh_monitor, front.event)
+                    self.assertTrue(front.trusted_ready)
+                    self.assertGreater(front.state.number, generation)
+                    self.assertFalse(front.state.writers)
+                    # Recovery cannot revive either side of the old grant path.
+                    old_client.close.assert_called_once()
+                    old_backend.close.assert_called_once()
+                finally:
+                    front.event_fence()
+                    front.monitor.close()
+
     async def test_real_unix_and_ordinary_paths(self):
         received = []
         release = asyncio.Event()
@@ -139,7 +184,19 @@ class Transport(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(b'X-Ceralive-Button-Path:', received[1])
                 self.assertIn(b'X-Ceralive-Button-Path: forged', received[2])
                 self.assertIn(b'Via:', received[3])
-                front.event_fence()
+                # Lose a remove/readd interval, then recover the exact same
+                # address/mask. Old upgraded Unix/TCP sessions must stay dead.
+                front.monitor.close()
+                front.monitor = Mock()
+                front.monitor.recvmsg.side_effect = OSError(errno.ENOBUFS, 'overflow')
+                front.schedule = Mock()
+                front.event()
+                fresh = Mock()
+                fresh.recvmsg.side_effect = BlockingIOError()
+                snapshot = b'[{"ifname":"eth7","ifindex":7,"addr_info":[{"family":"inet","local":"192.168.2.1","prefixlen":24}]}]'
+                with patch.object(m.socket, 'socket', return_value=fresh), patch.object(m.subprocess, 'check_output', return_value=snapshot):
+                    await front.reconcile()
+                self.assertTrue(front.trusted_ready)
                 for r in readers:
                     self.assertEqual(await asyncio.wait_for(r.read(), 2), b'')
                 for w in clients: w.close()

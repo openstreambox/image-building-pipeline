@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 import socket
 import ssl
+import struct
 import subprocess
 
 UNIX = '/run/ceralive-button-ingress/rpc.sock'
@@ -103,6 +104,24 @@ class FrontDoor:
         self.monitor.bind((0, 1 | 0x10 | 0x100))
         self.monitor.setblocking(False)
         self.pending = None
+        self.needs_subscription = False
+        self.loop = None
+
+    def resubscribe(self):
+        monitor = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE)
+        try:
+            monitor.bind((0, 1 | 0x10 | 0x100))
+            monitor.setblocking(False)
+        except BaseException:
+            monitor.close()
+            raise
+        if self.loop is not None:
+            self.loop.remove_reader(self.monitor)
+        self.monitor.close()
+        self.monitor = monitor
+        if self.loop is not None:
+            self.loop.add_reader(self.monitor, self.event)
+        self.needs_subscription = False
 
     def drain_events(self):
         changed = False
@@ -112,18 +131,26 @@ class FrontDoor:
                 changed = True
                 if not data or flags & socket.MSG_TRUNC:
                     raise OSError('netlink truncated')
+                offset = 0
+                while offset < len(data):
+                    if len(data) - offset < 16:
+                        raise OSError('netlink incomplete header')
+                    length, kind, message_flags = struct.unpack_from('=IHH', data, offset)
+                    # NLMSG_ERROR/OVERRUN and NLM_F_DUMP_INTR lose continuity.
+                    if length < 16 or offset + length > len(data) or kind in (2, 4) or message_flags & 0x10:
+                        raise OSError('netlink event history unavailable')
+                    offset += (length + 3) & ~3
             except BlockingIOError:
                 return changed
             except OSError:
                 # ENOBUFS/overflow or uncertain message: same full invalidation.
-                self.state.invalidate()
+                self.needs_subscription = True
+                self.event_fence()
                 return True
 
     def event(self):
         if self.drain_events():
-            self.state.invalidate()
-            for task in tuple(self.tasks):
-                task.cancel()
+            self.event_fence()
             self.schedule()
 
     def schedule(self):
@@ -131,10 +158,11 @@ class FrontDoor:
             self.pending = asyncio.create_task(self.reconcile())
 
     async def reconcile(self):
-        self.state.invalidate()
-        self.trusted_ready = False
+        self.event_fence()
         failed = False
         try:
+            if self.needs_subscription:
+                self.resubscribe()
             # Synchronous bounded dumps: no application handler runs between
             # snapshot and event drain. Queued events discard the whole snapshot.
             links = json.loads(subprocess.check_output(['/usr/sbin/ip', '-j', '-d', 'address', 'show'], timeout=3))
@@ -169,12 +197,14 @@ class FrontDoor:
             else:
                 self.trusted_ready = not failed
         except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            self.needs_subscription = True
             self.event_fence()
             logging.exception('listener reconciliation unavailable')
         finally:
             asyncio.get_running_loop().call_later(2, self.retry)
 
     def event_fence(self):
+        self.trusted_ready = False
         self.state.invalidate()
         for task in tuple(self.tasks):
             task.cancel()
@@ -261,12 +291,14 @@ class FrontDoor:
             await asyncio.gather(*pumps, return_exceptions=True)
 
     async def run(self):
-        asyncio.get_running_loop().add_reader(self.monitor, self.event)
+        self.loop = asyncio.get_running_loop()
+        self.loop.add_reader(self.monitor, self.event)
         self.schedule()
         try:
             await asyncio.Future()
         finally:
             self.event_fence()
+            self.loop.remove_reader(self.monitor)
             self.monitor.close()
 
 

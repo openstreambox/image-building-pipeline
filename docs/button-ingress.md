@@ -23,6 +23,12 @@ outside the listener's subnet also remain password-only.
 The netlink subscription precedes the initial snapshot. Every link/address
 event, truncated read or overflow unconditionally closes listeners and both
 sides of accepted connections, cancels handlers, and advances a generation.
+On ENOBUFS, overflow, truncation, interrupted/inconsistent dumps or any loss
+of event continuity, retire **all** trusted connections immediately. Rebuild
+from a fresh netlink subscription established before a complete address dump;
+withhold privileged forwarding until that dump is synchronized with events.
+An identical address and mask after a lost remove/readd interval cannot prove
+continuity and must never preserve or revive pre-loss evidence.
 Only a drained, current snapshot enables trusted admission. A failed bind
 withholds trusted admission globally and retries reconciliation. Address
 removal/readdition, mask changes, renames and interface identity changes cannot
