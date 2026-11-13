@@ -13,7 +13,8 @@ say() { printf 'privileged-check: %s\n' "$*"; }
 
 [[ -b "${capsule}" ]] || { say "source capsule ${capsule} missing"; exit 1; }
 install -d -m 0755 -o "${user}" -g "${user}" "${src}" "${home}/runner-temp"
-runuser -u "${user}" -- tar -xf "${capsule}" -C "${src}"
+# Root opens the disk-group device; the unprivileged user only unpacks the stream.
+runuser -u "${user}" -- tar -xf - -C "${src}" <"${capsule}"
 say "source $(runuser -u "${user}" -- cat "${src}/.capsule-revision" 2>/dev/null || printf unknown)"
 say "virt=$(systemd-detect-virt --vm 2>/dev/null || true) marker=$(ls /sys/firmware/qemu_fw_cfg/by_name/opt/ceralive)"
 # The same guard every privileged harness sources; report its verdict up front.
