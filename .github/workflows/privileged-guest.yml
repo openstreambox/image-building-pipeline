@@ -1,10 +1,14 @@
 # Privileged contracts in a marked disposable guest.
 #
-# The real Avahi, real RAUC and real kernel-stage contracts mount, loop-attach,
-# create partition labels and start system services. They refuse to run
-# anywhere but a disposable KVM/QEMU guest that carries the `opt/ceralive/`
-# firmware marker (tests/lib/require-disposable-guest.sh), so the hosted `bats`
-# job in v2-ci.yml skips them visibly. This workflow is where they run.
+# The real RAUC pair (real-rauc-contract.sh, real-rauc-cleanup-contract.test.sh)
+# can unmount any /mnt/rauc/* mount, binds over /proc/cmdline and exposes
+# rootfs_a/b partition labels to host udev. It refuses to run anywhere but a
+# disposable KVM/QEMU guest that carries the `opt/ceralive/` firmware marker
+# (tests/lib/require-disposable-guest.sh), so the hosted `bats` job in v2-ci.yml
+# skips it visibly. This workflow is where it runs. The real Avahi and real
+# kernel-stage contracts are confined to their own fixtures and stay required,
+# unguarded, in that hosted job; this guest runs them again alongside the RAUC
+# pair because it runs every `privileged` registry row.
 #
 # The job uses an ordinary GitHub-hosted runner, which exposes /dev/kvm. The
 # runner itself stays unmarked: ci/kernel-runner/privileged-guest.sh boots a
@@ -14,8 +18,9 @@
 # no self-hosted runner, no write token: code from a pull request only ever
 # runs inside a throwaway VM inside a throwaway hosted runner.
 #
-# It is not a required check. A run takes roughly half an hour, most of it
-# building the guest base (Ubuntu cloud image, pinned by digest, plus packages).
+# It is not a required check. A run takes about five to six minutes on hosted
+# KVM: roughly two building the guest base (Ubuntu cloud image, pinned by
+# digest, plus packages), the rest the four rows.
 
 name: Privileged contracts (marked guest)
 

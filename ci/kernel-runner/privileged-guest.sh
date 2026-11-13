@@ -9,7 +9,8 @@
 # pristine base for the one run, passes this checkout's tracked source as a
 # read-only tar capsule and the guest script as the `opt/ceralive/check`
 # firmware item (which is the marker the guard looks for), and deletes the
-# overlay afterwards. The destructive fixtures run only inside that guest.
+# overlay afterwards. The guest-only RAUC pair runs only inside that guest; the
+# confined Avahi and kernel-stage rows run there too, and also on the hosted job.
 #
 # The base is built once per set of base inputs and reused; its file name
 # carries their digest, so changed runner files build a new base.

@@ -87,14 +87,16 @@ assert_eq "no path is registered twice" "0" "${dupes}"
 # RAUC harness changes host mounts and partition labels and must stay guarded
 # (marked guest, or a GitHub-hosted ephemeral runner VM on explicit opt-in).
 confined_expected=$'tests/kernel-stage-real.test.sh\ntests/real-avahi-hostname-contract.sh'
-confined_seen=()
+confined_seen=() guarded_seen=() privileged_seen=()
 while IFS=$'\t' read -r path _kind tier _execution _reason; do
   [[ "${tier}" == privileged ]] || continue
   guarded=0 confined=0
+  privileged_seen+=("${path}")
   grep -Eq '^source "\$\{HERE\}/lib/require-(disposable-guest|ephemeral-host)\.sh"$' "${PIPELINE_DIR}/${path}" && guarded=1
   grep -Eq '^# guest-guard: confined\. .+' "${PIPELINE_DIR}/${path}" && confined=1
   if (( guarded && ! confined )); then
     ok "privileged harness sources guest guard: ${path}"
+    guarded_seen+=("${path}")
   elif (( confined && ! guarded )); then
     ok "privileged harness declares confined effects: ${path}"
     confined_seen+=("${path}")
@@ -111,6 +113,20 @@ for path in tests/real-rauc-contract.sh tests/real-rauc-cleanup-contract.test.sh
     bad "real RAUC harness lacks the ephemeral-host guard: ${path}"
   fi
 done
+
+# The marked-guest workflow's header says which rows are guest-only. It must
+# name exactly the guarded privileged harnesses by file name, so it cannot
+# drift back to listing a confined row (which runs unguarded on the hosted job)
+# or miss a newly guarded one.
+guest_workflow="${PIPELINE_DIR}/.github/workflows/privileged-guest.yml"
+guest_header="$(sed -n '/^#/!q;p' "${guest_workflow}")"
+named=()
+for path in "${privileged_seen[@]}"; do
+  grep -Fq "$(basename "${path}")" <<<"${guest_header}" && named+=("${path}")
+done
+assert_eq "guest workflow header names exactly the guest-only rows" \
+  "$(printf '%s\n' "${guarded_seen[@]}" | LC_ALL=C sort)" \
+  "$(printf '%s\n' "${named[@]}" | LC_ALL=C sort)"
 
 # Exercise only the shared guard, never a privileged harness. Substitute a
 # temporary marker path in a copy so all four guest/marker combinations are safe.
