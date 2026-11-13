@@ -108,6 +108,35 @@ for virt in none kvm; do
   done
 done
 
+# CI row selection reuses that guard: an unmarked runner skips the guarded rows
+# visibly (never exit 2 at the guard), a marked guest runs them all.
+for virt in none kvm; do
+  rm -rf "${WORK}/guest-marker" "${WORK}/ci.env"
+  [[ "${virt}" != kvm ]] || mkdir "${WORK}/guest-marker"
+  ( systemd-detect-virt() { echo "${virt}"; }; export -f systemd-detect-virt; export virt
+    CERALIVE_GUEST_GUARD="${WORK}/guard.sh" GITHUB_STEP_SUMMARY="" \
+      bash "${PIPELINE_DIR}/ci/privileged-contracts.sh" "${WORK}/ci.env" ) >"${WORK}/ci.log" 2>&1
+  rc=$?
+  assert_eq "CI row selection exits 0 (${virt})" "0" "${rc}"
+  if [[ "${virt}" == kvm ]]; then
+    expected=$'CERALIVE_RUN_REAL_AVAHI_CONTRACT=required\nCERALIVE_RUN_REAL_RAUC_CONTRACT=disposable-marked-guest-only\nCERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required'
+  else
+    expected=$'CERALIVE_RUN_REAL_AVAHI_CONTRACT=skip\nCERALIVE_RUN_REAL_RAUC_CONTRACT=skip\nCERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=skip'
+    if grep -Fq '::notice title=Privileged contracts::skipped: needs marked guest' "${WORK}/ci.log"; then
+      ok "unmarked CI runner shows skipped: needs marked guest"
+    else
+      bad "unmarked CI runner hides the privileged skip"
+    fi
+  fi
+  assert_eq "CI row selection env (${virt})" "${expected}" "$(cat "${WORK}/ci.env")"
+done
+if grep -Fq 'run: ci/privileged-contracts.sh "$GITHUB_ENV"' "${PIPELINE_DIR}/.github/workflows/v2-ci.yml" \
+  && ! grep -Eq 'CERALIVE_RUN_REAL_(AVAHI|RAUC|KERNEL_STAGE)_CONTRACT=' "${PIPELINE_DIR}/.github/workflows/v2-ci.yml"; then
+  ok "hosted bats job selects guarded rows through ci/privileged-contracts.sh"
+else
+  bad "hosted bats job forces guarded rows instead of selecting them"
+fi
+
 # --- 1. forward: every tracked tests/ file is registered -------------------
 echo
 echo "### 1. completeness — no tracked test file may be unregistered"
