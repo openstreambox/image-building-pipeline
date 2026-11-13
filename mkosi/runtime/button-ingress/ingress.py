@@ -47,7 +47,7 @@ def privileged(head, direct, peer, cidr):
         return False
     if any(k in ('forwarded', 'via', 'x-ceralive-button-path') or k.startswith('x-forwarded-') for k in headers):
         return False
-    if headers.get('upgrade', '').lower() != 'websocket' or 'upgrade' not in headers.get('connection', '').lower().split(','):
+    if headers.get('upgrade', '').lower() != 'websocket' or 'upgrade' not in [token.strip().lower() for token in headers.get('connection', '').split(',')]:
         return False
     if 'content-length' in headers or 'transfer-encoding' in headers:
         return False

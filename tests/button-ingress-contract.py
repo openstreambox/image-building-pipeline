@@ -26,6 +26,8 @@ class Contract(unittest.TestCase):
         good = b'GET /ws HTTP/1.1\r\nHost: box.local\r\nOrigin: http://box.local\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n'
         head = m.parse_head(good)
         self.assertTrue(m.privileged(head, True, '192.168.2.4', '192.168.2.1/24'))
+        comma = m.parse_head(good.replace(b'Connection: Upgrade', b'Connection: keep-alive, Upgrade'))
+        self.assertTrue(m.privileged(comma, True, '192.168.2.4', '192.168.2.1/24'))
         for name in ['Forwarded', 'X-Forwarded-For', 'x-forwarded-anything', 'Via', 'X-Ceralive-Button-Path']:
             self.assertFalse(m.privileged(m.parse_head(good[:-2] + name.encode() + b':\r\n\r\n'), True, '192.168.2.4', '192.168.2.1/24'))
         for peer in ['10.0.0.2', '::1', '127.0.0.1']:
