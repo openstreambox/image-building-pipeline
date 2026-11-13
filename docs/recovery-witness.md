@@ -44,11 +44,16 @@ ceiling. Witness retention is independent of software-release retention.
 Missing, truncated, unknown-version, schema-invalid, checksum-invalid, oversized,
 unreadable or configuration-mismatched records mean **zero automatic resets
 available**, with unknown witnesses. They never mean a healthy first boot or a
-fresh allowance. At `begin`, a rejected file is renamed to
-`recovery.rejected-<first 16 hex of its SHA-256>` before replacement, so
-generations never overwrite each other or the single `recovery.rejected` an older
-release writes; the newest four are kept. Rename/directory-fsync failure aborts
-admission.
+fresh allowance. At `begin`, rejected bytes are durably copied to
+`recovery.rejected-<sequence>-<first 16 hex of its SHA-256>` before replacement.
+The active ledger stays intact until its atomic replacement carries any known
+latch, including after an interrupted quarantine or a duplicate rejection.
+Generations never overwrite the single `recovery.rejected` an older release
+writes. The newest four distinct contents are kept by rejection sequence,
+independent of source mtime; rejecting identical content refreshes its order.
+Pre-sequence generations sort before new rejections. Copy/rename/directory-fsync
+failure aborts admission; interruption may leave extra diagnostic copies, which
+the next quarantine prunes.
 
 **Schema changes keep a known latch.** An intact record (checksum valid) of any
 other shape or version, newer or older, is quarantined like damage, but its
@@ -75,9 +80,13 @@ returns ALLOW (reset or trial; see below) and is sticky: later intents (`none`,
 charged whatever cause the next boot reports (`power-on`, `unknown` or
 `software`). Trials are therefore bounded by this budget too. A grant the box
 never acted on expires at a healthy re-arm whose continuous dwell began after
-the grant (the box stayed healthy a full interval without that reset), so a
-later power cycle is not charged for it. A re-arm whose dwell began before the
-grant keeps it. Clean power-on, `unknown` and an orderly `software` reboot that the
+the latest successful admission (the box stayed healthy a full interval without
+that reset), so a later power cycle is not charged for it. A re-arm whose dwell began before the
+grant keeps it. Every ALLOW refreshes `granted_at` from the private boot clock,
+not the proof's observation time; REFUSE preserves the previous grant time.
+The action owner MUST submit the action immediately after ALLOW and obtain a
+new admission if delayed; it MUST NOT act on an expired authorization.
+Clean power-on, `unknown` and an orderly `software` reboot that the
 box did not grant itself (an operator reboot, an update's completion reboot) do
 not spend. Whether operator reboots should count is an owner decision; until it
 is made they do not.

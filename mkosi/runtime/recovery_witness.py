@@ -453,9 +453,11 @@ class Store:
                 witness["bootloader"] = pinned_bootloader
             if allowed:
                 witness["intent"] = action
+                # Every successful admission renews ownership, independently of the
+                # proof's observation time. Failed admissions restore this tuple.
                 if witness["granted"] == "none":
-                    # Grant time: the verified evidence time, at most 5 s before now.
-                    witness["granted"], witness["granted_at"] = action, observed
+                    witness["granted"] = action
+                witness["granted_at"] = uptime(_boottime())
             elif not available and action == "reset":
                 if record["exhausted"]:
                     # A reset is needed and the last credit is gone: the rescue episode.
@@ -556,13 +558,24 @@ class Store:
         `recovery.rejected` an older release writes; the oldest beyond
         MAX_REJECTED is removed.
         """
-        digest = hashlib.sha256(self.path.read_bytes()).hexdigest()[:16]
-        target = self.root / f"recovery.rejected-{digest}"
-        if target.exists():
-            self.path.unlink()
-        else:
-            os.replace(self.path, target)
-        kept = sorted(self.root.glob("recovery.rejected-*"), key=lambda path: path.stat().st_mtime_ns)
+        raw = self.path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()[:16]
+        rejected = list(self.root.glob("recovery.rejected-*"))
+
+        def order(path):
+            # Pre-sequence content names are older than every new rejection.
+            match = re.fullmatch(r"recovery.rejected-([0-9]+)-[0-9a-f]{16}", path.name)
+            return int(match[1]) if match else 0
+
+        sequence = max((order(path) for path in rejected), default=0) + 1
+        target = self.root / f"recovery.rejected-{sequence:020d}-{digest}"
+        # Keep recovery.json intact until write() durably replaces it. Copying
+        # through atomic_file also persists bytes from a restored source file.
+        self.atomic_file(target, raw)
+        duplicates = [path for path in rejected if path.name.endswith(digest)]
+        for path in duplicates:
+            path.unlink()
+        kept = sorted([path for path in rejected if path not in duplicates] + [target], key=order)
         for path in kept[:-MAX_REJECTED]:
             path.unlink()
         directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)

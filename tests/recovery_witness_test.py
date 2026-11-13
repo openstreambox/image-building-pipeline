@@ -653,11 +653,11 @@ class AdmissionTest(unittest.TestCase):
     def test_live_clock_checked_after_probe_and_after_persistence(self):
         self.boot()
         self.rearm()
-        with patch.object(r, "_boottime", side_effect=[62, 67]):
+        with patch.object(r, "_boottime", side_effect=[62, 62, 67]):
             result = self.store.rollback(BOOT, pinned_bootloader=PIN, probe=self.proof)
         self.assertFalse(result["automatic_reset_allowed"])
         self.assertIn("expired", result["refusal_reasons"][-1])
-        with patch.object(r, "_boottime", side_effect=[62, 63]):
+        with patch.object(r, "_boottime", side_effect=[62, 62, 63]):
             result = self.store.rollback(BOOT, pinned_bootloader=PIN, probe=self.proof)
         self.assertTrue(result["automatic_reset_allowed"])
 
@@ -709,7 +709,7 @@ class SecondReviewAdmissionTest(unittest.TestCase):
         self.armed()
         boots = [BOOT] + ["%08x-8888-4888-8888-888888888888" % i for i in range(3)]
         for current, following in zip(boots, boots[1:]):
-            with patch.object(r, "_boottime", side_effect=[62, 67]):
+            with patch.object(r, "_boottime", side_effect=[62, 62, 67]):
                 result = self.store.rollback(current, pinned_bootloader=PIN,
                                              probe=lambda: good_proof(current))
             self.assertEqual(result["decision"], "REFUSE")
@@ -726,7 +726,7 @@ class SecondReviewAdmissionTest(unittest.TestCase):
     def test_late_refusal_keeps_an_earlier_grant(self):
         self.armed()
         self.assertEqual(self.admit(now=62)["decision"], "ALLOW")
-        with patch.object(r, "_boottime", side_effect=[62, 67]):
+        with patch.object(r, "_boottime", side_effect=[62, 62, 67]):
             self.store.rollback(BOOT, pinned_bootloader=PIN, probe=self.proof)
         self.assertEqual(self.store.read()["boots"][BOOT]["granted"], "reset")
 
@@ -1267,6 +1267,136 @@ class FourthReviewTest(unittest.TestCase):
         self.request(boots[0], now=62, store=store)
         store.health(boots[0], 70, "healthy")
         self.assertEqual(store.begin(boots[1], 0, reset_cause="software")["state"], "reset-budget-spent")
+
+
+class FifthReviewTest(unittest.TestCase):
+    """Interrupted migration, admission timing and rejection-order probes."""
+
+    setUp = RecoveryTest.setUp
+    rearm = RecoveryTest.rearm
+    BOOTS = ThirdReviewTest.BOOTS
+    spent = ThirdReviewTest.spent
+    snapshot = ThirdReviewTest.snapshot
+    request = FourthReviewTest.request
+
+    def foreign_latch(self):
+        self.spent()
+        self.store.begin(self.BOOTS[3], 0, reset_cause="watchdog")
+        resign(self.store.path, lambda record: record.update(version=r.VERSION + 1))
+        return self.store.path.read_bytes()
+
+    def test_interrupted_replacement_keeps_known_latch(self):
+        self.foreign_latch()
+        with patch.object(self.store, "write", side_effect=OSError("power cut")):
+            with self.assertRaises(OSError):
+                self.store.begin(self.BOOTS[4], 0, reset_cause="power-on")
+        restarted = Store(self.store.root, limit=2, healthy_seconds=60)
+        view = restarted.begin(self.BOOTS[4], 0, reset_cause="power-on")
+        self.assertTrue(view["rescue_required"])
+        self.assertTrue(view["stop_media"])
+        self.assertTrue(restarted.read()["exhausted"])
+        self.assertEqual(restarted.read()["rescue"]["entries"], 1)
+
+    def test_power_cut_at_each_migration_operation(self):
+        raw = self.foreign_latch()
+        # Include duplicate-content rejection, retention pruning, temp cleanup,
+        # file fsync, atomic rename and directory fsync, before and after each.
+        for duplicate in (False, True):
+            for after in (False, True):
+                cut = 0
+                while True:
+                    with tempfile.TemporaryDirectory() as root:
+                        store = Store(Path(root), limit=2, healthy_seconds=60)
+                        store.path.write_bytes(raw)
+                        for i in range(r.MAX_REJECTED):
+                            store.path.write_bytes(b"damage %d" % i)
+                            store.quarantine()
+                        store.path.write_bytes(raw)
+                        if duplicate:
+                            store.quarantine()
+                            store.path.write_bytes(raw)
+                        calls = []
+                        def intercept(name, original):
+                            def call(*args, **kwargs):
+                                index = len(calls)
+                                calls.append(name)
+                                if index == cut and not after:
+                                    r.os._exit(91)
+                                result = original(*args, **kwargs)
+                                if index == cut and after:
+                                    r.os._exit(91)
+                                return result
+                            return call
+                        pid = r.os.fork()
+                        if pid == 0:
+                            with patch.object(r.os, "fsync", intercept("fsync", r.os.fsync)), \
+                                 patch.object(r.os, "replace", intercept("replace", r.os.replace)), \
+                                 patch.object(Path, "unlink", intercept("unlink", Path.unlink)):
+                                store.begin(self.BOOTS[4], 0, reset_cause="power-on")
+                            r.os._exit(0)
+                        _, status = r.os.waitpid(pid, 0)
+                        self.assertTrue(r.os.WIFEXITED(status))
+                        exitcode = r.os.WEXITSTATUS(status)
+                        self.assertIn(exitcode, (0, 91))
+                        restarted = Store(Path(root), limit=2, healthy_seconds=60)
+                        view = restarted.begin(self.BOOTS[4], 0, reset_cause="power-on")
+                        with self.subTest(duplicate=duplicate, after=after, cut=cut, calls=calls):
+                            self.assertTrue(view["rescue_required"])
+                            self.assertTrue(view["stop_media"])
+                            self.assertTrue(restarted.read()["exhausted"])
+                            self.assertEqual(restarted.read()["rescue"]["entries"], 1)
+                        if exitcode == 0:
+                            break
+                        cut += 1
+
+    def test_latest_rejection_survives_old_source_mtime(self):
+        self.store.root.mkdir(exist_ok=True)
+        for i in range(r.MAX_REJECTED + 1):
+            self.store.path.write_bytes(b"generation %d" % i)
+            r.os.utime(self.store.path, ns=(1, 1) if i == r.MAX_REJECTED else (10**18, 10**18))
+            self.store.quarantine()
+            if i < r.MAX_REJECTED:
+                # Restored/touched diagnostic copies must not change ordering either.
+                for rejected in self.store.root.glob("recovery.rejected-*"):
+                    r.os.utime(rejected, ns=(4 * 10**18, 4 * 10**18))
+        rejected = [p.read_bytes() for p in self.store.root.glob("recovery.rejected-*")]
+        self.assertIn(b"generation 4", rejected)
+        self.assertNotIn(b"generation 0", rejected)
+        self.assertEqual(len(rejected), r.MAX_REJECTED)
+
+    def grant_probe(self, retry):
+        store = Store(Path(self.tmp.name) / "grant-probe", limit=1, healthy_seconds=60)
+        store.begin(BOOT, 0, reset_cause="power-on")
+        for now in (0, 30, 60):
+            store.health(BOOT, now, "healthy")
+        def admit(now, observed):
+            return self.request(BOOT, now=now, store=store, proof=good_proof(observed=observed))
+        self.assertEqual(admit(62, 62 if retry else 59)["decision"], "ALLOW")
+        for now in (90, 120):
+            store.health(BOOT, now, "healthy")
+        if retry:
+            store.health(BOOT, 150, "healthy")
+            self.assertEqual(admit(179, 179)["decision"], "ALLOW")
+            store.health(BOOT, 180, "healthy")
+        self.assertEqual(store.read()["boots"][BOOT]["granted"], "reset")
+        self.assertEqual(store.read()["boots"][BOOT]["granted_at"], 179 if retry else 62)
+        self.assertEqual(store.begin(OTHER, 0, reset_cause="software")["remaining"], 0)
+
+    def test_failed_retry_restores_latest_successful_admission_time(self):
+        self.store.begin(BOOT, 0, reset_cause="power-on")
+        self.rearm()
+        self.assertEqual(self.request(BOOT, proof=good_proof(observed=62))["decision"], "ALLOW")
+        for proof in (good_proof(observed=90), dict(good_proof(observed=90), watchdog="unknown")):
+            with patch.object(r, "_boottime", side_effect=[90, 90, 96]):
+                view = self.store.rollback(BOOT, pinned_bootloader=PIN, probe=lambda: proof)
+            self.assertEqual(view["decision"], "REFUSE")
+            self.assertEqual(self.store.read()["boots"][BOOT]["granted_at"], 62)
+
+    def test_retry_just_before_rearm_is_charged(self):
+        self.grant_probe(True)
+
+    def test_admission_after_dwell_anchor_with_older_proof_is_charged(self):
+        self.grant_probe(False)
 
 
 if __name__ == "__main__":
