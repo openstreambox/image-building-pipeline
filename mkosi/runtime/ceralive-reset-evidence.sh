@@ -80,10 +80,11 @@ collect() {
   sync -- "$store" "$(dirname "$store")" "${root%/}/data"
   # Unlink acknowledges pstore only after publication is durable. Other sysfs
   # evidence is read-only and must never be written or cleared.
-  for path in "${saved[@]}"; do rm -- "$path"; done
+  # Prune before acknowledgement: a read-only pstore must not defeat retention.
   mapfile -t old < <(archives | head -n -8 | cut -f2-)
   for dir in "${old[@]}"; do rm -r -- "$dir"; done
   sync -- "$store"
+  for path in "${saved[@]}"; do rm -- "$path"; done
 }
 
 case "${1:-}" in

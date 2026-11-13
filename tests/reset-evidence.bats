@@ -132,3 +132,22 @@ setup() {
   [ "$status" -eq 1 ]
   [[ "$output" == *'/data is not mounted; preserving pstore'* ]]
 }
+@test "retention remains bounded when pstore acknowledgement is refused" {
+  mkdir "$BATS_TEST_TMPDIR/bin"
+  cat > "$BATS_TEST_TMPDIR/bin/rm" <<'STUB'
+#!/bin/sh
+case "$*" in
+  */sys/fs/pstore/*) exit 1 ;;
+  *) exec /bin/rm "$@" ;;
+esac
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/rm"
+  echo panic > "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/dmesg-ramoops-0"
+  for n in {1..10}; do
+    printf '%08d-1234-1234-1234-123456789abc\n' "$n" > "$CERALIVE_EVIDENCE_ROOT/proc/sys/kernel/random/boot_id"
+    run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash "$TOOL" collect
+    [ "$status" -ne 0 ]
+  done
+  [ "$(find "$CERALIVE_EVIDENCE_ROOT/data/log/reset-evidence" -name evidence.json | wc -l)" -eq 8 ]
+  [ -f "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/dmesg-ramoops-0" ]
+}
