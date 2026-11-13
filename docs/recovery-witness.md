@@ -12,7 +12,7 @@ diagnostic add-on must not be its boot dependency. No package list changes here.
 ## Durable record and safe reads
 
 `Store` takes an explicit private, caller-owned local state directory, budget
-limit and healthy interval. Its schema-2 `recovery.json` ledger holds one witness
+limit and healthy interval. Its schema-3 `recovery.json` ledger holds one witness
 per boot ID and the separate reset budget in the **same commit**. Writers share
 an exclusive flock; a same-directory mode-0600 temporary file is flushed and
 fsynced, renamed atomically, then the directory is fsynced. New-directory
@@ -24,7 +24,7 @@ Storage and filesystem durability still require power-cut drills.
 
 Every witness links its previous boot ID (null if unknown), preserving boot order
 without a wall clock. It contains slot, A/B counters, bootloader **software digest**, reset
-cause, health verdict, detector states, intent, boot uptime and budget snapshot.
+cause, health verdict, detector states, intent, reset grant, boot uptime and budget snapshot.
 The source and budget at boot admission remain recorded even after healthy
 requalification, so recovery does not erase the earlier uncertainty.
 Unobserved values are explicitly unknown (counters null); armed is never inferred
@@ -52,11 +52,22 @@ Threshold changes spend the budget while preserving the witness history. Orphan
 
 ## Budget semantics and visibility
 
-A new boot spends an attempt only when its predecessor recorded a reset intent
-or the observed cause is watchdog/software reset; clean power-on does not spend.
-A missing ledger has no automatic reset credit but is not itself an exhausted
-reset episode. `exhausted` distinguishes actual exhaustion from unavailable
-credit. Counts saturate at zero; restarting a
+A new boot spends an attempt only when its predecessor was **granted** a reset
+or the observed cause is unclean (`watchdog`, or `panic` for a reboot after a
+kernel panic). A grant is recorded by the first successful `intent reset` of a
+boot and is sticky: later intents (`none`, `unbind-adapter`, another `reset`)
+update the declared `intent` but never erase `granted`, so a granted reset is
+charged whatever cause the next boot reports (`power-on`, `unknown` or
+`software`). Clean power-on, `unknown` and an orderly `software` reboot that the
+box did not grant itself (an operator reboot, an update's completion reboot) do
+not spend. Whether operator reboots should count is an owner decision; until it
+is made they do not.
+
+`exhausted` is set only when a charge spends the **last** credit (1 to 0). A
+charge against zero credit — a missing ledger, a quarantined corrupt one, or the
+zero credit left by a threshold change — leaves the credit at zero without
+claiming an exhausted episode; an episode already exhausted stays exhausted.
+Only health re-arm clears it. Counts saturate at zero; restarting a
 producer in the same boot does not spend again, but does recommit/fsync before
 returning admission (a prior writer may have died after rename). Stale boot IDs cannot modify a
 new boot. This is a box reset budget, not the bootloader slot counter, and does
@@ -82,9 +93,11 @@ also spends the budget until healthy requalification.
 
 `begin`, `health` and `intent` return the versioned status projection only after
 persistence. `status` and `export` need no write. Status from a previous boot denies resets
-until the current boot is admitted. A spent/uncertain budget announces
-**“Rescue required: reset budget exhausted or uncertain”**, denies automatic resets
-and exposes `rescue_required: true`. `rescue_active: false` deliberately does not
+until the current boot is admitted. An exhausted budget announces
+**“Rescue required: reset budget exhausted”**, denies automatic resets
+and exposes `rescue_required: true`. Missing or uncertain credit denies resets
+with “Recovery reset budget unavailable; confirm continuous health” and
+`rescue_required: false`. `rescue_active: false` deliberately does not
 claim that a rescue mode exists. Any storage/identity error exits nonzero and
 prints a safe denial without paths or exception text. `intent reset` returns
 exit 3 on a denied reset and never records that refused reset intent (storage or
@@ -134,10 +147,22 @@ before privileged operations. It requires both KVM/QEMU virtualization and the
 firmware marker `/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive`, otherwise exit 2.
 The real RAUC gate spelling is `disposable-marked-guest-only`; `required` is no
 longer accepted. Direct invocation has the same guard. Test the helper itself
-on a workstation, never a destructive harness. The hosted workflow must run
-these privileged legs in a marked disposable guest; an ordinary hosted VM with
-no marker is deliberately refused. Existing CI environments need that guest
-provisioning rather than an override.
+on a workstation, never a destructive harness.
+
+A guest is **marked** when the host starts it under QEMU/KVM with at least one
+firmware configuration item named below `opt/ceralive/` and the guest kernel
+exposes fw_cfg (`qemu_fw_cfg`), for example
+`-fw_cfg name=opt/ceralive/job,string=1`. `ci/kernel-runner/vm.py` already
+passes its job items that way, so its disposable guest is marked and
+`ci/kernel-runner/ci-tests.sh` runs every guarded row. Nothing inside a guest
+can create the marker after boot, and an ordinary hosted runner has none.
+
+The hosted `bats` job selects rows with `ci/privileged-contracts.sh`, which asks
+the same guard: on a marked guest the guarded rows (real Avahi, real RAUC, real
+kernel stage) run; on an unmarked runner they are skipped with a visible
+`skipped: needs marked guest` notice and step-summary line, instead of exiting 2
+at the guard. A skip there is not a pass of those contracts; they still need a
+marked disposable guest. There is no override variable for an unmarked host.
 
 Remaining policy limits: healthy requalification still restores the configured
 allowance, so very slow periodic failures can recur; boot-time includes suspend

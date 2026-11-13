@@ -371,5 +371,120 @@ class ReviewTest(unittest.TestCase):
             self.assertEqual(r.main(), 1)
 
 
+class ChargeTest(unittest.TestCase):
+    """Second review: only real resets spend credit; only the last credit exhausts."""
+    setUp = RecoveryTest.setUp
+    rearm = RecoveryTest.rearm
+
+    def armed(self):
+        self.store.begin(BOOT, 0, reset_cause="power-on")
+        self.rearm()
+
+    def test_zero_credit_charge_is_not_exhaustion(self):
+        # Fresh ledger, then one unclean reset: no credit, but no exhausted episode.
+        self.store.begin(BOOT, 0, reset_cause="power-on")
+        view = self.store.begin(OTHER, 0, reset_cause="watchdog")
+        self.assertEqual(view["remaining"], 0)
+        self.assertFalse(view["rescue_required"])
+        self.assertNotIn("Rescue required", view["announcement"])
+        self.assertFalse(self.store.read()["exhausted"])
+
+    def test_corruption_then_watchdog_is_not_exhaustion(self):
+        self.armed()
+        self.store.path.write_bytes(b"torn")
+        view = self.store.begin(OTHER, 0, reset_cause="watchdog")
+        self.assertFalse(view["rescue_required"])
+        self.assertFalse(self.store.read()["exhausted"])
+
+    def test_threshold_change_activation_reboot_is_not_exhaustion(self):
+        self.armed()
+        changed = r.Store(self.store.root, limit=3, healthy_seconds=60)
+        view = changed.begin(OTHER, 0, reset_cause="watchdog")
+        self.assertFalse(view["rescue_required"])
+        self.assertFalse(changed.read()["exhausted"])
+
+    def test_last_credit_exhausts_and_stays_exhausted(self):
+        self.armed()
+        self.assertFalse(self.store.begin(OTHER, 0, reset_cause="watchdog")["rescue_required"])
+        view = self.store.begin(THIRD, 0, reset_cause="watchdog")
+        self.assertEqual(view["remaining"], 0)
+        self.assertTrue(view["rescue_required"])
+        self.assertIn("Rescue required", view["announcement"])
+        fourth = "44444444-4444-4444-8444-444444444444"
+        self.assertTrue(self.store.begin(fourth, 0, reset_cause="power-on")["rescue_required"])
+        self.store.health(fourth, 0, "healthy")
+        self.store.health(fourth, 30, "healthy")
+        self.assertFalse(self.store.health(fourth, 60, "healthy")["rescue_required"])
+
+    def test_view_rescue_flag_follows_exhaustion_not_missing_credit(self):
+        self.store.begin(BOOT, 0, reset_cause="power-on")
+        record = self.store.read()
+        self.assertFalse(r.Store.view(record)["rescue_required"])
+        record["exhausted"] = True
+        self.assertTrue(r.Store.view(record)["rescue_required"])
+
+    def test_charge_by_cause(self):
+        # Box-decided resets and unclean causes are charged; orderly reboots
+        # (operator, update completion) and unclassified boots are not.
+        for cause, charged in (("watchdog", True), ("panic", True), ("software", False),
+                               ("unknown", False), ("power-on", False)):
+            with self.subTest(cause=cause):
+                self.store.path.unlink(missing_ok=True)
+                self.armed()
+                view = self.store.begin(OTHER, 0, reset_cause=cause)
+                self.assertEqual(view["remaining"], 1 if charged else 2)
+
+    def test_three_operator_reboots_do_not_exhaust(self):
+        self.armed()
+        for i in range(3):
+            view = self.store.begin("%08x-5555-4555-8555-555555555555" % i, 0, reset_cause="software")
+        self.assertEqual(view["remaining"], 2)
+        self.assertFalse(view["rescue_required"])
+
+    def test_granted_reset_is_charged_whatever_the_next_cause(self):
+        for cause in ("power-on", "unknown", "software"):
+            with self.subTest(cause=cause):
+                self.store.path.unlink(missing_ok=True)
+                self.armed()
+                self.assertTrue(self.store.intent(BOOT, "reset")["automatic_reset_allowed"])
+                self.assertEqual(self.store.begin(OTHER, 0, reset_cause=cause)["remaining"], 1)
+
+    def test_granted_reset_is_sticky_for_the_boot(self):
+        self.armed()
+        self.store.intent(BOOT, "reset")
+        for later in ("none", "unbind-adapter", "activate-other-slot", "reset"):
+            self.store.intent(BOOT, later)
+            witness = self.store.read()["boots"][BOOT]
+            self.assertEqual(witness["granted"], "reset")
+            self.assertEqual(witness["intent"], later)
+        self.assertEqual(self.store.begin(OTHER, 0, reset_cause="power-on")["remaining"], 1)
+
+    def test_repeated_grants_with_erasure_spend_the_budget(self):
+        # Review probe: grant, erase with intent none, reset — must not loop for free.
+        self.armed()
+        boots = [BOOT] + ["%08x-6666-4666-8666-666666666666" % i for i in range(20)]
+        admissions = 0
+        for current, following in zip(boots, boots[1:]):
+            if self.store.intent(current, "reset")["automatic_reset_allowed"]:
+                admissions += 1
+            self.store.intent(current, "none")
+            self.store.begin(following, 0, reset_cause="unknown")
+        self.assertEqual(admissions, 2)
+        self.assertEqual(self.store.read()["remaining"], 0)
+
+    def test_denied_reset_is_not_granted(self):
+        self.store.begin(BOOT, 0, reset_cause="power-on")
+        self.assertFalse(self.store.intent(BOOT, "reset")["automatic_reset_allowed"])
+        self.assertEqual(self.store.read()["boots"][BOOT]["granted"], "none")
+
+    def test_oversize_record_is_uncertain_and_quarantined(self):
+        self.armed()
+        size = self.store.path.stat().st_size
+        with patch.object(r, "MAX_BYTES", size - 1):
+            self.assertEqual(self.store.read()["source"], "invalid")
+            self.assertEqual(self.store.read()["remaining"], 0)
+        self.assertEqual(self.store.read()["remaining"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

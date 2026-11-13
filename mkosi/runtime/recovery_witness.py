@@ -12,14 +12,18 @@ import re
 import tempfile
 import time
 
-VERSION = 2
+VERSION = 3
 MAX_WITNESSES = 64
 MAX_BYTES = 4 * 1024 * 1024
 INTENTS = {"none", "reset", "activate-other-slot", "unbind-adapter"}
 CONSOLE_MARKERS = {"kernel-start", "root-wait", "userspace-start", "panic", "watchdog-reset"}
 STATES = {"unknown", "armed", "not-armed"}
 HEALTH = {"unknown", "healthy", "failed"}
-CAUSES = {"unknown", "watchdog", "software", "power-on"}
+CAUSES = {"unknown", "watchdog", "panic", "software", "power-on"}
+# Unclean resets spend credit; orderly reboots (operator, update completion) and
+# unclassified boots do not, unless this box itself granted the reset.
+CHARGED_CAUSES = {"watchdog", "panic"}
+GRANTS = {"none", "reset"}
 
 
 def encoded(value):
@@ -98,7 +102,7 @@ class Store:
             raise ValueError("invalid recovery policy")
         for key, witness in record["boots"].items():
             boot_id(key)
-            if set(witness) != {"state_source", "budget_at_start", "previous_boot", "slot", "counters", "bootloader", "reset_cause", "detectors", "console_tail", "health", "intent", "last_uptime", "healthy_since", "budget_remaining"}:
+            if set(witness) != {"state_source", "budget_at_start", "previous_boot", "slot", "counters", "bootloader", "reset_cause", "detectors", "console_tail", "health", "intent", "granted", "last_uptime", "healthy_since", "budget_remaining"}:
                 raise ValueError("unknown witness shape")
             if witness["state_source"] not in {"missing", "invalid", "valid"}:
                 raise ValueError("invalid initial state source")
@@ -114,7 +118,7 @@ class Store:
                 uptime(witness["healthy_since"])
                 if witness["healthy_since"] > witness["last_uptime"]:
                     raise ValueError("invalid health anchor")
-            if witness["health"] not in HEALTH or witness["intent"] not in INTENTS:
+            if witness["health"] not in HEALTH or witness["intent"] not in INTENTS or witness["granted"] not in GRANTS:
                 raise ValueError("invalid witness verdict")
             if type(witness["budget_remaining"]) is not int or not 0 <= witness["budget_remaining"] <= 1000:
                 raise ValueError("invalid witness budget")
@@ -184,7 +188,7 @@ class Store:
                 "automatic_reset_allowed": remaining > 0,
                 "rescue_required": record["exhausted"],
                 "rescue_active": False,
-                "announcement": ("Rescue required: reset budget exhausted or uncertain. Automatic resets denied; management and log export must remain available."
+                "announcement": ("Rescue required: reset budget exhausted. Automatic resets denied; management and log export must remain available."
                                  if record["exhausted"] else ("Recovery reset budget unavailable; confirm continuous health." if remaining == 0 else "Recovery reset budget available.")),
                 "state_source": record["source"]}
 
@@ -217,15 +221,19 @@ class Store:
                 return self.view(record)
             previous_boot = record["current_boot"]
             prior = record["boots"].get(previous_boot, {})
-            charge = prior.get("intent") == "reset" or reset_cause in {"watchdog", "software"}
-            if charge:
-                record["remaining"] = max(0, record["remaining"] - 1)
-                record["exhausted"] = record["remaining"] == 0
+            # A granted reset is charged whatever cause the next boot reports.
+            charge = prior.get("granted", "none") != "none" or reset_cause in CHARGED_CAUSES
+            if charge and record["remaining"] > 0:
+                record["remaining"] -= 1
+                # Only spending the last credit is an exhausted episode; a charge
+                # against missing, corrupt or reset-by-threshold credit is not.
+                if record["remaining"] == 0:
+                    record["exhausted"] = True
             record["current_boot"] = boot
             record["boots"][boot] = dict(state_source=record["source"],
                 budget_at_start=record["remaining"], previous_boot=previous_boot, slot=slot, counters=counters, bootloader=bootloader,
                 reset_cause=reset_cause, detectors=detectors, console_tail=console_tail,
-                health="unknown", intent="none", last_uptime=now, healthy_since=None,
+                health="unknown", intent="none", granted="none", last_uptime=now, healthy_since=None,
                 budget_remaining=record["remaining"])
             # Keep insertion order via the explicit previous_boot chain (JSON keys sort).
             keep, current = [], boot
@@ -255,8 +263,11 @@ class Store:
         if action not in INTENTS:
             raise ValueError("invalid intent")
         def change(record, witness):
-            if action == "reset" and record["remaining"] == 0:
-                return
+            if action == "reset":
+                if record["remaining"] == 0:
+                    return
+                # Sticky for this boot: later intents cannot erase the grant.
+                witness["granted"] = "reset"
             witness["intent"] = action
         return self.update(boot, change)
 
