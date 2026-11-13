@@ -63,6 +63,7 @@ tests/kernel-release-command.test.sh	shell	integration	default-shell	local kerne
 tests/kernel-release-environment.test.sh	shell	integration	default-shell	exact command contract result parity with and without inherited workflow and runner context
 tests/kernel-release-workflow.test.sh	shell	integration	default-shell	owner-approved VM workflow provenance, immutable Release and bench-bound authorization/dispatch sequences
 tests/kernel-runner.test.sh	shell	unit	default-shell	anonymous JIT handoff, no host shares or credentials, disposable disk cleanup on success and failure, apt timers masked in the base
+tests/privileged-guest.test.sh	shell	unit	default-shell	marked-guest launcher for the privileged rows with QEMU stubbed: capsule, check item, results, no host sudo
 tests/fixtures/kernel-bootstrap-publisher.sh	fixture	support	invoked-by-suite	verbatim apt-worker bootstrap-state validator driven by the offline producer-to-publisher sequence
 tests/kernel-bench-report.test.sh	shell	unit	default-shell	canonical two-board and bootstrap report schema, identity binding and fail-closed evidence
 tests/kernel-artifact-reuse.test.sh	shell	integration	default-shell	authenticated APT kernels, release metadata reuse, board gates and unpublished local source builds

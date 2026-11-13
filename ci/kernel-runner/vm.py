@@ -40,17 +40,26 @@ def die_with_parent(parent: int) -> None:
         os.kill(os.getpid(), signal.SIGKILL)
 
 
+def machine_args(accel: str, smp: int, memory: int) -> list[str]:
+    """KVM by default; TCG only for an owner without /dev/kvm (same guest, slower)."""
+    if accel == "kvm":
+        cpu = ["-enable-kvm", "-cpu", "host"]
+    else:
+        cpu = ["-accel", "tcg,thread=multi,tb-size=1024", "-cpu", "max"]
+    return [*cpu, "-machine", "q35", "-smp", str(smp), "-m", str(memory)]
+
+
 def boot(disk: Path, payload: bytes, kind: str, seconds: int,
          seed: Path | None = None, source_bundle: Path | None = None,
-         disk_fd: int | None = None) -> None:
+         disk_fd: int | None = None, machine: list[str] | None = None) -> None:
     """Pass the one-job credential in an anonymous RAM fd, not argv or a file."""
     fd = os.memfd_create("ceralive-job", 0)
     try:
         os.write(fd, payload)
         os.lseek(fd, 0, os.SEEK_SET)
         args = [
-            "qemu-system-x86_64", "-enable-kvm", "-machine", "q35", "-cpu", "host",
-            "-smp", "16", "-m", "16384", "-display", "none", "-monitor", "none",
+            "qemu-system-x86_64", *(machine or machine_args("kvm", 16, 16384)),
+            "-display", "none", "-monitor", "none",
             "-serial", "stdio", "-no-reboot",
             "-drive", f"file={disk},format=qcow2,if=none,id=system",
             "-device", "virtio-blk-pci,drive=system,bootindex=1",
@@ -110,6 +119,10 @@ def main() -> int:
     parser.add_argument("--source-bundle", type=Path,
                         help="check only: read-only public-source tar capsule, never a directory share")
     parser.add_argument("--timeout", type=int, default=21600)
+    parser.add_argument("--accel", choices=("kvm", "tcg"), default="kvm",
+                        help="tcg is software emulation for hosts without /dev/kvm access")
+    parser.add_argument("--smp", type=int, default=16)
+    parser.add_argument("--memory", type=int, default=16384, help="guest memory in MiB")
     args = parser.parse_args()
     parent = os.getppid()
     parent_proc = Path("/proc") / str(parent)
@@ -119,6 +132,9 @@ def main() -> int:
             (parent_proc / "cmdline").read_bytes().split(b"\0"))
     ):
         raise RuntimeError("run vm.py directly under flock --exclusive --close")
+    if args.smp < 1 or args.memory < 2048:
+        parser.error("--smp must be at least 1 and --memory at least 2048 MiB")
+    machine = machine_args(args.accel, args.smp, args.memory)
     die_with_parent(parent)
     child_setup = partial(die_with_parent, os.getpid())
     base = args.base.resolve()
@@ -176,7 +192,7 @@ def main() -> int:
                             "-joliet", "-rock", "-o", str(seed),
                             str(work / "user-data"), str(work / "meta-data")], check=True,
                            preexec_fn=child_setup, timeout=180)
-            boot(disk, b"", "base", args.timeout, seed)
+            boot(disk, b"", "base", args.timeout, seed, machine=machine)
             disk.chmod(0o444)
             # link is create-only, including against a concurrent base builder.
             os.link(disk, base)
@@ -211,10 +227,10 @@ def main() -> int:
             payload = json.loads(response.stdout)["encoded_jit_config"].encode()
             if not payload or b"\n" in payload:
                 raise RuntimeError("invalid JIT response")
-            boot(overlay, payload, "jit", args.timeout, disk_fd=disk_fd)
+            boot(overlay, payload, "jit", args.timeout, disk_fd=disk_fd, machine=machine)
         else:
             boot(overlay, args.check_script.read_bytes(), "check", args.timeout,
-                 source_bundle=args.source_bundle, disk_fd=disk_fd)
+                 source_bundle=args.source_bundle, disk_fd=disk_fd, machine=machine)
     print("CERALIVE_OVERLAY_REMOVED")
     return 0
 
