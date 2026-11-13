@@ -192,6 +192,25 @@ else
   exit
 fi
 
+# Reserve 1 MiB for ramoops on ROCK 5B/5B+ before Linux allocates memory.
+# Below 512 MiB on every supported RAM SKU; outside the normal kernel/FDT/
+# initrd load addresses. Warm-reset/firmware preservation needs bench qualification.
+# The reference DTS is rk3588-ramoops.dts; these properties must stay identical.
+if test "${fdtfile}" = "rk3588-rock-5b.dtb" || test "${fdtfile}" = "rk3588-rock-5b-plus.dtb"; then
+  if fdt addr ${fdt_addr_r} && fdt resize 1024 &&
+     fdt mknode /reserved-memory ramoops@1f000000 &&
+     fdt set /reserved-memory/ramoops@1f000000 compatible "ramoops" &&
+     fdt set /reserved-memory/ramoops@1f000000 reg <0x0 0x1f000000 0x0 0x100000> &&
+     fdt set /reserved-memory/ramoops@1f000000 record-size <0x20000> &&
+     fdt set /reserved-memory/ramoops@1f000000 console-size <0x80000> &&
+     fdt set /reserved-memory/ramoops@1f000000 max-reason <0x2>; then
+    echo "CeraLive: reserved ramoops 0x1f000000..0x1f0fffff"
+  else
+    echo "CeraLive: FATAL cannot reserve reset evidence memory"
+    exit
+  fi
+fi
+
 # The initrd is OPTIONAL by design and MUST stay optional: the Armbian vendor
 # package ships only the versioned /boot/initrd.img-<ver>, so this bare-name load
 # legitimately fails on the known-good path and the board boots root=PARTLABEL

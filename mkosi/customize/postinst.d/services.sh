@@ -160,6 +160,7 @@ configure_services() {
   setup_fan_curve
   setup_fan_kickstart
   setup_led_status
+  setup_reset_evidence
   setup_cpu_governor
   setup_hdmirx_edid
   setup_pipewire_system_mode
@@ -570,4 +571,17 @@ setup_rtmp_gateway() {
   rm -rf "${tmpdir}"
 
   enable_service ceralive-rtmp-gateway.service
+}
+
+# Install from committed sources into every rootfs slot.
+setup_reset_evidence() {
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -f "${src}/ceralive-reset-evidence.sh" && -f "${src}/ceralive-reset-evidence.service" ]] \
+    || die "reset evidence runtime sources missing"
+  install -D -m 0755 "${src}/ceralive-reset-evidence.sh" "${RESET_EVIDENCE_SBIN_DIR:-/usr/local/sbin}/ceralive-reset-evidence"
+  install -D -m 0644 "${src}/ceralive-reset-evidence.service" "${RESET_EVIDENCE_UNIT_DIR:-/etc/systemd/system}/ceralive-reset-evidence.service"
+  # Give this collector sole ownership: the stock archiver can otherwise delete
+  # sources after a failed /data write or when this service was skipped.
+  mask_service systemd-pstore.service
+  enable_service ceralive-reset-evidence.service
 }
