@@ -54,6 +54,11 @@ if (( ! only_privileged )); then
 fi
 mapfile -t rows < <(awk -F'\t' '!/^[[:space:]]*(#|$)/ && NF >= 4 && $3 == "privileged" { print $1 }' tests/registry.tsv)
 (( ${#rows[@]} > 0 )) || { printf 'registry declares no privileged rows\n' >&2; exit 1; }
+# ./run-tests materializes the ignored dev RAUC PKI (the registry's one
+# default-fixture row) before any suite; the RAUC rows need it here too.
+mapfile -t fixtures < <(awk -F'\t' '!/^[[:space:]]*(#|$)/ && NF >= 4 && $4 == "default-fixture" { print $1 }' tests/registry.tsv)
+(( ${#fixtures[@]} == 1 )) || { printf 'registry must declare exactly one default-fixture row\n' >&2; exit 1; }
+bash "${fixtures[0]}" >/dev/null
 failed=0
 for row in "${rows[@]}"; do
   printf '== privileged row: %s ==\n' "${row}"

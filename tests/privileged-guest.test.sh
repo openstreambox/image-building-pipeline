@@ -112,6 +112,10 @@ guard_line="$(grep -n 'require-disposable-guest.sh' "${CI_TESTS}" | grep source 
 sudo_line="$(grep -n 'sudo ' "${CI_TESTS}" | head -1 | cut -d: -f1)"
 [[ -n "${guard_line}" && -n "${sudo_line}" && "${guard_line}" -lt "${sudo_line}" ]] \
   && ok 'ci-tests.sh sources the guard before its first privileged command' || bad 'ci-tests.sh guard order'
+fixture_line="$(grep -n '"default-fixture"' "${CI_TESTS}" | head -1 | cut -d: -f1)"
+rows_line="$(grep -n 'for row in "${rows\[@\]}"' "${CI_TESTS}" | head -1 | cut -d: -f1)"
+[[ -n "${fixture_line}" && -n "${rows_line}" && "${fixture_line}" -lt "${rows_line}" ]] \
+  && ok 'privileged-only mode materializes the dev RAUC PKI fixture before the rows' || bad 'privileged-only mode skips the fixture'
 if bash "${CI_TESTS}" --bogus >/dev/null 2>&1; then bad 'ci-tests.sh accepted an unknown option'; else ok 'ci-tests.sh rejects unknown options'; fi
 grep -Fq 'ci-tests.sh --privileged-only' "${CHECK}" && grep -Fq 'runuser -u "${user}"' "${CHECK}" \
   && ok 'guest runs only the privileged rows, as the unprivileged guest user' || bad 'guest check wiring'
