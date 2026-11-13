@@ -9,12 +9,17 @@ case "${CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT:-skip}" in
   required) ;;
   *) printf 'CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT must be required or skip\n' >&2; exit 2 ;;
 esac
-# guest-guard: confined. Every mount target lies below its own mktemp directory:
-# loop-attached image files it creates, and /dev, /proc, /sys and /run bound into
-# that chroot tree while dpkg runs. Cleanup unmounts them and refuses to delete
-# the directory while any mount below it remains. It never mounts over a host
-# path, labels a host partition or starts a system service, so it runs without
-# the disposable-guest guard (opt-in locally, required in hosted CI).
+# guest-guard: confined. Confined except transient host loop devices and
+# host-namespace binds under its own mktemp directory: it attaches host loop
+# devices to image files it creates, and binds the host's /proc, /sys, /dev and
+# /dev/pts into its chroot tree (non-recursive, in the host mount namespace)
+# while dpkg runs there as root with the real /dev. The chroot's /run is a
+# tmpfs; RAUC, systemctl and busctl are stubs. Cleanup unmounts and detaches
+# them and refuses to delete the directory while a mount remains; if cleanup
+# fails it keeps them on purpose, and on a workstation they persist until
+# removed by hand. It never mounts over a host path, labels a host partition or
+# starts a system service, so it runs without the disposable-guest guard
+# (opt-in locally, required in hosted CI).
 
 if [[ "$(id -u)" -ne 0 ]]; then
   sudo -n true || { printf 'FAIL real kernel stage: root or passwordless sudo required\n' >&2; exit 1; }

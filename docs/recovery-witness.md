@@ -142,26 +142,39 @@ Run `tests/recovery-witness.test.sh`; it is also registered in `./run-tests`.
 
 ## Privileged harness boundary
 
-A privileged registry entry that can change host state outside its own fixtures
-sources `tests/lib/require-disposable-guest.sh` before privileged operations.
-It requires both KVM/QEMU virtualization and the firmware marker
-`/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive`, otherwise exit 2. Today that
-is the real RAUC pair (`real-rauc-contract.sh`, `real-rauc-cleanup-contract.test.sh`):
-it may unmount any `/mnt/rauc/*` mount, binds over `/proc/cmdline` and briefly
-exposes `rootfs_a`/`rootfs_b` partition labels to host udev. Its gate spelling
-is `disposable-marked-guest-only`; `required` is no longer accepted. Direct
-invocation has the same guard. Test the helper itself on a workstation, never a
-destructive harness.
+`tests/lib/require-disposable-guest.sh` admits only a marked disposable guest:
+it requires both KVM/QEMU virtualization and the firmware marker
+`/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive`, otherwise exit 2. Test the
+helper itself on a workstation, never a destructive harness.
 
-The other privileged rows are **confined**: every effect stays inside fixtures
-they create. Real Avahi uses per-run network namespaces, veth pairs and private
-D-Bus sockets tagged with its PID; real kernel stage mounts only loop images and
-binds `/dev`, `/proc`, `/sys` and `/run` into its own chroot tree under its
-`mktemp` directory, which it refuses to delete while a mount remains. They run as
-before the guard: opt-in locally, `required` in the hosted job. Each carries a
-`# guest-guard: confined.` header with its reason, and
+The real RAUC pair (`real-rauc-contract.sh`, `real-rauc-cleanup-contract.test.sh`)
+changes host state outside its own fixtures: it may unmount any `/mnt/rauc/*`
+mount, binds over `/proc/cmdline` and briefly exposes `rootfs_a`/`rootfs_b`
+partition labels to host udev. It sources `tests/lib/require-ephemeral-host.sh`
+before privileged operations, also on direct invocation. That guard admits a
+marked guest (`CERALIVE_RUN_REAL_RAUC_CONTRACT=disposable-marked-guest-only`), or
+a GitHub-hosted ephemeral runner VM on the explicit spelling
+`github-hosted-ephemeral`: the runner's own `GITHUB_ACTIONS=true` and
+`RUNNER_ENVIRONMENT=github-hosted`, on a machine `systemd-detect-virt --vm`
+reports as a VM. The runner is discarded after the job, which is why the pair
+ran there as required before the guard existed. A workstation is bare metal and
+refuses even with those variables; `required` is no longer accepted.
+
+The other privileged rows are **confined**: confined except transient host
+loop devices, netns mounts and host-namespace binds under their own directory.
+Real Avahi creates per-run network namespaces (nsfs mounts under the host's
+`/run/netns`) and veth pairs created in the host namespace with fixed peer
+names, so two concurrent runs collide and a killed run can leak interfaces; its
+daemon runs with a private mount namespace and D-Bus. Real kernel stage attaches
+host loop devices to its own images and binds the host's `/proc`, `/sys`,
+`/dev` and `/dev/pts` non-recursively into its own chroot tree under its
+`mktemp` directory, where dpkg runs as root; it refuses to delete that tree
+while a mount remains and keeps mounts and loops on a failed cleanup. Neither
+mounts over a host path, labels a host partition or starts a host service. They
+run as before the guard: opt-in locally, `required` in the hosted job. Each
+carries a `# guest-guard: confined.` header with these limits, and
 `tests/test-registry.test.sh` fixes the confined set, so moving a row out from
-under the guard is a reviewed change.
+under a guard is a reviewed change.
 
 A guest is **marked** when the host starts it under QEMU/KVM with at least one
 firmware configuration item named below `opt/ceralive/` and the guest kernel
@@ -172,12 +185,14 @@ passes its job items that way, so its disposable guest is marked and
 can create the marker after boot, and an ordinary hosted runner has none.
 
 The hosted `bats` job requires the real Avahi, real kernel-stage and
-privilege-drop contracts directly, and selects the guest-only real RAUC rows
-with `ci/privileged-contracts.sh`, which asks the same guard: on a marked guest
-they run; on an unmarked runner they are skipped with a visible
-`skipped: needs marked guest` notice and step-summary line, instead of exiting 2
-at the guard. A skip there is not a pass of the RAUC contract; it still needs a
-marked disposable guest. There is no override variable for an unmarked host.
+privilege-drop contracts directly, and selects the real RAUC rows with
+`ci/privileged-contracts.sh`: on a marked guest they run as
+`disposable-marked-guest-only`, on a GitHub-hosted runner VM as
+`github-hosted-ephemeral`, so the pair stays required on every pull request as it
+was before the guard. Anywhere else (a workstation, a self-hosted runner) they
+are skipped with a visible `skipped: needs marked guest` notice and step-summary
+line, instead of exiting 2 at the guard. A skip there is not a pass of the RAUC
+contract. There is no override variable for a bare-metal host.
 
 Remaining policy limits: healthy requalification still restores the configured
 allowance, so very slow periodic failures can recur; boot-time includes suspend

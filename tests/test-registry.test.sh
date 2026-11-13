@@ -84,13 +84,14 @@ assert_eq "no path is registered twice" "0" "${dupes}"
 # Every privileged entry must guard itself, including direct invocation, unless
 # it declares itself confined (all effects inside fixtures it creates). The
 # confined set is fixed here, so widening it is a reviewed change: the real
-# RAUC harness changes host mounts and partition labels and must stay guarded.
+# RAUC harness changes host mounts and partition labels and must stay guarded
+# (marked guest, or a GitHub-hosted ephemeral runner VM on explicit opt-in).
 confined_expected=$'tests/kernel-stage-real.test.sh\ntests/real-avahi-hostname-contract.sh'
 confined_seen=()
 while IFS=$'\t' read -r path _kind tier _execution _reason; do
   [[ "${tier}" == privileged ]] || continue
   guarded=0 confined=0
-  grep -F 'source "${HERE}/lib/require-disposable-guest.sh"' "${PIPELINE_DIR}/${path}" >/dev/null && guarded=1
+  grep -Eq '^source "\$\{HERE\}/lib/require-(disposable-guest|ephemeral-host)\.sh"$' "${PIPELINE_DIR}/${path}" && guarded=1
   grep -Eq '^# guest-guard: confined\. .+' "${PIPELINE_DIR}/${path}" && confined=1
   if (( guarded && ! confined )); then
     ok "privileged harness sources guest guard: ${path}"
@@ -103,6 +104,13 @@ while IFS=$'\t' read -r path _kind tier _execution _reason; do
 done <"${WORK}/rows.tsv"
 assert_eq "confined privileged harnesses" "${confined_expected}" \
   "$(printf '%s\n' "${confined_seen[@]}" | LC_ALL=C sort)"
+for path in tests/real-rauc-contract.sh tests/real-rauc-cleanup-contract.test.sh; do
+  if grep -Fxq 'source "${HERE}/lib/require-ephemeral-host.sh"' "${PIPELINE_DIR}/${path}"; then
+    ok "real RAUC harness sources the ephemeral-host guard: ${path}"
+  else
+    bad "real RAUC harness lacks the ephemeral-host guard: ${path}"
+  fi
+done
 
 # Exercise only the shared guard, never a privileged harness. Substitute a
 # temporary marker path in a copy so all four guest/marker combinations are safe.
@@ -121,34 +129,76 @@ for virt in none kvm; do
   done
 done
 
-# CI row selection reuses that guard: an unmarked runner skips the guest-only
-# RAUC rows visibly (never exit 2 at the guard), a marked guest runs them.
-for virt in none kvm; do
+# The RAUC guard: a marked guest, or a GitHub-hosted runner VM on the explicit
+# spelling. A copy of both guards with the temporary marker path; the runner
+# variables are set per case, never inherited from a real CI job.
+mkdir -p "${WORK}/lib"
+cp "${WORK}/guard.sh" "${WORK}/lib/require-disposable-guest.sh"
+cp "${HERE}/lib/require-ephemeral-host.sh" "${WORK}/lib/require-ephemeral-host.sh"
+rauc_guard_case() { # <virt> <marker> <spelling> <github-actions> <runner-environment>
+  rm -rf "${WORK}/guest-marker"
+  [[ "$2" != present ]] || mkdir "${WORK}/guest-marker"
+  env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u CERALIVE_RUN_REAL_RAUC_CONTRACT \
+    ${3:+CERALIVE_RUN_REAL_RAUC_CONTRACT=$3} ${4:+GITHUB_ACTIONS=$4} ${5:+RUNNER_ENVIRONMENT=$5} \
+    bash -c 'v="$1"; systemd-detect-virt() { echo "$v"; }; export -f systemd-detect-virt; export v; source "$2"' \
+    guard "$1" "${WORK}/lib/require-ephemeral-host.sh" >/dev/null 2>&1
+}
+#              virt      marker  spelling                 actions runner-env    expected
+while read -r virt marker spelling actions runner expected; do
+  [[ "${spelling}" != - ]] || spelling=""
+  [[ "${actions}" != - ]] || actions=""
+  [[ "${runner}" != - ]] || runner=""
+  rauc_guard_case "${virt}" "${marker}" "${spelling}" "${actions}" "${runner}"
+  assert_eq "RAUC guard ${virt}/${marker}/${spelling:-unset}/${actions:-unset}/${runner:-unset}" "${expected}" "$?"
+done <<'CASES'
+kvm       present -                        -    -            0
+none      absent  github-hosted-ephemeral  true github-hosted 2
+microsoft absent  github-hosted-ephemeral  true github-hosted 0
+microsoft absent  -                        true github-hosted 2
+microsoft absent  disposable-marked-guest-only true github-hosted 2
+microsoft absent  github-hosted-ephemeral  true self-hosted  2
+microsoft absent  github-hosted-ephemeral  -    github-hosted 2
+kvm       absent  -                        -    -            2
+CASES
+
+# CI row selection reuses those guards: a marked guest or a GitHub-hosted runner
+# VM runs the RAUC rows; anywhere else they are skipped visibly (never exit 2).
+#            virt      marker  actions runner-env    expected
+while read -r virt marker actions runner expected; do
+  [[ "${actions}" != - ]] || actions=""
+  [[ "${runner}" != - ]] || runner=""
   rm -rf "${WORK}/guest-marker" "${WORK}/ci.env"
-  [[ "${virt}" != kvm ]] || mkdir "${WORK}/guest-marker"
+  [[ "${marker}" != present ]] || mkdir "${WORK}/guest-marker"
   ( systemd-detect-virt() { echo "${virt}"; }; export -f systemd-detect-virt; export virt
+    unset GITHUB_ACTIONS RUNNER_ENVIRONMENT
+    [[ -z "${actions}" ]] || export GITHUB_ACTIONS="${actions}"
+    [[ -z "${runner}" ]] || export RUNNER_ENVIRONMENT="${runner}"
     CERALIVE_GUEST_GUARD="${WORK}/guard.sh" GITHUB_STEP_SUMMARY="" \
       bash "${PIPELINE_DIR}/ci/privileged-contracts.sh" "${WORK}/ci.env" ) >"${WORK}/ci.log" 2>&1
   rc=$?
-  assert_eq "CI row selection exits 0 (${virt})" "0" "${rc}"
-  if [[ "${virt}" == kvm ]]; then
-    expected='CERALIVE_RUN_REAL_RAUC_CONTRACT=disposable-marked-guest-only'
-  else
-    expected='CERALIVE_RUN_REAL_RAUC_CONTRACT=skip'
+  case_name="${virt}/${marker}/${actions:-unset}/${runner:-unset}"
+  assert_eq "CI row selection exits 0 (${case_name})" "0" "${rc}"
+  assert_eq "CI row selection env (${case_name})" "CERALIVE_RUN_REAL_RAUC_CONTRACT=${expected}" "$(cat "${WORK}/ci.env")"
+  if [[ "${expected}" == skip ]]; then
     if grep -Fq '::notice title=Privileged contracts::skipped: needs marked guest' "${WORK}/ci.log"; then
-      ok "unmarked CI runner shows skipped: needs marked guest"
+      ok "skipping runner shows skipped: needs marked guest (${case_name})"
     else
-      bad "unmarked CI runner hides the privileged skip"
+      bad "skipping runner hides the privileged skip (${case_name})"
     fi
   fi
-  assert_eq "CI row selection env (${virt})" "${expected}" "$(cat "${WORK}/ci.env")"
-done
+done <<'CASES'
+none      absent  -    -             skip
+kvm       present -    -             disposable-marked-guest-only
+microsoft absent  true github-hosted github-hosted-ephemeral
+none      absent  true github-hosted skip
+microsoft absent  true self-hosted   skip
+CASES
 workflow="${PIPELINE_DIR}/.github/workflows/v2-ci.yml"
 if grep -Fq 'run: ci/privileged-contracts.sh "$GITHUB_ENV"' "${workflow}" \
   && ! grep -Eq 'CERALIVE_RUN_REAL_RAUC_CONTRACT=' "${workflow}"; then
-  ok "hosted bats job selects the guest-only RAUC rows through ci/privileged-contracts.sh"
+  ok "hosted bats job selects the RAUC rows through ci/privileged-contracts.sh"
 else
-  bad "hosted bats job forces the guest-only RAUC rows instead of selecting them"
+  bad "hosted bats job forces the RAUC rows instead of selecting them"
 fi
 # The confined rows ran as required on the hosted runner before the guard and
 # must keep doing so; a skip there would mean they run in no CI at all.

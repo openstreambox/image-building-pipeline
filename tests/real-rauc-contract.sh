@@ -6,8 +6,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib/require-disposable-guest.sh
-source "${HERE}/lib/require-disposable-guest.sh"
+# shellcheck source=lib/require-ephemeral-host.sh
+source "${HERE}/lib/require-ephemeral-host.sh"
 
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/ceralive-rauc-contract.XXXXXX")"

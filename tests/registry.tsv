@@ -168,7 +168,7 @@ mkosi/platform/x86/test-x86-fallback.sh	shell	unit	default-shell	x86/GRUB offlin
 # --- run by run-tests outside the two suite lists ------------------------
 tests/rauc-rollback.sh	shell	integration	default-mock	run-tests drives its MOCK mode; LIVE mode needs BOARD_IP and real silicon
 tests/real-avahi-hostname-contract.sh	shell	privileged	opt-in	needs private network/D-Bus namespaces; confined to its own fixtures; gated on CERALIVE_RUN_REAL_AVAHI_CONTRACT=required
-tests/real-rauc-contract.sh	shell	privileged	opt-in	needs a real RAUC service on the system bus; changes host mounts and labels, marked guest only; gated on CERALIVE_RUN_REAL_RAUC_CONTRACT=disposable-marked-guest-only
+tests/real-rauc-contract.sh	shell	privileged	opt-in	needs a real RAUC service on the system bus; changes host mounts and labels, marked guest or GitHub-hosted runner VM only; gated on CERALIVE_RUN_REAL_RAUC_CONTRACT=disposable-marked-guest-only or github-hosted-ephemeral
 tests/real-rauc-cleanup-contract.test.sh	shell	privileged	opt-in	same RAUC service harness, cleanup half; same env gate
 
 # --- driven by a default row, never standalone ---------------------------
@@ -229,3 +229,4 @@ tests/manifests/fixtures/production-baseline/x86-minipc.params	fixture	support	n
 tests/recovery-witness.test.sh	shell	unit	default-shell	durable witness and reset budget host contracts
 tests/recovery_witness_test.py	helper	support	invoked-by-suite	Python assertions invoked by recovery witness shell suite
 tests/lib/require-disposable-guest.sh	helper	support	invoked-by-suite	Mandatory marked disposable guest guard for privileged harnesses
+tests/lib/require-ephemeral-host.sh	helper	support	invoked-by-suite	Real RAUC guard: marked disposable guest or GitHub-hosted ephemeral runner VM

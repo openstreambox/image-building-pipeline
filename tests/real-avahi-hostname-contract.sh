@@ -14,9 +14,14 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# guest-guard: confined. Every effect is a per-run namespace, veth pair, private
-# D-Bus socket or temporary directory that this script creates, tags with its PID
-# and removes; it never touches host mounts, devices or system services, so it
+# guest-guard: confined. Confined except transient host netns mounts and veth
+# pairs: `ip netns add` creates nsfs mounts under the host's /run/netns, and each
+# veth pair is created in the host namespace before it is moved, with fixed peer
+# names (peer-a/peer-b), so two concurrent runs collide and a SIGKILL between
+# create and move leaks host interfaces. It reads the host /etc/machine-id. Its
+# avahi-daemon runs in a private mount namespace with a private D-Bus, and
+# systemctl/hostnamectl are stubbed; cleanup removes its namespaces and temporary
+# directory. It never mounts over a host path or touches a host service, so it
 # runs without the disposable-guest guard (opt-in locally, required in hosted CI).
 
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"

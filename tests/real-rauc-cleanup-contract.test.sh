@@ -2,8 +2,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib/require-disposable-guest.sh
-source "${HERE}/lib/require-disposable-guest.sh"
+# shellcheck source=lib/require-ephemeral-host.sh
+source "${HERE}/lib/require-ephemeral-host.sh"
 
 HARNESS="${HERE}/real-rauc-contract.sh"
 TMP="$(mktemp -d)"

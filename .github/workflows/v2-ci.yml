@@ -284,10 +284,11 @@ jobs:
           trap 'docker rm "$container"' EXIT
           docker export "$container" >"$RUNNER_TEMP/kernel-stage-rootfs.tar"
 
-      - name: Select guest-only privileged contract rows
-        # The real RAUC contract runs only on a marked disposable guest; an
-        # unmarked hosted runner shows "skipped: needs marked guest" instead of
-        # failing at the guard. The confined privileged rows below stay required.
+      - name: Select real RAUC contract rows
+        # The real RAUC contract runs only where the machine is discarded: a
+        # marked disposable guest, or this GitHub-hosted ephemeral runner VM
+        # (github-hosted-ephemeral). Elsewhere it shows "skipped: needs marked
+        # guest". The confined privileged rows below stay required.
         run: ci/privileged-contracts.sh "$GITHUB_ENV"
 
       - name: Run v2 manifest unit suite
