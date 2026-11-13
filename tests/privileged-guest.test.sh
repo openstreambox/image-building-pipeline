@@ -11,6 +11,7 @@ mkdir "${WORK}/bin" "${WORK}/cache"
 LAUNCHER="${ROOT}/ci/kernel-runner/privileged-guest.sh"
 CHECK="${ROOT}/ci/kernel-runner/privileged-check.sh"
 CI_TESTS="${ROOT}/ci/kernel-runner/ci-tests.sh"
+WORKFLOW="${ROOT}/.github/workflows/privileged-guest.yml"
 
 if [[ "$(id -u)" -eq 0 ]]; then
   printf 'SKIP privileged-guest launcher: runs as an ordinary user only\n'
@@ -116,5 +117,13 @@ grep -Fq 'ci-tests.sh --privileged-only' "${CHECK}" && grep -Fq 'runuser -u "${u
   && ok 'guest runs only the privileged rows, as the unprivileged guest user' || bad 'guest check wiring'
 grep -Fq 'source "$1"' "${CHECK}" && grep -Fq 'require-disposable-guest.sh' "${CHECK}" \
   && ok 'guest reports the guard verdict before running rows' || bad 'guest check skips the guard verdict'
+workflow_code="$(grep -v '^[[:space:]]*#' "${WORKFLOW}")"
+if grep -Eq 'runs-on:[[:space:]]*ubuntu-' <<<"${workflow_code}" && ! grep -Eq 'self-hosted|secrets\.' <<<"${workflow_code}" \
+  && grep -Fq 'persist-credentials: false' "${WORKFLOW}" && grep -Fq 'contents: read' "${WORKFLOW}"; then
+  ok 'workflow uses a GitHub-hosted runner with no secrets and a read-only token'
+else bad 'workflow runner/credential policy'; fi
+grep -Fq 'bash ci/kernel-runner/privileged-guest.sh --accel kvm' "${WORKFLOW}" \
+  && ok 'workflow runs the same launcher with KVM' || bad 'workflow does not use the launcher'
+
 printf 'Privileged guest launcher: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 [[ "${FAIL}" == 0 ]]

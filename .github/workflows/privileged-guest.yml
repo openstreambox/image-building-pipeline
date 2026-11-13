@@ -1,0 +1,76 @@
+# Privileged contracts in a marked disposable guest.
+#
+# The real Avahi, real RAUC and real kernel-stage contracts mount, loop-attach,
+# create partition labels and start system services. They refuse to run
+# anywhere but a disposable KVM/QEMU guest that carries the `opt/ceralive/`
+# firmware marker (tests/lib/require-disposable-guest.sh), so the hosted `bats`
+# job in v2-ci.yml skips them visibly. This workflow is where they run.
+#
+# The job uses an ordinary GitHub-hosted runner, which exposes /dev/kvm. The
+# runner itself stays unmarked: ci/kernel-runner/privileged-guest.sh boots a
+# fresh Ubuntu guest under QEMU/KVM with the marker, hands it this commit's
+# tracked source as a read-only tar capsule, runs only the `privileged`
+# registry rows inside it and destroys the guest disk afterwards. No secrets,
+# no self-hosted runner, no write token: code from a pull request only ever
+# runs inside a throwaway VM inside a throwaway hosted runner.
+#
+# It is not a required check. A run takes roughly half an hour, most of it
+# building the guest base (Ubuntu cloud image, pinned by digest, plus packages).
+
+name: Privileged contracts (marked guest)
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: privileged-guest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Give the runner user access to /dev/kvm
+        run: |
+          set -euo pipefail
+          test -c /dev/kvm || { echo '::error::this runner exposes no /dev/kvm'; exit 1; }
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm-runner.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Install QEMU on the runner
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils xorriso python3-yaml
+
+      - name: Privileged rows inside the marked guest
+        env:
+          CERALIVE_GUEST_CACHE: ${{ runner.temp }}/guest
+        run: |
+          set -euo pipefail
+          # The guard refuses on the runner itself; this is the unmarked half of the proof.
+          if bash -c 'source tests/lib/require-disposable-guest.sh'; then
+            echo '::error::the hosted runner was admitted by the guest guard'; exit 1
+          fi
+          bash ci/kernel-runner/privileged-guest.sh --accel kvm --smp 4 --memory 12288
+
+      - name: Row results
+        if: always()
+        run: |
+          {
+            echo '### Privileged rows (marked guest)'
+            grep -ah 'CERALIVE_PRIVILEGED_ROW ' "${RUNNER_TEMP}"/guest/privileged-*.log \
+              | sed 's/^.*CERALIVE_PRIVILEGED_ROW /- /' || echo '- no row results reached the console'
+          } >>"${GITHUB_STEP_SUMMARY}"
