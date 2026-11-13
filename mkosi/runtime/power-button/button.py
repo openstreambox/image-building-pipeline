@@ -15,13 +15,13 @@ EVENT = struct.Struct('@llHHi')  # native Linux input_event (arm64 and amd64)
 class Gestures:
     def __init__(self, light, poweroff):
         self.light, self.poweroff = light, poweroff
-        self.down = self.tap = None
+        self.down = self.tap = self.observed_down = None
         self.fired = False
         self.request = None
         self.live = False
 
     def cancel(self):
-        self.down = self.tap = None
+        self.down = self.tap = self.observed_down = None
         self.fired = False
         self.light('cancel', 0)
 
@@ -36,36 +36,47 @@ class Gestures:
         self.request = None
         self.tap = None
 
-    def tick(self, now):
+    def expire(self, now):
         if self.request and now >= self.request[0]:
             reply = self.request[1]
             self.drop_request()
             reply('TIMEOUT')
+
+    def tick(self, now, authorize=lambda: True):
+        self.expire(now)
         if self.down is not None and not self.fired:
-            elapsed = now - self.down
+            elapsed = now - self.observed_down
             self.light('countdown', max(0, 3 - elapsed))
-            if elapsed >= 3:
+            pressed = self.down
+            if elapsed >= 3 and authorize() and self.down == pressed and self.down is not None:
                 self.fired = True
                 self.tap = None
-                self.light('shutdown', 0)
                 self.poweroff()
+                self.light('shutdown', 0)
 
-    def key(self, value, now):
+    def key(self, value, now, current_time=None):
+        current_time = current_time or (lambda: now)
+        self.expire(current_time())
         if value == 1 and self.down is None:
             self.down, self.fired = now, False
+            self.observed_down = max(now, current_time())
             self.light('countdown', 3)
         elif value == 0 and self.down is not None:
-            duration = now - self.down
+            pressed = self.down
+            duration = now - pressed
             self.down = None
             if self.fired:
                 return
-            if duration >= 0.5:
+            if duration < 0 or duration >= 0.5:
                 self.tap = None
                 self.light('cancel', 0)
                 return
             self.light('status', 0)
-            if self.request and self.request[2] <= now < self.request[0]:
-                if self.tap is not None and now - self.tap <= 0.4:
+            if self.request and self.request[2] <= pressed <= now < self.request[0]:
+                if self.tap is not None and 0 <= now - self.tap <= 0.4:
+                    self.expire(current_time())  # final decision after callbacks
+                    if not self.request:
+                        return
                     reply = self.request[1]
                     self.drop_request()  # consume before delivering
                     reply('CONFIRMED')
@@ -81,7 +92,8 @@ class Input:
         self.buffer = b''
         self.dropped = False
 
-    def feed(self, data, now):
+    def feed(self, data, now, current_time=None):
+        self.g.expire(now)
         self.buffer += data
         while len(self.buffer) >= EVENT.size:
             sec, usec, kind, code, value = EVENT.unpack(self.buffer[:EVENT.size])
@@ -94,7 +106,7 @@ class Input:
                 if kind == 1 and code == 116 and value == 0:
                     self.dropped = False
             elif kind == 1 and code == 116:
-                self.g.key(value, sec + usec / 1_000_000 if self.event_clock else now)
+                self.g.key(value, sec + usec / 1_000_000 if self.event_clock else now, current_time or (lambda: now))
 
 
 def discover():
@@ -113,7 +125,15 @@ def monotonic_input(fd):
     fcntl.ioctl(fd, 0x400445A0, struct.pack("i", time.CLOCK_MONOTONIC))
 
 
-def serve(device, path, light, poweroff, configure_input=monotonic_input):
+def power_key_down(fd):
+    # EVIOCGKEY: Linux KEY_MAX is 0x2ff, bitmap includes KEY_POWER (116).
+    keys = bytearray(96)
+    fcntl.ioctl(fd, 0x80604518, keys, True)
+    return bool(keys[116 // 8] & (1 << (116 % 8)))
+
+
+def serve(device, path, light, poweroff, configure_input=monotonic_input,
+          key_state=power_key_down):
     g = Gestures(light, poweroff)
     decoder = Input(g, event_clock=True)
     sel = selectors.DefaultSelector()
@@ -146,15 +166,40 @@ def serve(device, path, light, poweroff, configure_input=monotonic_input):
             pass
         close(client)
 
+    def drain():
+        # Bound work under a noisy/broken input source; uncertainty denies holds.
+        for _ in range(256):
+            try:
+                data = os.read(fd, EVENT.size * 64)
+            except BlockingIOError:
+                return not decoder.buffer and not decoder.dropped
+            if not data:
+                raise RuntimeError('power key disconnected')
+            now = time.monotonic()  # read may have been descheduled
+            decoder.feed(data, now, time.monotonic)
+        return False
+
+    def authorize_hold():
+        started = time.monotonic()
+        try:
+            certain = drain() and key_state(fd) is True
+        except OSError:
+            certain = False
+        now = time.monotonic()
+        # A pause loses continuity even if a later press is currently down.
+        certain = certain and now - last_tick <= .25 and now - started <= .25
+        if not certain:
+            g.cancel()
+            decoder.dropped = True  # require release, then a fresh press
+        return certain
+
+    last_tick = time.monotonic()
     try:
         while True:
             for key, _ in sel.select(0.025):
                 now = time.monotonic()
                 if key.data == 'input':
-                    data = os.read(fd, EVENT.size * 64)
-                    if not data:
-                        raise RuntimeError('power key disconnected')
-                    decoder.feed(data, now)
+                    drain()
                 elif key.data == 'accept':
                     client, _ = server.accept()
                     client.setblocking(False)
@@ -182,6 +227,8 @@ def serve(device, path, light, poweroff, configure_input=monotonic_input):
                         if rest:
                             reply(client, 'ERROR')
                         elif len(parts) == 2 and parts[0] == b'CONFIRM' and parts[1].isdigit() and 1 <= int(parts[1]) <= 60:
+                            now = time.monotonic()
+                            g.expire(now)
                             if g.request_confirm(now, int(parts[1]), lambda msg, c=client: reply(c, msg)):
                                 owner = client
                                 state[2] = True
@@ -197,7 +244,11 @@ def serve(device, path, light, poweroff, configure_input=monotonic_input):
                         else:
                             reply(client, 'ERROR')
             now = time.monotonic()
-            g.tick(now)
+            if now - last_tick > .25:
+                g.cancel()
+                decoder.dropped = True
+            g.tick(now, authorize_hold)
+            last_tick = now
             for client, state in list(clients.items()):
                 if not state[2] and now >= state[1]:
                     reply(client, 'TIMEOUT')

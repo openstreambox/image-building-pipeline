@@ -59,3 +59,12 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; }
   run python3 "$ROOT/tests/power-button-contract.py" Gestures.test_queued_events
   [ "$status" -eq 0 ]
 }
+
+@test "power button: scheduling pauses, batch boundaries and key-state uncertainty fail closed" {
+  run python3 "$ROOT/tests/power-button-contract.py" Socket.test_pause_between_read_and_tick Socket.test_split_batches Socket.test_current_key_released Socket.test_uncertain_key_state Socket.test_observed_hold
+  [ "$status" -eq 0 ]
+}
+@test "power button: both tap edges follow admission and delivery precedes expiry" {
+  run python3 "$ROOT/tests/power-button-contract.py" Gestures.test_pre_admission_press Gestures.test_delayed_confirmation Gestures.test_final_confirmation_deadline
+  [ "$status" -eq 0 ]
+}

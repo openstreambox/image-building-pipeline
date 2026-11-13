@@ -17,7 +17,13 @@ input device fails the service, so systemd retries discovery. The timer uses a
 monotonic clock. Evdev is explicitly switched to CLOCK_MONOTONIC; physical
 event timestamps bound the double window even when events are queued. Events
 from before request admission cannot confirm a new request. A very late event-loop wake
-may delay shutdown; it never backdates a fresh press.
+cancels hold tracking if service observations are more than 250 ms apart and
+requires release before rearming. A delayed press starts its hold countdown at
+observation time, never in the past. Immediately before shutdown the service
+drains all pending batches (bounded to 256 reads), requires a complete decoder
+and a positive EVIOCGKEY KEY_POWER state. Read/ioctl uncertainty denies the hold.
+The final check is a userspace decision, not an atomic guarantee against a key
+release or scheduler pause after that decision.
 
 ## logind and dependencies
 
@@ -51,7 +57,11 @@ application authenticates/authorizes its caller before opening a request.
   before displaying the prompt. Exactly one client may hold a request; another
   receives `BUSY\n` and closes. The owner receives `CONFIRMED\n` or `TIMEOUT\n`,
   then EOF. Disconnect cancels. Each connection may request once; a fresh one
-  needs two fresh taps. No press before request admission carries over.
+  needs two fresh taps. Both edges of each tap must follow admission. A press
+  already down must release before two new taps can qualify. Requests expire
+  against current service monotonic time before decoding and again at the final
+  confirmation decision; queued on-time taps delivered after expiry yield TIMEOUT.
+  These freshness checks preserve version 1 commands and replies.
 - `LIVE 1\n` or `LIVE 0\n` gets `OK\n` and EOF. This process-local flag is
   advisory: it cannot enable a shorter shutdown. Clients should republish their
   current state after service restart. Default is false; safety is identical

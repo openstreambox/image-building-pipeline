@@ -1,5 +1,6 @@
 """Hardware-free production decoder, gesture and Unix socket contracts."""
 import importlib.util
+import inspect
 import multiprocessing
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('button', ROOT / 'mkosi/runtime/power-button/button.py')
@@ -117,8 +119,116 @@ class Gestures(unittest.TestCase):
         decoder.feed(b.EVENT.pack(12, 150000, 1, 116, 0), 15)
         self.assertEqual(self.replies, ['CONFIRMED'])
 
+    def test_pre_admission_press(self):
+        self.g.key(1, 9.9)
+        self.g.request_confirm(10, 1, self.replies.append)
+        self.g.key(0, 10.01)
+        self.tap(10.1)
+        self.assertEqual(self.replies, [])
+        self.tap(10.3)
+        self.assertEqual(self.replies, ['CONFIRMED'])
+
+    def test_delayed_confirmation(self):
+        decoder = b.Input(self.g, event_clock=True)
+        self.g.request_confirm(10, 1, self.replies.append)
+        for at, usec, value in ((10, 100000, 1), (10, 150000, 0),
+                                (10, 200000, 1), (10, 250000, 0)):
+            decoder.feed(b.EVENT.pack(at, usec, 1, 116, value), 20)
+        self.assertEqual(self.replies, ['TIMEOUT'])
+
+    def test_final_confirmation_deadline(self):
+        self.g.request_confirm(10, 1, self.replies.append)
+        self.tap(10.1)
+        self.g.key(1, 10.2)
+        # Delivery starts on time but the final status callback crosses expiry.
+        self.g.light = lambda *args: None
+        with patch.object(b.time, 'monotonic', side_effect=[10.9, 11]):
+            kwargs = {}
+            if 'current_time' in inspect.signature(self.g.key).parameters:
+                kwargs['current_time'] = b.time.monotonic
+            self.g.key(0, 10.25, **kwargs)
+        self.assertEqual(self.replies, ['TIMEOUT'])
+
 
 class Socket(unittest.TestCase):
+    def run_queued_release(self, pause=False, split=False, state=True, hold=False):
+        with tempfile.TemporaryDirectory() as directory:
+            fifo, path = directory + '/events', directory + '/control.sock'
+            os.mkfifo(fifo)
+            writer = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+            read_gate, resume, ready, off = [multiprocessing.Event() for _ in range(4)]
+            def child():
+                original = b.os.read
+                first = True
+                def read(fd, size):
+                    nonlocal first
+                    data = original(fd, size)
+                    if data and first:
+                        first = False
+                        read_gate.set()
+                        if pause:
+                            if not resume.wait(5):
+                                raise RuntimeError('test resume deadline')
+                    return data
+                def light(*args):
+                    ready.set()
+                with patch.object(b.os, 'read', read):
+                    kwargs = {}
+                    # The FIFO has no EVIOCGKEY; inject its measured state.
+                    if 'key_state' in inspect.signature(b.serve).parameters:
+                        kwargs['key_state'] = lambda fd: state
+                    b.serve(fifo, path, light, off.set, lambda fd: None, **kwargs)
+            process = multiprocessing.get_context('fork').Process(target=child)
+            process.start()
+            try:
+                deadline = time.monotonic() + 3
+                while not os.path.exists(path):
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(.01)
+                at = time.monotonic() - (3.1 if split or not pause else 0)
+                sec = int(at)
+                press = b.EVENT.pack(sec, int((at-sec)*1000000), 1, 116, 1)
+                release = b.EVENT.pack(sec, int((at-sec)*1000000)+50000, 1, 116, 0)
+                if split:
+                    # Exactly one read's worth, release starts the next batch.
+                    os.write(writer, press + b.EVENT.pack(sec, 0, 1, 30, 0)*63 + release)
+                else:
+                    os.write(writer, press)
+                    self.assertTrue(read_gate.wait(2))
+                    if pause:
+                        time.sleep(.05)
+                        os.write(writer, release)
+                        time.sleep(3.1)
+                        resume.set()
+                self.assertTrue(ready.wait(2))
+                self.assertFalse(off.wait(.2), 'short/stale/uncertain hold powered off')
+                if not pause and not split:
+                    if hold:
+                        self.assertTrue(off.wait(3.5), 'continuous observed hold did not fire')
+                    else:
+                        self.assertFalse(off.wait(3.2), 'released/uncertain key powered off')
+                self.assertTrue(process.is_alive())
+            finally:
+                resume.set()
+                process.terminate()
+                process.join(3)
+                os.close(writer)
+
+    def test_pause_between_read_and_tick(self):
+        self.run_queued_release(pause=True)
+
+    def test_split_batches(self):
+        self.run_queued_release(split=True)
+
+    def test_current_key_released(self):
+        self.run_queued_release(state=False)
+
+    def test_uncertain_key_state(self):
+        self.run_queued_release(state=None)
+
+    def test_observed_hold(self):
+        self.run_queued_release(hold=True)
+
     def test_socket(self):
         with tempfile.TemporaryDirectory() as directory:
             fifo, path = directory + '/events', directory + '/control.sock'
