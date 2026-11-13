@@ -14,8 +14,10 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib/require-disposable-guest.sh
-source "${HERE}/lib/require-disposable-guest.sh"
+# guest-guard: confined. Every effect is a per-run namespace, veth pair, private
+# D-Bus socket or temporary directory that this script creates, tags with its PID
+# and removes; it never touches host mounts, devices or system services, so it
+# runs without the disposable-guest guard (opt-in locally, required in hosted CI).
 
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 POSTINST_ENTRY="${PIPELINE_DIR}/mkosi/customize/postinst-lib.sh"

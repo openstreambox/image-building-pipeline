@@ -142,12 +142,26 @@ Run `tests/recovery-witness.test.sh`; it is also registered in `./run-tests`.
 
 ## Privileged harness boundary
 
-Every privileged registry entry sources `tests/lib/require-disposable-guest.sh`
-before privileged operations. It requires both KVM/QEMU virtualization and the
-firmware marker `/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive`, otherwise exit 2.
-The real RAUC gate spelling is `disposable-marked-guest-only`; `required` is no
-longer accepted. Direct invocation has the same guard. Test the helper itself
-on a workstation, never a destructive harness.
+A privileged registry entry that can change host state outside its own fixtures
+sources `tests/lib/require-disposable-guest.sh` before privileged operations.
+It requires both KVM/QEMU virtualization and the firmware marker
+`/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive`, otherwise exit 2. Today that
+is the real RAUC pair (`real-rauc-contract.sh`, `real-rauc-cleanup-contract.test.sh`):
+it may unmount any `/mnt/rauc/*` mount, binds over `/proc/cmdline` and briefly
+exposes `rootfs_a`/`rootfs_b` partition labels to host udev. Its gate spelling
+is `disposable-marked-guest-only`; `required` is no longer accepted. Direct
+invocation has the same guard. Test the helper itself on a workstation, never a
+destructive harness.
+
+The other privileged rows are **confined**: every effect stays inside fixtures
+they create. Real Avahi uses per-run network namespaces, veth pairs and private
+D-Bus sockets tagged with its PID; real kernel stage mounts only loop images and
+binds `/dev`, `/proc`, `/sys` and `/run` into its own chroot tree under its
+`mktemp` directory, which it refuses to delete while a mount remains. They run as
+before the guard: opt-in locally, `required` in the hosted job. Each carries a
+`# guest-guard: confined.` header with its reason, and
+`tests/test-registry.test.sh` fixes the confined set, so moving a row out from
+under the guard is a reviewed change.
 
 A guest is **marked** when the host starts it under QEMU/KVM with at least one
 firmware configuration item named below `opt/ceralive/` and the guest kernel
@@ -157,11 +171,12 @@ passes its job items that way, so its disposable guest is marked and
 `ci/kernel-runner/ci-tests.sh` runs every guarded row. Nothing inside a guest
 can create the marker after boot, and an ordinary hosted runner has none.
 
-The hosted `bats` job selects rows with `ci/privileged-contracts.sh`, which asks
-the same guard: on a marked guest the guarded rows (real Avahi, real RAUC, real
-kernel stage) run; on an unmarked runner they are skipped with a visible
+The hosted `bats` job requires the real Avahi, real kernel-stage and
+privilege-drop contracts directly, and selects the guest-only real RAUC rows
+with `ci/privileged-contracts.sh`, which asks the same guard: on a marked guest
+they run; on an unmarked runner they are skipped with a visible
 `skipped: needs marked guest` notice and step-summary line, instead of exiting 2
-at the guard. A skip there is not a pass of those contracts; they still need a
+at the guard. A skip there is not a pass of the RAUC contract; it still needs a
 marked disposable guest. There is no override variable for an unmarked host.
 
 Remaining policy limits: healthy requalification still restores the configured

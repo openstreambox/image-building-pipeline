@@ -81,15 +81,28 @@ cut -f1 "${WORK}/rows.tsv" | LC_ALL=C sort > "${WORK}/registered.txt"
 dupes="$(uniq -d < "${WORK}/registered.txt" | wc -l | tr -d ' ')"
 assert_eq "no path is registered twice" "0" "${dupes}"
 
-# Every privileged entry must guard itself, including direct invocation.
+# Every privileged entry must guard itself, including direct invocation, unless
+# it declares itself confined (all effects inside fixtures it creates). The
+# confined set is fixed here, so widening it is a reviewed change: the real
+# RAUC harness changes host mounts and partition labels and must stay guarded.
+confined_expected=$'tests/kernel-stage-real.test.sh\ntests/real-avahi-hostname-contract.sh'
+confined_seen=()
 while IFS=$'\t' read -r path _kind tier _execution _reason; do
   [[ "${tier}" == privileged ]] || continue
-  if grep -F 'source "${HERE}/lib/require-disposable-guest.sh"' "${PIPELINE_DIR}/${path}" >/dev/null; then
+  guarded=0 confined=0
+  grep -F 'source "${HERE}/lib/require-disposable-guest.sh"' "${PIPELINE_DIR}/${path}" >/dev/null && guarded=1
+  grep -Eq '^# guest-guard: confined\. .+' "${PIPELINE_DIR}/${path}" && confined=1
+  if (( guarded && ! confined )); then
     ok "privileged harness sources guest guard: ${path}"
+  elif (( confined && ! guarded )); then
+    ok "privileged harness declares confined effects: ${path}"
+    confined_seen+=("${path}")
   else
-    bad "privileged harness lacks guest guard: ${path}"
+    bad "privileged harness must either source the guest guard or declare itself confined: ${path}"
   fi
 done <"${WORK}/rows.tsv"
+assert_eq "confined privileged harnesses" "${confined_expected}" \
+  "$(printf '%s\n' "${confined_seen[@]}" | LC_ALL=C sort)"
 
 # Exercise only the shared guard, never a privileged harness. Substitute a
 # temporary marker path in a copy so all four guest/marker combinations are safe.
@@ -108,8 +121,8 @@ for virt in none kvm; do
   done
 done
 
-# CI row selection reuses that guard: an unmarked runner skips the guarded rows
-# visibly (never exit 2 at the guard), a marked guest runs them all.
+# CI row selection reuses that guard: an unmarked runner skips the guest-only
+# RAUC rows visibly (never exit 2 at the guard), a marked guest runs them.
 for virt in none kvm; do
   rm -rf "${WORK}/guest-marker" "${WORK}/ci.env"
   [[ "${virt}" != kvm ]] || mkdir "${WORK}/guest-marker"
@@ -119,9 +132,9 @@ for virt in none kvm; do
   rc=$?
   assert_eq "CI row selection exits 0 (${virt})" "0" "${rc}"
   if [[ "${virt}" == kvm ]]; then
-    expected=$'CERALIVE_RUN_REAL_AVAHI_CONTRACT=required\nCERALIVE_RUN_REAL_RAUC_CONTRACT=disposable-marked-guest-only\nCERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required'
+    expected='CERALIVE_RUN_REAL_RAUC_CONTRACT=disposable-marked-guest-only'
   else
-    expected=$'CERALIVE_RUN_REAL_AVAHI_CONTRACT=skip\nCERALIVE_RUN_REAL_RAUC_CONTRACT=skip\nCERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=skip'
+    expected='CERALIVE_RUN_REAL_RAUC_CONTRACT=skip'
     if grep -Fq '::notice title=Privileged contracts::skipped: needs marked guest' "${WORK}/ci.log"; then
       ok "unmarked CI runner shows skipped: needs marked guest"
     else
@@ -130,12 +143,22 @@ for virt in none kvm; do
   fi
   assert_eq "CI row selection env (${virt})" "${expected}" "$(cat "${WORK}/ci.env")"
 done
-if grep -Fq 'run: ci/privileged-contracts.sh "$GITHUB_ENV"' "${PIPELINE_DIR}/.github/workflows/v2-ci.yml" \
-  && ! grep -Eq 'CERALIVE_RUN_REAL_(AVAHI|RAUC|KERNEL_STAGE)_CONTRACT=' "${PIPELINE_DIR}/.github/workflows/v2-ci.yml"; then
-  ok "hosted bats job selects guarded rows through ci/privileged-contracts.sh"
+workflow="${PIPELINE_DIR}/.github/workflows/v2-ci.yml"
+if grep -Fq 'run: ci/privileged-contracts.sh "$GITHUB_ENV"' "${workflow}" \
+  && ! grep -Eq 'CERALIVE_RUN_REAL_RAUC_CONTRACT=' "${workflow}"; then
+  ok "hosted bats job selects the guest-only RAUC rows through ci/privileged-contracts.sh"
 else
-  bad "hosted bats job forces guarded rows instead of selecting them"
+  bad "hosted bats job forces the guest-only RAUC rows instead of selecting them"
 fi
+# The confined rows ran as required on the hosted runner before the guard and
+# must keep doing so; a skip there would mean they run in no CI at all.
+for contract in AVAHI KERNEL_STAGE PRIVILEGE_DROP; do
+  if grep -Eq "^ +CERALIVE_RUN_REAL_${contract}_CONTRACT=required " "${workflow}"; then
+    ok "hosted bats job requires the ${contract} contract"
+  else
+    bad "hosted bats job no longer requires the ${contract} contract"
+  fi
+done
 
 # --- 1. forward: every tracked tests/ file is registered -------------------
 echo
