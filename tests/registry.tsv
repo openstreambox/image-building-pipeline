@@ -226,3 +226,5 @@ tests/manifests/fixtures/valid-family.yaml	fixture	support	not-executed	positive
 tests/manifests/fixtures/production-baseline/orange-pi-5-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/rock-5b-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/x86-minipc.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
+tests/recovery-witness.test.sh	shell	unit	default-shell	durable witness and reset budget host contracts
+tests/recovery_witness_test.py	helper	support	invoked-by-suite	Python assertions invoked by recovery witness shell suite
