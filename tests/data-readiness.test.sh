@@ -124,6 +124,24 @@ for scenario in media growth filesystem incomplete full readonly inventory cardr
   esac
   if env "${envs[@]}" bash "$helper"; then exit 1; fi
   grep -q "^$expected " "$CERALIVE_DATA_STATUS_FILE"
+  if [[ "$scenario" == io ]]; then
+    python3 - "$CERALIVE_DATA_STATUS_FILE" "$work" <<'PY_MESSAGE'
+import importlib.util, json, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('attention', 'mkosi/runtime/ceralive-attention.py')
+a = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(a)
+a.INPUT = Path(sys.argv[2]) / 'conditions'
+a.INPUT.mkdir()
+a.data_condition(Path(sys.argv[1]))
+item = json.loads((a.INPUT / 'data-readiness.json').read_text())
+assert item['line'] == "The box couldn't prepare its storage.", item
+assert 'image' in item['fix'] and 'different card' in item['fix'], item
+spanish = Path('docs/unsafe-storage.es-419.md').read_text()
+assert 'La caja no pudo preparar su almacenamiento' in spanish
+assert 'falsa o defectuosa' not in spanish
+PY_MESSAGE
+  fi
 done
 bash "$helper"
 [[ ! -e $CERALIVE_DATA_STATUS_FILE ]]

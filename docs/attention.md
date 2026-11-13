@@ -209,8 +209,10 @@ status indicator. HDMI VT8 and the local HTTP page say “The box can't start
 safely”, followed by the cause and fix:
 
 - “This card is too small for the box. Use a card sold as 16 GB or bigger.”
-- “This card can't hold what it claims: it's fake or faulty. The box can't use
-  it. Set up a different card.” (unreadable filesystem geometry)
+- “The box couldn't prepare its storage.” Use local recovery to check the
+  filesystem or set up the card with the image again. If failures persist,
+  set up a different card. A metadata read or validation failure does not
+  establish that the card has misreported capacity.
 - “This card is read-only.” Check the adapter lock; replace a card that stays
   read-only.
 - Growth failures say the card could not finish getting ready, with local

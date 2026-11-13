@@ -19,7 +19,7 @@ with tempfile.TemporaryDirectory() as tmp:
     receipt = root / 'receipt'
     for reason, text in [
         ('media-too-small', 'This card is too small for the box.'),
-        ('card-io-failed', "This card can't hold what it claims: it's fake or faulty."),
+        ('card-io-failed', "The box couldn't prepare its storage."),
         ('card-read-only', 'This card is read-only.'),
         ('partition-growth', 'The card could not finish getting ready.'),
         ('filesystem-growth', 'The card could not finish getting ready.'),

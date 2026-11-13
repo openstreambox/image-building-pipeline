@@ -103,7 +103,7 @@ def data_condition(receipt=Path('/run/ceralive-data-status')):
     messages = {
         'media-too-small': ('This card is too small for the box.', 'Use a card sold as 16 GB or bigger. Set it up with the image again.'),
         'card-read-only': ('This card is read-only.', 'Check the adapter lock. If the card stays read-only, set up a different card.'),
-        'card-io-failed': ("This card can't hold what it claims: it's fake or faulty.", "The box can't use it. Set up a different card."),
+        'card-io-failed': ("The box couldn't prepare its storage.", "Use local recovery to check the filesystem or set up the card with the image again. If failures persist, set up a different card."),
         'data-full': ('The card does not have enough free space.', 'Use local recovery to free space, then restart the device.'),
         'partition-growth': ('The card could not finish getting ready.', 'Use local recovery to check the card, then restart the device.'),
         'filesystem-growth': ('The card could not finish getting ready.', 'Use local recovery to check the card, then restart the device.'),

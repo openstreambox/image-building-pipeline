@@ -20,8 +20,9 @@ HTTP local ofrece la misma información, sin acciones de escritura:
 
 - Tarjeta demasiado pequeña: usa una vendida como 16 GB o más y vuelve a
   prepararla con la imagen.
-- No se puede leer la geometría del sistema de archivos: la tarjeta puede ser
-  falsa o defectuosa. Prepara otra tarjeta.
+- La caja no pudo preparar su almacenamiento: usa la recuperación local para
+  revisar el sistema de archivos o vuelve a preparar la tarjeta con la imagen.
+  Si el problema persiste, prepara otra tarjeta.
 - Solo lectura: revisa el seguro del adaptador. Si sigue así, cambia la tarjeta.
 - Error de ampliación: revisa la tarjeta mediante recuperación local antes de
   reiniciar manualmente.
