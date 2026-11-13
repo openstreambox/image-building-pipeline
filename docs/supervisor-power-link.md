@@ -183,6 +183,13 @@ function monotonicMs(): number {
 }
 ```
 
+A host-only PTY run of the actual C writer produced `rx_mono_ms: 213574345`.
+Calling the function above in a separate Bun process returned `213575366`:
+`age_ms = 213575366 - 213574345 = 1021`, so the sample was fresh (below 5000 ms).
+These are observed CLOCK_MONOTONIC timestamps, not process-start-relative
+values. Read a new timestamp on each check; do not reuse these example numbers.
+The executable used a fake serial source; no hardware was involved.
+
 If the clock call is unavailable, show unknown; do not substitute wall time.
 
 ## Measurement field grammar
