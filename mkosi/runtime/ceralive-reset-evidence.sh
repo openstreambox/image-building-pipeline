@@ -77,7 +77,7 @@ collect() {
   final="$store/${stamp}_${boot}"
   mv -- "$pending" "$final"
   pending=''
-  sync -- "$store" "$(dirname "$store")"
+  sync -- "$store" "$(dirname "$store")" "${root%/}/data"
   # Unlink acknowledges pstore only after publication is durable. Other sysfs
   # evidence is read-only and must never be written or cleared.
   for path in "${saved[@]}"; do rm -- "$path"; done
