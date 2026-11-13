@@ -93,6 +93,9 @@ flock --exclusive --close "$KERNEL_HEAVY_LOCK" \
 ```
 
 Run these commands under the workstation's shared exclusive heavy-suite lock.
+`--accel`, `--smp` and `--memory` keep their defaults here (KVM, 16 CPUs,
+16384 MiB); the TCG choice exists for `privileged-guest.sh` on hosts without
+`/dev/kvm` (see `docs/recovery-witness.md`).
 The base uses SHA-verified Ubuntu noble/20261017 and runner 2.338.2; cloud-init
 installs Docker and CI/build dependencies, disables SSH and console logins,
 then powers off. Job output uses journal+console, not a shared login terminal.

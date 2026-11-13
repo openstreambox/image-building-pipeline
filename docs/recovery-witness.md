@@ -405,6 +405,42 @@ are skipped with a visible `skipped: needs marked guest` notice and step-summary
 line, instead of exiting 2 at the guard. A skip there is not a pass of the RAUC
 contract. There is no override variable for a bare-metal host.
 
+### Running the privileged rows in a marked guest
+
+`ci/kernel-runner/privileged-guest.sh` runs exactly the registry's `privileged`
+rows inside a fresh guest and prints one result line per row:
+
+```bash
+ci/kernel-runner/privileged-guest.sh                 # KVM if /dev/kvm is usable, else TCG
+ci/kernel-runner/privileged-guest.sh --accel kvm --smp 4 --memory 12288
+```
+
+The host side runs QEMU as the invoking user and refuses to run as root; it
+needs `qemu-system-x86_64`, `qemu-img`, `xorriso`, `flock`, `git` and Python
+with PyYAML. It reuses `ci/kernel-runner/vm.py`: a pristine Ubuntu base
+(cloud image pinned by digest, packages from `provision.sh`) is built once per
+set of base inputs under `mkosi/cache/kernel-runner/` (or
+`CERALIVE_GUEST_CACHE`), and every run boots a new overlay of it that is deleted
+afterwards. The host passes only this checkout's tracked files as a read-only tar
+capsule and `ci/kernel-runner/privileged-check.sh` as the `opt/ceralive/check`
+firmware item, which is the marker. No host directory is shared, no credential
+enters the guest and nothing privileged touches the host.
+
+Inside the guest, `privileged-check.sh` unpacks the capsule for the unprivileged
+`ubuntu` user, reports the guard verdict, and runs `ci/kernel-runner/ci-tests.sh
+--privileged-only` as that user. That builds the pinned RAUC, creates the
+`ceralive-ota` account, exports the native Debian rootfs, and runs each
+`privileged` row to the end so one failure does not hide the others. Each row
+ends with `CERALIVE_PRIVILEGED_ROW rc=<exit> seconds=<n> <path>` on the console.
+The launcher's log stays in the cache directory.
+
+`--accel kvm` is the normal path. `--accel tcg` emulates the CPU in software for
+a host without `/dev/kvm` access. It is the same guest, only several times
+slower. The workflow `.github/workflows/privileged-guest.yml` runs the launcher
+with KVM on an ordinary GitHub-hosted runner, which exposes `/dev/kvm`. It uses no
+secrets, no self-hosted runner and a read-only token, and is not a required
+check.
+
 Remaining policy limits: healthy requalification still restores the configured
 allowance, so very slow periodic failures can recur; boot-time includes suspend
 (but a report gap exceeding the maximum restarts dwell), and lock acquisition
