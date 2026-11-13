@@ -417,7 +417,10 @@ class ChargeTest(unittest.TestCase):
 
     def test_last_credit_exhausts_and_stays_exhausted(self):
         self.armed()
-        self.assertFalse(self.store.begin(OTHER, 0, reset_cause="watchdog")["rescue_required"])
+        first = self.store.begin(OTHER, 0, reset_cause="watchdog")
+        self.assertFalse(first["rescue_required"])
+        self.assertEqual(first["state"], "rollback-not-armed")
+        self.assertFalse(self.store.read()["exhausted"])
         view = self.store.begin(THIRD, 0, reset_cause="watchdog")
         self.assertEqual(view["remaining"], 0)
         # The boot after the last permitted reset may be healthy: spent, not rescue.
@@ -429,7 +432,10 @@ class ChargeTest(unittest.TestCase):
         self.assertTrue(self.store.read()["exhausted"])
         self.store.health(fourth, 0, "healthy")
         self.store.health(fourth, 30, "healthy")
-        self.assertFalse(self.store.health(fourth, 60, "healthy")["rescue_required"])
+        rearmed = self.store.health(fourth, 60, "healthy")
+        self.assertFalse(rearmed["rescue_required"])
+        self.assertEqual(rearmed["state"], "rollback-not-armed")
+        self.assertFalse(self.store.read()["exhausted"])
 
     def test_view_rescue_flag_follows_exhaustion_not_missing_credit(self):
         self.store.begin(BOOT, 0, reset_cause="power-on")
@@ -579,7 +585,8 @@ class AdmissionTest(unittest.TestCase):
     def test_positive_proof_cannot_bypass_rescue_or_failed_commit(self):
         self.boot()
         record = self.store.read()
-        record.update(exhausted=True)
+        # Credit shown alongside a latch must not reopen admission.
+        record.update(exhausted=True, remaining=2)
         record["rescue"].update(required=True, entries=1, entered_boot=BOOT)
         self.store.write(record)
         result = self.admit()
@@ -750,18 +757,23 @@ class SecondReviewAdmissionTest(unittest.TestCase):
 
     def test_future_dated_evidence_refused(self):
         self.armed()
+        with patch.object(r, "_boottime", return_value=61):
+            self.assertFalse(self.store.rollback_status(
+                BOOT, pinned_bootloader=PIN, probe=lambda: good_proof(observed=70))["rollback_armed"])
         self.assertEqual(self.admit(good_proof(observed=70), now=61)["decision"], "REFUSE")
         self.assertEqual(self.admit(good_proof(observed=61), now=66)["decision"], "ALLOW")
 
     def test_counter_evidence_must_be_exact_and_typed(self):
         self.armed()
-        for key, value in (("counter_after", 1), ("counter_readback", 1), ("counter_before", 0),
-                           ("counter_after", "2"), ("counter_before", 2.0),
-                           ("counter_before", 2 ** 31), ("counter_readback", None)):
+        cases = [dict(counter_after=1, counter_readback=1), dict(counter_readback=1),
+                 dict(counter_before=0), dict(counter_after="2"), dict(counter_before=2.0),
+                 dict(counter_before=2 ** 31), dict(counter_readback=None),
+                 dict(counter_before=3.0, counter_after=2.0, counter_readback=2.0),
+                 dict(counter_before=True, counter_after=0, counter_readback=0)]
+        for change in cases:
+            key, value = next(iter(change.items()))
             proof = self.proof()
-            proof[key] = value
-            if key == "counter_after" and value == 1:
-                proof["counter_readback"] = 1
+            proof.update(change)
             with self.subTest(key=key, value=value):
                 result = self.admit(proof)
                 self.assertEqual(result["decision"], "REFUSE")
