@@ -445,9 +445,10 @@ under KVM. A TCG run decides only the kernel-stage and RAUC cleanup rows; use
 KVM for a verdict on the other two. The workflow `.github/workflows/privileged-guest.yml` runs the launcher
 with KVM on an ordinary GitHub-hosted runner, which exposes `/dev/kvm`. It uses no
 secrets, no self-hosted runner and a read-only token, and is not a required
-check. It is the only CI that runs the guest-only RAUC pair; the confined real
-Avahi and kernel-stage rows it runs as well stay required, unguarded, in the
-hosted `bats` job. `tests/test-registry.test.sh` checks that the workflow
+check. It runs the real RAUC pair in a marked guest in addition to the hosted
+`bats` job, which requires the pair with `github-hosted-ephemeral` through
+`tests/lib/require-ephemeral-host.sh`. The confined real Avahi and kernel-stage
+rows also stay required, unguarded, in that hosted job. `tests/test-registry.test.sh` checks that the workflow
 header names exactly the guarded rows.
 
 Remaining policy limits: healthy requalification still restores the configured

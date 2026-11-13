@@ -2,13 +2,14 @@
 #
 # The real RAUC pair (real-rauc-contract.sh, real-rauc-cleanup-contract.test.sh)
 # can unmount any /mnt/rauc/* mount, binds over /proc/cmdline and exposes
-# rootfs_a/b partition labels to host udev. It refuses to run anywhere but a
-# disposable KVM/QEMU guest that carries the `opt/ceralive/` firmware marker
-# (tests/lib/require-disposable-guest.sh), so the hosted `bats` job in v2-ci.yml
-# skips it visibly. This workflow is where it runs. The real Avahi and real
-# kernel-stage contracts are confined to their own fixtures and stay required,
-# unguarded, in that hosted job; this guest runs them again alongside the RAUC
-# pair because it runs every `privileged` registry row.
+# rootfs_a/b partition labels to host udev. Its guard
+# (tests/lib/require-ephemeral-host.sh) admits a disposable KVM/QEMU guest
+# carrying the `opt/ceralive/` firmware marker, or an explicitly selected
+# github-hosted-ephemeral runner VM. The hosted `bats` job in v2-ci.yml also
+# requires the real RAUC pair with that spelling. This workflow runs it again
+# in a marked guest. The real Avahi and kernel-stage contracts are confined
+# to their own fixtures and stay required, unguarded, in the hosted job; this
+# guest runs every `privileged` registry row.
 #
 # The job uses an ordinary GitHub-hosted runner, which exposes /dev/kvm. The
 # runner itself stays unmarked: ci/kernel-runner/privileged-guest.sh boots a
@@ -65,7 +66,7 @@ jobs:
           CERALIVE_GUEST_CACHE: ${{ runner.temp }}/guest
         run: |
           set -euo pipefail
-          # The guard refuses on the runner itself; this is the unmarked half of the proof.
+          # The strict guest guard refuses on the runner itself (no ephemeral-host opt-in).
           if bash -c 'source tests/lib/require-disposable-guest.sh'; then
             echo '::error::the hosted runner was admitted by the guest guard'; exit 1
           fi

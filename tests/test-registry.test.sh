@@ -114,7 +114,7 @@ for path in tests/real-rauc-contract.sh tests/real-rauc-cleanup-contract.test.sh
   fi
 done
 
-# The marked-guest workflow's header says which rows are guest-only. It must
+# The marked-guest workflow's header says which rows need a guard. It must
 # name exactly the guarded privileged harnesses by file name, so it cannot
 # drift back to listing a confined row (which runs unguarded on the hosted job)
 # or miss a newly guarded one.
@@ -124,7 +124,7 @@ named=()
 for path in "${privileged_seen[@]}"; do
   grep -Fq "$(basename "${path}")" <<<"${guest_header}" && named+=("${path}")
 done
-assert_eq "guest workflow header names exactly the guest-only rows" \
+assert_eq "guest workflow header names exactly the guarded rows" \
   "$(printf '%s\n' "${guarded_seen[@]}" | LC_ALL=C sort)" \
   "$(printf '%s\n' "${named[@]}" | LC_ALL=C sort)"
 
