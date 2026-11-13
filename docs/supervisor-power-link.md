@@ -24,7 +24,7 @@ make -C mkosi/runtime/power-link DESTDIR=/path/to/target-rootfs install
 ```
 
 Installation stages the executable, unit, sysusers definition, udev rule and
-boot enablement symlink. It does not start a host service. This is an explicit
+boot enablement through systemctl --root enable. It does not start a host service. This is an explicit
 staging target; existing image builds do not automatically include it. No
 compiler or Python runtime is needed on the target. Before a live start the
 `osb-power` account must exist (`systemd-sysusers` processes its definition at
@@ -44,6 +44,13 @@ prevents ModemManager probing that interface. USB identity is not authentication
 only valid OSB1 status frames establish telemetry. This identity is shared by
 other boards; use a dedicated connection.
 
+A single matched device with an initial open/setup failure publishes silent
+while pending; only a second consecutive failed attempt publishes error. A
+successful attempt or disappearance clears this debounce. Post-open setup
+failures retry after 1, 2, 4, 8, 16, then 30 seconds (capped), reducing repeated
+open-time driver side effects; success or a changed/disappeared device resets
+backoff. Ordinary pre-open failures retry each second.
+
 The port stays open with `O_RDONLY|O_NOCTTY|O_NONBLOCK|O_CLOEXEC`, `TIOCEXCL`, raw
 input, no HUPCL and no hardware flow control. There are no modem-control ioctls
 or device writes by this process. Linux nevertheless asserts DTR/RTS when opening
@@ -52,7 +59,7 @@ ECHO/ICANON window between open and raw configuration: arriving bytes may be
 transmitted back by n_tty. O_RDONLY and DeviceAllow do not prevent these driver
 side effects. Clearing HUPCL reduces close-time transitions; O_NOCTTY prevents
 acquiring a controlling terminal. Neither removes the first-open window.
-Before qualification, capture the first open after enumeration with usbmon and
+Before qualification, capture the first open after host boot and after enumeration with usbmon and
 check control transfers, echoed bytes, and reset/download behavior on open and
 close. Field firmware ignores RX; that is not proof of electrical silence.
 Kernel/USB-driver behavior on open/close still requires bench
@@ -86,7 +93,8 @@ bounded key/value fields are preserved without assigning meaning. Duplicate
 keys, invalid counters and malformed fields are rejected. Bounds are 48 keys,
 31 bytes/key and 159 bytes/value, within the 512-byte frame limit.
 
-Sequence spans status and events. Forward modulo-2^32 deltas count missing
+Sequence spans status and events. A decrease in validated `up` within a repeated
+boot id immediately establishes a restart, retaining even the first boot event. Forward modulo-2^32 deltas count missing
 lines; wrap is continuous. Duplicates and backwards/half-range deltas are
 rejected without refreshing status. Three consecutive CRC-valid backward
 frames with sequence numbers increasing by one establish a restart even if
@@ -106,12 +114,12 @@ All paths are local to the device. Directories are 0755; published files are
 temporary file, flushed and renamed atomically. Readers see either the old or
 new complete file. The two files are independently atomic, not a transaction.
 Publication is at most once per second, including during a flood. A graceful
-stop publishes absent. RuntimeDirectoryPreserve=yes keeps that snapshot across
+stop publishes `stopped`, retaining the last open_error for diagnosis. RuntimeDirectoryPreserve=yes keeps that snapshot across
 stop/restart (not host reboot). Do not give another unit ownership of the
 parent `/run/ceralive` via RuntimeDirectory: its cleanup could remove these
 files. A runtime publication error exits and systemd restarts the writer.
-Marker persistence errors instead set persist_error, log and retry once per
-second while telemetry continues. Events are rewritten only when the ring
+Marker persistence errors instead set persist_error, log once on entry to
+each failure episode and retry once per second while telemetry continues. Events are rewritten only when the ring
 changes, with an empty ring published at process startup.
 
 `/run/ceralive/power/supervisor.json` contains:
@@ -119,12 +127,13 @@ changes, with an empty ring published at process startup.
 | Key | Type and meaning |
 | --- | --- |
 | `schema_version` | Integer `1`; consumers reject unsupported schemas. |
-| `link` | `absent`, `silent`, `bootloader`, `unknown_version`, `error`, `ok`. Error means a matched device could not be opened/configured; it is not evidence of an unfitted board. |
+| `link` | `absent`, `silent`, `bootloader`, `unknown_version`, `error`, `stopped`, `ok`. Stopped means the writer has exited gracefully. Error means a matched device could not be opened/configured; it is not evidence of an unfitted board. |
 | `open_error` | Linux errno integer for open/configuration failure (e.g. EACCES=13, EBUSY=16), zero otherwise. |
 | `persist_error` | Boolean; expected marker could not be saved; retries continue. |
 | `ambiguous` | Boolean; multiple devices matched, so none was opened. |
 | `expected` | Boolean learned after the first accepted status or event, retained across reader restarts and host reboots. An absent board need not warn until expected. |
 | `stale` | Boolean calculated at publication; anything except `ok` is stale. |
+| `published_mono_ms` | Integer CLOCK_MONOTONIC milliseconds at each snapshot publication, including startup and stop. Heartbeat advances every second while running, even with no board. |
 | `rx_mono_ms` | Integer CLOCK_MONOTONIC milliseconds of the last accepted **status**, or null before one. It is never refreshed by events or rejected input. |
 | `fields` | Object of original string key/value pairs from the last accepted status, including seq/boot and all available measurements. Empty before one; fields can remain present while stale. CRC is validated, then omitted. Missing fields mean unknown. |
 | `temperatures` | Object with `a`, `b`, `pack`; each has `celsius` (number or null) and `quality` (`reported`, `na`, `uncal`, `unknown`). Pack calibration provenance remains in `fields.pack_cal`. Reported does not mean calibrated or present: gate bank temperatures on bank state (absent banks may report 25 C). |
@@ -134,7 +143,12 @@ changes, with an empty ring published at process startup.
 | `rejected` | Counters: `crc`, `malformed`, `oversize`, `ignored`, `unknown_version`, `out_of_order`. All counters reset on reader restart. Normal firmware CSV rows increment ignored about once per second; do not alarm on that counter. |
 
 **Consumers must independently calculate freshness**, even if `stale:false` is
-saved in the file. Current data requires all of: schema 1, link ok, stale false,
+saved in the file. First require a valid `published_mono_ms` and
+`0 <= CLOCK_MONOTONIC_ms - published_mono_ms < 3000`. At exactly three seconds,
+a missing/invalid heartbeat, or `link:stopped`, show unknown/unavailable even
+when expected is false and the retained link is absent. A live absent snapshot
+with expected false alone means no board fitted. Only then evaluate status
+freshness. Current data requires all of: schema 1, link ok, stale false,
 non-null rx_mono_ms, and `0 <= CLOCK_MONOTONIC_ms - rx_mono_ms < 5000`.
 Missing/unreadable/invalid files mean unknown. At exactly five seconds show
 unknown; never present retained fields as current. Use wall time only for
@@ -149,8 +163,13 @@ or reader restarts. File size is bounded by the wire limit and JSON escaping.
 Do not derive current state or shutdown actions from it.
 
 `/data/osb-power/expected` contains `1\n` after the first accepted frame;
-absence means not yet learned. `/data` survives A/B OTA slot changes; tmpfiles
-creates the directory as osb-power after persistent mounts are available.
+absence means not yet learned. `/data` survives A/B OTA slot changes.
+The service has ordering-only `After=data.mount`, with no hard mount requirement.
+A privileged, failure-tolerant ExecStartPre checks mountpoint and creates the
+0755 osb-power-owned directory only when /data is mounted. The main writer
+stays sandboxed. Without /data it still publishes runtime state and skips the
+persistent marker (persist_error after a frame teaches expected). Nothing
+creates this directory through unordered tmpfiles on the root slot.
 To intentionally forget a removed board: stop the reader, remove this marker,
 then restart the reader. A live attached board will immediately teach it again.
 Existing installations may copy the old `/var/lib/osb-power/expected` marker
@@ -162,7 +181,7 @@ control file is consumed by this service.
 For host-only PTY tests, the executable accepts `--device`, `--state-dir` and
 `--persistent-dir` (and `--sysfs-dir` for synthetic discovery). Production uses discovery and the paths above. Output
 directories must already exist and belong to the service user (systemd creates
-the runtime directory; tmpfiles creates the persistent directory). No hardware is opened by `make check`.
+the runtime directory; the mount-checked prestart creates the persistent directory). No hardware is opened by `make check`.
 
 ## Bun CLOCK_MONOTONIC recipe
 

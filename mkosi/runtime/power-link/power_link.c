@@ -29,7 +29,8 @@ struct state {
     uint64_t oversize, ignored, unknown_version, out_of_order;
     char events[EVENTS][513]; size_t event_count, event_next;
     uint64_t event_generation, published_generation;
-    int events_published, persist_error, open_error;
+    int events_published, persist_error, open_error, stopped, opening;
+    uint32_t up;
     unsigned regressions; uint32_t regression_seq;
     int special; /* 1 download mode, 2 unsupported version */
 };
@@ -88,6 +89,7 @@ static void line_received(struct state *s, char *line, uint64_t now) {
     struct fieldset parsed;
     parsed.nfields = 0; memset(parsed.fields, 0, sizeof parsed.fields);
     char *start = line + 5;
+    uint32_t up;
     if (event) {
         /* The seven firmware trailer fields have fixed order. Text before them
          * is opaque, including anything resembling a field or checksum. */
@@ -103,7 +105,7 @@ static void line_received(struct state *s, char *line, uint64_t now) {
             if (!i) start = space;
             end = space - 1;
         }
-        uint32_t up; char value[32];
+        char value[32];
         const char *space = strchr(line + 9, ' ');
         if (strncmp(line + 9, "up=", 3) || !space || space >= start || space-(line+12) >= 32) {
             ++s->malformed; return;
@@ -132,11 +134,10 @@ static void line_received(struct state *s, char *line, uint64_t now) {
     if (!number(get_fields(&parsed, "seq"), 10, &seq) || !boot_text || strlen(boot_text) != 8 ||
         !number(boot_text, 16, &boot)) { ++s->malformed; return; }
     if (!event) {
-        uint32_t up;
         if (!number(get_fields(&parsed, "up"), 10, &up)) { ++s->malformed; return; }
     }
     char canonical[9]; snprintf(canonical, sizeof canonical, "%08" PRIx32, boot);
-    if (s->have_seq && !strcmp(s->boot, canonical)) {
+    if (s->have_seq && !strcmp(s->boot, canonical) && up >= s->up) {
         uint32_t delta = seq - s->seq;
         if (!delta || delta >= UINT32_C(0x80000000)) {
             if (delta && (!s->regressions || seq - s->regression_seq == 1)) ++s->regressions;
@@ -151,7 +152,7 @@ static void line_received(struct state *s, char *line, uint64_t now) {
         s->have_status = 0;
     }
     s->regressions = 0;
-    strcpy(s->boot, canonical); s->seq = seq; s->have_seq = 1;
+    strcpy(s->boot, canonical); s->seq = seq; s->up = up; s->have_seq = 1;
     s->expected = 1; ++s->accepted; s->special = 0;
     if (event) {
         snprintf(s->events[s->event_next], 513, "%s", original);
@@ -178,6 +179,8 @@ static void feed(struct state *s, const char *p, size_t n, uint64_t now) {
 }
 static void disconnect_source(struct state *s) { s->used = 0; s->dropping = 0; s->special = 0; s->have_status = 0; }
 static const char *link_state(const struct state *s, int connected, uint64_t now) {
+    if (s->stopped) return "stopped";
+    if (!connected && s->opening) return "silent";
     if (!connected) return s->open_error ? "error" : "absent";
     if (s->special == 1) return "bootloader";
     if (s->special == 2) return "unknown_version";
@@ -249,6 +252,7 @@ static int publish(struct state *s, int connected, int ambiguous, uint64_t now, 
     fprintf(f, "{\"schema_version\":1,\"link\":\"%s\",\"ambiguous\":%s,\"expected\":%s,\"stale\":%s,\"rx_mono_ms\":",
             link, ambiguous ? "true" : "false", s->expected ? "true" : "false", strcmp(link, "ok") ? "true" : "false");
     if (s->rx_ms) fprintf(f, "%" PRIu64, s->rx_ms); else fputs("null", f);
+    fprintf(f, ",\"published_mono_ms\":%" PRIu64, now);
     fprintf(f, ",\"persist_error\":%s,\"open_error\":%d", s->persist_error ? "true" : "false", s->open_error);
     fputs(",\"fields\":{", f);
     for (size_t i = 0; i < s->nfields; ++i) {
@@ -277,9 +281,10 @@ static int publish(struct state *s, int connected, int ambiguous, uint64_t now, 
     return 0;
 }
 /* Only read access is requested. No modem-control ioctl and no device writes. */
-static int open_serial(const char *path) {
+static int open_serial(const char *path, int *opened) {
     int fd = open(path, O_RDONLY | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) return -1;
+    *opened = 1;
     struct termios t;
     if (ioctl(fd, TIOCEXCL) || tcgetattr(fd, &t)) { int error = errno; close(fd); errno = error; return -1; }
     cfmakeraw(&t); t.c_cflag &= ~(HUPCL | CRTSCTS); t.c_cflag |= CLOCAL | CREAD;
@@ -310,6 +315,11 @@ static int discover(const char *sysfs, char *device, size_t size) {
     }
     closedir(d); return matches;
 }
+static int persistence_available(const char *persist) {
+    struct stat data_stat, root_stat;
+    return strcmp(persist, "/data/osb-power") ||
+        (!stat("/data", &data_stat) && !stat("/", &root_stat) && data_stat.st_dev != root_stat.st_dev);
+}
 static volatile sig_atomic_t stopping;
 static void stop(int sig) { (void)sig; stopping = 1; }
 int main(int argc, char **argv) {
@@ -325,9 +335,11 @@ int main(int argc, char **argv) {
     }
     static struct state s;
     char expected[4096]; snprintf(expected, sizeof expected, "%s/expected", persist);
-    s.expected = access(expected, F_OK) == 0; int saved = s.expected;
+    s.expected = persistence_available(persist) && access(expected, F_OK) == 0; int saved = s.expected;
     signal(SIGTERM, stop); signal(SIGINT, stop);
     int fd = -1, ambiguous = 0; uint64_t next_scan = 0, next_publish = 0, next_save = 0;
+    unsigned open_failures = 0, retry_seconds = 1;
+    char retry_device[4096] = "";
     while (!stopping) {
         uint64_t now = mono_ms();
         if (now >= next_scan) {
@@ -336,21 +348,39 @@ int main(int argc, char **argv) {
             else count = discover(sysfs, device, sizeof device);
             ambiguous = count > 1;
             if (count != 1 && fd >= 0) { close(fd); fd = -1; disconnect_source(&s); }
-            if (count != 1) s.open_error = 0;
-            if (count == 1 && fd < 0) {
-                fd = open_serial(device);
-                s.open_error = fd < 0 && errno != ENOENT && errno != ENODEV ? errno : 0;
+            if (count != 1 || strcmp(device, retry_device)) {
+                s.open_error = 0; s.opening = 0; open_failures = 0; retry_seconds = 1;
             }
-            next_scan = now + 1000;
+            unsigned scan_seconds = 1;
+            if (count == 1 && fd < 0) {
+                snprintf(retry_device, sizeof retry_device, "%s", device);
+                int opened = 0;
+                fd = open_serial(device, &opened);
+                int error = fd < 0 && errno != ENOENT && errno != ENODEV ? errno : 0;
+                if (error) {
+                    ++open_failures;
+                    s.opening = open_failures < 2;
+                    s.open_error = s.opening ? 0 : error;
+                    if (opened) {
+                        scan_seconds = retry_seconds;
+                        retry_seconds = retry_seconds < 16 ? retry_seconds * 2 : 30;
+                    }
+                } else {
+                    s.open_error = 0; s.opening = 0; open_failures = 0; retry_seconds = 1;
+                }
+            }
+            next_scan = now + scan_seconds * 1000;
         }
         if (s.expected && !saved && now >= next_save) {
-            char tmp[4096]; FILE *f = atomic_start(persist, "expected", tmp, sizeof tmp);
+            /* Never write beneath an unmounted production /data mountpoint. */
+            char tmp[4096];
+            FILE *f = persistence_available(persist) ? atomic_start(persist, "expected", tmp, sizeof tmp) : NULL;
             if (f) {
                 fputs("1\n", f);
                 saved = atomic_finish(f, tmp, persist, "expected") == 0;
             }
+            if (!saved && !s.persist_error) fputs("persist expected: unavailable; retrying quietly\n", stderr);
             s.persist_error = !saved;
-            if (!saved) perror("persist expected");
             next_save = now + 1000;
         }
         if (now >= next_publish) {
@@ -368,7 +398,7 @@ int main(int argc, char **argv) {
         } else if (ready < 0 && errno != EINTR) return 1;
     }
     if (fd >= 0) close(fd);
-    s.open_error = 0;
+    s.stopped = 1; s.opening = 0;
     return publish(&s, 0, ambiguous, mono_ms(), dir) ? 1 : 0;
 }
 #endif

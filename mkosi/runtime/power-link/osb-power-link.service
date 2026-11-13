@@ -1,12 +1,12 @@
 [Unit]
 Description=Read-only supervisor telemetry
-After=systemd-udevd.service systemd-tmpfiles-setup.service
-RequiresMountsFor=/data/osb-power
+After=systemd-udevd.service systemd-tmpfiles-setup.service data.mount
 
 [Service]
 Type=simple
 User=osb-power
 Group=osb-power
+ExecStartPre=+-/bin/sh -c 'mountpoint -q /data && exec install -d -o osb-power -g osb-power -m 0755 /data/osb-power'
 ExecStart=/usr/libexec/osb-power-link
 Restart=always
 RestartSec=2
@@ -45,7 +45,7 @@ DeviceAllow=char-ttyACM r
 ReadWritePaths=/run/ceralive/power -/data/osb-power
 MemoryMax=32M
 CPUQuota=10%
-TasksMax=1
+TasksMax=4
 LimitNOFILE=32
 
 [Install]

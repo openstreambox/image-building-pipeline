@@ -21,7 +21,7 @@ int main(void) {
     assert(s.bad_crc == 1 && s.rx_ms == 1000);
     status(line, 3, "01234567"); feed(&s, line, strlen(line), 3000);
     assert(s.missed == 2);
-    frame(line, "OSB1 EVT up=101 example event seq=4 boot=01234567 rst=wdt alive=1 hot=none shutdowns=0 fw=field-12345678");
+    frame(line, "OSB1 EVT up=100 example event seq=4 boot=01234567 rst=wdt alive=1 hot=none shutdowns=0 fw=field-12345678");
     feed(&s, line, strlen(line), 4000);
     assert(s.seq == 4 && s.rx_ms == 3000 && s.event_count == 1);
     status(line, 5, "01234567"); feed(&s, line, strlen(line), 5000);
@@ -70,6 +70,17 @@ int main(void) {
     }
     assert(regression.restarts == 1 && regression.seq == 4 && regression.rx_ms == 6);
     assert(regression.out_of_order == 2 && regression.missed == 0);
+    /* A repeated boot id must retain the first boot events, even at old seq=1. */
+    for (unsigned old = 1; old <= 500; old += 499) {
+        struct state repeated = {0};
+        status(line, old, "01234567"); feed(&repeated, line, strlen(line), 1);
+        frame(line, "OSB1 EVT up=0 armed seq=0 boot=01234567 rst=wdt alive=1 hot=none shutdowns=0 fw=field-12345678");
+        feed(&repeated, line, strlen(line), 2);
+        assert(repeated.restarts == 1 && repeated.event_count == 1 && !repeated.have_status);
+        frame(line, "OSB1 EVT up=0 boot field left-out=ina seq=1 boot=01234567 rst=wdt alive=1 hot=none shutdowns=0 fw=field-12345678");
+        feed(&repeated, line, strlen(line), 3);
+        assert(repeated.event_count == 2 && repeated.out_of_order == 0 && repeated.missed == 0);
+    }
     struct state opaque = {0};
     frame(line, "OSB1 EVT up=0 waiting for download crc=oops seq=77 left-out=ina left-out=storage restart-record=stale seq=0 boot=01234567 rst=wdt alive=1 hot=none shutdowns=0 fw=field-12345678");
     feed(&opaque, line, strlen(line), 1);
@@ -83,6 +94,6 @@ int main(void) {
         assert(captured.accepted == 1 && captured.malformed == 0 && captured.bad_crc == 0);
         ++rows;
     }
-    fclose(gold); assert(rows >= 6);
+    fclose(gold); assert(rows == 11);
     puts("power-link parser/state tests passed");
 }

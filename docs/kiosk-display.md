@@ -44,7 +44,6 @@ Type=simple
 User=ceralive
 Environment=DISPLAY_PROFILE=lcd
 EnvironmentFile=-/etc/ceralive/kiosk.env
-RuntimeDirectory=ceralive
 ExecStartPre=/bin/sh -c 'until curl -sf http://127.0.0.1:80/status; do sleep 1; done'
 ExecStart=/usr/bin/cage -- /usr/bin/chromium \
     --kiosk \
@@ -61,7 +60,7 @@ WantedBy=graphical.target
 Key design decisions:
 - `After=ceralive.service` + `ExecStartPre` health check: the backend must be up and the token file must exist before Chromium launches
 - `StartLimitBurst=3` / `StartLimitIntervalSec=60`: three failures within 60 seconds triggers the `OnFailure` handler and puts the unit in `failed` state (DC-2 crash-loop detection)
-- `RuntimeDirectory=ceralive`: ensures `/run/ceralive/` exists before the token read (the backend also creates it, but belt-and-suspenders)
+- The backend creates `/run/ceralive/` before the token read. The kiosk must not own this shared parent with RuntimeDirectory: stopping it would remove the power telemetry subtree.
 - The token is read inline in `ExecStart` via `$(cat ...)` — it is NOT cached in an env var or logged
 
 ### `kiosk-onfailure.service`
