@@ -1,0 +1,23 @@
+[Unit]
+Description=Power button gestures and local confirmation requests
+After=systemd-logind.service systemd-udev-trigger.service
+Wants=systemd-logind.service
+
+[Service]
+Type=simple
+RuntimeDirectory=ceralive-button
+RuntimeDirectoryMode=0700
+# The low-level inhibitor makes the service the sole software hold owner.
+# logind's five-second fallback applies when this process is absent.
+ExecStart=/usr/bin/systemd-inhibit --what=handle-power-key --who=power-button --why=gesture-countdown --mode=block /usr/bin/python3 /usr/local/lib/ceralive-button/button.py
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
