@@ -165,8 +165,7 @@ them separately; do not attribute all later cache growth to this facility.
 Attention is advisory and never calls mark-good, mark-bad, rollback or reboot.
 Storage readiness still blocks health and update consumers as before. Its
 mount is wanted rather than hard-required so the readiness helper executes
-and can explain mount failure too. Unsupported root geometry refuses growth
-and capacity checks, but must have mounted, writable data. SSH remains default-off with its existing
+and can explain mount failure too. Unsupported root geometry is refused before storage mutation. SSH remains default-off with its existing
 persistent identity prerequisites; rescue has no readiness dependency.
 Operator reboots spend the existing finite attempts, then use the existing
 unconfirmed last-resort head. There is no new rollback loop or false success.
