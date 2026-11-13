@@ -1898,5 +1898,16 @@ This project is dual-licensed under either:
 
 You may choose either license.
 
+### Update identity in the release record
+
+The profile resolver emits `UPDATE_BOARD` from the board manifest filename only
+when that profile declares `os-updates`. Both rootfs writers include it with
+`UPDATE_COMPATIBLE` (the same `COMPATIBLE_STRING` used by RAUC) and `KERNEL_ARCH`
+(the profile's `ARCH`). `FAMILY` selects the kernel package suffix. An empty
+update slug means no image updates are offered; a family name alone grants
+nothing. In particular, this metadata does not qualify a new boot or recovery
+adapter, publish a channel, or change signing keys. The Orange Pi product slug
+remains distinct from its Armbian board ID.
+
 Power-key behaviour and the local confirmation API: [power button](docs/power-button.md)
 (draft; two-board bench qualification pending).

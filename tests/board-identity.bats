@@ -60,3 +60,33 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *$'CAPABILITIES\t'* ]]
 }
+@test "update identity follows profile, including distinct Orange product slug" {
+  UPDATE_BOARD=orange-pi-5-plus COMPATIBLE_STRING=ceralive-orangepi5-plus ARCH=arm64 write_board_identity "$BATS_TEST_TMPDIR/release" orangepi5-plus rk3588 os-updates
+  grep -qx 'UPDATE_BOARD=orange-pi-5-plus' "$BATS_TEST_TMPDIR/release"
+  grep -qx 'UPDATE_COMPATIBLE=ceralive-orangepi5-plus' "$BATS_TEST_TMPDIR/release"
+  grep -qx 'KERNEL_ARCH=arm64' "$BATS_TEST_TMPDIR/release"
+}
+@test "future families carry kernel architecture without enabling updates" {
+  for family in rk3566 bcm2711 bcm2712 x86_64 unknown; do
+    ARCH=amd64 write_board_identity "$BATS_TEST_TMPDIR/$family" generic "$family" ''
+    grep -qx 'UPDATE_BOARD=' "$BATS_TEST_TMPDIR/$family"
+    grep -qx 'KERNEL_ARCH=amd64' "$BATS_TEST_TMPDIR/$family"
+  done
+}
+@test "a new family resolves explicit update metadata without a build" {
+  root="${BATS_TEST_DIRNAME}/.."
+  cp "$BATS_TEST_DIRNAME/manifests/fixtures/valid-family.yaml" "$BATS_TEST_TMPDIR/rk3566.yaml"
+  cp "$BATS_TEST_DIRNAME/manifests/fixtures/valid-board.yaml" "$BATS_TEST_TMPDIR/example.yaml"
+  python3 - "$BATS_TEST_TMPDIR/example.yaml" <<'PY'
+import sys,yaml
+p=sys.argv[1]
+v=yaml.safe_load(open(p))
+v['family']='rk3566'
+v['capabilities']=['os-updates']
+with open(p,'w') as f: yaml.safe_dump(v,f)
+PY
+  run python3 "$root/lib/resolve.py" merge --family "$BATS_TEST_TMPDIR/rk3566.yaml" --board "$BATS_TEST_TMPDIR/example.yaml" --family-schema "$root/manifests/schema/family.schema.json" --board-schema "$root/manifests/schema/board.schema.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'FAMILY\trk3566'* ]]
+  [[ "$output" == *$'UPDATE_BOARD\texample'* ]]
+}
