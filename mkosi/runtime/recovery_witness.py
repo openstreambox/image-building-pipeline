@@ -275,11 +275,13 @@ class Store:
             witness = record["boots"][boot]
             prior = self._health.get(boot)
             continuous = (prior is not None and prior[2] == "healthy" and verdict == "healthy"
+                          and witness["health"] == "healthy"
                           and 0 <= now - prior[0] <= self.max_health_gap)
             anchor = prior[1] if continuous else (now if verdict == "healthy" else None)
             self._health[boot] = (now, anchor, verdict)
             rearm = verdict == "healthy" and now - anchor >= self.healthy_seconds
-            transition = (not continuous or verdict != witness["health"] or rearm)
+            transition = (verdict != witness["health"] or rearm
+                          or verdict == "healthy" and not continuous)
             if not transition:
                 return self.view(record)
             witness.update(last_uptime=now, health=verdict, healthy_since=anchor)

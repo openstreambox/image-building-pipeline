@@ -329,6 +329,21 @@ class ReviewTest(unittest.TestCase):
         restarted = r.Store(self.store.root, limit=2, healthy_seconds=60)
         self.assertFalse(restarted.health(BOOT, 1000, "healthy")["automatic_reset_allowed"])
 
+    def test_repeated_failure_is_not_a_new_flash_write(self):
+        self.boot()
+        self.store.health(BOOT, 1, "failed")
+        before = self.store.path.read_bytes()
+        self.store.health(BOOT, 2, "failed")
+        self.assertEqual(before, self.store.path.read_bytes())
+
+    def test_another_reporter_failure_restarts_local_dwell(self):
+        self.boot()
+        self.store.health(BOOT, 0, "healthy")
+        self.store.health(BOOT, 30, "healthy")
+        other = r.Store(self.store.root, limit=2, healthy_seconds=60)
+        other.health(BOOT, 40, "failed")
+        self.assertFalse(self.store.health(BOOT, 60, "healthy")["automatic_reset_allowed"])
+
     def test_clean_power_cycles_never_exhaust(self):
         self.boot()
         self.rearm()
