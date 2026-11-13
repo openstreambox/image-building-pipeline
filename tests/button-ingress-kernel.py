@@ -49,6 +49,19 @@ try:
     except socket.timeout:
         pass
     listener.close()
+    # The backend stays wildcard in the partner application. Verify the real
+    # image fence, including local access, in this same disposable namespace.
+    backend = socket.socket()
+    backend.bind(('0.0.0.0', 18080))
+    backend.listen()
+    client('python3', '-c', probe.replace('18888', '18080'), 'yes')
+    accepted, _ = backend.accept()
+    accepted.close()
+    run('nft', '-f', str(root / 'mkosi/runtime/button-ingress/backend.nft'))
+    loopback = socket.create_connection(('127.0.0.1', 18080), timeout=1)
+    loopback.close()
+    client('python3', '-c', probe.replace('18888', '18080'), 'no')
+    backend.close()
     print('actual SO_BINDTODEVICE: direct accepted, overlapping wrong-device ingress refused')
 finally:
     child.terminate()

@@ -91,6 +91,12 @@ class Transport(unittest.IsolatedAsyncioTestCase):
         async def backend(reader, writer):
             raw = await reader.readuntil(b"\r\n\r\n")
             received.append(raw)
+            if raw.startswith(b'POST '):
+                body = await reader.readexactly(4)
+                writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n' + body)
+                await writer.drain()
+                writer.close()
+                return
             writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
             await writer.drain()
             await release.wait()
@@ -121,6 +127,11 @@ class Transport(unittest.IsolatedAsyncioTestCase):
                     w.write(b'GET /ws HTTP/1.1\r\nHost: box.local\r\nOrigin: http://box.local\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' + extra + b'\r\n')
                     await w.drain()
                     await asyncio.wait_for(r.readuntil(b'\r\n\r\n'), 2)
+                post_reader, post_writer = await asyncio.open_connection(*server.sockets[0].getsockname()[:2])
+                clients.append(post_writer)
+                post_writer.write(b'POST /api HTTP/1.1\r\nHost: box.local\r\nContent-Length: 4\r\n\r\ndata')
+                await post_writer.drain()
+                self.assertTrue((await asyncio.wait_for(post_reader.read(), 2)).endswith(b'data'))
                 self.assertIn(b'"interface":"eth7"', received[0])
                 self.assertIn(b'Origin: http://box.local', received[0])
                 self.assertNotIn(b'X-Ceralive-Button-Path:', received[1])
