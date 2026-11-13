@@ -14,6 +14,13 @@ SPEC.loader.exec_module(r)
 BOOT = "11111111-1111-4111-8111-111111111111"
 OTHER = "22222222-2222-4222-8222-222222222222"
 THIRD = "33333333-3333-4333-8333-333333333333"
+PIN = "sha256:" + "a" * 64
+
+
+def good_proof(boot=BOOT, observed=61):
+    return dict(boot_id=boot, observed_uptime=observed, counter_source="independent-readback",
+                counter_before=3, counter_after=2, counter_readback=2,
+                bootloader=PIN, watchdog="armed")
 
 
 def concurrent_begin(root):
@@ -380,6 +387,11 @@ class ChargeTest(unittest.TestCase):
         self.store.begin(BOOT, 0, reset_cause="power-on")
         self.rearm()
 
+    def grant(self, boot=BOOT, action="reset"):
+        with patch.object(r, "_boottime", return_value=62):
+            return self.store.rollback(boot, pinned_bootloader=PIN, action=action,
+                                       probe=lambda: good_proof(boot))
+
     def test_zero_credit_charge_is_not_exhaustion(self):
         # Fresh ledger, then one unclean reset: no credit, but no exhausted episode.
         self.store.begin(BOOT, 0, reset_cause="power-on")
@@ -408,10 +420,13 @@ class ChargeTest(unittest.TestCase):
         self.assertFalse(self.store.begin(OTHER, 0, reset_cause="watchdog")["rescue_required"])
         view = self.store.begin(THIRD, 0, reset_cause="watchdog")
         self.assertEqual(view["remaining"], 0)
-        self.assertTrue(view["rescue_required"])
-        self.assertIn("Rescue required", view["announcement"])
+        # The boot after the last permitted reset may be healthy: spent, not rescue.
+        self.assertTrue(self.store.read()["exhausted"])
+        self.assertFalse(view["rescue_required"])
+        self.assertEqual(view["state"], "reset-budget-spent")
         fourth = "44444444-4444-4444-8444-444444444444"
-        self.assertTrue(self.store.begin(fourth, 0, reset_cause="power-on")["rescue_required"])
+        self.assertFalse(self.store.begin(fourth, 0, reset_cause="power-on")["rescue_required"])
+        self.assertTrue(self.store.read()["exhausted"])
         self.store.health(fourth, 0, "healthy")
         self.store.health(fourth, 30, "healthy")
         self.assertFalse(self.store.health(fourth, 60, "healthy")["rescue_required"])
@@ -421,6 +436,9 @@ class ChargeTest(unittest.TestCase):
         record = self.store.read()
         self.assertFalse(r.Store.view(record)["rescue_required"])
         record["exhausted"] = True
+        self.assertFalse(r.Store.view(record)["rescue_required"])
+        self.assertEqual(r.Store.view(record)["state"], "reset-budget-spent")
+        record["rescue"]["required"] = True
         self.assertTrue(r.Store.view(record)["rescue_required"])
 
     def test_charge_by_cause(self):
@@ -446,17 +464,23 @@ class ChargeTest(unittest.TestCase):
             with self.subTest(cause=cause):
                 self.store.path.unlink(missing_ok=True)
                 self.armed()
-                self.assertTrue(self.store.intent(BOOT, "reset")["automatic_reset_allowed"])
+                self.assertTrue(self.grant()["automatic_reset_allowed"])
                 self.assertEqual(self.store.begin(OTHER, 0, reset_cause=cause)["remaining"], 1)
 
     def test_granted_reset_is_sticky_for_the_boot(self):
         self.armed()
-        self.store.intent(BOOT, "reset")
-        for later in ("none", "unbind-adapter", "activate-other-slot", "reset"):
+        self.assertEqual(self.grant()["decision"], "ALLOW")
+        for later in ("none", "unbind-adapter"):
             self.store.intent(BOOT, later)
             witness = self.store.read()["boots"][BOOT]
             self.assertEqual(witness["granted"], "reset")
             self.assertEqual(witness["intent"], later)
+        # A refused rollback (stale evidence) and a granted trial cannot erase it.
+        with patch.object(r, "_boottime", return_value=3600):
+            self.assertEqual(self.store.rollback(BOOT, pinned_bootloader=PIN,
+                                                 probe=good_proof)["decision"], "REFUSE")
+        self.assertEqual(self.grant(action="activate-other-slot")["decision"], "ALLOW")
+        self.assertEqual(self.store.read()["boots"][BOOT]["granted"], "reset")
         self.assertEqual(self.store.begin(OTHER, 0, reset_cause="power-on")["remaining"], 1)
 
     def test_repeated_grants_with_erasure_spend_the_budget(self):
@@ -465,7 +489,7 @@ class ChargeTest(unittest.TestCase):
         boots = [BOOT] + ["%08x-6666-4666-8666-666666666666" % i for i in range(20)]
         admissions = 0
         for current, following in zip(boots, boots[1:]):
-            if self.store.intent(current, "reset")["automatic_reset_allowed"]:
+            if self.grant(current)["automatic_reset_allowed"]:
                 admissions += 1
             self.store.intent(current, "none")
             self.store.begin(following, 0, reset_cause="unknown")
@@ -490,13 +514,12 @@ class AdmissionTest(unittest.TestCase):
     boot = RecoveryTest.boot
     rearm = RecoveryTest.rearm
     def proof(self):
-        return dict(boot_id=BOOT, observed_uptime=61, counter_source="independent-readback",
-                    counter_before=3, counter_after=2, counter_readback=2,
-                    bootloader="sha256:" + "a" * 64, watchdog="armed")
+        return good_proof()
 
-    def admit(self, proof=None, now=61):
-        return self.store.rollback(BOOT, now, pinned_bootloader="sha256:" + "a" * 64,
-                                   probe=lambda: self.proof() if proof is None else proof)
+    def admit(self, proof=None, now=61, action="reset", pinned=PIN):
+        with patch.object(r, "_boottime", return_value=now):
+            return self.store.rollback(BOOT, pinned_bootloader=pinned, action=action,
+                                       probe=lambda: self.proof() if proof is None else proof)
 
     def test_rollback_requires_fresh_independent_proof(self):
         self.boot()
@@ -522,7 +545,8 @@ class AdmissionTest(unittest.TestCase):
         self.rearm()
         def unreadable():
             raise OSError("private path")
-        result = self.store.rollback(BOOT, 61, pinned_bootloader="unknown", probe=unreadable)
+        with patch.object(r, "_boottime", return_value=61):
+            result = self.store.rollback(BOOT, pinned_bootloader="unknown", probe=unreadable)
         self.assertFalse(result["rollback_armed"])
         self.assertNotIn("private path", json.dumps(result))
         self.admit()
@@ -531,21 +555,33 @@ class AdmissionTest(unittest.TestCase):
         self.assertFalse(status["automatic_reset_allowed"])
 
     def test_rescue_entry_is_once_until_explicit_healthy_rearm(self):
-        self.boot()
+        boots = ["%08x-7777-4777-8777-777777777777" % i for i in range(9)]
+        self.store.begin(boots[0], 0, reset_cause="power-on")
+        self.rearm(boots[0])
+        self.boot(boots[1])
+        self.boot(boots[2])                      # last credit: spent, not rescue
+        self.assertEqual(self.store.read()["rescue"]["entries"], 0)
+        self.boot(boots[3])                      # a further unclean reset with no credit
         first = self.store.read()["rescue"].copy()
-        self.boot()
-        self.boot(OTHER)
+        self.assertEqual(first, {"required": True, "entries": 1, "entered_boot": boots[3]})
+        self.boot(boots[3])
+        self.boot(boots[4])
+        self.store.begin(boots[5], 0, reset_cause="power-on")
         self.assertEqual(first, self.store.read()["rescue"])
-        self.assertEqual(first["entries"], 1)
         self.assertFalse(self.store.view(self.store.read())["rescue_active"])
-        self.rearm(OTHER)
+        self.rearm(boots[5])
         self.assertFalse(self.store.read()["rescue"]["required"])
-        self.boot(THIRD)
-        self.store.begin("44444444-4444-4444-8444-444444444444", 0, reset_cause="watchdog")
+        self.boot(boots[6])
+        self.boot(boots[7])
+        self.boot(boots[8])
         self.assertEqual(self.store.read()["rescue"]["entries"], 2)
 
     def test_positive_proof_cannot_bypass_rescue_or_failed_commit(self):
         self.boot()
+        record = self.store.read()
+        record.update(exhausted=True)
+        record["rescue"].update(required=True, entries=1, entered_boot=BOOT)
+        self.store.write(record)
         result = self.admit()
         self.assertFalse(result["automatic_reset_allowed"])
         self.assertFalse(result["update_trial_allowed"])
@@ -555,25 +591,28 @@ class AdmissionTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.admit()
         self.assertEqual(self.store.read()["boots"][BOOT]["intent"], "none")
-        result = self.store.rollback(BOOT, 61, pinned_bootloader="sha256:" + "a" * 64,
-                                     probe=self.proof, action="activate-other-slot")
+        result = self.admit(action="activate-other-slot")
         self.assertTrue(result["update_trial_allowed"])
         self.assertFalse(result["automatic_reset_allowed"])
         self.assertEqual(self.store.read()["boots"][BOOT]["intent"], "activate-other-slot")
 
-    def test_status_projection_failure_never_returns_a_grant(self):
+    def test_status_projection_failure_neither_fails_nor_half_applies(self):
         self.boot()
         self.rearm()
+        self.assertTrue((self.store.root / "recovery-status.json").exists())
         replace = r.os.replace
         def fail_status(source, target):
             if Path(target).name == "recovery-status.json":
                 raise OSError("status unavailable")
             return replace(source, target)
         with patch.object(r.os, "replace", side_effect=fail_status):
-            with self.assertRaises(OSError):
-                self.admit()
+            result = self.admit()
+        # The ledger commit is the transaction; a stale projection is removed.
+        self.assertEqual(result["decision"], "ALLOW")
+        self.assertEqual(self.store.read()["boots"][BOOT]["granted"], "reset")
+        self.assertFalse((self.store.root / "recovery-status.json").exists())
+        self.assertEqual(list(self.store.root.glob(".write-*")), [])
         self.assertFalse(self.store.view(self.store.read())["automatic_reset_allowed"])
-        self.assertTrue(self.admit()["automatic_reset_allowed"])
 
     def test_malformed_latch_or_release_refuses_even_with_valid_checksum(self):
         self.boot()
@@ -591,14 +630,12 @@ class AdmissionTest(unittest.TestCase):
     def test_live_clock_checked_after_probe_and_after_persistence(self):
         self.boot()
         self.rearm()
-        with patch.object(r.time, "clock_gettime", side_effect=[62, 67]):
-            result = self.store.rollback(BOOT, pinned_bootloader="sha256:" + "a" * 64,
-                                         probe=self.proof)
+        with patch.object(r, "_boottime", side_effect=[62, 67]):
+            result = self.store.rollback(BOOT, pinned_bootloader=PIN, probe=self.proof)
         self.assertFalse(result["automatic_reset_allowed"])
         self.assertIn("expired", result["refusal_reasons"][-1])
-        with patch.object(r.time, "clock_gettime", side_effect=[62, 63]):
-            result = self.store.rollback(BOOT, pinned_bootloader="sha256:" + "a" * 64,
-                                         probe=self.proof)
+        with patch.object(r, "_boottime", side_effect=[62, 63]):
+            result = self.store.rollback(BOOT, pinned_bootloader=PIN, probe=self.proof)
         self.assertTrue(result["automatic_reset_allowed"])
 
     def test_release_observations_are_unknown_until_supplied(self):
@@ -612,6 +649,231 @@ class AdmissionTest(unittest.TestCase):
                            activated_at=1000, full_healthy_stream=True, trusted_now=605800)
         self.assertTrue(self.store.read()["release"]["full_healthy_stream"])
         self.assertFalse(self.store.view(self.store.read())["release_retirement_allowed"])
+
+
+class SecondReviewAdmissionTest(unittest.TestCase):
+    """Second review of the rollback layer: B6, B7, B8 and the follow-up gaps."""
+    setUp = RecoveryTest.setUp
+    rearm = RecoveryTest.rearm
+    admit = AdmissionTest.admit
+    proof = AdmissionTest.proof
+
+    def armed(self):
+        self.store.begin(BOOT, 0, reset_cause="power-on")
+        self.rearm()
+
+    def test_second_boot_after_flashing_does_not_latch(self):
+        for cause in ("software", "watchdog", "panic"):
+            with self.subTest(cause=cause):
+                self.store.path.unlink(missing_ok=True)
+                self.store.begin(BOOT, 0, reset_cause="power-on")
+                view = self.store.begin(OTHER, 0, reset_cause=cause)
+                self.assertFalse(view["rescue_required"])
+                self.assertNotEqual(view["state"], "rescue-required")
+                self.assertEqual(self.store.read()["rescue"]["entries"], 0)
+
+    def test_corruption_or_threshold_change_then_watchdog_does_not_latch(self):
+        self.armed()
+        self.store.path.write_bytes(b"torn")
+        self.assertNotEqual(self.store.begin(OTHER, 0, reset_cause="watchdog")["state"], "rescue-required")
+        self.store.path.unlink()
+        self.armed()
+        changed = r.Store(self.store.root, limit=3, healthy_seconds=60)
+        self.assertNotEqual(changed.begin(OTHER, 0, reset_cause="watchdog")["state"], "rescue-required")
+        self.assertFalse(changed.read()["rescue"]["required"])
+
+    def test_late_refusal_commits_no_grant(self):
+        self.armed()
+        boots = [BOOT] + ["%08x-8888-4888-8888-888888888888" % i for i in range(3)]
+        for current, following in zip(boots, boots[1:]):
+            with patch.object(r, "_boottime", side_effect=[62, 67]):
+                result = self.store.rollback(current, pinned_bootloader=PIN,
+                                             probe=lambda: good_proof(current))
+            self.assertEqual(result["decision"], "REFUSE")
+            witness = self.store.read()["boots"][current]
+            self.assertEqual(witness["granted"], "none")
+            self.assertEqual(witness["intent"], "none")
+            self.assertEqual(witness["detectors"]["rollback"], "not-armed")
+            status = json.loads((self.store.root / "recovery-status.json").read_text())
+            self.assertFalse(status["automatic_reset_allowed"])
+            self.store.begin(following, 0, reset_cause="power-on")
+        self.assertEqual(self.store.read()["remaining"], 2)
+        self.assertFalse(self.store.read()["rescue"]["required"])
+
+    def test_late_refusal_keeps_an_earlier_grant(self):
+        self.armed()
+        self.assertEqual(self.admit(now=62)["decision"], "ALLOW")
+        with patch.object(r, "_boottime", side_effect=[62, 67]):
+            self.store.rollback(BOOT, pinned_bootloader=PIN, probe=self.proof)
+        self.assertEqual(self.store.read()["boots"][BOOT]["granted"], "reset")
+
+    def test_grant_survives_intent_and_refused_rollback(self):
+        self.armed()
+        self.assertEqual(self.admit()["decision"], "ALLOW")
+        self.store.intent(BOOT, "none")
+        self.store.intent(BOOT, "unbind-adapter")
+        bad = self.proof()
+        bad["watchdog"] = "unknown"
+        self.assertEqual(self.admit(bad)["decision"], "REFUSE")
+        self.assertEqual(self.store.read()["boots"][BOOT]["granted"], "reset")
+        self.assertEqual(self.store.begin(OTHER, 0, reset_cause="unknown")["remaining"], 1)
+
+    def test_review_probe_twenty_grants_spend_the_budget(self):
+        self.armed()
+        boots = [BOOT] + ["%08x-9999-4999-8999-999999999999" % i for i in range(20)]
+        admissions = 0
+        for current, following in zip(boots, boots[1:]):
+            with patch.object(r, "_boottime", return_value=62):
+                result = self.store.rollback(current, pinned_bootloader=PIN,
+                                             probe=lambda: good_proof(current))
+            admissions += result["decision"] == "ALLOW"
+            self.store.intent(current, "none")
+            self.store.begin(following, 0, reset_cause="unknown")
+        self.assertEqual(admissions, 2)
+        self.assertEqual(self.store.read()["remaining"], 0)
+
+    def test_granted_trial_is_charged(self):
+        self.armed()
+        self.assertTrue(self.admit(action="activate-other-slot")["update_trial_allowed"])
+        self.assertEqual(self.store.read()["boots"][BOOT]["granted"], "activate-other-slot")
+        self.assertEqual(self.store.begin(OTHER, 0, reset_cause="unknown")["remaining"], 1)
+
+    def test_clock_is_not_a_caller_parameter(self):
+        import inspect
+        self.assertNotIn("now", inspect.signature(r.Store.rollback).parameters)
+        self.assertNotIn("now", inspect.signature(r.Store.rollback_status).parameters)
+        self.armed()
+        with self.assertRaises(TypeError):
+            self.store.rollback(BOOT, 61, pinned_bootloader=PIN, probe=self.proof)
+        # Hour-old evidence is refused by the live clock.
+        self.assertEqual(self.admit(now=3661)["decision"], "REFUSE")
+
+    def test_future_dated_evidence_refused(self):
+        self.armed()
+        self.assertEqual(self.admit(good_proof(observed=70), now=61)["decision"], "REFUSE")
+        self.assertEqual(self.admit(good_proof(observed=61), now=66)["decision"], "ALLOW")
+
+    def test_counter_evidence_must_be_exact_and_typed(self):
+        self.armed()
+        for key, value in (("counter_after", 1), ("counter_readback", 1), ("counter_before", 0),
+                           ("counter_after", "2"), ("counter_before", 2.0),
+                           ("counter_before", 2 ** 31), ("counter_readback", None)):
+            proof = self.proof()
+            proof[key] = value
+            if key == "counter_after" and value == 1:
+                proof["counter_readback"] = 1
+            with self.subTest(key=key, value=value):
+                result = self.admit(proof)
+                self.assertEqual(result["decision"], "REFUSE")
+                self.assertTrue(any("counter" in reason for reason in result["refusal_reasons"]))
+
+    def test_pin_format_is_checked_not_just_equality(self):
+        self.armed()
+        for pin in ("unknown", "sha256:" + "A" * 64, "sha256:" + "a" * 63, None):
+            proof = self.proof()
+            proof["bootloader"] = pin
+            with self.subTest(pin=pin):
+                self.assertEqual(self.admit(proof, pinned=pin)["decision"], "REFUSE")
+
+    def test_refusal_records_detectors_but_never_the_bootloader(self):
+        self.armed()
+        bad = self.proof()
+        bad["watchdog"] = "unknown"
+        self.admit(bad)
+        witness = self.store.read()["boots"][BOOT]
+        self.assertEqual(witness["bootloader"], "unknown")
+        self.assertEqual(witness["detectors"], {"rollback": "not-armed", "watchdog": "unknown"})
+        stale = self.proof()
+        self.admit(stale, now=100)
+        witness = self.store.read()["boots"][BOOT]
+        self.assertEqual(witness["detectors"], {"rollback": "not-armed", "watchdog": "unknown"})
+        self.assertEqual(witness["bootloader"], "unknown")
+        self.admit()
+        witness = self.store.read()["boots"][BOOT]
+        self.assertEqual(witness["detectors"], {"rollback": "armed", "watchdog": "armed"})
+        self.assertEqual(witness["bootloader"], PIN)
+
+    def test_rollback_status_is_read_only_and_never_grants(self):
+        self.armed()
+        before = sorted((path.name, path.read_bytes()) for path in self.store.root.iterdir())
+        with patch.object(r, "_boottime", return_value=62):
+            status = self.store.rollback_status(BOOT, pinned_bootloader=PIN, probe=self.proof)
+        self.assertTrue(status["rollback_armed"])
+        self.assertEqual(status["decision"], "REFUSE")
+        self.assertFalse(status["automatic_reset_allowed"])
+        self.assertFalse(status["update_trial_allowed"])
+        self.assertEqual(before, sorted((path.name, path.read_bytes()) for path in self.store.root.iterdir()))
+        for i in range(3):
+            following = "%08x-aaaa-4aaa-8aaa-aaaaaaaaaaaa" % i
+            self.store.begin(following, 0, reset_cause="power-on")
+        self.assertEqual(self.store.read()["remaining"], 2)
+
+    def test_rollback_status_creates_nothing_on_a_fresh_directory(self):
+        root = Path(self.tmp.name) / "absent"
+        store = r.Store(root, limit=2, healthy_seconds=60)
+        with patch.object(r, "_boottime", return_value=62):
+            status = store.rollback_status(BOOT, pinned_bootloader=PIN, probe=good_proof)
+        self.assertEqual(status["decision"], "REFUSE")
+        self.assertFalse(root.exists())
+
+    def test_probe_errors_of_any_kind_refuse(self):
+        self.armed()
+        def broken():
+            raise RuntimeError("collector bug")
+        with patch.object(r, "_boottime", return_value=62):
+            result = self.store.rollback(BOOT, pinned_bootloader=PIN, probe=broken)
+            status = self.store.rollback_status(BOOT, pinned_bootloader=PIN, probe=broken)
+        self.assertEqual(result["decision"], "REFUSE")
+        self.assertFalse(status["rollback_armed"])
+
+    def test_rescue_entered_only_when_a_reset_is_needed_after_the_last_credit(self):
+        boots = ["%08x-bbbb-4bbb-8bbb-bbbbbbbbbbbb" % i for i in range(6)]
+        for need in ("watchdog", "failed-health", "reset-request"):
+            with self.subTest(need=need):
+                self.store.path.unlink(missing_ok=True)
+                self.store.begin(boots[0], 0, reset_cause="power-on")
+                self.rearm(boots[0])
+                self.store.begin(boots[1], 0, reset_cause="watchdog")
+                view = self.store.begin(boots[2], 0, reset_cause="watchdog")
+                self.assertEqual(view["state"], "reset-budget-spent")
+                self.assertFalse(view["rescue_required"])
+                self.assertIn("spent", view["announcement"])
+                self.assertNotIn("Stop media", view["announcement"])
+                self.assertEqual(self.store.health(boots[2], 1, "healthy")["state"], "reset-budget-spent")
+                if need == "watchdog":
+                    view = self.store.begin(boots[3], 0, reset_cause="watchdog")
+                    entered = boots[3]
+                elif need == "failed-health":
+                    view = self.store.health(boots[2], 2, "failed")
+                    entered = boots[2]
+                else:
+                    with patch.object(r, "_boottime", return_value=62):
+                        view = self.store.rollback(boots[2], pinned_bootloader=PIN,
+                                                   probe=lambda: good_proof(boots[2]))
+                    self.assertEqual(view["decision"], "REFUSE")
+                    entered = boots[2]
+                self.assertTrue(view["rescue_required"])
+                self.assertEqual(view["state"], "rescue-required")
+                self.assertEqual(self.store.read()["rescue"],
+                                 {"required": True, "entries": 1, "entered_boot": entered})
+
+    def test_missing_credit_reset_request_is_not_rescue(self):
+        self.store.begin(BOOT, 0, reset_cause="power-on")
+        result = self.admit()
+        self.assertEqual(result["decision"], "REFUSE")
+        self.assertFalse(result["rescue_required"])
+        self.assertFalse(self.store.read()["rescue"]["required"])
+
+    def test_damaged_ledger_reports_unknown_rescue_state(self):
+        self.armed()
+        self.store.path.write_bytes(b"torn")
+        view = self.store.view(self.store.read())
+        self.assertIsNone(view["rescue_required"])
+        self.assertEqual(view["state"], "recovery-uncertain")
+        view = self.store.begin(OTHER, 0, reset_cause="power-on")
+        self.assertIsNone(view["rescue_required"])
+        status = json.loads((self.store.root / "recovery-status.json").read_text())
+        self.assertIsNone(status["rescue_required"])
 
 
 if __name__ == "__main__":

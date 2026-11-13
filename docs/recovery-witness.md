@@ -12,7 +12,7 @@ diagnostic add-on must not be its boot dependency. No package list changes here.
 ## Durable record and safe reads
 
 `Store` takes an explicit private, caller-owned local state directory, budget
-limit and healthy interval. Its schema-3 `recovery.json` ledger holds one witness
+limit and healthy interval. Its schema-4 `recovery.json` ledger holds one witness
 per boot ID and the separate reset budget in the **same commit**. Writers share
 an exclusive flock; a same-directory mode-0600 temporary file is flushed and
 fsynced, renamed atomically, then the directory is fsynced. New-directory
@@ -54,11 +54,12 @@ Threshold changes spend the budget while preserving the witness history. Orphan
 
 A new boot spends an attempt only when its predecessor was **granted** a reset
 or the observed cause is unclean (`watchdog`, or `panic` for a reboot after a
-kernel panic). A grant is recorded by the first successful `intent reset` of a
-boot and is sticky: later intents (`none`, `unbind-adapter`, another `reset`)
-update the declared `intent` but never erase `granted`, so a granted reset is
+kernel panic). A grant is recorded by the first `Store.rollback` of a boot that
+returns ALLOW (reset or trial; see below) and is sticky: later intents (`none`,
+`unbind-adapter`), refused rollback calls and later grants update the declared
+`intent` and detectors but never erase `granted`, so a granted reset or trial is
 charged whatever cause the next boot reports (`power-on`, `unknown` or
-`software`). Clean power-on, `unknown` and an orderly `software` reboot that the
+`software`). Trials are therefore bounded by this budget too. Clean power-on, `unknown` and an orderly `software` reboot that the
 box did not grant itself (an operator reboot, an update's completion reboot) do
 not spend. Whether operator reboots should count is an owner decision; until it
 is made they do not.
@@ -94,10 +95,16 @@ also spends the budget until healthy requalification.
 `begin` and `intent` return after persistence; health transitions persist before
 returning, while ordinary heartbeats return the unchanged safe projection.
 `status` and `export` need no write. Status from a previous boot denies resets
-until the current boot is admitted. An actually exhausted episode announces
-**“Rescue required”** and exposes
-`rescue_required: true`. Missing/uncertain credit alone is rollback-not-armed,
-with no automatic reset permission; a fresh clean boot is not called rescue.
+until the current boot is admitted. Spending the last credit reports
+`reset-budget-spent` (`RESET_BUDGET_SPENT`): no automatic reset, but the boot
+produced by the last permitted reset may be healthy and is not told to stop
+media. **“Rescue required”** (`rescue_required: true`) is entered only when the
+box needs another reset with the budget spent: a further charged boot, a
+`failed` health verdict, or a `rollback` request. Missing credit alone is
+rollback-not-armed with `rescue_required: false`; a fresh clean boot is not
+called rescue. After a quarantined ledger (or a threshold change) any earlier
+latch is unknown, so the state is `recovery-uncertain` with
+`rescue_required: null` until health is requalified.
 `rescue_active: false` deliberately does not
 claim that a rescue mode exists. Any storage/identity error exits nonzero and
 prints a safe denial without paths or exception text. `intent reset` returns
@@ -130,13 +137,22 @@ checks a trusted, read-only collector under the writer lock and durably writes t
 intent before returning an immediate admission. `action="activate-other-slot"`
 is the other supported action. No default pin or hardware collector is provided:
 without these integration-owned inputs, admission remains REFUSE. Collectors
-must raise OSError/ValueError on failed reads, never substitute a configured value
+must raise on failed reads (any exception refuses), never substitute a configured value
 for an observation. The returned reasons contain fixed actionable messages, never
 exception text or paths. No bootloader write is implemented or permitted here.
 
-Production callers omit `now`: the store samples CLOCK_BOOTTIME after collection
-and again after persistence, refusing if the write outlasts freshness. The optional
-`now` argument supplies deterministic host-test time only.
+There is no caller-supplied time: the store samples CLOCK_BOOTTIME itself after
+collection and again after persistence (tests replace a private clock function).
+If the write outlasts freshness, the same locked transaction restores the
+boot's previous grant and intent, records the rollback detector as not armed and
+recommits before returning REFUSE, so a refusal never leaves a charged grant. If
+that second commit fails the call raises; the grant may then remain and the next
+boot is charged (fails toward fewer resets).
+
+`Store.rollback_status(...)` takes the same arguments for display: it judges the
+evidence and reports `rollback_armed` and reasons, but never writes, grants,
+latches or creates files, and always returns REFUSE. Use it, not `rollback`, to
+show whether rollback is armed. Collector exceptions of any type refuse.
 
 The collector returns this exact evidence contract (extra fields confer no trust):
 
@@ -160,10 +176,19 @@ immediately before the action and bind execution to this boot. Recheck if the
 consumer delays or the evidence changes. CLI commands intentionally have no way
 to claim these proofs and always refuse rollback-dependent admission.
 
-Clean power-on does not spend a reset credit. A previous admitted reset intent
-or an observed watchdog/software reset does. The durable `rescue` latch has `required`, `entries` and `entered_boot`. Exhaustion
-enters once, repeated producers/reboots do not add entries, and only explicit
-continuous-health requalification clears it. Missing/invalid/old-schema storage
+Clean power-on does not spend a reset credit. A previous admitted grant or an
+observed watchdog/panic reset does (see budget semantics). The durable `rescue`
+latch has `required`, `entries` and `entered_boot`. It is entered once per
+episode, repeated producers/reboots do not add entries, and only explicit
+continuous-health requalification clears it.
+
+Leaving the latch needs one long-lived health producer: a single `Store`
+process reporting `healthy` at gaps of at most the stored maximum for the whole
+healthy interval. The CLI's `health` starts a fresh dwell per invocation and
+cannot clear it, and no such producer exists yet. Because the latch asks the
+consumer to stop media, the health verdict used during rescue must not depend
+on media running (for example: management path reachable, storage writable, no
+watchdog pressure); otherwise there is no exit. The wiring task must define it. Missing/invalid/old-schema storage
 starts with no automatic reset credit, separately from an exhausted rescue episode; it never migrates into a fresh allowance.
 A person can recover using known-good boot media and then explicitly requalify
 health. There is no unauthenticated clear command. No further automatic reset or
@@ -171,6 +196,8 @@ update/trial is admitted while latched, even with good rollback evidence.
 
 Every successful mutation publishes `recovery-status.json` using mode 0600,
 atomic replacement and file/directory fsync, after committing `recovery.json`.
+The ledger commit is the transaction: a failed projection write neither fails
+it nor leaves an old projection behind (the stale file is removed).
 It is a versioned projection for a privileged UI/LED reader, with `state`,
 `console_marker`, `announcement`, `rescue_required` and `rescue_active`. Console
 JSON exposes the same fields. `RESCUE_REQUIRED` means stop media and preserve
@@ -183,7 +210,8 @@ The status file is advisory and never carries a rollback/reset grant. A crash
 between ledger and projection replacement can leave it stale: consumers must
 check boot ID and the canonical ledger, treat unavailable/stale status as refusal,
 and republish via a successful transaction before displaying a cleared latch.
-Failure of either fsync/write denies the operation. Never authorize from status.
+A failed ledger write/fsync denies the operation; a failed projection only
+removes the projection. Never authorize from status.
 
 ## Previous-release observations and update-path obligations
 

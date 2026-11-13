@@ -23,7 +23,16 @@ CAUSES = {"unknown", "watchdog", "panic", "software", "power-on"}
 # Unclean resets spend credit; orderly reboots (operator, update completion) and
 # unclassified boots do not, unless this box itself granted the reset.
 CHARGED_CAUSES = {"watchdog", "panic"}
-GRANTS = {"none", "reset"}
+# Admitted disruptive actions. Granted only by rollback(); sticky for the boot.
+GRANTS = {"none", "reset", "activate-other-slot"}
+ACTIONS = GRANTS - {"none"}
+FRESH_SECONDS = 5
+PIN_FORMAT = r"sha256:[0-9a-f]{64}"
+
+
+def _boottime():
+    # Private clock seam: evidence age is never judged by a caller-supplied time.
+    return time.clock_gettime(time.CLOCK_BOOTTIME)
 
 
 def encoded(value):
@@ -107,7 +116,7 @@ class Store:
         rescue = record["rescue"]
         if (not isinstance(rescue, dict) or set(rescue) != {"required", "entries", "entered_boot"}
                 or type(rescue["required"]) is not bool or type(rescue["entries"]) is not int
-                or rescue["entries"] < 0 or rescue["required"] != record["exhausted"]):
+                or rescue["entries"] < 0 or rescue["required"] and not record["exhausted"]):
             raise ValueError("invalid rescue state")
         if rescue["entered_boot"] is not None:
             boot_id(rescue["entered_boot"])
@@ -177,8 +186,20 @@ class Store:
         if len(raw) > MAX_BYTES:
             raise ValueError("witness storage full; export and service required")
         self.atomic_file(self.path, raw)
-        # A durable status projection for UI/LED consumers. Cached evidence never grants.
-        self.atomic_file(self.root / "recovery-status.json", encoded(self.view(record)))
+        self.project(record)
+
+    def project(self, record):
+        """Durable advisory projection for UI/LED consumers; never grants.
+
+        The ledger commit above is the transaction. A failed projection must not
+        fail it or leave a stale projection behind, so it is removed instead.
+        """
+        status = self.root / "recovery-status.json"
+        try:
+            self.atomic_file(status, encoded(self.view(record)))
+        except OSError:
+            with contextlib.suppress(OSError):
+                status.unlink(missing_ok=True)
 
     def atomic_file(self, path, raw):
         fd, name = tempfile.mkstemp(prefix=".write-", dir=self.root)
@@ -219,80 +240,85 @@ class Store:
         if current_boot is not None and record["current_boot"] != current_boot:
             remaining = 0
         rescue = record["rescue"]["required"]
+        spent = record["exhausted"] and not rescue
+        # A quarantined ledger loses any earlier latch: say unknown, never "not required".
+        uncertain = not rescue and not spent and record["source"] == "invalid"
+        if rescue:
+            state, marker = "rescue-required", "RESCUE_REQUIRED"
+            announcement = ("Rescue required: automatic resets denied. Stop media; retain management and log export. "
+                            "Rescue is not active. Ask a helper to recover using known-good boot media.")
+        elif spent:
+            state, marker = "reset-budget-spent", "RESET_BUDGET_SPENT"
+            announcement = ("Reset budget spent: no automatic resets until continuous health is confirmed. "
+                            "Rescue is required only if the box needs another reset.")
+        elif uncertain:
+            state, marker = "recovery-uncertain", "RECOVERY_UNCERTAIN"
+            announcement = ("Recovery history unreadable or reset by a configuration change; earlier rescue state unknown. "
+                            "Automatic resets denied until continuous health is confirmed.")
+        else:
+            state, marker = "rollback-not-armed", "ROLLBACK_NOT_ARMED"
+            announcement = "Rollback not armed: verify counter persistence, pinned bootloader and live watchdog; updates and trials refused."
         return {"version": VERSION, "boot_id": record["current_boot"], "remaining": remaining,
                 "reset_budget_available": remaining > 0 and not rescue,
                 "automatic_reset_allowed": False, "rollback_armed": False, "decision": "REFUSE",
                 "update_trial_allowed": False,
                 "refusal_reasons": ["Recheck independent counter persistence, pinned bootloader and live watchdog before relying on rollback."],
-                "rescue_required": rescue, "rescue_active": False,
-                "state": "rescue-required" if rescue else "rollback-not-armed",
-                "console_marker": "RESCUE_REQUIRED" if rescue else "ROLLBACK_NOT_ARMED",
-                "announcement": ("Rescue required: automatic resets denied. Stop media; retain management and log export. Rescue is not active. Ask a helper to recover using known-good boot media."
-                                 if rescue else "Rollback not armed: verify counter persistence, pinned bootloader and live watchdog; updates and trials refused."),
+                "rescue_required": None if uncertain else rescue, "rescue_active": False,
+                "state": state, "console_marker": marker, "announcement": announcement,
                 "release_retirement_allowed": False,
                 "state_source": record["source"]}
 
     @staticmethod
-    def latch(record):
+    def enter_rescue(record):
+        """Latch once per episode, when a reset is needed after the last credit."""
         rescue = record["rescue"]
         if record["exhausted"] and not rescue["required"]:
             rescue.update(required=True, entries=rescue["entries"] + 1,
                           entered_boot=record["current_boot"])
-        elif rescue["required"] and rescue["entered_boot"] is None:
-            rescue["entered_boot"] = record["current_boot"]
 
-    def rollback(self, boot, now=None, *, pinned_bootloader, probe, action="reset"):
-        """Fresh trusted read-only collector; never use ledger/cached evidence.
-
-        The collector must independently reread the bootloader's persisted counter,
-        identify the running bootloader and check the currently running watchdog.
-        No hardware collector or production pin is supplied by this host layer.
-        """
-        if now is not None:
-            uptime(now)
-        if action not in {"reset", "activate-other-slot"}:
-            raise ValueError("invalid rollback action")
+    @staticmethod
+    def evidence(boot, pinned_bootloader, probe):
+        """Judge fresh collector evidence; returns (reasons, observed uptime, watchdog)."""
         reasons = []
-        observed_times = []
-        def change(record, witness):
-            try:
-                proof = probe()
-            except (OSError, ValueError):
-                proof = {}
-            if not isinstance(proof, dict):
-                proof = {}
-            try:
-                observed = uptime(proof.get("observed_uptime"))
-                checked_now = time.clock_gettime(time.CLOCK_BOOTTIME) if now is None else now
-                observed_times.append(observed)
-                fresh = proof.get("boot_id") == boot and 0 <= checked_now - observed <= 5
-            except ValueError:
-                fresh = False
-            if not fresh:
-                reasons.append("Read fresh evidence from this boot (maximum age 5 seconds).")
-            values = [proof.get(k) for k in ("counter_before", "counter_after", "counter_readback")]
-            if (proof.get("counter_source") != "independent-readback"
-                    or any(type(v) is not int or not 0 <= v <= 2147483647 for v in values)
-                    or values[0] < 1 or values[1] != values[0] - 1 or values[2] != values[1]):
-                reasons.append("Verify the bootloader decremented its counter and independently reread the persisted value.")
-            if (not isinstance(pinned_bootloader, str)
-                    or not re.fullmatch(r"sha256:[0-9a-f]{64}", pinned_bootloader)
-                    or proof.get("bootloader") != pinned_bootloader):
-                reasons.append("Check the running bootloader against the known pinned build; arrange manual service if different. Never write it automatically.")
-            if proof.get("watchdog") != "armed":
-                reasons.append("Verify the watchdog is running; an installed device or configuration alone is insufficient.")
-            witness["detectors"] = {"rollback": "not-armed" if reasons else "armed",
-                                    "watchdog": "armed" if fresh and proof.get("watchdog") == "armed" else "unknown"}
-            if not reasons:
-                witness["bootloader"] = pinned_bootloader
-            witness["intent"] = action if not reasons and record["remaining"] > 0 else "none"
-        result = self.update(boot, change)
-        if now is None and observed_times and not 0 <= time.clock_gettime(time.CLOCK_BOOTTIME) - observed_times[0] <= 5:
-            reasons.append("Evidence expired during persistence; collect fresh evidence before the action.")
+        try:
+            proof = probe()
+        except Exception:  # any collector failure refuses; it never propagates
+            proof = {}
+        if not isinstance(proof, dict):
+            proof = {}
+        try:
+            observed = uptime(proof.get("observed_uptime"))
+            fresh = proof.get("boot_id") == boot and 0 <= _boottime() - observed <= FRESH_SECONDS
+        except ValueError:
+            observed, fresh = None, False
+        if not fresh:
+            reasons.append("Read fresh evidence from this boot (maximum age 5 seconds).")
+        values = [proof.get(k) for k in ("counter_before", "counter_after", "counter_readback")]
+        if (proof.get("counter_source") != "independent-readback"
+                or any(type(v) is not int or not 0 <= v <= 2147483647 for v in values)
+                or values[0] < 1 or values[1] != values[0] - 1 or values[2] != values[1]):
+            reasons.append("Verify the bootloader decremented its counter and independently reread the persisted value.")
+        if (not isinstance(pinned_bootloader, str)
+                or not re.fullmatch(PIN_FORMAT, pinned_bootloader)
+                or proof.get("bootloader") != pinned_bootloader):
+            reasons.append("Check the running bootloader against the known pinned build; arrange manual service if different. Never write it automatically.")
+        if proof.get("watchdog") != "armed":
+            reasons.append("Verify the watchdog is running; an installed device or configuration alone is insufficient.")
+        watchdog = "armed" if fresh and proof.get("watchdog") == "armed" else "unknown"
+        return reasons, observed, watchdog
+
+    @staticmethod
+    def budget_reason(record):
+        if record["rescue"]["required"]:
+            return "Rescue required; recover and explicitly requalify health."
+        if record["exhausted"]:
+            return "Reset budget spent; confirm continuous health before another automatic reset."
+        return "Reset budget unavailable or uncertain; confirm continuous health."
+
+    @staticmethod
+    def decide(result, reasons, available_reason, allowed, action):
         result["rollback_armed"] = not reasons
-        result["refusal_reasons"] = reasons + (["Reset budget exhausted or uncertain; recover and explicitly requalify health."]
-                                                if not result["reset_budget_available"] else [])
-        allowed = not reasons and result["reset_budget_available"]
+        result["refusal_reasons"] = reasons + ([available_reason] if available_reason else [])
         result["decision"] = "ALLOW" if allowed else "REFUSE"
         result["automatic_reset_allowed"] = allowed and action == "reset"
         result["update_trial_allowed"] = allowed and action == "activate-other-slot"
@@ -300,6 +326,64 @@ class Store:
             result.update(state="rollback-armed", console_marker="ROLLBACK_ARMED",
                           announcement="Rollback evidence verified for this immediate admission only.")
         return result
+
+    def rollback_status(self, boot, *, pinned_bootloader, probe, action="reset"):
+        """Read-only evidence check for display. Never writes, grants or latches."""
+        if action not in ACTIONS:
+            raise ValueError("invalid rollback action")
+        boot_id(boot)
+        record = self.read()  # rename-atomic snapshot; no lock, no directory creation
+        reasons, _, _ = self.evidence(boot, pinned_bootloader, probe)
+        if record["current_boot"] != boot:
+            reasons.append("This boot is not admitted; run begin first.")
+        result = self.view(record, boot)
+        available = result["reset_budget_available"]
+        return self.decide(result, reasons, None if available else self.budget_reason(record),
+                           False, action)
+
+    def rollback(self, boot, *, pinned_bootloader, probe, action="reset"):
+        """Admit one disruptive action on fresh trusted read-only evidence.
+
+        The collector must independently reread the bootloader's persisted counter,
+        identify the running bootloader and check the currently running watchdog.
+        No hardware collector or production pin is supplied by this host layer.
+        An ALLOW records a grant that is sticky for this boot and charged at the
+        next boot; perform the action only after this call returns ALLOW.
+        """
+        if action not in ACTIONS:
+            raise ValueError("invalid rollback action")
+        boot_id(boot)
+        with self.locked():
+            record = self.read()
+            if record["current_boot"] != boot:
+                raise ValueError("current boot witness unavailable")
+            witness = record["boots"][boot]
+            reasons, observed, watchdog = self.evidence(boot, pinned_bootloader, probe)
+            available = record["remaining"] > 0 and not record["rescue"]["required"]
+            allowed = not reasons and available
+            before = (witness["intent"], witness["granted"])
+            witness["detectors"] = {"rollback": "not-armed" if reasons else "armed", "watchdog": watchdog}
+            if not reasons:
+                witness["bootloader"] = pinned_bootloader
+            if allowed:
+                witness["intent"] = action
+                if witness["granted"] == "none":
+                    witness["granted"] = action
+            elif not available:
+                # A reset is needed and the last credit is gone: that is the rescue episode.
+                self.enter_rescue(record)
+            available_reason = None if available else self.budget_reason(record)
+            self.write(record)
+            if allowed and not 0 <= _boottime() - observed <= FRESH_SECONDS:
+                # Persistence outlasted the evidence: withdraw this call's grant in the
+                # same locked transaction, so a REFUSE never leaves a charged grant.
+                reasons.append("Evidence expired during persistence; collect fresh evidence before the action.")
+                allowed = False
+                witness["intent"], witness["granted"] = before
+                witness["detectors"] = {"rollback": "not-armed", "watchdog": "unknown"}
+                self.write(record)
+            result = self.view(record)
+        return self.decide(result, reasons, available_reason, allowed, action)
 
     def release(self, boot, *, new_release, previous_release, activated_at,
                 full_healthy_stream, trusted_now):
@@ -335,13 +419,14 @@ class Store:
                     raise ValueError("stale boot")
                 # A prior writer may have died after rename but before directory fsync.
                 # Recommit before returning a successful idempotent admission.
-                self.latch(record)
                 self.write(record)
                 return self.view(record)
             previous_boot = record["current_boot"]
             prior = record["boots"].get(previous_boot, {})
             # A granted reset is charged whatever cause the next boot reports.
             charge = prior.get("granted", "none") != "none" or reset_cause in CHARGED_CAUSES
+            # Another charged reset after the last credit was spent needs rescue.
+            needs_rescue = charge and record["remaining"] == 0 and record["exhausted"]
             if charge and record["remaining"] > 0:
                 record["remaining"] -= 1
                 # Only spending the last credit is an exhausted episode; a charge
@@ -364,7 +449,8 @@ class Store:
             for key in removed:
                 del record["boots"][key]
             record["boots"][keep[-1]]["previous_boot"] = None
-            self.latch(record)
+            if needs_rescue:
+                self.enter_rescue(record)
             self.write(record)
             return self.view(record)
 
@@ -375,7 +461,6 @@ class Store:
             if record["current_boot"] != boot:
                 raise ValueError("current boot witness unavailable")
             change(record, record["boots"][boot])
-            self.latch(record)
             self.write(record)
             return self.view(record)
 
@@ -384,7 +469,9 @@ class Store:
         if action not in INTENTS:
             raise ValueError("invalid intent")
         def change(record, witness):
-            if action in {"reset", "activate-other-slot"}:
+            # Disruptive actions are admitted only by rollback(); the grant is separate
+            # from the declared intent, so no intent can erase it.
+            if action in ACTIONS:
                 return
             witness["intent"] = action
         return self.update(boot, change)
@@ -419,7 +506,9 @@ class Store:
                 record["rescue"]["required"] = False
                 self._health[boot] = (now, now, verdict)
             witness["budget_remaining"] = record["remaining"]
-            self.latch(record)
+            if verdict == "failed":
+                # A failing box with the budget spent cannot be reset: rescue.
+                self.enter_rescue(record)
             self.write(record)
             return self.view(record)
 
@@ -452,7 +541,7 @@ def main():
             else:
                 result = store.health(boot, now, args.verdict)
         print(json.dumps(result, sort_keys=True))
-        if args.command == "intent" and args.action in {"reset", "activate-other-slot"}:
+        if args.command == "intent" and args.action in ACTIONS:
             return 3
     except (OSError, ValueError):
         # Do not echo paths, raw input or exception text into a support report.
