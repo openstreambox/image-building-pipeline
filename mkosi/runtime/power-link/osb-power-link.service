@@ -1,0 +1,48 @@
+[Unit]
+Description=Read-only supervisor telemetry
+After=systemd-udevd.service
+
+[Service]
+Type=simple
+User=osb-power
+Group=osb-power
+ExecStart=/usr/libexec/osb-power-link
+Restart=always
+RestartSec=2
+RuntimeDirectory=ceralive/power
+RuntimeDirectoryMode=0755
+StateDirectory=osb-power
+StateDirectoryMode=0755
+UMask=0022
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @reboot @swap
+DevicePolicy=closed
+DeviceAllow=char-ttyACM r
+ReadWritePaths=/run/ceralive/power /var/lib/osb-power
+MemoryMax=32M
+CPUQuota=10%
+TasksMax=1
+LimitNOFILE=32
+
+[Install]
+WantedBy=multi-user.target
