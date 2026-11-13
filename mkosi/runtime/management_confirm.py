@@ -127,12 +127,12 @@ class Controller:
             self._write(r)
             return True
 
-    def recover(self, boot, *, restore):
+    def recover(self, boot, *, restore, startup=False):
         """Timer/startup owner calls this; restore is durable and idempotent."""
         boot_id(boot)
         with self.io.locked():
             r = self.read()
-            if r["state"] == "pending" and self._expired(r, boot, uptime(_boottime())):
+            if r["state"] == "pending" and (startup or self._expired(r, boot, uptime(_boottime()))):
                 restore(r["previous"])
                 r["state"] = "reverted"
                 self._write(r)

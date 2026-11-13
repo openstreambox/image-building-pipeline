@@ -2,3 +2,4 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 tests/management_confirm_test.py
+python3 tests/management_owner_test.py

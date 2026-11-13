@@ -107,3 +107,105 @@ Select a measured timeout and supervisor cadence, not this test's example values
 Host validation: `tests/management-confirm.test.sh` (registered in the default
 gate), plus `tests/recovery-witness.test.sh`. Hardware D7, supervisor/network
 integration and physical power-loss qualification remain unrun.
+
+## Configuration owner and startup barrier (host contracts only)
+
+`management_owner.Owner(root)` is the sole write API for an opaque, nonempty
+configuration bundle (maximum 1 MiB). Choose a dedicated private directory on
+persistent local storage, separate from the witness ledger; it holds
+`config.bundle`, `management.json`, `blob-<sha256>` snapshots and `writer/.lock`.
+No production directory, service or timeout is selected or installed here.
+`provision(bytes)` is explicit local setup. Never call it to repair missing or
+damaged state. Interrupted provisioning needs local inspection. Retain blobs;
+there is deliberately no garbage collection that could delete a pending snapshot.
+
+Every management writer calls `change(boot, bytes, path=..., seconds=...,
+arm=..., activate=...)`. The owner lock serializes snapshot capture, changes,
+confirmation, timer recovery and boot recovery across processes. The prior bytes
+are copied from the current bundle, not accepted as a caller's claimed digest.
+Both bundles are durably retained under content digests, checked on every reuse
+and restore. Secrets remain in mode-0600 files under the private root. Each file
+uses same-directory temporary write, file fsync, atomic rename and directory
+fsync. This is a single-bundle contract: it does not promise multi-file atomic
+replacement or atomicity between persistent bytes and the active network.
+
+Ordering is snapshot/candidate durability → durable pending journal → independent
+timer acknowledgement → deadline recheck → atomic config replacement → active
+apply. `arm(record)` must synchronously acknowledge exactly `{transaction, boot,
+deadline}` only after an independent supervisor has accepted that deadline. It
+must not merely schedule an async request or spawn a request-owned child. Failed,
+wrong or late acknowledgements deny apply and leave intent pending. A supervisor
+that loses its arm must restart, recover pending state and report failure, never
+claim protection is active. No cancellation is needed for safety: a stale timer
+calls `tick`, which rereads the locked canonical journal instead of replaying an
+old callback or overwriting a later confirmed transaction.
+
+The supervisor calls `tick(current_boot, activate=...)` at its bounded cadence;
+request death releases file locks, so the already independent supervisor can
+restore. The host process test demonstrates an arm handshake with a separate
+process before the request dies mid-apply, followed by exact-byte recovery.
+A wedged callback or storage operation holding the lock still blocks recovery;
+bounded adapter execution and fault handling remain release dependencies.
+
+The early startup entry point is `barrier(current_boot, activate=...)`. It restores
+**every pending change**, even before its deadline on a same-boot service-manager
+restart. Persistent restore and successful active restore precede the durable
+reverted record and barrier success. Failed restore, missing snapshot or invalid
+journal raises; retry is idempotent and must keep networking stopped. Confirmed,
+reverted and idle journals can pass. `confirm` routes the existing trusted probe
+through the same owner lock; authentication semantics are unchanged.
+
+### Required service-manager wiring before enabling
+
+Install an image-owned early oneshot that runs the barrier after persistent data
+is mounted but before *every* network configuration consumer. Each consumer needs
+both `Requires=management-recovery.service` and
+`After=management-recovery.service` (ordering alone does not block on failure).
+Include NetworkManager/networkd, AP/provisioning, app and update writers, and
+socket, D-Bus and hotplug activation paths; inventory the actual image instead
+of assuming `network-pre.target` alone covers them. No consumer may read/apply
+the candidate before this barrier. Keep the barrier's restore adapter free of
+network-service dependencies to avoid an ordering cycle. On failure expose local
+repair over the independent recovery floor, without starting candidate networking.
+Do not add a fail-open timeout or `ConditionPathExists` that skips missing state.
+
+The installed long-lived supervisor must own its timer independently of requests,
+restart with bounded retries, reread journals after restart and use boot time.
+Adapters must restore durable bundle bytes **and** active state before returning.
+The bundle must be the authoritative input for all writers; NetworkManager profile
+files and provisioning scripts cannot continue as independent sources of truth.
+Image packaging, privileged IPC/authorization, exclusive real configuration
+ownership, the actual supervisor and unit dependency closure are still unbuilt.
+Thus this additive topic must not land alone or enable protection: retain #18
+and #11–#13, plus those adapters/wiring, the trusted changed-path collector,
+Python/module packaging, witness/UI consumers and measured D7 acceptance together.
+No existing network file, timer, service or boot ordering is changed by this topic.
+
+### D7 additions for the owner/timer/barrier (pending board work)
+
+On the sacrificial card with console and verified spare media already available:
+
+1. Inventory every management writer and activation path. Record the installed
+   bundle/snapshot/journal locations, their ownership/modes and digests, supervisor
+   identity, timeout/cadence/restore bounds and complete unit dependency graph.
+   Verify a direct legacy writer is denied or routed through the owner.
+2. Capture monotonic events proving snapshot fsync and pending fsync precede timer
+   acknowledgement, and that acknowledgement precedes persistent and active apply.
+   Stop/refuse the timer before arming and inject a late/wrong acknowledgement:
+   no config or active-path change is allowed. A local pending repair is expected.
+3. Kill the request after acknowledgement and during active apply. Leave the
+   supervisor alive; observe exact prior bytes and usable prior path restored by
+   the declared deadline plus cadence/restore bound, without a request restart.
+4. Reboot pending before expiry. Capture early console/unit events proving both
+   persistent and active restoration finish before any network consumer starts.
+   Repeat a same-boot barrier restart; pending must revert immediately too.
+5. Remove/corrupt the snapshot, fail active restore and make durable storage full.
+   The barrier must fail and every consumer remain stopped, including activation
+   by socket/D-Bus/hotplug. Repair locally, retry and prove restoration completes.
+6. Confirm through the changed path as in the positive control above, then reboot:
+   candidate stays selected. Start a second change and prove its prior snapshot
+   is that confirmed candidate. Repeat controlled power cuts around each durable
+   boundary, recording actual recovery times and storage outcomes.
+
+These steps are a protocol, not a board receipt. Host process death and fsync
+checks cannot qualify power-loss durability or real network restoration.
