@@ -342,7 +342,7 @@ class ReviewTest(unittest.TestCase):
         self.store.health(BOOT, 30, "healthy")
         other = r.Store(self.store.root, limit=2, healthy_seconds=60)
         other.health(BOOT, 40, "failed")
-        self.assertFalse(self.store.health(BOOT, 60, "healthy")["automatic_reset_allowed"])
+        self.assertFalse(self.store.health(BOOT, 60, "healthy")["reset_budget_available"])
 
     def test_clean_power_cycles_never_exhaust(self):
         self.boot()

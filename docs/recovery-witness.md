@@ -71,8 +71,8 @@ Only health re-arm clears it. Counts saturate at zero; restarting a
 producer in the same boot does not spend again, but does recommit/fsync before
 returning admission (a prior writer may have died after rename). Stale boot IDs cannot modify a
 new boot. This is a box reset budget, not the bootloader slot counter, and does
-not depend on an update being pending. The future boot integration must decide
-which actual boots to admit; this module does not arm an unattended policy.
+not depend on an update being pending. Boot integration must admit each actual kernel boot and supply its observed
+reset cause; this module does not arm an unattended policy.
 
 Corruption falls toward **denying automatic reset** to stop loops. It does not
 permanently lock recovery: in that same boot the trusted health producer can
@@ -91,13 +91,14 @@ survives wall-clock/NTP jumps, but its anchors are scoped to the current boot.
 A new boot always starts with unknown health and no anchor. A threshold change
 also spends the budget until healthy requalification.
 
-`begin`, `health` and `intent` return the versioned status projection only after
-persistence. `status` and `export` need no write. Status from a previous boot denies resets
-until the current boot is admitted. An exhausted budget announces
-**“Rescue required: reset budget exhausted”**, denies automatic resets
-and exposes `rescue_required: true`. Missing or uncertain credit denies resets
-with “Recovery reset budget unavailable; confirm continuous health” and
-`rescue_required: false`. `rescue_active: false` deliberately does not
+`begin` and `intent` return after persistence; health transitions persist before
+returning, while ordinary heartbeats return the unchanged safe projection.
+`status` and `export` need no write. Status from a previous boot denies resets
+until the current boot is admitted. An actually exhausted episode announces
+**“Rescue required”** and exposes
+`rescue_required: true`. Missing/uncertain credit alone is rollback-not-armed,
+with no automatic reset permission; a fresh clean boot is not called rescue.
+`rescue_active: false` deliberately does not
 claim that a rescue mode exists. Any storage/identity error exits nonzero and
 prints a safe denial without paths or exception text. `intent reset` returns
 exit 3 on a denied reset and never records that refused reset intent (storage or
@@ -159,7 +160,8 @@ immediately before the action and bind execution to this boot. Recheck if the
 consumer delays or the evidence changes. CLI commands intentionally have no way
 to claim these proofs and always refuse rollback-dependent admission.
 
-The durable `rescue` latch has `required`, `entries` and `entered_boot`. Exhaustion
+Clean power-on does not spend a reset credit. A previous admitted reset intent
+or an observed watchdog/software reset does. The durable `rescue` latch has `required`, `entries` and `entered_boot`. Exhaustion
 enters once, repeated producers/reboots do not add entries, and only explicit
 continuous-health requalification clears it. Missing/invalid/old-schema storage
 starts with no automatic reset credit, separately from an exhausted rescue episode; it never migrates into a fresh allowance.
