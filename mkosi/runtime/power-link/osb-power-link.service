@@ -1,6 +1,7 @@
 [Unit]
 Description=Read-only supervisor telemetry
-After=systemd-udevd.service
+After=systemd-udevd.service systemd-tmpfiles-setup.service
+RequiresMountsFor=/data/osb-power
 
 [Service]
 Type=simple
@@ -11,8 +12,7 @@ Restart=always
 RestartSec=2
 RuntimeDirectory=ceralive/power
 RuntimeDirectoryMode=0755
-StateDirectory=osb-power
-StateDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 UMask=0022
 NoNewPrivileges=yes
 CapabilityBoundingSet=
@@ -27,7 +27,11 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=none
+ProtectProc=invisible
+ProcSubset=pid
+PrivateIPC=yes
+RemoveIPC=yes
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
@@ -38,7 +42,7 @@ SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources @mount @reboot @swap
 DevicePolicy=closed
 DeviceAllow=char-ttyACM r
-ReadWritePaths=/run/ceralive/power /var/lib/osb-power
+ReadWritePaths=/run/ceralive/power -/data/osb-power
 MemoryMax=32M
 CPUQuota=10%
 TasksMax=1

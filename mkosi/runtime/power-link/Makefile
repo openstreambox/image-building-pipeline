@@ -15,6 +15,7 @@ check: test-power-link
 install: osb-power-link
 	install -D -m 0755 osb-power-link $(DESTDIR)/usr/libexec/osb-power-link
 	install -D -m 0644 osb-power-link.service $(DESTDIR)/usr/lib/systemd/system/osb-power-link.service
+	install -D -m 0644 osb-power-tmpfiles.conf $(DESTDIR)/usr/lib/tmpfiles.d/osb-power.conf
 	install -D -m 0644 osb-power.conf $(DESTDIR)/usr/lib/sysusers.d/osb-power.conf
 	install -D -m 0644 79-osb-supervisor.rules $(DESTDIR)/usr/lib/udev/rules.d/79-osb-supervisor.rules
 	install -d $(DESTDIR)/etc/systemd/system/multi-user.target.wants
