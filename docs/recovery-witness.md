@@ -316,7 +316,9 @@ recording API does not enforce release lifecycle or authorize retirement.
   keeping management/update repair/log export available without claiming rescue
   activation until that mechanism is implemented and measured.
 - Implement previous-release retention in selector/update/mirror owners.
-- Management-path commit-confirm, reset triggers, missing-root timeouts and remote
+- [Management-path commit-confirm](management-commit-confirm.md) now has an inert
+  host contract; timer/network integration and D7 remain unqualified. Reset
+  triggers, missing-root timeouts and remote
   companion/export authentication remain separate work. Hardware acceptance still
   requires boot, storage and power-cut drills; this module enables no services.
 
