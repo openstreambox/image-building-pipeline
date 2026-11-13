@@ -208,6 +208,8 @@ render_mount() { # $1=src $2=dst $3=unitname
 }
 render_mount /data/log       /var/log       var-log.mount
 render_mount /data/ceralive  /opt/ceralive  opt-ceralive.mount
+nm_bind=$(systemd-escape -p --suffix=mount /etc/NetworkManager/system-connections)
+render_mount /data/nm/system-connections /etc/NetworkManager/system-connections "$nm_bind"
 
 # Execute the shipped ROCK persistence installer through its early-unit block.
 # Rewrite only output paths outside heredocs; unit bodies and fstab options are
@@ -230,16 +232,24 @@ for line in text.splitlines():
     match=re.search(r"<<['\"]?(\w+)",line)
     line=line.replace('/etc/', '${S}/etc/').replace('/usr/', '${S}/usr/')
     line=line.replace('mkdir -p "${data_root}"', 'mkdir -p "${S}${data_root}"')
+    line=line.replace('install_bounded_apt_metadata /', 'install_bounded_apt_metadata "${S}"')
     lines.append(line)
     if match:
         heredoc=match[1]
 Path(sys.argv[2]).write_text('setup_data_persistence() {\n'+'\n'.join(lines)+'\n}\nsetup_data_persistence\n')
 PY_RENDER
+# Load the real helper definitions, then render their call into the private tree.
+# shellcheck source=mkosi/customize/postinst.d/persistence.sh
+source "${POSTINST_D}/persistence.sh"
+grep -Fq 'install_bounded_apt_metadata "${S}"' "${TMP}/render-growth.sh" \
+  || fail 'bounded APT renderer must target the private tree'
 export S CERALIVE_RUNTIME_SRC="${RUNTIME}" BOARD_ID=rock-5b-plus
 log() { :; }
 resolve_partlabel() { printf '%s\n' data; }
 # shellcheck source=/dev/null
 source "${TMP}/render-growth.sh"
+grep -Fxq 'tmpfs /var/lib/apt/lists tmpfs nosuid,nodev,noexec,size=192M,mode=0755 0 0' "${S}/etc/fstab" \
+  || fail 'default larger APT lists mount missing from rendered fstab'
 
 # Feed the rendered fstab through the real host generator, including growfs,
 # fsck, nofail, and the partition-growth ordering edge. Keep the real stock
@@ -299,7 +309,7 @@ cp "${JOURNAL_FLUSH_DROPIN}" "${ETC}/systemd-journal-flush.service.d/10-ceralive
 systemctl --root "${S}" enable \
   ssh.socket ceralive-ssh-firstboot.service ceralive-ci-uart-bootstrap.service \
   ceralive-migrate-data.service var-log.mount opt-ceralive.mount data.mount \
-  ceralive.service NetworkManager.service ceralive-hostname.service \
+  "$nm_bind" ceralive.service NetworkManager.service ceralive-hostname.service \
   ceralive-machine-id.service ceralive-dpkg-recover.service ceralive-healthcheck.service >/dev/null 2>&1 || true
 mkdir -p "${ETC}/multi-user.target.wants"
 ln -sf ../ssh.service "${ETC}/multi-user.target.wants/ssh.service"
@@ -413,11 +423,18 @@ echo 'systemd-ordering-cycle: Part E dpkg recovery ordering OK (filesystem, reco
 for edge in \
   'data.mount ceralive-grow-data.service' \
   'systemd-growfs@data.service data.mount' \
+  'ceralive-migrate-data.service systemd-growfs@data.service' \
+  'var-log.mount systemd-growfs@data.service' \
+  'opt-ceralive.mount systemd-growfs@data.service' \
+  "$nm_bind systemd-growfs@data.service" \
   'ceralive-data-ready.service systemd-growfs@data.service' \
   'ceralive-data-ready.service ceralive-grow-data.service'; do
   read -r later earlier <<<"$edge"
   probe_orders_after "$later" "$earlier" || fail "$later can precede $earlier"
 done
+# Requires alone can still start repair in parallel; prove the ordering too.
+data_fsck=$(systemd-escape --path --template=systemd-fsck@.service /dev/disk/by-partlabel/data)
+probe_orders_after "$data_fsck" ceralive-grow-data.service || fail 'fsck can start before growth finishes'
 for consumer in ceralive ceralive-healthcheck rauc rauc-hawkbit-updater; do
   probe_orders_after "${consumer}.service" ceralive-data-ready.service \
     || fail "${consumer} can precede data readiness"
@@ -470,15 +487,30 @@ def dependencies(unit):
         paths.extend(sorted((r/(unit+'.d')).glob('*.conf')))
     conf.read(paths)
     result=set()
-    for key in ('Requires','Requisite','BindsTo'):
-        result.update(conf.get('Unit',key,fallback='').split())
+    # systemd accumulates repeated dependency directives; ConfigParser keeps
+    # only the last one (fstab-generator emits one Requires per dependency).
+    accumulated={key: set() for key in ('Requires','Requisite','BindsTo')}
+    for path in paths:
+        section=''
+        for line in path.read_text().splitlines():
+            if line.startswith('['):
+                section=line
+            key, sep, value=line.partition('=')
+            if section == '[Unit]' and sep and key in accumulated:
+                if not value.strip():
+                    accumulated[key].clear()
+                else:
+                    accumulated[key].update(value.split())
+    for values in accumulated.values():
+        result.update(values)
     if any(p=='/data' or p.startswith('/data/') for p in conf.get('Unit','RequiresMountsFor',fallback='').split()):
         result.add('data.mount')
     if unit.endswith('.service') and conf.get('Unit','DefaultDependencies',fallback='yes') != 'no':
         result.add('sysinit.target')
     for r in roots:
         result.update(p.name for p in (r/(unit+'.requires')).glob('*'))
-    return result
+    instance=unit.split('@',1)[1].rsplit('.',1)[0] if '@' in unit else ''
+    return {name.replace('%i', instance) for name in result}
 
 def closure(unit):
     found=set()
@@ -490,6 +522,21 @@ def closure(unit):
         found.add(name)
         pending.extend(dependencies(name)-found)
     return found
+for unit in dependencies('data.mount'):
+    if unit.startswith('systemd-fsck@'):
+        assert 'ceralive-grow-data.service' in closure(unit), 'fsck can write after failed growth'
+assert 'ceralive-grow-data.service' in closure('data.mount'), 'mount can write after failed growth'
+assert 'ceralive-grow-data.service' in closure('systemd-growfs@data.service'), 'growfs can write after failed growth'
+# Failure contract: ordered Requires propagates a failed growfs start job to
+# migration and every writable bind. The cycle probes above separately prove
+# the ordering half; Wants alone must never pass this half of the contract.
+writers=('ceralive-migrate-data.service', 'var-log.mount', 'opt-ceralive.mount',
+         r'etc-NetworkManager-system\x2dconnections.mount')
+for writer in writers:
+    assert 'systemd-growfs@data.service' in closure(writer), writer+' can write after failed growfs'
+for diagnostic in ('ceralive-data-ready.service', 'ceralive-attention.service', 'rescue.target'):
+    assert 'systemd-growfs@data.service' not in closure(diagnostic), diagnostic+' blocked by growfs failure'
+assert 'ceralive-grow-data.service' not in closure('ceralive-attention.service'), 'attention blocked by growth failure'
 for unit in ('ssh.service','ssh.socket','rescue.target'):
     assert 'ceralive-data-ready.service' not in closure(unit), unit+' hard-requires readiness'
 for unit in ('ceralive.service','ceralive-healthcheck.service','rauc.service','rauc-hawkbit-updater.service'):
