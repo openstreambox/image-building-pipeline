@@ -356,6 +356,8 @@ class ReviewTest(unittest.TestCase):
             self.store.begin(BOOT, 0)
         with self.assertRaises(ValueError):
             self.store.health(BOOT, 100, "healthy")
+        with self.assertRaises(ValueError):
+            self.store.intent(BOOT, "activate-other-slot")
 
     def test_cli_uses_boottime_and_safe_bad_config(self):
         import sys
