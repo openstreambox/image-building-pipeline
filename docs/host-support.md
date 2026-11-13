@@ -617,7 +617,8 @@ builder container. `SOURCE_DATE_EPOCH` clamps imported inode timestamps in those
 versions. `E2FSPROGS_FAKE_TIME` alone fixes filesystem creation time but does not
 clamp source access times on older versions. UUID and directory hash seed remain
 fixed separately. The writer refuses older tools rather than emitting a
-silently non-reproducible slot.
+silently non-reproducible slot. The Bats CI job pins Ubuntu 26.04, whose
+distribution e2fsprogs meets that minimum, instead of the migrating latest label.
 
 For a host gate isolated from host process-name signalling, run
 `TMPDIR=/var/tmp BATS_JOBS=1 ci/run-host-tests.sh`. It needs passwordless sudo,
