@@ -15,7 +15,7 @@ python3 - "$work/disk" <<'PY'
 import sys
 with open(sys.argv[1], 'r+b') as f:
     f.seek(34*512); f.write(bytes(range(256))*((32768-34)*2))
-    for sector in (32768,557056,5799936):
+    for sector in (32768,557056,6848512):
         f.seek(sector*512); f.write(b'partition-sentinel'*3072)
 PY
 truncate -s 8G "$work/disk"

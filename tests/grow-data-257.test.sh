@@ -70,7 +70,7 @@ for bad in missing duplicate physical-reordered overlap type; do
   case "$bad" in
     missing) sed '/ data /d' "$work/rock-ab/table" ;;
     duplicate) cat "$work/rock-ab/table"; tail -1 "$work/rock-ab/table" ;;
-    physical-reordered) awk '$5 == 3 {$6=11567104} $5 == 4 {$6=5799936} {print}' "$work/rock-ab/table" ;;
+    physical-reordered) awk '$5 == 3 {$6=18000000} $5 == 4 {$6=6848512} {print}' "$work/rock-ab/table" ;;
     overlap) awk '$5 == 4 {$6-=8} {print}' "$work/rock-ab/table" ;;
     type) sed 's/0FC63DAF-8483-4772-8E79-3D69D8477DE4/00000000-0000-0000-0000-000000000000/g' "$work/rock-ab/table" ;;
   esac >"$work/$bad/table"

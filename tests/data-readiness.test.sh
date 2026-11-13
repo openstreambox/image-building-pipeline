@@ -82,7 +82,7 @@ sed '/^if \[\[ "${1:-}" == --partlabel-guard \]\]; then/,$d' mkosi/runtime/ceral
 echo 'data readiness failure/pending/success and health refusal pass'
 
 # Undersized media is refused.
-for media in 5923405824 8589934591; do
+for media in 8000000000 8589934591; do
   if timeout 2s env MEDIA_BYTES="$media" bash "$helper" >"$work/capacity-error" 2>&1; then exit 1; else status=$?; fi
   [[ "$status" == 78 ]]
   grep -q 'no automatic retry or reboot' "$work/capacity-error"
@@ -99,7 +99,7 @@ bs init
 selected=""
 for _ in {1..8}; do
   selected+="$(bs boot-select | cut -d' ' -f1)"
-  if MEDIA_BYTES=5923405824 bash "$helper" >"$work/capacity-error" 2>&1; then exit 1; else [[ "$?" == 78 ]]; fi
+  if MEDIA_BYTES=8000000000 bash "$helper" >"$work/capacity-error" 2>&1; then exit 1; else [[ "$?" == 78 ]]; fi
 done
 [[ "$selected" == AAABBBAA ]]
 grep -qx 'BOOT_A_LEFT=0' "$CERALIVE_BOOT_STATE_FILE"
@@ -110,7 +110,7 @@ echo 'capacity boundary, terminal refusal and finite boot-attempt regression pas
 # Receipts distinguish every fatal readiness class without disclosing device paths.
 for scenario in media growth filesystem incomplete full readonly inventory; do
   case "$scenario" in
-    media) envs=(MEDIA_BYTES=5923405824); expected='media-too-small' ;;
+    media) envs=(MEDIA_BYTES=8000000000); expected='media-too-small' ;;
     growth) envs=(GROW_STATE=failure); expected='partition-growth' ;;
     filesystem) envs=(FS_STATE=failure); expected='filesystem-growth' ;;
     incomplete) envs=(SMALL_FS=1); expected='filesystem-incomplete' ;;
