@@ -65,7 +65,10 @@ fi
 install_bounded_apt_metadata() {
   local root="${1%/}"
   mkdir -p "$root/var/lib/apt/lists" "$root/etc/apt/apt.conf.d"
-  printf 'tmpfs /var/lib/apt/lists tmpfs nosuid,nodev,noexec,size=192M,mode=0755 0 0\n' >>"$root/etc/fstab"
+  local entry='tmpfs /var/lib/apt/lists tmpfs nosuid,nodev,noexec,size=192M,mode=0755 0 0'
+  if ! grep -Fxq "$entry" "$root/etc/fstab" 2>/dev/null; then
+    printf '%s\n' "$entry" >>"$root/etc/fstab"
+  fi
   printf 'Dir::Cache::pkgcache "";\nDir::Cache::srcpkgcache "";\n' >"$root/etc/apt/apt.conf.d/82bounded-metadata"
 }
 
