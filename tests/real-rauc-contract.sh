@@ -6,6 +6,9 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/require-disposable-guest.sh
+source "${HERE}/lib/require-disposable-guest.sh"
+
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/ceralive-rauc-contract.XXXXXX")"
 CONF="${WORK}/system.conf"

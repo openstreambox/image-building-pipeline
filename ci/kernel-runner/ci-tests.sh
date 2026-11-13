@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Native CI prerequisites in the disposable VM. Never run on the workstation.
 set -euo pipefail
-[[ "$(systemd-detect-virt --vm)" == kvm || "$(systemd-detect-virt --vm)" == qemu ]]
-[[ -d /sys/firmware/qemu_fw_cfg/by_name/opt/ceralive ]]
+# shellcheck source=tests/lib/require-disposable-guest.sh
+source "$(cd "$(dirname "$0")/../.." && pwd)/tests/lib/require-disposable-guest.sh"
 sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "${ROOT}"
@@ -35,6 +35,6 @@ trap 'docker rm "${container}"; rm -rf -- "${work}"' EXIT
 docker export "${container}" >"${RUNNER_TEMP}/kernel-stage-rootfs.tar"
 export CERALIVE_KERNEL_STAGE_ROOTFS="${RUNNER_TEMP}/kernel-stage-rootfs.tar"
 CERALIVE_RUN_REAL_AVAHI_CONTRACT=required \
-  CERALIVE_RUN_REAL_RAUC_CONTRACT=required \
+  CERALIVE_RUN_REAL_RAUC_CONTRACT=disposable-marked-guest-only \
   CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required \
   CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests

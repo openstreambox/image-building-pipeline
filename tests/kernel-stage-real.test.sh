@@ -9,6 +9,9 @@ case "${CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT:-skip}" in
   required) ;;
   *) printf 'CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT must be required or skip\n' >&2; exit 2 ;;
 esac
+# shellcheck source=lib/require-disposable-guest.sh
+source "${HERE}/lib/require-disposable-guest.sh"
+
 if [[ "$(id -u)" -ne 0 ]]; then
   sudo -n true || { printf 'FAIL real kernel stage: root or passwordless sudo required\n' >&2; exit 1; }
   exec sudo -n env TMPDIR="${TMPDIR:?}" \

@@ -1191,7 +1191,7 @@ target, so a fast symlink yields a 0-byte file), so the gate `stat`s each artifa
 follows a terminal-component symlink to the versioned target, and globs the versioned
 initrd name when the bare one is absent; plain-file `/boot` layouts still pass. `run-tests` blocks on the actual boot-script sanitizer, fallback engine,
 mock rollback, preflash adversarial fixtures, and the four privileged hardware-free
-contracts required by CI: `CERALIVE_RUN_REAL_RAUC_CONTRACT=required` exercises
+contracts required by CI: `CERALIVE_RUN_REAL_RAUC_CONTRACT=disposable-marked-guest-only` exercises
 real-RAUC interruption/cleanup,
 `CERALIVE_RUN_REAL_AVAHI_CONTRACT=required` exercises real mDNS arbitration in
 private namespaces, `CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required` exercises

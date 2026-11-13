@@ -34,7 +34,7 @@ ci/check-suite-literals.sh --self-test
 ci/check-suite-literals.sh
 python3 ci/check-first-party-pins.py
 python3 ci/validate-manifests.py
-CERALIVE_RUN_REAL_AVAHI_CONTRACT=required CERALIVE_RUN_REAL_RAUC_CONTRACT=required CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
+CERALIVE_RUN_REAL_AVAHI_CONTRACT=required CERALIVE_RUN_REAL_RAUC_CONTRACT=disposable-marked-guest-only CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
 ```
 Python dependencies: `ci/requirements-ci.txt`; tools/provisioning: `v2-ci.yml`.
 The kernel-stage contract also needs `CERALIVE_KERNEL_STAGE_ROOTFS`, a pre-exported

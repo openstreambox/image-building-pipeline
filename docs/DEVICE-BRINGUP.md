@@ -910,7 +910,7 @@ clean checkout:
 
 ```bash
 CERALIVE_RUN_REAL_AVAHI_CONTRACT=required \
-  CERALIVE_RUN_REAL_RAUC_CONTRACT=required \
+  CERALIVE_RUN_REAL_RAUC_CONTRACT=disposable-marked-guest-only \
   CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required \
   CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
 ```

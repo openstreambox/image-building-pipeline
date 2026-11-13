@@ -17,7 +17,22 @@ THIRD = "33333333-3333-4333-8333-333333333333"
 
 
 def concurrent_begin(root):
-    return r.Store(root, limit=2, healthy_seconds=60).begin(OTHER, 0)
+    return r.Store(root, limit=2, healthy_seconds=60).begin(OTHER, 0, reset_cause="watchdog")
+
+
+def slow_health(root, ready):
+    import time
+    store = r.Store(root, limit=2, healthy_seconds=60)
+    def change(record, witness):
+        witness["health"] = "failed"
+        ready.set()
+        time.sleep(0.3)
+    store.update(BOOT, change)
+
+
+def racing_intent(root, ready):
+    ready.wait(5)
+    r.Store(root, limit=2, healthy_seconds=60).intent(BOOT, "activate-other-slot")
 
 
 class RecoveryTest(unittest.TestCase):
@@ -27,10 +42,11 @@ class RecoveryTest(unittest.TestCase):
         self.store = r.Store(Path(self.tmp.name), limit=2, healthy_seconds=60)
 
     def boot(self, boot=BOOT, now=0):
-        return self.store.begin(boot, now, slot="A")
+        return self.store.begin(boot, now, slot="A", reset_cause="watchdog")
 
     def rearm(self, boot=BOOT, now=0):
         self.store.health(boot, now, "healthy")
+        self.store.health(boot, now + 30, "healthy")
         return self.store.health(boot, now + 60, "healthy")
 
     def test_missing_is_spent_then_healthy_dwell_recovers(self):
@@ -76,6 +92,7 @@ class RecoveryTest(unittest.TestCase):
         self.boot()
         with patch("time.time", return_value=10**12):
             self.store.health(BOOT, 5, "healthy")
+        self.store.health(BOOT, 35, "healthy")
         with patch("time.time", return_value=-10**12):
             self.assertFalse(self.store.health(BOOT, 64, "healthy")["automatic_reset_allowed"])
             self.assertTrue(self.store.health(BOOT, 65, "healthy")["automatic_reset_allowed"])
@@ -86,6 +103,7 @@ class RecoveryTest(unittest.TestCase):
         self.assertFalse(self.store.health(BOOT, 1, "healthy")["automatic_reset_allowed"])
         self.store.health(BOOT, 50, "failed")
         self.assertFalse(self.store.health(BOOT, 60, "healthy")["automatic_reset_allowed"])
+        self.store.health(BOOT, 90, "healthy")
         self.assertFalse(self.store.health(BOOT, 119, "healthy")["automatic_reset_allowed"])
         self.assertTrue(self.store.health(BOOT, 120, "healthy")["automatic_reset_allowed"])
 
@@ -152,7 +170,7 @@ class RecoveryTest(unittest.TestCase):
         with patch.object(r, "MAX_BYTES", 1):
             with self.assertRaises(ValueError):
                 self.boot(OTHER)
-        self.assertEqual(before, self.store.path.read_bytes())
+        self.assertEqual(before, (self.store.root / "recovery.rejected").read_bytes())
 
     def test_post_replace_sync_failure_is_reported_and_retry_is_idempotent(self):
         self.boot()
@@ -210,7 +228,7 @@ spec = importlib.util.spec_from_file_location('recovery', sys.argv[1])
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
 r.os.replace = lambda *args: os._exit(99)
-r.Store(sys.argv[2], limit=2, healthy_seconds=60).intent(sys.argv[3], 'reset')
+r.Store(sys.argv[2], limit=2, healthy_seconds=60).intent(sys.argv[3], 'activate-other-slot')
 """
         killed = subprocess.run([sys.executable, "-c", program, SPEC.origin, str(self.store.root), BOOT])
         self.assertEqual(killed.returncode, 99)
@@ -238,6 +256,102 @@ r.Store(sys.argv[2], limit=2, healthy_seconds=60).intent(sys.argv[3], 'reset')
         self.rearm()
         other = r.Store(self.store.root, limit=3, healthy_seconds=60)
         self.assertFalse(other.begin(OTHER, 0)["automatic_reset_allowed"])
+
+
+class ReviewTest(unittest.TestCase):
+    setUp = RecoveryTest.setUp
+    boot = RecoveryTest.boot
+    rearm = RecoveryTest.rearm
+    def test_lock_prevents_lost_health_and_intent_update(self):
+        import multiprocessing
+        self.boot()
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        processes = [context.Process(target=slow_health, args=(self.store.root, ready)),
+                     context.Process(target=racing_intent, args=(self.store.root, ready))]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(10)
+            self.assertEqual(process.exitcode, 0)
+        witness = self.store.read()["boots"][BOOT]
+        self.assertEqual(witness["health"], "failed")
+        self.assertEqual(witness["intent"], "activate-other-slot")
+
+    def test_denied_reset_has_no_intent_and_cli_exit_3(self):
+        import subprocess, sys
+        self.boot()
+        result = self.store.intent(BOOT, "reset")
+        self.assertFalse(result["automatic_reset_allowed"])
+        self.assertEqual(self.store.read()["boots"][BOOT]["intent"], "none")
+        # CLI boot identity is real, without issuing any reset.
+        actual = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        self.store.begin(actual, 0)
+        result = subprocess.run([sys.executable, SPEC.origin, "--state-dir", str(self.store.root),
+            "--limit", "2", "--healthy-seconds", "60", "intent", "reset"], capture_output=True)
+        self.assertEqual(result.returncode, 3)
+
+    def test_bounded_history_rearms_after_many_boots(self):
+        with patch.object(r, "MAX_WITNESSES", 4, create=True):
+            for i in range(12):
+                self.store.begin("%08x-1111-4111-8111-111111111111" % (i+1), 0)
+            record = self.store.read()
+            self.assertLessEqual(len(record["boots"]), 4)
+            self.assertGreater(record["pruned_boots"], 0)
+            last = record["current_boot"]
+            self.store.health(last, 0, "healthy")
+            self.store.health(last, 30, "healthy")
+            self.assertTrue(self.store.health(last, 60, "healthy")["automatic_reset_allowed"])
+
+    def test_invalid_record_quarantined_and_orphans_cleaned(self):
+        self.store.path.write_bytes(b"torn evidence")
+        (self.store.root / ".write-orphan").write_bytes(b"old")
+        self.boot()
+        self.assertEqual((self.store.root / "recovery.rejected").read_bytes(), b"torn evidence")
+        self.assertFalse((self.store.root / ".write-orphan").exists())
+
+    def test_threshold_change_preserves_history(self):
+        self.boot()
+        self.rearm()
+        self.store.intent(BOOT, "activate-other-slot")
+        changed = r.Store(self.store.root, limit=2, healthy_seconds=90)
+        result = changed.begin(OTHER, 0, reset_cause="power-on")
+        self.assertFalse(result["automatic_reset_allowed"])
+        self.assertEqual(changed.read()["boots"][BOOT]["intent"], "activate-other-slot")
+
+    def test_gap_resets_health_and_heartbeat_does_not_write(self):
+        self.boot()
+        self.store.health(BOOT, 0, "healthy")
+        before = self.store.path.read_bytes()
+        self.store.health(BOOT, 10, "healthy")
+        self.assertEqual(before, self.store.path.read_bytes())
+        self.assertFalse(self.store.health(BOOT, 70, "healthy")["automatic_reset_allowed"])
+        restarted = r.Store(self.store.root, limit=2, healthy_seconds=60)
+        self.assertFalse(restarted.health(BOOT, 1000, "healthy")["automatic_reset_allowed"])
+
+    def test_clean_power_cycles_never_exhaust(self):
+        self.boot()
+        self.rearm()
+        for boot in (OTHER, THIRD):
+            result = self.store.begin(boot, 0, reset_cause="power-on")
+            self.assertEqual(result["remaining"], 2)
+            self.assertFalse(result["rescue_required"])
+            self.assertFalse(result["rescue_active"])
+        with self.assertRaises(ValueError):
+            self.store.begin(BOOT, 0)
+        with self.assertRaises(ValueError):
+            self.store.health(BOOT, 100, "healthy")
+
+    def test_cli_uses_boottime_and_safe_bad_config(self):
+        import sys
+        with patch.object(sys, "argv", [SPEC.origin, "--state-dir", str(self.store.root),
+                "--limit", "2", "--healthy-seconds", "60", "begin"]), \
+                patch.object(r.time, "clock_gettime", return_value=123) as clock:
+            r.main()
+            clock.assert_called_once_with(r.time.CLOCK_BOOTTIME)
+        with patch.object(sys, "argv", [SPEC.origin, "--state-dir", str(self.store.root),
+                "--limit", "0", "--healthy-seconds", "60", "begin"]):
+            self.assertEqual(r.main(), 1)
 
 
 if __name__ == "__main__":

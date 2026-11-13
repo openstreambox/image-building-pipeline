@@ -14,6 +14,9 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/require-disposable-guest.sh
+source "${HERE}/lib/require-disposable-guest.sh"
+
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 POSTINST_ENTRY="${PIPELINE_DIR}/mkosi/customize/postinst-lib.sh"
 POSTINST_D="${PIPELINE_DIR}/mkosi/customize/postinst.d"

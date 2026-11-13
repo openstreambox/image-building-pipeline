@@ -81,6 +81,33 @@ cut -f1 "${WORK}/rows.tsv" | LC_ALL=C sort > "${WORK}/registered.txt"
 dupes="$(uniq -d < "${WORK}/registered.txt" | wc -l | tr -d ' ')"
 assert_eq "no path is registered twice" "0" "${dupes}"
 
+# Every privileged entry must guard itself, including direct invocation.
+while IFS=$'\t' read -r path _kind tier _execution _reason; do
+  [[ "${tier}" == privileged ]] || continue
+  if grep -F 'source "${HERE}/lib/require-disposable-guest.sh"' "${PIPELINE_DIR}/${path}" >/dev/null; then
+    ok "privileged harness sources guest guard: ${path}"
+  else
+    bad "privileged harness lacks guest guard: ${path}"
+  fi
+done <"${WORK}/rows.tsv"
+
+# Exercise only the shared guard, never a privileged harness. Substitute a
+# temporary marker path in a copy so all four guest/marker combinations are safe.
+sed "s|/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive|${WORK}/guest-marker|g" \
+  "${HERE}/lib/require-disposable-guest.sh" > "${WORK}/guard.sh"
+for virt in none kvm; do
+  for marker in absent present; do
+    rm -rf "${WORK}/guest-marker"
+    [[ "${marker}" != present ]] || mkdir "${WORK}/guest-marker"
+    bash -c 'systemd-detect-virt() { echo "$1"; }; v="$1"; systemd-detect-virt() { echo "$v"; }; source "$2"' \
+      guard "${virt}" "${WORK}/guard.sh" >"${WORK}/guard.log" 2>&1
+    rc=$?
+    expected=2
+    [[ "${virt}" != kvm || "${marker}" != present ]] || expected=0
+    assert_eq "guest guard ${virt}/${marker}" "${expected}" "${rc}"
+  done
+done
+
 # --- 1. forward: every tracked tests/ file is registered -------------------
 echo
 echo "### 1. completeness — no tracked test file may be unregistered"

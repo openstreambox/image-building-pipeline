@@ -12,7 +12,8 @@ import re
 import tempfile
 import time
 
-VERSION = 1
+VERSION = 2
+MAX_WITNESSES = 64
 MAX_BYTES = 4 * 1024 * 1024
 INTENTS = {"none", "reset", "activate-other-slot", "unbind-adapter"}
 CONSOLE_MARKERS = {"kernel-start", "root-wait", "userspace-start", "panic", "watchdog-reset"}
@@ -71,30 +72,37 @@ class Store:
         self.path = self.root / "recovery.json"
         self.limit = limit
         self.healthy_seconds = healthy_seconds
+        self.max_health_gap = min(30, healthy_seconds)
+        self._health = {}
 
     def empty(self, source):
         return {"version": VERSION, "limit": self.limit, "healthy_seconds": self.healthy_seconds,
-                "remaining": 0, "current_boot": None, "boots": {}, "source": source}
+                "remaining": 0, "current_boot": None, "boots": {}, "source": source, "exhausted": False,
+                "pruned_boots": 0, "max_health_gap": self.max_health_gap}
 
     def validate(self, record):
         if set(record) != set(self.empty("missing")):
             raise ValueError("unknown record shape")
         if (type(record["version"]) is not int or record["version"] != VERSION
-                or type(record["limit"]) is not int or record["limit"] != self.limit
-                or type(record["healthy_seconds"]) is not int or record["healthy_seconds"] != self.healthy_seconds
-                or type(record["remaining"]) is not int or not 0 <= record["remaining"] <= self.limit
+                or type(record["limit"]) is not int or not 1 <= record["limit"] <= 1000
+                or type(record["healthy_seconds"]) is not int or not 1 <= record["healthy_seconds"] <= 604800
+                or type(record["remaining"]) is not int or not 0 <= record["remaining"] <= record["limit"]
                 or record["source"] not in {"missing", "invalid", "valid"}
                 or not isinstance(record["boots"], dict)):
             raise ValueError("invalid budget")
         if record["current_boot"] is not None and record["current_boot"] not in record["boots"]:
             raise ValueError("missing current boot")
+        if (type(record["exhausted"]) is not bool or type(record["pruned_boots"]) is not int
+                or record["pruned_boots"] < 0 or type(record["max_health_gap"]) is not int
+                or not 1 <= record["max_health_gap"] <= 30):
+            raise ValueError("invalid recovery policy")
         for key, witness in record["boots"].items():
             boot_id(key)
             if set(witness) != {"state_source", "budget_at_start", "previous_boot", "slot", "counters", "bootloader", "reset_cause", "detectors", "console_tail", "health", "intent", "last_uptime", "healthy_since", "budget_remaining"}:
                 raise ValueError("unknown witness shape")
             if witness["state_source"] not in {"missing", "invalid", "valid"}:
                 raise ValueError("invalid initial state source")
-            if type(witness["budget_at_start"]) is not int or not 0 <= witness["budget_at_start"] <= self.limit:
+            if type(witness["budget_at_start"]) is not int or not 0 <= witness["budget_at_start"] <= 1000:
                 raise ValueError("invalid initial budget")
             if witness["previous_boot"] is not None:
                 boot_id(witness["previous_boot"])
@@ -108,7 +116,7 @@ class Store:
                     raise ValueError("invalid health anchor")
             if witness["health"] not in HEALTH or witness["intent"] not in INTENTS:
                 raise ValueError("invalid witness verdict")
-            if type(witness["budget_remaining"]) is not int or not 0 <= witness["budget_remaining"] <= self.limit:
+            if type(witness["budget_remaining"]) is not int or not 0 <= witness["budget_remaining"] <= 1000:
                 raise ValueError("invalid witness budget")
         return record
 
@@ -122,7 +130,12 @@ class Store:
             envelope = json.loads(raw)
             if set(envelope) != {"record", "sha256"} or envelope["sha256"] != hashlib.sha256(encoded(envelope["record"])).hexdigest():
                 raise ValueError("integrity mismatch")
-            return self.validate(envelope["record"])
+            record = self.validate(envelope["record"])
+            if (record["healthy_seconds"] != self.healthy_seconds or record["limit"] != self.limit
+                    or record["max_health_gap"] != self.max_health_gap):
+                record.update(remaining=0, source="invalid", limit=self.limit,
+                              healthy_seconds=self.healthy_seconds, max_health_gap=self.max_health_gap)
+            return record
         except FileNotFoundError:
             return self.empty("missing")
         except (OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError):
@@ -132,6 +145,7 @@ class Store:
     def locked(self):
         # fsync the parent even after restart after an interrupted mkdir.
         self.root.mkdir(mode=0o700, exist_ok=True)
+        self.root.chmod(0o700)
         parent = os.open(self.root.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(parent)
@@ -168,10 +182,10 @@ class Store:
             remaining = 0
         return {"version": VERSION, "boot_id": record["current_boot"], "remaining": remaining,
                 "automatic_reset_allowed": remaining > 0,
-                "rescue_required": remaining == 0,
+                "rescue_required": record["exhausted"],
                 "rescue_active": False,
                 "announcement": ("Rescue required: reset budget exhausted or uncertain. Automatic resets denied; management and log export must remain available."
-                                 if remaining == 0 else "Recovery reset budget available."),
+                                 if record["exhausted"] else ("Recovery reset budget unavailable; confirm continuous health." if remaining == 0 else "Recovery reset budget available.")),
                 "state_source": record["source"]}
 
     def begin(self, boot, now, *, slot="unknown", counters=None, bootloader="unknown",
@@ -184,6 +198,16 @@ class Store:
         observations(slot, counters, bootloader, reset_cause, detectors, console_tail)
         with self.locked():
             record = self.read()
+            for orphan in self.root.glob(".write-*"):
+                orphan.unlink()
+            if record["source"] == "invalid" and not record["boots"] and self.path.exists():
+                # Preserve one rejected generation, even when its contents cannot be read.
+                os.replace(self.path, self.root / "recovery.rejected")
+                directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
             if boot in record["boots"]:
                 if record["current_boot"] != boot:
                     raise ValueError("stale boot")
@@ -191,14 +215,28 @@ class Store:
                 # Recommit before returning a successful idempotent admission.
                 self.write(record)
                 return self.view(record)
-            record["remaining"] = max(0, record["remaining"] - 1)
             previous_boot = record["current_boot"]
+            prior = record["boots"].get(previous_boot, {})
+            charge = prior.get("intent") == "reset" or reset_cause in {"watchdog", "software"}
+            if charge:
+                record["remaining"] = max(0, record["remaining"] - 1)
+                record["exhausted"] = record["remaining"] == 0
             record["current_boot"] = boot
             record["boots"][boot] = dict(state_source=record["source"],
                 budget_at_start=record["remaining"], previous_boot=previous_boot, slot=slot, counters=counters, bootloader=bootloader,
                 reset_cause=reset_cause, detectors=detectors, console_tail=console_tail,
                 health="unknown", intent="none", last_uptime=now, healthy_since=None,
                 budget_remaining=record["remaining"])
+            # Keep insertion order via the explicit previous_boot chain (JSON keys sort).
+            keep, current = [], boot
+            while current is not None and len(keep) < MAX_WITNESSES:
+                keep.append(current)
+                current = record["boots"][current]["previous_boot"]
+            removed = set(record["boots"]) - set(keep)
+            record["pruned_boots"] += len(removed)
+            for key in removed:
+                del record["boots"][key]
+            record["boots"][keep[-1]]["previous_boot"] = None
             self.write(record)
             return self.view(record)
 
@@ -216,27 +254,41 @@ class Store:
         """Call and await success BEFORE submitting the disruptive operation."""
         if action not in INTENTS:
             raise ValueError("invalid intent")
-        return self.update(boot, lambda record, witness: witness.update(intent=action))
+        def change(record, witness):
+            if action == "reset" and record["remaining"] == 0:
+                return
+            witness["intent"] = action
+        return self.update(boot, change)
 
     def health(self, boot, now, verdict):
         uptime(now)
         if verdict not in HEALTH:
             raise ValueError("invalid health")
 
-        def change(record, witness):
-            if now < witness["last_uptime"] or verdict != "healthy":
-                witness["healthy_since"] = None
-            witness["last_uptime"] = now
-            witness["health"] = verdict
-            if verdict == "healthy":
-                if witness["healthy_since"] is None:
-                    witness["healthy_since"] = now
-                if now - witness["healthy_since"] >= self.healthy_seconds:
-                    record["remaining"] = self.limit
-                    record["source"] = "valid"
+        # Heartbeats are process-local. A restarted reporter must start a new dwell;
+        # persisted healthy snapshots cannot prove that the reporter stayed alive.
+        boot_id(boot)
+        with self.locked():
+            record = self.read()
+            if record["current_boot"] != boot:
+                raise ValueError("current boot witness unavailable")
+            witness = record["boots"][boot]
+            prior = self._health.get(boot)
+            continuous = (prior is not None and prior[2] == "healthy" and verdict == "healthy"
+                          and 0 <= now - prior[0] <= self.max_health_gap)
+            anchor = prior[1] if continuous else (now if verdict == "healthy" else None)
+            self._health[boot] = (now, anchor, verdict)
+            rearm = verdict == "healthy" and now - anchor >= self.healthy_seconds
+            transition = (not continuous or verdict != witness["health"] or rearm)
+            if not transition:
+                return self.view(record)
+            witness.update(last_uptime=now, health=verdict, healthy_since=anchor)
+            if rearm:
+                record.update(remaining=self.limit, source="valid", exhausted=False)
+                self._health[boot] = (now, now, verdict)
             witness["budget_remaining"] = record["remaining"]
-
-        return self.update(boot, change)
+            self.write(record)
+            return self.view(record)
 
 
 def main():
@@ -251,8 +303,8 @@ def main():
     sub.add_parser("intent").add_argument("action", choices=sorted(INTENTS))
     sub.add_parser("health").add_argument("verdict", choices=sorted(HEALTH))
     args = parser.parse_args()
-    store = Store(args.state_dir, limit=args.limit, healthy_seconds=args.healthy_seconds)
     try:
+        store = Store(args.state_dir, limit=args.limit, healthy_seconds=args.healthy_seconds)
         if args.command == "export":
             result = store.read()
         elif args.command == "status":
@@ -267,6 +319,8 @@ def main():
             else:
                 result = store.health(boot, now, args.verdict)
         print(json.dumps(result, sort_keys=True))
+        if args.command == "intent" and args.action == "reset" and not result["automatic_reset_allowed"]:
+            return 3
     except (OSError, ValueError):
         # Do not echo paths, raw input or exception text into a support report.
         print(json.dumps({"automatic_reset_allowed": False, "rescue_required": True,
