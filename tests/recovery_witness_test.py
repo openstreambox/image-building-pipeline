@@ -191,7 +191,8 @@ class RecoveryTest(unittest.TestCase):
         with patch.object(r, "MAX_BYTES", 1):
             with self.assertRaises(ValueError):
                 self.boot(OTHER)
-        self.assertEqual(before, (self.store.root / "recovery.rejected").read_bytes())
+        rejected = list(self.store.root.glob("recovery.rejected-*"))
+        self.assertEqual([before], [path.read_bytes() for path in rejected])
 
     def test_post_replace_sync_failure_is_reported_and_retry_is_idempotent(self):
         self.boot()
@@ -328,7 +329,8 @@ class ReviewTest(unittest.TestCase):
         self.store.path.write_bytes(b"torn evidence")
         (self.store.root / ".write-orphan").write_bytes(b"old")
         self.boot()
-        self.assertEqual((self.store.root / "recovery.rejected").read_bytes(), b"torn evidence")
+        self.assertEqual([path.read_bytes() for path in self.store.root.glob("recovery.rejected-*")],
+                         [b"torn evidence"])
         self.assertFalse((self.store.root / ".write-orphan").exists())
 
     def test_threshold_change_preserves_history(self):
@@ -1070,6 +1072,201 @@ class ThirdReviewTest(unittest.TestCase):
         self.store.begin(boots[2], 0, reset_cause="watchdog")
         self.assertEqual(self.store.begin(boots[3], 0, reset_cause="power-on")["remaining"], 1)
         self.assertEqual(self.store.read()["charges_without_credit"], 0)
+
+
+def resign(path, change):
+    """Rewrite a ledger with a valid checksum after changing its record."""
+    envelope = json.loads(path.read_text())
+    change(envelope["record"])
+    envelope["sha256"] = r.hashlib.sha256(r.encoded(envelope["record"])).hexdigest()
+    path.write_text(json.dumps(envelope))
+
+
+class FourthReviewTest(unittest.TestCase):
+    """Round-4 review: rescue only for a needed reset; uncredited requests; schema carry."""
+    setUp = RecoveryTest.setUp
+    rearm = RecoveryTest.rearm
+    BOOTS = ThirdReviewTest.BOOTS
+    spent = ThirdReviewTest.spent
+    snapshot = ThirdReviewTest.snapshot
+
+    def request(self, boot, action="reset", proof=None, now=62, store=None):
+        store = store or self.store
+        with patch.object(r, "_boottime", return_value=now):
+            return store.rollback(boot, pinned_bootloader=PIN, action=action,
+                                  probe=lambda: good_proof(boot) if proof is None else proof)
+
+    def test_update_trial_with_the_budget_spent_refuses_without_rescue(self):
+        boot = self.spent()
+        result = self.request(boot, "activate-other-slot")
+        self.assertEqual(result["decision"], "REFUSE")
+        self.assertFalse(result["update_trial_allowed"])
+        self.assertEqual(result["state"], "reset-budget-spent")
+        self.assertFalse(result["rescue_required"])
+        self.assertFalse(result["stop_media"])
+        self.assertIn(r.Store.budget_reason(self.store.read()), result["refusal_reasons"])
+        self.assertFalse(self.store.read()["rescue"]["required"])
+        self.assertEqual(self.store.read()["boots"][boot]["granted"], "none")
+        # A reset request is the need that enters rescue.
+        result = self.request(boot, "reset")
+        self.assertEqual(result["state"], "rescue-required")
+        self.assertTrue(result["stop_media"])
+
+    def test_trial_after_the_last_granted_reset_keeps_streaming(self):
+        store = Store(Path(self.tmp.name) / "one", limit=1, healthy_seconds=60)
+        boots = self.BOOTS
+        store.begin(boots[0], 0, reset_cause="power-on")
+        for now in (0, 30, 60):
+            store.health(boots[0], now, "healthy")
+        self.assertEqual(self.request(boots[0], store=store)["decision"], "ALLOW")
+        self.assertEqual(store.begin(boots[1], 0, reset_cause="software")["state"], "reset-budget-spent")
+        store.health(boots[1], 1, "healthy")
+        view = self.request(boots[1], "activate-other-slot", store=store)
+        self.assertEqual(view["state"], "reset-budget-spent")
+        self.assertFalse(store.read()["rescue"]["required"])
+
+    def test_reset_request_with_bad_evidence_and_the_budget_spent_enters_rescue(self):
+        boot = self.spent()
+        proof = good_proof(boot)
+        proof["watchdog"] = "unknown"
+        result = self.request(boot, proof=proof)
+        self.assertFalse(result["rollback_armed"])
+        self.assertEqual(result["state"], "rescue-required")
+
+    def test_rescue_without_exhausted_is_not_a_valid_record(self):
+        self.store.begin(BOOT, 0, reset_cause="power-on")
+        self.rearm()
+        resign(self.store.path, lambda record: record["rescue"].update(required=True, entries=1))
+        record = self.store.read()
+        self.assertEqual(record["source"], "invalid")
+        self.assertEqual(record["remaining"], 0)
+
+    def test_refused_reset_requests_without_credit_count_once_per_boot(self):
+        store = Store(Path(self.tmp.name) / "three", limit=3, healthy_seconds=60)
+        boots = self.BOOTS
+        store.begin(boots[0], 0, reset_cause="power-on")
+        for _ in range(5):
+            view = self.request(boots[0], store=store)
+        self.assertEqual(view["state"], "rollback-not-armed")
+        self.assertEqual(store.read()["charges_without_credit"], 1)
+        # Trials never count; a boot already counted by its own charge adds nothing.
+        store.begin(boots[1], 0, reset_cause="watchdog")
+        self.request(boots[1], "activate-other-slot", store=store)
+        self.request(boots[1], store=store)
+        self.assertEqual(store.read()["charges_without_credit"], 2)
+        store.begin(boots[2], 0, reset_cause="power-on")
+        view = self.request(boots[2], store=store)
+        self.assertEqual(view["state"], "reset-budget-spent")
+        self.assertFalse(view["stop_media"])
+        self.assertFalse(store.read()["rescue"]["required"])
+        # The next reset the box needs with nothing left is rescue.
+        self.assertEqual(self.request(boots[2], store=store)["state"], "rescue-required")
+        self.assertEqual(store.read()["rescue"]["entries"], 1)
+
+    def test_refused_requests_reach_rescue_on_a_quarantined_ledger(self):
+        boots = self.BOOTS
+        self.store.path.write_bytes(b"torn")
+        for i in range(2):
+            self.store.begin(boots[i], 0, reset_cause="power-on")
+            view = self.request(boots[i])
+        self.assertEqual(view["state"], "reset-budget-spent")
+        self.assertEqual(self.request(boots[1])["state"], "rescue-required")
+
+    def test_refused_requests_can_be_left_uncounted_by_setting(self):
+        store = Store(Path(self.tmp.name) / "ignore", limit=2, healthy_seconds=60,
+                      refused_reset_requests="ignore")
+        for i, boot in enumerate(self.BOOTS):
+            store.begin(boot, 0, reset_cause="power-on")
+            for _ in range(3):
+                view = self.request(boot, store=store)
+        self.assertEqual(view["state"], "rollback-not-armed")
+        self.assertEqual(store.read()["charges_without_credit"], 0)
+        with self.assertRaises(ValueError):
+            r.Store(self.tmp.name, limit=2, healthy_seconds=60, refused_reset_requests="always")
+        self.assertEqual(r.Store(self.tmp.name, limit=2, healthy_seconds=60).refused_reset_requests,
+                         "count-per-boot")
+
+    def test_requests_with_credit_left_are_not_counted(self):
+        self.store.begin(BOOT, 0, reset_cause="power-on")
+        self.rearm()
+        proof = good_proof()
+        proof["watchdog"] = "unknown"
+        self.assertEqual(self.request(BOOT, proof=proof)["decision"], "REFUSE")
+        self.assertEqual(self.store.read()["charges_without_credit"], 0)
+
+    def test_a_known_latch_survives_a_schema_change_in_either_direction(self):
+        for version in (r.VERSION - 2, r.VERSION - 1, r.VERSION + 1):
+            with self.subTest(version=version):
+                self.store.path.unlink(missing_ok=True)
+                self.spent()
+                self.store.begin(self.BOOTS[3], 0, reset_cause="watchdog")
+                def other_schema(record):
+                    record["version"] = version
+                    record.pop("charges_without_credit", None)
+                    record["future_field"] = 1
+                resign(self.store.path, other_schema)
+                view = self.store.view(self.store.read())
+                self.assertEqual(view["state"], "rescue-required")
+                self.assertTrue(view["stop_media"])
+                view = self.store.begin(self.BOOTS[4], 0, reset_cause="power-on")
+                self.assertEqual(view["state"], "rescue-required")
+                self.assertEqual(self.store.read()["rescue"]["entries"], 1)
+                self.assertEqual(self.store.read()["source"], "invalid")
+        self.store.path.unlink()
+        self.spent()
+        resign(self.store.path, lambda record: record.update(version=r.VERSION + 1))
+        self.assertEqual(self.store.view(self.store.read())["state"], "reset-budget-spent")
+
+    def test_unknown_latch_does_not_stop_media(self):
+        self.spent()
+        self.store.begin(self.BOOTS[3], 0, reset_cause="watchdog")
+        self.store.path.write_bytes(b"torn")
+        view = self.store.view(self.store.read())
+        self.assertIsNone(view["rescue_required"])
+        self.assertFalse(view["stop_media"])
+        self.assertEqual(view["decision"], "REFUSE")
+
+    def test_rejected_generations_are_kept_and_never_overwritten(self):
+        legacy = self.store.root / "recovery.rejected"
+        self.store.root.mkdir(exist_ok=True)
+        legacy.write_bytes(b"older release quarantine")
+        for i, damage in enumerate((b"first", b"second", b"first")):
+            self.store.path.write_bytes(damage)
+            self.store.begin(self.BOOTS[i], 0, reset_cause="power-on")
+        rejected = sorted(path.read_bytes() for path in self.store.root.glob("recovery.rejected-*"))
+        self.assertEqual(rejected, [b"first", b"second"])
+        self.assertEqual(legacy.read_bytes(), b"older release quarantine")
+        for i in range(3, 3 + r.MAX_REJECTED + 2):
+            self.store.path.write_bytes(b"damage %d" % i)
+            self.store.begin(self.BOOTS[i % len(self.BOOTS)] if i < len(self.BOOTS) else
+                             "%08x-dddd-4ddd-8ddd-dddddddddddd" % i, 0, reset_cause="power-on")
+        self.assertEqual(len(list(self.store.root.glob("recovery.rejected-*"))), r.MAX_REJECTED)
+
+    def test_unused_grant_expires_after_a_healthy_interval_that_started_after_it(self):
+        store = Store(Path(self.tmp.name) / "grant", limit=1, healthy_seconds=60)
+        boots = self.BOOTS
+        store.begin(boots[0], 0, reset_cause="power-on")
+        for now in (0, 30, 60):
+            store.health(boots[0], now, "healthy")
+        self.assertEqual(self.request(boots[0], now=62, store=store)["decision"], "ALLOW")
+        for now in (90, 120):
+            store.health(boots[0], now, "healthy")
+        # That re-arm's dwell started at 60, before the grant: still charged.
+        self.assertEqual(store.read()["boots"][boots[0]]["granted"], "reset")
+        for now in (150, 180):
+            store.health(boots[0], now, "healthy")
+        self.assertEqual(store.read()["boots"][boots[0]]["granted"], "none")
+        self.assertEqual(store.begin(boots[1], 0, reset_cause="power-on")["remaining"], 1)
+
+    def test_grant_used_promptly_is_still_charged(self):
+        store = Store(Path(self.tmp.name) / "used", limit=1, healthy_seconds=60)
+        boots = self.BOOTS
+        store.begin(boots[0], 0, reset_cause="power-on")
+        for now in (0, 30, 60):
+            store.health(boots[0], now, "healthy")
+        self.request(boots[0], now=62, store=store)
+        store.health(boots[0], 70, "healthy")
+        self.assertEqual(store.begin(boots[1], 0, reset_cause="software")["state"], "reset-budget-spent")
 
 
 if __name__ == "__main__":

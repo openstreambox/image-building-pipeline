@@ -12,8 +12,9 @@ import re
 import tempfile
 import time
 
-VERSION = 5
+VERSION = 6
 MAX_WITNESSES = 64
+MAX_REJECTED = 4
 MAX_BYTES = 4 * 1024 * 1024
 INTENTS = {"none", "reset", "activate-other-slot", "unbind-adapter"}
 CONSOLE_MARKERS = {"kernel-start", "root-wait", "userspace-start", "panic", "watchdog-reset"}
@@ -27,6 +28,10 @@ CHARGED_CAUSES = {"watchdog", "panic"}
 GRANTS = {"none", "reset", "activate-other-slot"}
 ACTIONS = GRANTS - {"none"}
 FRESH_SECONDS = 5
+# What a reset request refused for want of credit means on a box that never
+# confirmed health: count it like a charged reset, once per boot (default), or
+# leave it uncounted so only charged boots can reach rescue.
+REFUSED_RESET_REQUESTS = {"count-per-boot", "ignore"}
 PIN_FORMAT = r"sha256:[0-9a-f]{64}"
 
 
@@ -77,11 +82,14 @@ class Store:
     All producers must use this API; no edits or parallel alternate writers.
     """
 
-    def __init__(self, root, *, limit, healthy_seconds):
+    def __init__(self, root, *, limit, healthy_seconds, refused_reset_requests="count-per-boot"):
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("invalid budget limit")
         if type(healthy_seconds) is not int or not 1 <= healthy_seconds <= 604800:
             raise ValueError("invalid health interval")
+        if refused_reset_requests not in REFUSED_RESET_REQUESTS:
+            raise ValueError("invalid refused reset request policy")
+        self.refused_reset_requests = refused_reset_requests
         self.root = Path(root)
         self.path = self.root / "recovery.json"
         self.limit = limit
@@ -128,8 +136,14 @@ class Store:
         self.validate_release(record["release"])
         for key, witness in record["boots"].items():
             boot_id(key)
-            if set(witness) != {"state_source", "budget_at_start", "previous_boot", "slot", "counters", "bootloader", "reset_cause", "detectors", "console_tail", "health", "intent", "granted", "last_uptime", "healthy_since", "budget_remaining"}:
+            if set(witness) != {"state_source", "budget_at_start", "previous_boot", "slot", "counters", "bootloader", "reset_cause", "detectors", "console_tail", "health", "intent", "granted", "granted_at", "counted_without_credit", "last_uptime", "healthy_since", "budget_remaining"}:
                 raise ValueError("unknown witness shape")
+            if type(witness["counted_without_credit"]) is not bool:
+                raise ValueError("invalid uncredited charge flag")
+            if (witness["granted"] == "none") != (witness["granted_at"] is None):
+                raise ValueError("invalid grant time")
+            if witness["granted_at"] is not None:
+                uptime(witness["granted_at"])
             if witness["state_source"] not in {"missing", "invalid", "valid"}:
                 raise ValueError("invalid initial state source")
             if type(witness["budget_at_start"]) is not int or not 0 <= witness["budget_at_start"] <= 1000:
@@ -160,7 +174,12 @@ class Store:
             envelope = json.loads(raw)
             if set(envelope) != {"record", "sha256"} or envelope["sha256"] != hashlib.sha256(encoded(envelope["record"])).hexdigest():
                 raise ValueError("integrity mismatch")
-            record = self.validate(envelope["record"])
+            try:
+                record = self.validate(envelope["record"])
+            except (ValueError, TypeError, KeyError, AttributeError):
+                # An intact record of another schema version (a newer release, or
+                # an older one after slot fallback) keeps a known latch.
+                return self.carry_latch(envelope["record"])
             if (record["healthy_seconds"] != self.healthy_seconds or record["limit"] != self.limit
                     or record["max_health_gap"] != self.max_health_gap):
                 record.update(remaining=0, source="invalid", limit=self.limit,
@@ -170,6 +189,31 @@ class Store:
             return self.empty("missing")
         except (OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError):
             return self.empty("invalid")
+
+    def carry_latch(self, old):
+        """Quarantine an intact record of any other shape, keeping a known latch.
+
+        Only the top-level `exhausted` and `rescue.required` fields are read; every
+        schema keeps them. Only True carries over, so damage cannot clear a latch
+        and nothing here invents credit.
+        """
+        record = self.empty("invalid")
+        if not isinstance(old, dict):
+            return record
+        rescue = old.get("rescue") if isinstance(old.get("rescue"), dict) else {}
+        if rescue.get("required") is True:
+            entries = rescue.get("entries")
+            entered = rescue.get("entered_boot")
+            try:
+                entered = boot_id(entered)
+            except ValueError:
+                entered = None
+            record["rescue"] = {"required": True, "entered_boot": entered,
+                                "entries": entries if type(entries) is int and 1 <= entries <= 1000000 else 1}
+            record["exhausted"] = True
+        elif old.get("exhausted") is True:
+            record["exhausted"] = True
+        return record
 
     @contextlib.contextmanager
     def locked(self):
@@ -286,6 +330,9 @@ class Store:
             announcement = "Rollback not armed: verify counter persistence, pinned bootloader and live watchdog; updates and trials refused."
         return {"version": VERSION, "boot_id": record["current_boot"], "remaining": remaining,
                 "reset_budget_available": remaining > 0 and not rescue,
+                # Media stops only on a known latch; an unknown one (null) keeps
+                # streaming with resets and trials denied.
+                "stop_media": rescue,
                 "automatic_reset_allowed": False, "rollback_armed": False, "decision": "REFUSE",
                 "update_trial_allowed": False,
                 "refusal_reasons": ["Recheck independent counter persistence, pinned bootloader and live watchdog before relying on rollback."],
@@ -293,6 +340,16 @@ class Store:
                 "state": state, "console_marker": marker, "announcement": announcement,
                 "release_retirement_allowed": False,
                 "state_source": record["source"]}
+
+    @staticmethod
+    def count_without_credit(record, witness):
+        """One uncredited charge per boot; reaching the limit is a spent budget."""
+        if witness["counted_without_credit"] or record["exhausted"]:
+            return
+        witness["counted_without_credit"] = True
+        record["charges_without_credit"] = min(record["limit"], record["charges_without_credit"] + 1)
+        if record["charges_without_credit"] >= record["limit"]:
+            record["exhausted"] = True
 
     @staticmethod
     def enter_rescue(record):
@@ -390,17 +447,24 @@ class Store:
             reasons, observed, watchdog = self.evidence(boot, pinned_bootloader, probe)
             available = record["remaining"] > 0 and not record["rescue"]["required"]
             allowed = not reasons and available
-            before = (witness["intent"], witness["granted"])
+            before = (witness["intent"], witness["granted"], witness["granted_at"])
             witness["detectors"] = {"rollback": "not-armed" if reasons else "armed", "watchdog": watchdog}
             if not reasons:
                 witness["bootloader"] = pinned_bootloader
             if allowed:
                 witness["intent"] = action
                 if witness["granted"] == "none":
-                    witness["granted"] = action
-            elif not available:
-                # A reset is needed and the last credit is gone: that is the rescue episode.
-                self.enter_rescue(record)
+                    # Grant time: the verified evidence time, at most 5 s before now.
+                    witness["granted"], witness["granted_at"] = action, observed
+            elif not available and action == "reset":
+                if record["exhausted"]:
+                    # A reset is needed and the last credit is gone: the rescue episode.
+                    # An update trial is not a needed reset: it only refuses.
+                    self.enter_rescue(record)
+                elif self.refused_reset_requests == "count-per-boot":
+                    # No credit was ever earned (fresh or quarantined ledger): this
+                    # boot needed a reset it cannot get; count it once, like a charge.
+                    self.count_without_credit(record, witness)
             available_reason = None if available else self.budget_reason(record)
             self.write(record)
             if allowed and not 0 <= _boottime() - observed <= FRESH_SECONDS:
@@ -408,7 +472,7 @@ class Store:
                 # same locked transaction, so a REFUSE never leaves a charged grant.
                 reasons.append("Evidence expired during persistence; collect fresh evidence before the action.")
                 allowed = False
-                witness["intent"], witness["granted"] = before
+                witness["intent"], witness["granted"], witness["granted_at"] = before
                 witness["detectors"] = {"rollback": "not-armed", "watchdog": "unknown"}
                 self.write(record)
             result = self.view(record)
@@ -436,13 +500,7 @@ class Store:
             for orphan in self.root.glob(".write-*"):
                 orphan.unlink()
             if record["source"] == "invalid" and not record["boots"] and self.path.exists():
-                # Preserve one rejected generation, even when its contents cannot be read.
-                os.replace(self.path, self.root / "recovery.rejected")
-                directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
+                self.quarantine()
             if boot in record["boots"]:
                 if record["current_boot"] != boot:
                     raise ValueError("stale boot")
@@ -462,19 +520,20 @@ class Store:
                 # charge against missing, corrupt or reset-by-threshold credit is not.
                 if record["remaining"] == 0:
                     record["exhausted"] = True
-            elif charge and not record["exhausted"]:
+            witness = dict(state_source=record["source"],
+                budget_at_start=record["remaining"], previous_boot=previous_boot, slot=slot, counters=counters, bootloader=bootloader,
+                reset_cause=reset_cause, detectors=detectors, console_tail=console_tail,
+                health="unknown", intent="none", granted="none", granted_at=None,
+                counted_without_credit=False, last_uptime=now, healthy_since=None,
+                budget_remaining=record["remaining"])
+            if charge and record["remaining"] == 0 and not needs_rescue:
                 # A box that never confirmed health and keeps dying: as many charged
                 # resets as a full budget allows are a spent budget too, so the next
                 # one needs rescue instead of looping as rollback-not-armed.
-                record["charges_without_credit"] = min(record["limit"], record["charges_without_credit"] + 1)
-                if record["charges_without_credit"] >= record["limit"]:
-                    record["exhausted"] = True
+                self.count_without_credit(record, witness)
+            witness["budget_at_start"] = witness["budget_remaining"] = record["remaining"]
             record["current_boot"] = boot
-            record["boots"][boot] = dict(state_source=record["source"],
-                budget_at_start=record["remaining"], previous_boot=previous_boot, slot=slot, counters=counters, bootloader=bootloader,
-                reset_cause=reset_cause, detectors=detectors, console_tail=console_tail,
-                health="unknown", intent="none", granted="none", last_uptime=now, healthy_since=None,
-                budget_remaining=record["remaining"])
+            record["boots"][boot] = witness
             # Keep insertion order via the explicit previous_boot chain (JSON keys sort).
             keep, current = [], boot
             while current is not None and len(keep) < MAX_WITNESSES:
@@ -489,6 +548,28 @@ class Store:
                 self.enter_rescue(record)
             self.write(record)
             return self.view(record)
+
+    def quarantine(self):
+        """Keep rejected generations, even unreadable ones, under content names.
+
+        A name never collides with another generation, nor with the single
+        `recovery.rejected` an older release writes; the oldest beyond
+        MAX_REJECTED is removed.
+        """
+        digest = hashlib.sha256(self.path.read_bytes()).hexdigest()[:16]
+        target = self.root / f"recovery.rejected-{digest}"
+        if target.exists():
+            self.path.unlink()
+        else:
+            os.replace(self.path, target)
+        kept = sorted(self.root.glob("recovery.rejected-*"), key=lambda path: path.stat().st_mtime_ns)
+        for path in kept[:-MAX_REJECTED]:
+            path.unlink()
+        directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
     def update(self, boot, change):
         boot_id(boot)
@@ -542,6 +623,10 @@ class Store:
                 record.update(remaining=self.limit, source="valid", exhausted=False,
                               charges_without_credit=0)
                 record["rescue"]["required"] = False
+                if witness["granted_at"] is not None and anchor > witness["granted_at"]:
+                    # A full healthy interval that began after the grant: the grant
+                    # was never used, so a later boot must not be charged for it.
+                    witness.update(granted="none", granted_at=None)
                 self._health[boot] = (now, now, verdict)
             witness["budget_remaining"] = record["remaining"]
             # A failed verdict alone never enters rescue: a transient failure must

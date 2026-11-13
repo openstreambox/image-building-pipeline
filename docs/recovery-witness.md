@@ -12,7 +12,7 @@ diagnostic add-on must not be its boot dependency. No package list changes here.
 ## Durable record and safe reads
 
 `Store` takes an explicit private, caller-owned local state directory, budget
-limit and healthy interval. Its schema-5 `recovery.json` ledger holds one witness
+limit and healthy interval. Its schema-6 `recovery.json` ledger holds one witness
 per boot ID and the separate reset budget in the **same commit**. Writers share
 an exclusive flock; a same-directory mode-0600 temporary file is flushed and
 fsynced, renamed atomically, then the directory is fsynced. New-directory
@@ -44,8 +44,22 @@ ceiling. Witness retention is independent of software-release retention.
 Missing, truncated, unknown-version, schema-invalid, checksum-invalid, oversized,
 unreadable or configuration-mismatched records mean **zero automatic resets
 available**, with unknown witnesses. They never mean a healthy first boot or a
-fresh allowance. At `begin`, a rejected file is renamed to `recovery.rejected` (one retained
-generation) before replacement; rename/directory-fsync failure aborts admission.
+fresh allowance. At `begin`, a rejected file is renamed to
+`recovery.rejected-<first 16 hex of its SHA-256>` before replacement, so
+generations never overwrite each other or the single `recovery.rejected` an older
+release writes; the newest four are kept. Rename/directory-fsync failure aborts
+admission.
+
+**Schema changes keep a known latch.** An intact record (checksum valid) of any
+other shape or version, newer or older, is quarantined like damage, but its
+top-level `exhausted` and `rescue.required` are read first: a `true` carries
+over (rescue with its entry count), so a slot fallback or an update never clears
+a latch, and nothing here creates credit. Every future schema must keep those
+two fields with this meaning. Code that predates this rule cannot follow it: a
+release older than schema 6 reads a newer ledger as rescue false. None has
+shipped, and the update owner must never fall back to such a release with a
+ledger written by a newer one. A checksum-invalid record has no trustworthy
+fields and carries nothing (`rescue_required: null`, below).
 Threshold changes spend the budget while preserving the witness history. Orphan
 `.write-*` files are removed under the same lock before admission.
 `export` is read-only and exports the admitted ledger, not raw malformed bytes.
@@ -59,7 +73,11 @@ returns ALLOW (reset or trial; see below) and is sticky: later intents (`none`,
 `unbind-adapter`), refused rollback calls and later grants update the declared
 `intent` and detectors but never erase `granted`, so a granted reset or trial is
 charged whatever cause the next boot reports (`power-on`, `unknown` or
-`software`). Trials are therefore bounded by this budget too. Clean power-on, `unknown` and an orderly `software` reboot that the
+`software`). Trials are therefore bounded by this budget too. A grant the box
+never acted on expires at a healthy re-arm whose continuous dwell began after
+the grant (the box stayed healthy a full interval without that reset), so a
+later power cycle is not charged for it. A re-arm whose dwell began before the
+grant keeps it. Clean power-on, `unknown` and an orderly `software` reboot that the
 box did not grant itself (an operator reboot, an update's completion reboot) do
 not spend. Whether operator reboots should count is an owner decision; until it
 is made they do not.
@@ -73,8 +91,16 @@ confirmed health has taken as many charged resets as the configured limit, that
 is a spent budget too (`exhausted`), and the next charged reset enters rescue as
 below. Otherwise a crash loop on a fresh or quarantined ledger would stay
 rollback-not-armed forever. Clean and orderly boots neither add to nor clear the
-count. An episode already exhausted stays exhausted. Only health re-arm clears
-it, and the uncredited count with it. Counts saturate at zero; restarting a
+count, and a boot counts at most once. An episode already exhausted stays
+exhausted. Only health re-arm clears it, and the uncredited count with it.
+
+A reset **request** refused for want of credit on such a box counts the same way
+by default (`Store(..., refused_reset_requests="count-per-boot")`): the box needed
+a reset it cannot get. Without it, a box that is up but failing, on a fresh or
+quarantined ledger, is refused for ever and never reaches a designed state.
+Trials never count. `refused_reset_requests="ignore"` leaves such requests
+uncounted, so only charged boots can reach rescue; that choice belongs to the
+owner and is the only behaviour the setting changes. Counts saturate at zero; restarting a
 producer in the same boot does not spend again, but does recommit/fsync before
 returning admission (a prior writer may have died after rename). Stale boot IDs cannot modify a
 new boot. This is a box reset budget, not the bootloader slot counter, and does
@@ -106,15 +132,28 @@ until the current boot is admitted. Spending the last credit reports
 produced by the last permitted reset may be healthy and is not told to stop
 media. **“Rescue required”** (`rescue_required: true`) is entered only when the
 box needs another reset with the budget spent: a further charged boot, or a
-`rollback` request. A `failed` health verdict alone does not enter rescue, even
+`rollback(action="reset")` request (with any evidence). An update trial
+(`activate-other-slot`) is not a reset the box needs: with the budget spent it
+refuses with the budget reason and never enters rescue, so an update during the
+healthy interval after the last reset cannot stop a live stream. A `failed`
+health verdict alone does not enter rescue, even
 with the budget spent: one transient failure must not stop a live stream, and a
 later healthy verdict could not clear the latch before a full healthy interval.
 The reset policy acts on a failed verdict by asking `rollback` for a reset; with
 no credit left that request refuses and enters rescue. Missing credit alone is
 rollback-not-armed with `rescue_required: false`; a fresh clean boot is not
-called rescue. After a quarantined ledger (or a threshold change) any earlier
-latch is unknown, so the state is `recovery-uncertain` with
+called rescue. After a checksum-invalid ledger (or a threshold change) any
+earlier latch is unknown, so the state is `recovery-uncertain` with
 `rescue_required: null` until health is requalified.
+
+`stop_media` is the field media owners act on: `true` only for a known latch
+(`rescue_required: true`). `null` means **keep streaming**, with automatic resets
+and update trials denied and the uncertain announcement shown. Reasons: null
+arises only from storage damage or a configuration change, not from a box that
+keeps dying; intact latches survive schema changes (above), so null means no
+latch information survived; stopping a live stream on storage damage is the false
+trip this contract avoids elsewhere; and a box that really keeps dying reaches
+rescue again through the uncredited count.
 `rescue_active: false` deliberately does not
 claim that a rescue mode exists. Any storage/identity error exits nonzero and
 prints a safe denial without paths or exception text. `intent reset` returns
@@ -262,6 +301,8 @@ recording API does not enforce release lifecycle or authorize retirement.
   full/corrupt storage, medium-priority and power-cut drills.
 - Supply independently measured counter, running bootloader pin and live watchdog
   collectors, plus image-owned Python and boot-time callers. Never auto-write SPI.
+- Implement the wiring contract below (reset policy, watchdog, panic and systemd
+  reboot suppression in rescue, `stop_media`).
 - Wire rescue-required to media suppression and persistent UI/LED announcements,
   keeping management/update repair/log export available without claiming rescue
   activation until that mechanism is implemented and measured.
@@ -269,6 +310,35 @@ recording API does not enforce release lifecycle or authorize retirement.
 - Management-path commit-confirm, reset triggers, missing-root timeouts and remote
   companion/export authentication remain separate work. Hardware acceptance still
   requires boot, storage and power-cut drills; this module enables no services.
+
+### Wiring contract (MUST)
+
+This module only admits or refuses resets it is asked about. Rescue means no
+further resets, so the enabling change MUST also stop the resets that never ask:
+
+- **Reset policy.** On a failed health verdict the policy MUST call
+  `Store.rollback(action="reset")` and act only on ALLOW. It MUST NOT pre-check
+  `reset_budget_available` (or any status field) and skip the call: the refused
+  request is what records the need, counts it on a box without credit and enters
+  rescue when the budget is spent. Display code uses `rollback_status`.
+- **Hardware watchdog.** With `rescue_required: true`, and before handing the
+  watchdog to PID 1 on such a boot, the consumer MUST NOT arm, or MUST disarm,
+  the hardware watchdog (`RuntimeWatchdogSec=0`/`RebootWatchdogSec=0`, no handover
+  from the bootloader), so a hang in rescue waits for a person instead of looping.
+- **Kernel panic reboot.** In rescue the kernel MUST NOT reboot on panic
+  (`panic=0`, `kernel.panic=0`, and `panic_on_oops`/`softlockup_panic` must not turn
+  hangs into resets).
+- **systemd reboot actions.** In rescue, unit `FailureAction=`/`SuccessAction=`,
+  `StartLimitAction=`, `JobTimeoutAction=` and `WatchdogSec` service restarts that
+  escalate to `reboot*` or `poweroff` MUST be off or downgraded to `none`.
+- **Media.** Act on `stop_media`: stop media only when it is `true`; on `null`
+  keep streaming with resets and trials denied.
+- **Trials.** An update trial MUST call `rollback(action="activate-other-slot")`
+  and act only on ALLOW; with the budget spent it refuses and does not latch.
+
+Whether the same reset suppression should apply once the budget is merely spent
+(`reset-budget-spent`) is the wiring task's decision; this layer already refuses
+every admitted reset in that state.
 
 Run `tests/recovery-witness.test.sh`; it is also registered in `./run-tests`.
 
