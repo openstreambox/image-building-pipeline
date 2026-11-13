@@ -7,9 +7,8 @@ Wants=systemd-logind.service
 Type=simple
 RuntimeDirectory=ceralive-button
 RuntimeDirectoryMode=0700
-# The low-level inhibitor makes the service the sole software hold owner.
-# logind's five-second fallback applies when this process is absent.
-ExecStart=/usr/bin/systemd-inhibit --what=handle-power-key --who=power-button --why=gesture-countdown --mode=block /usr/bin/python3 /usr/local/lib/ceralive-button/button.py
+# The daemon holds a releasable inhibitor child; input failure hands it to logind.
+ExecStart=/usr/bin/python3 /usr/local/lib/ceralive-button/button.py
 Restart=on-failure
 RestartSec=2
 UMask=0077

@@ -2,11 +2,13 @@
 """Power-key gestures and a root-only, connection-scoped confirmation socket."""
 import fcntl
 import glob
+import logging
 import os
 import selectors
 import socket
 import struct
 import subprocess
+import sys
 import time
 
 EVENT = struct.Struct('@llHHi')  # native Linux input_event (arm64 and amd64)
@@ -133,7 +135,7 @@ def power_key_down(fd):
 
 
 def serve(device, path, light, poweroff, configure_input=monotonic_input,
-          key_state=power_key_down):
+          key_state=power_key_down, release_ownership=lambda: None):
     g = Gestures(light, poweroff)
     decoder = Input(g, event_clock=True)
     sel = selectors.DefaultSelector()
@@ -149,6 +151,8 @@ def serve(device, path, light, poweroff, configure_input=monotonic_input,
     sel.register(server, selectors.EVENT_READ, 'accept')
     clients = {}
     owner = None
+    failures = 0
+    failed = False
 
     def close(client):
         nonlocal owner
@@ -176,15 +180,29 @@ def serve(device, path, light, poweroff, configure_input=monotonic_input,
             if not data:
                 raise RuntimeError('power key disconnected')
             now = time.monotonic()  # read may have been descheduled
-            decoder.feed(data, now, time.monotonic)
+            if not failed:
+                decoder.feed(data, now, time.monotonic)
         return False
 
     def authorize_hold():
+        nonlocal failures, failed
+        if failed:
+            return False
         started = time.monotonic()
         try:
             certain = drain() and key_state(fd) is True
+            failures = 0
         except OSError:
+            failures += 1
             certain = False
+            if failures >= 3:
+                failed = True
+                logging.error('Power-button input failed after %d queries; handing power key back to logind', failures)
+                g.cancel()
+                if owner:
+                    reply(owner, 'FAILED INPUT')
+                release_ownership()
+                light('failed', 0)
         now = time.monotonic()
         # A pause loses continuity even if a later press is currently down.
         certain = certain and now - last_tick <= .25 and now - started <= .25
@@ -226,6 +244,10 @@ def serve(device, path, light, poweroff, configure_input=monotonic_input,
                         parts = line.split()
                         if rest:
                             reply(client, 'ERROR')
+                        elif line == b'STATUS':
+                            reply(client, 'FAILED INPUT' if failed else 'OK')
+                        elif failed:
+                            reply(client, 'FAILED INPUT')
                         elif len(parts) == 2 and parts[0] == b'CONFIRM' and parts[1].isdigit() and 1 <= int(parts[1]) <= 60:
                             now = time.monotonic()
                             g.expire(now)
@@ -247,12 +269,14 @@ def serve(device, path, light, poweroff, configure_input=monotonic_input,
             if now - last_tick > .25:
                 g.cancel()
                 decoder.dropped = True
-            g.tick(now, authorize_hold)
+            if not failed:
+                g.tick(now, authorize_hold)
             last_tick = now
             for client, state in list(clients.items()):
                 if not state[2] and now >= state[1]:
                     reply(client, 'TIMEOUT')
     finally:
+        release_ownership()
         g.cancel()
         for client in list(clients):
             close(client)
@@ -268,13 +292,45 @@ def light_stub(event, remaining):
         print('light:', event, flush=True)
 
 
+class PowerKeyOwnership:
+    """Keep the inhibitor in a separate child whose stdin defines its lifetime."""
+    def __init__(self):
+        self.process = subprocess.Popen([
+            '/usr/bin/systemd-inhibit', '--what=handle-power-key',
+            '--who=power-button', '--why=gesture-countdown', '--mode=block',
+            sys.executable, '-c',
+            "import sys; print('READY', flush=True); sys.stdin.buffer.read()",
+        ], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        with selectors.DefaultSelector() as ready:
+            ready.register(self.process.stdout, selectors.EVENT_READ)
+            if not ready.select(5) or self.process.stdout.readline() != b'READY\n':
+                self.release()
+                raise RuntimeError('could not acquire power-key ownership')
+
+    def release(self):
+        if self.process.stdin and not self.process.stdin.closed:
+            self.process.stdin.close()
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=2)
+        self.process.stdout.close()
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--device', help='explicit evdev path; otherwise discover RK80x')
     args = parser.parse_args()
-    serve(args.device or discover(), '/run/ceralive-button/control.sock', light_stub,
-          lambda: subprocess.run(['/usr/bin/systemctl', 'poweroff'], check=True, timeout=10))
+    device = args.device or discover()
+    ownership = PowerKeyOwnership()
+    try:
+        serve(device, '/run/ceralive-button/control.sock', light_stub,
+              lambda: subprocess.run(['/usr/bin/systemctl', 'poweroff'], check=True, timeout=10),
+              release_ownership=ownership.release)
+    finally:
+        ownership.release()
 
 
 if __name__ == '__main__':

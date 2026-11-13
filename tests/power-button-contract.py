@@ -26,6 +26,20 @@ class Gestures(unittest.TestCase):
         self.g.key(1, now)
         self.g.key(0, now + .05)
 
+    def test_releasable_inhibitor_child(self):
+        spawn = b.subprocess.Popen
+        commands = []
+        def fake_inhibit(command, **kwargs):
+            commands.append(command)
+            return spawn(command[-3:], **kwargs)
+        with patch.object(b.subprocess, 'Popen', fake_inhibit):
+            ownership = b.PowerKeyOwnership()
+        self.assertIn('--what=handle-power-key', commands[0])
+        self.assertIsNone(ownership.process.poll())
+        ownership.release()
+        self.assertEqual(ownership.process.poll(), 0)
+        ownership.release()  # idempotent shutdown/failure cleanup
+
     def test_taps(self):
         for live in (False, True):
             self.g.live = live
@@ -228,6 +242,62 @@ class Socket(unittest.TestCase):
 
     def test_observed_hold(self):
         self.run_queued_release(hold=True)
+
+    def test_persistent_ioctl_failure_relinquishes_ownership(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fifo, path = directory + '/events', directory + '/control.sock'
+            os.mkfifo(fifo)
+            writer = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+            released, off = multiprocessing.Event(), multiprocessing.Event()
+            def child():
+                def broken(fd):
+                    raise OSError('input query failed')
+                b.serve(fifo, path, lambda *x: None, off.set, lambda fd: None,
+                        **({"key_state": broken, "release_ownership": released.set}
+                           if "release_ownership" in inspect.signature(b.serve).parameters
+                           else {"key_state": broken}))
+            process = multiprocessing.get_context('fork').Process(target=child)
+            process.start()
+            def query(command):
+                with socket.socket(socket.AF_UNIX) as client:
+                    client.settimeout(2)
+                    client.connect(path)
+                    client.sendall(command + b'\n')
+                    return client.recv(100)
+            def edge(value):
+                now = time.monotonic()
+                sec = int(now)
+                os.write(writer, b.EVENT.pack(sec, int((now-sec)*1000000), 1, 116, value))
+            try:
+                deadline = time.monotonic() + 2
+                while not os.path.exists(path) and process.is_alive():
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(.01)
+                pending = socket.socket(socket.AF_UNIX)
+                pending.settimeout(2)
+                pending.connect(path)
+                pending.sendall(b'CONFIRM 60\n')
+                self.assertEqual(pending.recv(100), b'READY\n')
+                for _ in range(3):
+                    edge(0)
+                    time.sleep(.06)
+                    edge(1)
+                    self.assertFalse(off.wait(3.2))
+                self.assertTrue(released.wait(1), 'logind ownership was not released')
+                self.assertEqual(pending.recv(100), b'FAILED INPUT\n')
+                pending.close()
+                self.assertEqual(query(b'STATUS'), b'FAILED INPUT\n')
+                self.assertEqual(query(b'CONFIRM 10'), b'FAILED INPUT\n')
+                self.assertEqual(query(b'LIVE 1'), b'FAILED INPUT\n')
+                edge(0)
+                time.sleep(.06)
+                edge(1)
+                self.assertFalse(off.wait(3.2), 'failed daemon authorized a hold')
+                self.assertTrue(process.is_alive())
+            finally:
+                process.terminate()
+                process.join(3)
+                os.close(writer)
 
     def test_socket(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -35,8 +35,10 @@ and `HandlePowerKeyLongPress=poweroff`.
 
 [systemd v257's source](https://github.com/systemd/systemd/blob/v257/src/login/logind-button.c)
 uses a fixed five-second `LONG_PRESS_DURATION`; no logind hold-time option
-exists there. `systemd-inhibit --what=handle-power-key` therefore wraps the
-service, making it the sole software countdown owner. If it is absent, logind
+exists there. The daemon starts a `systemd-inhibit --what=handle-power-key`
+child and waits for its post-acquisition readiness before serving. Closing the
+child's stdin and waiting for its exit releases ownership without stopping the
+confirmation server. If it is absent, logind
 still ignores taps and powers off after its own five-second hold, provided the
 kernel delivers the hold. No evdev exclusive grab is used. Behaviour across a
 service crash or logind restart while a key is down requires a bench check.
@@ -46,6 +48,17 @@ delta to the shared image list, because minimal Python alone does not supply
 all socket modules. Measure image growth and free-slot reserve in the next
 image build. This host-only change makes no image-size or boot qualification
 claim. Neither CeraUI nor the existing heartbeat LED owner is modified here.
+
+After three consecutive final-hold key-state query errors, the daemon latches
+an input-failed state, logs an error, cancels any confirmation and releases its
+inhibitor child. It never authorizes another hold or confirmation until an
+administrator restarts it after fixing input. A successful query before the
+threshold resets the count. Uncertain holds always remain denied. Release the
+key, then start a fresh five-second hold for logind's fallback; handing ownership
+back does not promise that a press already in progress is replayed. The stock
+logind handover and physical shutdown still need both-board qualification.
+The host tests exercise synthetic input failures and inhibitor-child lifetime;
+they do not emulate or qualify the real logind timer.
 
 ## Local client protocol, version 1
 
@@ -66,12 +79,16 @@ application authenticates/authorizes its caller before opening a request.
   advisory: it cannot enable a shorter shutdown. Clients should republish their
   current state after service restart. Default is false; safety is identical
   in either state. No pairing or reset is performed by this service.
+- `STATUS\n` returns `OK\n` or `FAILED INPUT\n`, then EOF. In the failed
+  state CONFIRM and LIVE also return `FAILED INPUT\n`; an active confirmation
+  receives that failure and closes. Existing clients treat it as unavailable,
+  never confirmation. This is an additive version 1 status/failure reply.
 - Malformed, pipelined or oversized commands receive `ERROR\n` and close.
   Idle handshakes expire in five seconds. At most 32 clients are admitted.
   Responses are small; disconnected or non-reading clients cannot block holds.
 
 `light_stub(event, remaining)` is the integration hook: `status`, `countdown`
-(remaining seconds), `cancel`, `shutdown`. It currently logs non-countdown events
+(remaining seconds), `cancel`, `shutdown`, `failed`. It currently logs non-countdown events
 and performs no LED writes. The countdown hook is called at approximately 25 ms
 intervals. A real light driver must be nonblocking and coordinate with the LED
 owner. Do not ship user text promising visible feedback until it is wired.
@@ -79,7 +96,7 @@ owner. Do not ship user text promising visible feedback until it is wired.
 Discovery accepts exactly one input name `rk805 pwrkey` or `rk806 pwrkey`.
 Missing/ambiguous matches fail safely and retry. After measuring the actual
 name, an administrator can override ExecStart with `--device /dev/input/...`
-inside the inhibitor command. Never assume `event0` numbering is stable.
+on the daemon command. Never assume `event0` numbering is stable.
 
 ## Bench check before release
 

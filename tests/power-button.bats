@@ -13,7 +13,7 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; }
   [ "$status" -eq 0 ]
 }
 @test "power button: release cancels and only full hold shuts down while live" {
-  run python3 "$ROOT/tests/power-button-contract.py" Gestures.test_holds
+  run python3 "$ROOT/tests/power-button-contract.py" Gestures.test_holds Gestures.test_releasable_inhibitor_child
   [ "$status" -eq 0 ]
 }
 @test "power button: fake evdev handles partial records, repeats and loss" {
@@ -30,7 +30,8 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; }
   grep -q '^python3 ' "$ROOT/manifests/packages/shared.list"
   grep -q 'HandlePowerKey=ignore' "$ROOT/mkosi/runtime/power-button/60-ceralive-button.conf"
   grep -q 'HandlePowerKeyLongPress=poweroff' "$ROOT/mkosi/runtime/power-button/60-ceralive-button.conf"
-  grep -q 'systemd-inhibit --what=handle-power-key' "$ROOT/mkosi/runtime/power-button/ceralive-button.service"
+  grep -q "'--what=handle-power-key'" "$ROOT/mkosi/runtime/power-button/button.py"
+  grep -qx 'ExecStart=/usr/bin/python3 /usr/local/lib/ceralive-button/button.py' "$ROOT/mkosi/runtime/power-button/ceralive-button.service"
   grep -q 'version.*-ge 251' "$ROOT/mkosi/customize/postinst.d/services.sh"
 }
 @test "power button: installer stages policy and rejects older systemd" {
@@ -66,5 +67,10 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; }
 }
 @test "power button: both tap edges follow admission and delivery precedes expiry" {
   run python3 "$ROOT/tests/power-button-contract.py" Gestures.test_pre_admission_press Gestures.test_delayed_confirmation Gestures.test_final_confirmation_deadline
+  [ "$status" -eq 0 ]
+}
+
+@test "power button: persistent query faults hand ownership back and expose failed state" {
+  run python3 "$ROOT/tests/power-button-contract.py" Socket.test_persistent_ioctl_failure_relinquishes_ownership
   [ "$status" -eq 0 ]
 }
