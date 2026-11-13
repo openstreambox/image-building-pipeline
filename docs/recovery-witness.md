@@ -436,7 +436,13 @@ The launcher's log stays in the cache directory.
 
 `--accel kvm` is the normal path. `--accel tcg` emulates the CPU in software for
 a host without `/dev/kvm` access. It is the same guest, only several times
-slower. The workflow `.github/workflows/privileged-guest.yml` runs the launcher
+slower, and two rows carry budgets sized for hardware virtualization. Under
+TCG the real RAUC contract exceeds its 60-second `rauc install` timeout (exit
+124). The real Avahi contract never sees the late-merge name conflict, probably
+because the slow guest joins the two networks after Avahi has finished
+announcing (not yet proven). Both pass
+under KVM. A TCG run decides only the kernel-stage and RAUC cleanup rows; use
+KVM for a verdict on the other two. The workflow `.github/workflows/privileged-guest.yml` runs the launcher
 with KVM on an ordinary GitHub-hosted runner, which exposes `/dev/kvm`. It uses no
 secrets, no self-hosted runner and a read-only token, and is not a required
 check.
