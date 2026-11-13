@@ -12,7 +12,7 @@ diagnostic add-on must not be its boot dependency. No package list changes here.
 ## Durable record and safe reads
 
 `Store` takes an explicit private, caller-owned local state directory, budget
-limit and healthy interval. Its schema-4 `recovery.json` ledger holds one witness
+limit and healthy interval. Its schema-5 `recovery.json` ledger holds one witness
 per boot ID and the separate reset budget in the **same commit**. Writers share
 an exclusive flock; a same-directory mode-0600 temporary file is flushed and
 fsynced, renamed atomically, then the directory is fsynced. New-directory
@@ -64,11 +64,17 @@ box did not grant itself (an operator reboot, an update's completion reboot) do
 not spend. Whether operator reboots should count is an owner decision; until it
 is made they do not.
 
-`exhausted` is set only when a charge spends the **last** credit (1 to 0). A
+`exhausted` is set when a charge spends the **last** credit (1 to 0). A single
 charge against zero credit — a missing ledger, a quarantined corrupt one, or the
 zero credit left by a threshold change — leaves the credit at zero without
-claiming an exhausted episode; an episode already exhausted stays exhausted.
-Only health re-arm clears it. Counts saturate at zero; restarting a
+claiming an exhausted episode, so one hang after flashing is not called rescue.
+Such charges are counted in `charges_without_credit`; once a box that never
+confirmed health has taken as many charged resets as the configured limit, that
+is a spent budget too (`exhausted`), and the next charged reset enters rescue as
+below. Otherwise a crash loop on a fresh or quarantined ledger would stay
+rollback-not-armed forever. Clean and orderly boots neither add to nor clear the
+count. An episode already exhausted stays exhausted. Only health re-arm clears
+it, and the uncredited count with it. Counts saturate at zero; restarting a
 producer in the same boot does not spend again, but does recommit/fsync before
 returning admission (a prior writer may have died after rename). Stale boot IDs cannot modify a
 new boot. This is a box reset budget, not the bootloader slot counter, and does
@@ -99,8 +105,12 @@ until the current boot is admitted. Spending the last credit reports
 `reset-budget-spent` (`RESET_BUDGET_SPENT`): no automatic reset, but the boot
 produced by the last permitted reset may be healthy and is not told to stop
 media. **“Rescue required”** (`rescue_required: true`) is entered only when the
-box needs another reset with the budget spent: a further charged boot, a
-`failed` health verdict, or a `rollback` request. Missing credit alone is
+box needs another reset with the budget spent: a further charged boot, or a
+`rollback` request. A `failed` health verdict alone does not enter rescue, even
+with the budget spent: one transient failure must not stop a live stream, and a
+later healthy verdict could not clear the latch before a full healthy interval.
+The reset policy acts on a failed verdict by asking `rollback` for a reset; with
+no credit left that request refuses and enters rescue. Missing credit alone is
 rollback-not-armed with `rescue_required: false`; a fresh clean boot is not
 called rescue. After a quarantined ledger (or a threshold change) any earlier
 latch is unknown, so the state is `recovery-uncertain` with
@@ -137,12 +147,17 @@ checks a trusted, read-only collector under the writer lock and durably writes t
 intent before returning an immediate admission. `action="activate-other-slot"`
 is the other supported action. No default pin or hardware collector is provided:
 without these integration-owned inputs, admission remains REFUSE. Collectors
-must raise on failed reads (any exception refuses), never substitute a configured value
-for an observation. The returned reasons contain fixed actionable messages, never
+must raise on failed reads (any `Exception` refuses), never substitute a configured value
+for an observation. `SystemExit`, `KeyboardInterrupt` and `GeneratorExit` are
+process control, not collector failures: they propagate before anything is
+written, so the ledger is unchanged and nothing is granted. The returned reasons contain fixed actionable messages, never
 exception text or paths. No bootloader write is implemented or permitted here.
 
-There is no caller-supplied time: the store samples CLOCK_BOOTTIME itself after
-collection and again after persistence (tests replace a private clock function).
+There is no caller-supplied time anywhere in the store: `begin` and `health`
+sample CLOCK_BOOTTIME themselves under the writer lock (`Store.begin(boot, ...)`,
+`Store.health(boot, verdict)`), so a caller cannot step a clock to complete a
+healthy interval, and `rollback` samples it after collection and again after
+persistence. Tests replace one private clock function.
 If the write outlasts freshness, the same locked transaction restores the
 boot's previous grant and intent, records the rollback detector as not armed and
 recommits before returning REFUSE, so a refusal never leaves a charged grant. If
@@ -151,8 +166,9 @@ boot is charged (fails toward fewer resets).
 
 `Store.rollback_status(...)` takes the same arguments for display: it judges the
 evidence and reports `rollback_armed` and reasons, but never writes, grants,
-latches or creates files, and always returns REFUSE. Use it, not `rollback`, to
-show whether rollback is armed. Collector exceptions of any type refuse.
+latches or creates files, and always returns REFUSE, also with the budget spent.
+Use it, not `rollback`, to show whether rollback is armed. Collector failures
+refuse as above.
 
 The collector returns this exact evidence contract (extra fields confer no trust):
 
@@ -206,10 +222,15 @@ not implement a rescue service, stop media, drive LEDs or reset the machine.
 Consumers must implement suppression and retain the announcement across restarts.
 No generic promise that inserting a card will boot is made.
 
-The status file is advisory and never carries a rollback/reset grant. A crash
-between ledger and projection replacement can leave it stale: consumers must
-check boot ID and the canonical ledger, treat unavailable/stale status as refusal,
-and republish via a successful transaction before displaying a cleared latch.
+The status file is advisory and never carries a rollback/reset grant. It names
+the ledger generation it describes in `ledger_sha256`. It can go stale: a crash
+between ledger and projection replacement, or a ledger damaged after the last
+write (the projection may still say rescue while the ledger now says unknown).
+`Store.current_projection()` returns the projection only while that digest
+matches the intact current ledger, otherwise None; a consumer outside Python
+must verify the ledger envelope the same way, or use `status`. Consumers must
+check boot ID, treat unavailable/stale status as refusal, and republish via a
+successful transaction before displaying a cleared latch.
 A failed ledger write/fsync denies the operation; a failed projection only
 removes the projection. Never authorize from status.
 

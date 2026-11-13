@@ -17,6 +17,20 @@ THIRD = "33333333-3333-4333-8333-333333333333"
 PIN = "sha256:" + "a" * 64
 
 
+class Store(r.Store):
+    """Test seam: drive the private boot clock explicitly, as the rollback tests do.
+
+    Production callers cannot pass a time; see ThirdReviewTest for the real API.
+    """
+    def begin(self, boot, now, **kwargs):
+        with patch.object(r, "_boottime", return_value=now):
+            return super().begin(boot, **kwargs)
+
+    def health(self, boot, now, verdict):
+        with patch.object(r, "_boottime", return_value=now):
+            return super().health(boot, verdict)
+
+
 def good_proof(boot=BOOT, observed=61):
     return dict(boot_id=boot, observed_uptime=observed, counter_source="independent-readback",
                 counter_before=3, counter_after=2, counter_readback=2,
@@ -24,12 +38,12 @@ def good_proof(boot=BOOT, observed=61):
 
 
 def concurrent_begin(root):
-    return r.Store(root, limit=2, healthy_seconds=60).begin(OTHER, 0, reset_cause="watchdog")
+    return Store(root, limit=2, healthy_seconds=60).begin(OTHER, 0, reset_cause="watchdog")
 
 
 def slow_health(root, ready):
     import time
-    store = r.Store(root, limit=2, healthy_seconds=60)
+    store = Store(root, limit=2, healthy_seconds=60)
     def change(record, witness):
         witness["health"] = "failed"
         ready.set()
@@ -39,14 +53,14 @@ def slow_health(root, ready):
 
 def racing_intent(root, ready):
     ready.wait(5)
-    r.Store(root, limit=2, healthy_seconds=60).intent(BOOT, "unbind-adapter")
+    Store(root, limit=2, healthy_seconds=60).intent(BOOT, "unbind-adapter")
 
 
 class RecoveryTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.store = r.Store(Path(self.tmp.name), limit=2, healthy_seconds=60)
+        self.store = Store(Path(self.tmp.name), limit=2, healthy_seconds=60)
 
     def boot(self, boot=BOOT, now=0):
         return self.store.begin(boot, now, slot="A", reset_cause="watchdog")
@@ -261,7 +275,7 @@ r.Store(sys.argv[2], limit=2, healthy_seconds=60).intent(sys.argv[3], 'activate-
     def test_configuration_change_spends_budget(self):
         self.boot()
         self.rearm()
-        other = r.Store(self.store.root, limit=3, healthy_seconds=60)
+        other = Store(self.store.root, limit=3, healthy_seconds=60)
         self.assertFalse(other.begin(OTHER, 0)["reset_budget_available"])
 
 
@@ -321,7 +335,7 @@ class ReviewTest(unittest.TestCase):
         self.boot()
         self.rearm()
         self.store.intent(BOOT, "unbind-adapter")
-        changed = r.Store(self.store.root, limit=2, healthy_seconds=90)
+        changed = Store(self.store.root, limit=2, healthy_seconds=90)
         result = changed.begin(OTHER, 0, reset_cause="power-on")
         self.assertFalse(result["reset_budget_available"])
         self.assertEqual(changed.read()["boots"][BOOT]["intent"], "unbind-adapter")
@@ -333,7 +347,7 @@ class ReviewTest(unittest.TestCase):
         self.store.health(BOOT, 10, "healthy")
         self.assertEqual(before, self.store.path.read_bytes())
         self.assertFalse(self.store.health(BOOT, 70, "healthy")["reset_budget_available"])
-        restarted = r.Store(self.store.root, limit=2, healthy_seconds=60)
+        restarted = Store(self.store.root, limit=2, healthy_seconds=60)
         self.assertFalse(restarted.health(BOOT, 1000, "healthy")["reset_budget_available"])
 
     def test_repeated_failure_is_not_a_new_flash_write(self):
@@ -347,7 +361,7 @@ class ReviewTest(unittest.TestCase):
         self.boot()
         self.store.health(BOOT, 0, "healthy")
         self.store.health(BOOT, 30, "healthy")
-        other = r.Store(self.store.root, limit=2, healthy_seconds=60)
+        other = Store(self.store.root, limit=2, healthy_seconds=60)
         other.health(BOOT, 40, "failed")
         self.assertFalse(self.store.health(BOOT, 60, "healthy")["reset_budget_available"])
 
@@ -410,7 +424,7 @@ class ChargeTest(unittest.TestCase):
 
     def test_threshold_change_activation_reboot_is_not_exhaustion(self):
         self.armed()
-        changed = r.Store(self.store.root, limit=3, healthy_seconds=60)
+        changed = Store(self.store.root, limit=3, healthy_seconds=60)
         view = changed.begin(OTHER, 0, reset_cause="watchdog")
         self.assertFalse(view["rescue_required"])
         self.assertFalse(changed.read()["exhausted"])
@@ -685,7 +699,7 @@ class SecondReviewAdmissionTest(unittest.TestCase):
         self.assertNotEqual(self.store.begin(OTHER, 0, reset_cause="watchdog")["state"], "rescue-required")
         self.store.path.unlink()
         self.armed()
-        changed = r.Store(self.store.root, limit=3, healthy_seconds=60)
+        changed = Store(self.store.root, limit=3, healthy_seconds=60)
         self.assertNotEqual(changed.begin(OTHER, 0, reset_cause="watchdog")["state"], "rescue-required")
         self.assertFalse(changed.read()["rescue"]["required"])
 
@@ -822,7 +836,7 @@ class SecondReviewAdmissionTest(unittest.TestCase):
 
     def test_rollback_status_creates_nothing_on_a_fresh_directory(self):
         root = Path(self.tmp.name) / "absent"
-        store = r.Store(root, limit=2, healthy_seconds=60)
+        store = Store(root, limit=2, healthy_seconds=60)
         with patch.object(r, "_boottime", return_value=62):
             status = store.rollback_status(BOOT, pinned_bootloader=PIN, probe=good_proof)
         self.assertEqual(status["decision"], "REFUSE")
@@ -856,7 +870,12 @@ class SecondReviewAdmissionTest(unittest.TestCase):
                     view = self.store.begin(boots[3], 0, reset_cause="watchdog")
                     entered = boots[3]
                 elif need == "failed-health":
-                    view = self.store.health(boots[2], 2, "failed")
+                    # The verdict alone keeps streaming; the reset it calls for enters rescue.
+                    self.assertEqual(self.store.health(boots[2], 2, "failed")["state"],
+                                     "reset-budget-spent")
+                    with patch.object(r, "_boottime", return_value=62):
+                        view = self.store.rollback(boots[2], pinned_bootloader=PIN,
+                                                   probe=lambda: good_proof(boots[2]))
                     entered = boots[2]
                 else:
                     with patch.object(r, "_boottime", return_value=62):
@@ -886,6 +905,171 @@ class SecondReviewAdmissionTest(unittest.TestCase):
         self.assertIsNone(view["rescue_required"])
         status = json.loads((self.store.root / "recovery-status.json").read_text())
         self.assertIsNone(status["rescue_required"])
+
+
+class ThirdReviewTest(unittest.TestCase):
+    """Third review: rescue only when a reset is needed; no caller clock; read-only status."""
+    setUp = RecoveryTest.setUp
+    rearm = RecoveryTest.rearm
+    BOOTS = ["%08x-cccc-4ccc-8ccc-cccccccccccc" % i for i in range(8)]
+
+    def spent(self):
+        boots = self.BOOTS
+        self.store.begin(boots[0], 0, reset_cause="power-on")
+        self.rearm(boots[0])
+        self.store.begin(boots[1], 0, reset_cause="watchdog")
+        view = self.store.begin(boots[2], 0, reset_cause="watchdog")
+        self.assertEqual(view["state"], "reset-budget-spent")
+        return boots[2]
+
+    def snapshot(self):
+        return sorted((path.name, path.read_bytes()) for path in self.store.root.iterdir())
+
+    def test_transient_failed_verdict_with_budget_spent_does_not_latch_rescue(self):
+        boot = self.spent()
+        view = self.store.health(boot, 1, "failed")
+        self.assertEqual(view["state"], "reset-budget-spent")
+        self.assertFalse(view["rescue_required"])
+        self.assertNotIn("Stop media", view["announcement"])
+        self.assertFalse(self.store.read()["rescue"]["required"])
+        self.assertEqual(self.store.read()["boots"][boot]["health"], "failed")
+        view = self.store.health(boot, 2, "healthy")
+        self.assertEqual(view["state"], "reset-budget-spent")
+        status = json.loads((self.store.root / "recovery-status.json").read_text())
+        self.assertFalse(status["rescue_required"])
+        # The reset policy owner acts on a failed verdict by asking for a reset;
+        # that request, not the verdict, is the rescue episode.
+        self.store.health(boot, 3, "failed")
+        with patch.object(r, "_boottime", return_value=62):
+            result = self.store.rollback(boot, pinned_bootloader=PIN, probe=lambda: good_proof(boot))
+        self.assertEqual(result["decision"], "REFUSE")
+        self.assertEqual(result["state"], "rescue-required")
+        self.assertEqual(self.store.read()["rescue"],
+                         {"required": True, "entries": 1, "entered_boot": boot})
+
+    def test_repeated_failed_verdicts_never_latch_without_a_reset_need(self):
+        boot = self.spent()
+        for now in range(1, 40):
+            self.store.health(boot, now, "failed" if now % 2 else "healthy")
+        self.assertFalse(self.store.read()["rescue"]["required"])
+        view = self.store.begin(self.BOOTS[3], 0, reset_cause="watchdog")
+        self.assertEqual(view["state"], "rescue-required")
+
+    def test_rollback_status_never_latches_rescue_on_a_spent_budget(self):
+        boot = self.spent()
+        before = self.snapshot()
+        with patch.object(r, "_boottime", return_value=62):
+            status = self.store.rollback_status(boot, pinned_bootloader=PIN,
+                                                probe=lambda: good_proof(boot))
+        self.assertEqual(status["decision"], "REFUSE")
+        self.assertFalse(status["rescue_required"])
+        self.assertEqual(status["state"], "reset-budget-spent")
+        self.assertEqual(before, self.snapshot())
+        self.assertFalse(self.store.read()["rescue"]["required"])
+
+
+    def test_health_and_begin_take_no_caller_clock(self):
+        self.spent()
+        rescued = self.BOOTS[3]
+        self.assertEqual(self.store.begin(rescued, 0, reset_cause="watchdog")["state"], "rescue-required")
+        raw = r.Store(self.store.root, limit=2, healthy_seconds=60)
+        with self.assertRaises(TypeError):
+            raw.health(rescued, 30, "healthy")
+        with self.assertRaises(TypeError):
+            raw.begin(self.BOOTS[4], 0)
+        # The review's probe, 21 reports in about a millisecond: real boot time
+        # barely moves, so the 60 s dwell never completes and the latch holds.
+        for _ in range(21):
+            view = raw.health(rescued, "healthy")
+        self.assertEqual(view["state"], "rescue-required")
+        self.assertEqual(self.store.read()["remaining"], 0)
+        self.assertTrue(self.store.read()["rescue"]["required"])
+        # Only the clock the store samples itself moves the dwell.
+        for step, now in enumerate((100, 130, 160)):
+            with patch.object(r, "_boottime", return_value=now):
+                view = raw.health(rescued, "healthy")
+        self.assertEqual(view["remaining"], 2)
+        self.assertFalse(view["rescue_required"])
+
+
+    def test_process_control_from_a_collector_propagates_without_a_grant(self):
+        self.store.begin(BOOT, 0, reset_cause="power-on")
+        self.rearm()
+        for signal in (KeyboardInterrupt, SystemExit):
+            def interrupted():
+                raise signal()
+            before = self.snapshot()
+            with self.subTest(signal=signal.__name__), patch.object(r, "_boottime", return_value=62):
+                with self.assertRaises(signal):
+                    self.store.rollback(BOOT, pinned_bootloader=PIN, probe=interrupted)
+                with self.assertRaises(signal):
+                    self.store.rollback_status(BOOT, pinned_bootloader=PIN, probe=interrupted)
+            self.assertEqual(before, self.snapshot())
+            self.assertEqual(self.store.read()["boots"][BOOT]["granted"], "none")
+
+
+    def test_status_projection_is_bound_to_the_ledger_it_describes(self):
+        self.spent()
+        self.store.begin(self.BOOTS[3], 0, reset_cause="watchdog")
+        projection = self.store.root / "recovery-status.json"
+        status = json.loads(projection.read_text())
+        envelope = json.loads(self.store.path.read_text())
+        self.assertEqual(status["ledger_sha256"], envelope["sha256"])
+        self.assertTrue(self.store.current_projection()["rescue_required"])
+        # Damage after the last write: the file still says rescue, the ledger
+        # says unknown; the bound reader refuses the stale projection.
+        for damage in ("torn", "record"):
+            with self.subTest(damage=damage):
+                if damage == "torn":
+                    self.store.path.write_bytes(b"torn")
+                else:
+                    envelope["record"]["remaining"] = 1
+                    self.store.path.write_text(json.dumps(envelope))
+                self.assertTrue(json.loads(projection.read_text())["rescue_required"])
+                self.assertIsNone(self.store.view(self.store.read())["rescue_required"])
+                self.assertIsNone(self.store.current_projection())
+        view = self.store.begin(self.BOOTS[4], 0, reset_cause="power-on")
+        self.assertEqual(self.store.current_projection(), json.loads(projection.read_text()))
+        self.assertIsNone(self.store.current_projection()["rescue_required"])
+        self.assertEqual(view["state"], "recovery-uncertain")
+        projection.unlink()
+        self.assertIsNone(self.store.current_projection())
+
+
+    def test_crash_loop_without_earned_credit_reaches_rescue(self):
+        # A box that never confirmed health (fresh flash or quarantined ledger)
+        # and keeps dying needs as many resets as a full budget allows, then
+        # rescue, instead of looping as rollback-not-armed forever.
+        boots = self.BOOTS
+        for start in ("fresh", "quarantined"):
+            with self.subTest(start=start):
+                self.store.path.unlink(missing_ok=True)
+                if start == "quarantined":
+                    self.store.path.write_bytes(b"torn")
+                view = self.store.begin(boots[0], 0, reset_cause="power-on")
+                self.assertFalse(view["reset_budget_available"])
+                view = self.store.begin(boots[1], 0, reset_cause="watchdog")
+                self.assertNotIn(view["state"], ("reset-budget-spent", "rescue-required"))
+                # Clean and orderly boots in between neither count nor reset the count.
+                self.store.begin(boots[2], 0, reset_cause="power-on")
+                self.store.begin(boots[3], 0, reset_cause="software")
+                view = self.store.begin(boots[4], 0, reset_cause="panic")
+                self.assertEqual(view["state"], "reset-budget-spent")
+                self.assertFalse(view["rescue_required"])
+                self.assertNotIn("Stop media", view["announcement"])
+                view = self.store.begin(boots[5], 0, reset_cause="watchdog")
+                self.assertEqual(view["state"], "rescue-required")
+                self.assertEqual(self.store.read()["rescue"]["entries"], 1)
+
+    def test_confirmed_health_forgets_charges_taken_without_credit(self):
+        boots = self.BOOTS
+        self.store.begin(boots[0], 0, reset_cause="power-on")
+        self.store.begin(boots[1], 0, reset_cause="watchdog")
+        self.rearm(boots[1])
+        self.assertEqual(self.store.read()["charges_without_credit"], 0)
+        self.store.begin(boots[2], 0, reset_cause="watchdog")
+        self.assertEqual(self.store.begin(boots[3], 0, reset_cause="power-on")["remaining"], 1)
+        self.assertEqual(self.store.read()["charges_without_credit"], 0)
 
 
 if __name__ == "__main__":

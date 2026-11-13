@@ -12,7 +12,7 @@ import re
 import tempfile
 import time
 
-VERSION = 4
+VERSION = 5
 MAX_WITNESSES = 64
 MAX_BYTES = 4 * 1024 * 1024
 INTENTS = {"none", "reset", "activate-other-slot", "unbind-adapter"}
@@ -31,7 +31,8 @@ PIN_FORMAT = r"sha256:[0-9a-f]{64}"
 
 
 def _boottime():
-    # Private clock seam: evidence age is never judged by a caller-supplied time.
+    # Private clock seam: evidence age, health dwell and witness uptime are never
+    # judged by a caller-supplied time.
     return time.clock_gettime(time.CLOCK_BOOTTIME)
 
 
@@ -91,6 +92,7 @@ class Store:
     def empty(self, source):
         return {"version": VERSION, "limit": self.limit, "healthy_seconds": self.healthy_seconds,
                 "remaining": 0, "current_boot": None, "boots": {}, "source": source, "exhausted": False,
+                "charges_without_credit": 0,
                 "pruned_boots": 0, "max_health_gap": self.max_health_gap,
                 "rescue": {"required": False, "entries": 0, "entered_boot": None},
                 "release": {"new_release": None, "previous_release": None,
@@ -109,6 +111,9 @@ class Store:
             raise ValueError("invalid budget")
         if record["current_boot"] is not None and record["current_boot"] not in record["boots"]:
             raise ValueError("missing current boot")
+        if (type(record["charges_without_credit"]) is not int
+                or not 0 <= record["charges_without_credit"] <= 1000):
+            raise ValueError("invalid uncredited charge count")
         if (type(record["exhausted"]) is not bool or type(record["pruned_boots"]) is not int
                 or record["pruned_boots"] < 0 or type(record["max_health_gap"]) is not int
                 or not 1 <= record["max_health_gap"] <= 30):
@@ -182,24 +187,45 @@ class Store:
 
     def write(self, record):
         self.validate(record)
-        raw = encoded({"record": record, "sha256": hashlib.sha256(encoded(record)).hexdigest()})
+        digest = hashlib.sha256(encoded(record)).hexdigest()
+        raw = encoded({"record": record, "sha256": digest})
         if len(raw) > MAX_BYTES:
             raise ValueError("witness storage full; export and service required")
         self.atomic_file(self.path, raw)
-        self.project(record)
+        self.project(record, digest)
 
-    def project(self, record):
+    def project(self, record, digest):
         """Durable advisory projection for UI/LED consumers; never grants.
 
         The ledger commit above is the transaction. A failed projection must not
         fail it or leave a stale projection behind, so it is removed instead.
+        `ledger_sha256` names the ledger generation it describes; see
+        current_projection().
         """
         status = self.root / "recovery-status.json"
         try:
-            self.atomic_file(status, encoded(self.view(record)))
+            self.atomic_file(status, encoded(dict(self.view(record), ledger_sha256=digest)))
         except OSError:
             with contextlib.suppress(OSError):
                 status.unlink(missing_ok=True)
+
+    def current_projection(self):
+        """The published status only while it describes the intact current ledger.
+
+        A ledger damaged, replaced or reconfigured after the last write makes the
+        projection stale (it may still say rescue while the ledger says unknown);
+        that returns None, which consumers treat as unavailable and refuse.
+        """
+        try:
+            with (self.root / "recovery-status.json").open("rb") as stream:
+                status = json.loads(stream.read(MAX_BYTES))
+        except (OSError, ValueError):
+            return None
+        record = self.read()
+        if (not isinstance(status, dict) or record["source"] == "missing"
+                or status.get("ledger_sha256") != hashlib.sha256(encoded(record)).hexdigest()):
+            return None
+        return status
 
     def atomic_file(self, path, raw):
         fd, name = tempfile.mkstemp(prefix=".write-", dir=self.root)
@@ -283,6 +309,9 @@ class Store:
         try:
             proof = probe()
         except Exception:  # any collector failure refuses; it never propagates
+            # SystemExit, KeyboardInterrupt and GeneratorExit are process control,
+            # not collector failures: they propagate before anything is written,
+            # so they cannot grant either.
             proof = {}
         if not isinstance(proof, dict):
             proof = {}
@@ -394,15 +423,15 @@ class Store:
         self.validate_release(value)
         return self.update(boot, lambda record, witness: record.update(release=value))
 
-    def begin(self, boot, now, *, slot="unknown", counters=None, bootloader="unknown",
+    def begin(self, boot, *, slot="unknown", counters=None, bootloader="unknown",
               reset_cause="unknown", detectors=None, console_tail=None):
         boot_id(boot)
-        uptime(now)
         counters = {"A": None, "B": None} if counters is None else counters
         detectors = {"watchdog": "unknown", "rollback": "unknown"} if detectors is None else detectors
         console_tail = [] if console_tail is None else console_tail
         observations(slot, counters, bootloader, reset_cause, detectors, console_tail)
         with self.locked():
+            now = uptime(_boottime())
             record = self.read()
             for orphan in self.root.glob(".write-*"):
                 orphan.unlink()
@@ -429,9 +458,16 @@ class Store:
             needs_rescue = charge and record["remaining"] == 0 and record["exhausted"]
             if charge and record["remaining"] > 0:
                 record["remaining"] -= 1
-                # Only spending the last credit is an exhausted episode; a charge
-                # against missing, corrupt or reset-by-threshold credit is not.
+                # Only spending the last credit is an exhausted episode; a single
+                # charge against missing, corrupt or reset-by-threshold credit is not.
                 if record["remaining"] == 0:
+                    record["exhausted"] = True
+            elif charge and not record["exhausted"]:
+                # A box that never confirmed health and keeps dying: as many charged
+                # resets as a full budget allows are a spent budget too, so the next
+                # one needs rescue instead of looping as rollback-not-armed.
+                record["charges_without_credit"] = min(record["limit"], record["charges_without_credit"] + 1)
+                if record["charges_without_credit"] >= record["limit"]:
                     record["exhausted"] = True
             record["current_boot"] = boot
             record["boots"][boot] = dict(state_source=record["source"],
@@ -476,8 +512,8 @@ class Store:
             witness["intent"] = action
         return self.update(boot, change)
 
-    def health(self, boot, now, verdict):
-        uptime(now)
+    def health(self, boot, verdict):
+        """Report a verdict at this boot's CLOCK_BOOTTIME, sampled here under the lock."""
         if verdict not in HEALTH:
             raise ValueError("invalid health")
 
@@ -485,6 +521,7 @@ class Store:
         # persisted healthy snapshots cannot prove that the reporter stayed alive.
         boot_id(boot)
         with self.locked():
+            now = uptime(_boottime())
             record = self.read()
             if record["current_boot"] != boot:
                 raise ValueError("current boot witness unavailable")
@@ -502,13 +539,15 @@ class Store:
                 return self.view(record)
             witness.update(last_uptime=now, health=verdict, healthy_since=anchor)
             if rearm:
-                record.update(remaining=self.limit, source="valid", exhausted=False)
+                record.update(remaining=self.limit, source="valid", exhausted=False,
+                              charges_without_credit=0)
                 record["rescue"]["required"] = False
                 self._health[boot] = (now, now, verdict)
             witness["budget_remaining"] = record["remaining"]
-            if verdict == "failed":
-                # A failing box with the budget spent cannot be reset: rescue.
-                self.enter_rescue(record)
+            # A failed verdict alone never enters rescue: a transient failure must
+            # not stop a live stream. Rescue starts when a reset is actually needed
+            # with the budget spent: the reset policy asks rollback(), or the box
+            # comes back from another charged reset (begin()).
             self.write(record)
             return self.view(record)
 
@@ -533,13 +572,12 @@ def main():
             result = store.view(store.read(), Path("/proc/sys/kernel/random/boot_id").read_text().strip())
         else:
             boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-            now = time.clock_gettime(time.CLOCK_BOOTTIME)
             if args.command == "begin":
-                result = store.begin(boot, now)
+                result = store.begin(boot)
             elif args.command == "intent":
                 result = store.intent(boot, args.action)
             else:
-                result = store.health(boot, now, args.verdict)
+                result = store.health(boot, args.verdict)
         print(json.dumps(result, sort_keys=True))
         if args.command == "intent" and args.action in ACTIONS:
             return 3
