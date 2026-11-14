@@ -46,8 +46,14 @@ fi
 # configured 1 MiB reservation to about 1.4 MiB when read; allow 44 MiB of history,
 # including directory metadata. Also trim inputs from larger reservations.
 archives=(history/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
+# Count only generations that this loop can prune, not unrelated entries.
+numbered=()
+for dir in "${archives[@]}"; do
+  [[ ! -d "$dir" ]] || numbered+=("$dir")
+done
+archives=("${numbered[@]}")
 while ((${#archives[@]})) && { ((${#archives[@]} > 31)) ||
-  (( $(du -sb history | cut -f1) > 44 * 1024 * 1024 )); }; do
+  (( $(du -sbc -- "${archives[@]}" | tail -n 1 | cut -f1) > 44 * 1024 * 1024 )); }; do
   rm -rf -- "${archives[0]}"
   archives=("${archives[@]:1}")
 done

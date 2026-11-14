@@ -46,7 +46,7 @@ setup() {
   grep -qx 'Unlink=yes' "$PSTORE_DESTROOT/etc/systemd/pstore.conf.d/60-ceralive.conf"
   grep -qx 'RequiresMountsFor=/data/ceralive/pstore' "$PSTORE_DESTROOT/etc/systemd/system/systemd-pstore.service.d/60-ceralive.conf"
   grep -qx 'BindPaths=/data/ceralive/pstore:/var/lib/systemd/pstore' "$PSTORE_DESTROOT/etc/systemd/system/systemd-pstore.service.d/60-ceralive.conf"
-  grep -qx 'd /data/ceralive/pstore 0700 root root 30d' "$PSTORE_DESTROOT/etc/tmpfiles.d/ceralive-pstore.conf"
+  grep -qx 'd /data/ceralive/pstore 0700 root root -' "$PSTORE_DESTROOT/etc/tmpfiles.d/ceralive-pstore.conf"
   grep -qx 'After=data.mount' "$PSTORE_DESTROOT/etc/systemd/system/systemd-tmpfiles-setup.service.d/60-ceralive-pstore.conf"
   grep -qx 'enable systemd-pstore.service' "$CALLS"
   ! grep -q mask "$CALLS"
@@ -162,7 +162,9 @@ clock_history() {
     bash "$REPO/mkosi/runtime/ceralive-pstore-rotate.sh" "$store"
   done
   [ "$(find "$store/history" -mindepth 1 -maxdepth 1 -type d | wc -l)" = 31 ]
-  for i in $(seq 1 9); do ! grep -rx "crash $i" "$store"; done
+  for i in $(seq 1 9); do
+    if grep -rx "crash $i" "$store"; then return 1; fi
+  done
   for i in $(seq 10 40); do
     grep -qx "crash $i" "$store/history/$(printf '%010d' "$i")/dmesg-ramoops-0"
   done
@@ -217,4 +219,39 @@ SH
   done
   bash "$REPO/mkosi/runtime/ceralive-pstore-rotate.sh" "$store"
   [ "$(find "$store/history" -mindepth 1 -maxdepth 1 -type d | wc -l)" = 31 ]
+}
+
+@test "tmpfiles clean retains epoch-dated crash records after clock synchronization" {
+  root="$BATS_TEST_TMPDIR/root"
+  store="$root/data/ceralive/pstore"
+  mkdir -p "$store/history/0000000001"
+  printf 'newest crash\n' > "$store/dmesg-ramoops-0"
+  printf 'newest console\n' > "$store/console-ramoops-0"
+  printf 'previous crash\n' > "$store/history/0000000001/dmesg-ramoops-0"
+  printf '2020-01-01T00:00:00Z\n' > "$store/history/0000000001/collected-at"
+  find "$root" -exec touch -a -m -d '2020-01-01 UTC' '{}' +
+  # touch cannot backdate ctime/btime. Advance only tmpfiles' realtime clock
+  # beyond those too, simulating time sync without changing the host clock.
+  cc -shared -fPIC -o "$BATS_TEST_TMPDIR/clock.so" "$REPO/tests/fixtures/tmpfiles-clock.c"
+  sed "s/root root/$(id -u) $(id -g)/" "$REPO/mkosi/runtime/ceralive-pstore.tmpfiles.conf" > "$BATS_TEST_TMPDIR/tmpfiles.conf"
+  # Positive control: prove the old rule really deletes this fixture.
+  sed 's/ -$/ 30d/' "$BATS_TEST_TMPDIR/tmpfiles.conf" > "$BATS_TEST_TMPDIR/aged.conf"
+  cp -a "$root" "$BATS_TEST_TMPDIR/control"
+  LD_PRELOAD="$BATS_TEST_TMPDIR/clock.so" systemd-tmpfiles --root="$BATS_TEST_TMPDIR/control" --clean "$BATS_TEST_TMPDIR/aged.conf"
+  [ ! -e "$BATS_TEST_TMPDIR/control/data/ceralive/pstore/dmesg-ramoops-0" ]
+  LD_PRELOAD="$BATS_TEST_TMPDIR/clock.so" systemd-tmpfiles --root="$root" --clean "$BATS_TEST_TMPDIR/tmpfiles.conf"
+  grep -qx 'newest crash' "$store/dmesg-ramoops-0"
+  grep -qx 'newest console' "$store/console-ramoops-0"
+  grep -qx 'previous crash' "$store/history/0000000001/dmesg-ramoops-0"
+  grep -qx '2020-01-01T00:00:00Z' "$store/history/0000000001/collected-at"
+}
+
+@test "history size budget ignores entries outside numbered generations" {
+  store="$BATS_TEST_TMPDIR/store"
+  mkdir -p "$store/history/lost+found" "$store/history/0000000001"
+  truncate -s 52428800 "$store/history/lost+found/junk"
+  printf 'keep me\n' > "$store/history/0000000001/dmesg-ramoops-0"
+  bash "$REPO/mkosi/runtime/ceralive-pstore-rotate.sh" "$store"
+  grep -qx 'keep me' "$store/history/0000000001/dmesg-ramoops-0"
+  [ -f "$store/history/lost+found/junk" ]
 }

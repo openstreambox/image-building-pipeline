@@ -36,15 +36,17 @@ flat ramoops files into a unique history directory so a later warm reboot cannot
 replace them. It retains at most 31 previous collections plus the current one,
 pruning by zero-padded sequence number and limiting history to 44 MiB of apparent
 size. Allocation uses exclusive directory creation and retries collisions. The
-wall clock is saved only in `collected-at`; backward steps and repeated boot
-epochs do not affect retention. Empty allocations are removed, and interrupted
+wall clock is saved only in `collected-at`: the time the previous flat files
+were moved into history, or an interrupted move was resumed, rather than the
+original stock collection time. Backward steps and repeated boot epochs do not
+affect retention. Empty allocations are removed, and interrupted
 moves resume in the same generation. With pstore decompression, the configured
 1 MiB RAM reservation can yield about 1.4 MiB in the current collection;
 filesystem metadata and block allocation add overhead. This is a rolling bound,
 not a promise to keep every crash indefinitely. A larger reservation requires
-reviewing this budget. Tmpfiles also makes files eligible for cleanup after
-30 days under its normal access/modification/change-time rules; reads can delay
-cleanup and the count/size limit can remove records sooner.
+reviewing this budget. Tmpfiles has no age-based cleanup rule: only sequence-based
+count and size pruning removes saved generations. The size budget counts only
+numbered generation directories.
 
 For support export, use stock files (root permissions are required):
 

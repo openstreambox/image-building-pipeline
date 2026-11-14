@@ -20,14 +20,16 @@ ramoops existentes a un directorio único antes de que el archivador estándar
 reemplace sus nombres. Conserva hasta 31 colecciones anteriores y la actual;
 elimina por número de secuencia con ceros iniciales y limita el historial a 44 MiB de
 tamaño aparente. La creación exclusiva del directorio reintenta las colisiones.
-La hora queda solo como metadato en `collected-at`; los retrocesos del reloj o
-una época de arranque repetida no alteran el orden. Se eliminan las asignaciones
+La hora queda solo como metadato en `collected-at`: indica cuándo los archivos
+anteriores se movieron al historial o se reanudó un movimiento interrumpido, no
+cuándo los recopiló systemd-pstore. Los retrocesos del reloj y las épocas de
+arranque repetidas no afectan la retención. Se eliminan las asignaciones
 vacías y los movimientos interrumpidos continúan en la misma generación. La
 descompresión de pstore puede producir unos 1.4 MiB desde la reserva de 1 MiB, más la
 sobrecarga del sistema de archivos. No se promete conservar cada fallo para
-siempre. Tmpfiles permite limpiar después de 30 días según sus reglas de acceso,
-modificación y cambio; las lecturas pueden retrasarlo y los límites pueden
-eliminar registros antes. Los archivos sobreviven al cambio
+siempre. Tmpfiles no elimina archivos por edad: solo los límites de cantidad y
+tamaño eliminan generaciones por secuencia. El cálculo de tamaño incluye
+únicamente los directorios de generaciones numeradas. Los archivos sobreviven al cambio
 de raíz A/B. Si falta `/data`, el servicio no ejecuta ni borra los registros.
 
 Lectura sin modificar archivos (requiere permisos de root):
