@@ -11,7 +11,10 @@ apt-config -c "$w/etc/apt/apt.conf.d/82bounded-metadata" dump >"$w/config"
 grep -Fxq 'Dir::Cache::pkgcache "";' "$w/config"
 grep -Fxq 'Dir::Cache::srcpkgcache "";' "$w/config"
 # No transaction hooks remove the lists that an install following update needs.
-! grep -q 'Post-Invoke' "$w/etc/apt/apt.conf.d/82bounded-metadata"
+if grep -q 'Post-Invoke' "$w/etc/apt/apt.conf.d/82bounded-metadata"; then
+  echo 'APT metadata policy must retain indexes after a transaction' >&2
+  exit 1
+fi
 # Board-specific setup must follow the shared attention installation so every
 # board receives diagnostics before customization enters its optional path.
 python3 - <<'PY'
