@@ -1,46 +1,41 @@
-# Evidencia de reinicios (implementación; falta validar en hardware)
+# Registros de fallos después de un reinicio en caliente (borrador)
 
-En ROCK 5B y 5B+ el script de arranque reserva 1 MiB de RAM,
-`0x1f000000–0x1f0fffff`, para ramoops: consola de 512 KiB y cuatro registros
-de oops/panic de 128 KiB. La reserva se agrega al DT cargado antes de `booti`.
-El overlay de referencia `rk3588-ramoops.dts` se compila en las pruebas;
-no se debe aplicar además de la reserva del script de arranque.
+Un reinicio silencioso puede borrar la pista del fallo. La compilación del kernel
+agrega una reserva ramoops de 1 MiB en `0x1f000000` a los árboles de dispositivos
+de ROCK 5B y ROCK 5B+. El kernel conserva los últimos mensajes en RAM y el
+servicio estándar systemd-pstore los guarda y elimina del pstore al arrancar.
+No se modifica `boot.scr`.
 
-Falta comprobar el mapa real de memoria, las reservas del firmware, los rangos
-de carga y la conservación de RAM durante un reinicio en cada variante de RAM,
-kernel y bootloader. Un corte de energía pierde la RAM. Otros modelos RK3588,
-otras familias ARM y x86 quedan pendientes porque necesitan su propio mapa de
-memoria y backend validado. No se cambia la política del watchdog.
+El archivo `manifests/kernel/rk3588-ramoops.dtsi` define registros de 128 KiB,
+512 KiB de consola y `max-reason=2`. El helper y el archivo son entradas de la
+huella del kernel; las revisiones del paquete avanzan para evitar reutilizar
+bytes publicados. Se necesita compilar y publicar el kernel correspondiente
+antes de ensamblar una imagen de producción; este borrador no lo publica.
 
-Al arrancar, `ceralive-reset-evidence.service` espera los sistemas de archivos,
-`/data`, pstore y udev. Solo escribe si `/data` está montado. Reemplaza al
-archivador `systemd-pstore.service`, que queda enmascarado para evitar carreras.
-Guarda pstore, `watchdog*/bootstatus` y los atributos de texto de causa de
-reinicio disponibles en `/data/log/reset-evidence/<fecha-UTC>_<boot-id>/`.
-`evidence.json` usa esquema 1; `pstore/` contiene los archivos originales.
-La secuencia identifica el orden aun cuando el reloj esté desajustado.
+`Storage=external` y `Unlink=yes` usan el archivador estándar. El servicio
+requiere el montaje de `/data` y la preparación de tmpfiles. Un bind privado
+del servicio conecta `/data/ceralive/pstore` con `/var/lib/systemd/pstore`.
+Tmpfiles crea el directorio con permisos 0700 y retención de 30 días por edad,
+sin límite personalizado de bytes o cantidad. Los archivos sobreviven al cambio
+de raíz A/B. Si falta `/data`, el servicio no ejecuta ni borra los registros.
 
-Conserva ocho colecciones, con hasta 16 MiB y 128 archivos pstore por colección.
-Los archivos son privados. Primero sincroniza datos y directorios; después
-elimina los archivos pstore. Si falla el almacenamiento, conserva las fuentes.
-`bootstatus` es de solo lectura y nunca se borra ni se escribe; tampoco se
-modifican los atributos de causa de reinicio. No se abre `/dev/watchdog`.
-Un mapa vacío significa que no hay datos disponibles, no que el reinicio fue
-normal. RK3588 puede no exponer una causa de reinicio mediante sysfs.
-
-El lector para una futura integración privilegiada con soporte o CeraUI es:
+Lectura sin modificar archivos (requiere permisos de root):
 
 ```sh
-/usr/local/sbin/ceralive-reset-evidence latest
+sudo find /data/ceralive/pstore -type f -name '*ramoops*' -exec cat -- '{}' +
+sudo journalctl -u systemd-pstore.service
 ```
 
-Imprime el JSON más reciente: código 0 si existe, 1 si falta o no puede leerse,
-2 para argumentos inválidos. No recopila ni borra datos. CeraUI no cambia.
-Los registros de consola serie externos siguen siendo independientes.
+No hay colector propio, esquema JSON ni lector de último arranque. CeraUI no
+consume el lector retirado. Las causas de reinicio de U-Boot y el bootstatus
+del watchdog corresponden a un registro de arranque separado.
 
-Falta validar con medios recuperables y consola serie independiente: reserva,
-oops/panic controlado, reinicio en caliente sin panic, estado del watchdog,
-causa expuesta, borrado posterior a la copia duradera, fallas de `/data` y
-retención. Registrar las versiones y repetir tras cambios de kernel/bootloader.
-No se accedió a placas ni se grabaron imágenes durante esta implementación.
-Detalles y límites: [contrato técnico](reset-evidence.md).
+Falta validar la dirección, reservas de firmware, rangos del cargador y
+conservación de RAM en cada tamaño de memoria y combinación kernel/cargador.
+Se deben repetir pánicos y reinicios por watchdog y comprobar los archivos y
+su eliminación del pstore. Un corte de energía borra RAM; un bloqueo puede
+dejar solo la consola. Las pruebas del host no califican hardware.
+
+TODO: otras placas RK3588 (incluida Orange Pi 5 Plus), otras familias ARM y x86
+necesitan su propia dirección o backend y pruebas de conservación. No se cambia
+la política del watchdog.

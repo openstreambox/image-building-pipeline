@@ -573,15 +573,12 @@ setup_rtmp_gateway() {
   enable_service ceralive-rtmp-gateway.service
 }
 
-# Install from committed sources into every rootfs slot.
+# Stock pstore owns archiving and acknowledgement in every rootfs slot.
 setup_reset_evidence() {
-  local src="${CERALIVE_RUNTIME_SRC:-}"
-  [[ -f "${src}/ceralive-reset-evidence.sh" && -f "${src}/ceralive-reset-evidence.service" ]] \
-    || die "reset evidence runtime sources missing"
-  install -D -m 0755 "${src}/ceralive-reset-evidence.sh" "${RESET_EVIDENCE_SBIN_DIR:-/usr/local/sbin}/ceralive-reset-evidence"
-  install -D -m 0644 "${src}/ceralive-reset-evidence.service" "${RESET_EVIDENCE_UNIT_DIR:-/etc/systemd/system}/ceralive-reset-evidence.service"
-  # Give this collector sole ownership: the stock archiver can otherwise delete
-  # sources after a failed /data write or when this service was skipped.
-  mask_service systemd-pstore.service
-  enable_service ceralive-reset-evidence.service
+  local src="${CERALIVE_RUNTIME_SRC:-}" dest="${PSTORE_DESTROOT:-}"
+  install -D -m 0644 "${src}/ceralive-pstore.conf" "${dest}/etc/systemd/pstore.conf.d/60-ceralive.conf"
+  install -D -m 0644 "${src}/ceralive-pstore.service.conf" "${dest}/etc/systemd/system/systemd-pstore.service.d/60-ceralive.conf"
+  install -D -m 0644 "${src}/ceralive-pstore.tmpfiles.conf" "${dest}/etc/tmpfiles.d/ceralive-pstore.conf"
+  install -D -m 0644 "${src}/ceralive-pstore-tmpfiles.service.conf" "${dest}/etc/systemd/system/systemd-tmpfiles-setup.service.d/60-ceralive-pstore.conf"
+  enable_service systemd-pstore.service
 }

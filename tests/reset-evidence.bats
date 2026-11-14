@@ -1,153 +1,80 @@
 #!/usr/bin/env bats
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
-  TOOL="$REPO/mkosi/runtime/ceralive-reset-evidence.sh"
-  export CERALIVE_EVIDENCE_ROOT="$BATS_TEST_TMPDIR/root"
-  mkdir -p "$CERALIVE_EVIDENCE_ROOT"/{sys/fs/pstore,sys/class/watchdog/watchdog2,proc/sys/kernel/random,data}
-  echo 12345678-1234-1234-1234-123456789abc > "$CERALIVE_EVIDENCE_ROOT/proc/sys/kernel/random/boot_id"
 }
-@test "collects pstore, watchdog and exposed reset cause before clearing only pstore" {
-  echo panic > "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/dmesg-ramoops-0"
-  echo console > "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/console-ramoops-0"
-  echo 32 > "$CERALIVE_EVIDENCE_ROOT/sys/class/watchdog/watchdog2/bootstatus"
-  mkdir -p "$CERALIVE_EVIDENCE_ROOT/sys/kernel"
-  echo watchdog > "$CERALIVE_EVIDENCE_ROOT/sys/kernel/reset_reason"
-  run bash "$TOOL" collect
-  [ "$status" -eq 0 ]
-  run bash "$TOOL" latest
-  [ "$status" -eq 0 ]
-  [[ "$output" == *'"watchdog2": "32"'* ]]
-  [[ "$output" == *'watchdog'* && "$output" == *'reset_reason'* ]]
-  [ -z "$(ls -A "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore")" ]
-  [ "$(cat "$CERALIVE_EVIDENCE_ROOT/sys/class/watchdog/watchdog2/bootstatus")" = 32 ]
-  grep -rq panic "$CERALIVE_EVIDENCE_ROOT/data/log/reset-evidence"
-}
-@test "missing optional evidence is explicit and same boot retry is idempotent" {
-  bash "$TOOL" collect
-  bash "$TOOL" collect
-  [ "$(find "$CERALIVE_EVIDENCE_ROOT/data/log/reset-evidence" -name evidence.json | wc -l)" -eq 1 ]
-  run bash "$TOOL" latest
-  [[ "$output" == *'"reset_causes": {}'* ]]
-}
-@test "failed persistence and oversized input leave pstore intact" {
-  mkdir "$CERALIVE_EVIDENCE_ROOT/data/log"
-  touch "$CERALIVE_EVIDENCE_ROOT/data/log/reset-evidence"
-  echo panic > "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/dmesg-ramoops-0"
-  run bash "$TOOL" collect
-  [ "$status" -ne 0 ]
-  [ -f "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/dmesg-ramoops-0" ]
-  rm "$CERALIVE_EVIDENCE_ROOT/data/log/reset-evidence"
-  truncate -s 17000000 "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/dmesg-ramoops-0"
-  run bash "$TOOL" collect
-  [ "$status" -ne 0 ]
-  [ -f "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/dmesg-ramoops-0" ]
-}
-@test "retention keeps eight boot collections even with unsynchronised clocks" {
-  for n in {1..10}; do
-    printf '%08d-1234-1234-1234-123456789abc\n' "$n" > "$CERALIVE_EVIDENCE_ROOT/proc/sys/kernel/random/boot_id"
-    bash "$TOOL" collect
-  done
-  [ "$(find "$CERALIVE_EVIDENCE_ROOT/data/log/reset-evidence" -name evidence.json | wc -l)" -eq 8 ]
-}
-@test "ramoops reference overlay compiles and applies without base symbols" {
-  dtc -@ -I dts -O dtb -o "$BATS_TEST_TMPDIR/overlay.dtbo" "$REPO/mkosi/platform/boot/rk3588-ramoops.dts"
+@test "kernel device tree reservation compiles and applies without base symbols" {
+  { printf '/dts-v1/; /plugin/; / { fragment@0 { target-path = "/"; __overlay__ {\n'
+    sed '1,2d;$d' "$REPO/manifests/kernel/rk3588-ramoops.dtsi"
+    printf '}; }; };\n'
+  } > "$BATS_TEST_TMPDIR/overlay.dts"
+  dtc -@ -I dts -O dtb -o "$BATS_TEST_TMPDIR/overlay.dtbo" "$BATS_TEST_TMPDIR/overlay.dts"
   printf '/dts-v1/; / { #address-cells = <2>; #size-cells = <2>; reserved-memory { #address-cells = <2>; #size-cells = <2>; ranges; }; };' > "$BATS_TEST_TMPDIR/base.dts"
   dtc -I dts -O dtb -o "$BATS_TEST_TMPDIR/base.dtb" "$BATS_TEST_TMPDIR/base.dts"
   fdtoverlay -i "$BATS_TEST_TMPDIR/base.dtb" -o "$BATS_TEST_TMPDIR/result.dtb" "$BATS_TEST_TMPDIR/overlay.dtbo"
-  [ "$(fdtget -tx "$BATS_TEST_TMPDIR/result.dtb" /reserved-memory/ramoops@1f000000 reg)" = '0 1f000000 0 100000' ]
+  node=/reserved-memory/ramoops@1f000000
+  [ "$(fdtget -tx "$BATS_TEST_TMPDIR/result.dtb" "$node" reg)" = '0 1f000000 0 100000' ]
+  [ "$(fdtget -tx "$BATS_TEST_TMPDIR/result.dtb" "$node" record-size)" = 20000 ]
+  [ "$(fdtget -tx "$BATS_TEST_TMPDIR/result.dtb" "$node" console-size)" = 80000 ]
+  [ "$(fdtget -tx "$BATS_TEST_TMPDIR/result.dtb" "$node" max-reason)" = 2 ]
 }
-@test "boot reservation and collection are installed and ordered before other pstore consumers" {
-  grep -q 'ramoops@1f000000' "$REPO/mkosi/platform/boot/boot.scr.cmd"
-  grep -q 'Before=systemd-pstore.service' "$REPO/mkosi/runtime/ceralive-reset-evidence.service"
-  grep -q 'After=data.mount' "$REPO/mkosi/runtime/ceralive-reset-evidence.service"
-  grep -q 'setup_reset_evidence' "$REPO/mkosi/customize/postinst.d/services.sh"
+@test "kernel build injects the reservation only into both Rock board sources" {
+  tree="$BATS_TEST_TMPDIR/linux/arch/arm64/boot/dts/rockchip"
+  mkdir -p "$tree"
+  for board in rk3588-rock-5b rk3588-rock-5b-plus rk3588-orangepi-5-plus; do
+    printf '/dts-v1/; / { #address-cells = <2>; #size-cells = <2>; };\n' > "$tree/$board.dts"
+  done
+  bash "$REPO/lib/kernel/ramoops.sh" "$BATS_TEST_TMPDIR/linux" "$REPO/manifests/kernel/rk3588-ramoops.dtsi"
+  bash "$REPO/lib/kernel/ramoops.sh" "$BATS_TEST_TMPDIR/linux" "$REPO/manifests/kernel/rk3588-ramoops.dtsi"
+  for board in rk3588-rock-5b rk3588-rock-5b-plus; do
+    [ "$(grep -c '/include/' "$tree/$board.dts")" = 1 ]
+    dtc -I dts -O dtb -o "$BATS_TEST_TMPDIR/$board.dtb" "$tree/$board.dts"
+    [ "$(fdtget -ts "$BATS_TEST_TMPDIR/$board.dtb" /reserved-memory/ramoops@1f000000 compatible)" = ramoops ]
+  done
+  ! grep -q ramoops "$tree/rk3588-orangepi-5-plus.dts"
+  grep -q 'bash /in/ramoops.sh /src/linux /in/ramoops.dtsi' "$REPO/lib/build-kernel.sh"
+  grep -q 'rk3588-ramoops.dtsi' "$REPO/lib/kernel/artifact-cache.sh"
+  ! grep -q ramoops "$REPO/mkosi/platform/boot/boot.scr.cmd"
 }
-
-@test "installer uses committed sources and gives collector sole pstore ownership" {
+@test "stock pstore installer provides persistent storage, config and ordering" {
   export CERALIVE_RUNTIME_SRC="$REPO/mkosi/runtime"
-  export RESET_EVIDENCE_SBIN_DIR="$BATS_TEST_TMPDIR/sbin"
-  export RESET_EVIDENCE_UNIT_DIR="$BATS_TEST_TMPDIR/units"
+  export PSTORE_DESTROOT="$BATS_TEST_TMPDIR/root"
   export CALLS="$BATS_TEST_TMPDIR/calls"
   run bash -c 'source "$1/mkosi/customize/postinst.d/services.sh"; enable_service() { echo "enable $*" >> "$CALLS"; }; mask_service() { echo "mask $*" >> "$CALLS"; }; setup_reset_evidence' _ "$REPO"
   [ "$status" -eq 0 ]
-  [ -x "$RESET_EVIDENCE_SBIN_DIR/ceralive-reset-evidence" ]
-  cmp "$REPO/mkosi/runtime/ceralive-reset-evidence.sh" "$RESET_EVIDENCE_SBIN_DIR/ceralive-reset-evidence"
-  grep -q 'mask systemd-pstore.service' "$CALLS"
-  grep -q 'enable ceralive-reset-evidence.service' "$CALLS"
+  grep -qx 'Storage=external' "$PSTORE_DESTROOT/etc/systemd/pstore.conf.d/60-ceralive.conf"
+  grep -qx 'Unlink=yes' "$PSTORE_DESTROOT/etc/systemd/pstore.conf.d/60-ceralive.conf"
+  grep -qx 'RequiresMountsFor=/data/ceralive/pstore /var/lib/systemd/pstore' "$PSTORE_DESTROOT/etc/systemd/system/systemd-pstore.service.d/60-ceralive.conf"
+  grep -qx 'BindPaths=/data/ceralive/pstore:/var/lib/systemd/pstore' "$PSTORE_DESTROOT/etc/systemd/system/systemd-pstore.service.d/60-ceralive.conf"
+  grep -qx 'd /data/ceralive/pstore 0700 root root 30d' "$PSTORE_DESTROOT/etc/tmpfiles.d/ceralive-pstore.conf"
+  grep -qx 'After=data.mount' "$PSTORE_DESTROOT/etc/systemd/system/systemd-tmpfiles-setup.service.d/60-ceralive-pstore.conf"
+  grep -qx 'enable systemd-pstore.service' "$CALLS"
+  ! grep -q mask "$CALLS"
+  [ ! -e "$REPO/mkosi/runtime/ceralive-reset-evidence.sh" ]
+  [ ! -e "$REPO/mkosi/runtime/ceralive-reset-evidence.service" ]
 }
-@test "symlinks are not copied or cleared and latest never collects" {
-  echo private > "$BATS_TEST_TMPDIR/elsewhere"
-  ln -s "$BATS_TEST_TMPDIR/elsewhere" "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/link"
-  run bash "$TOOL" latest
-  [ "$status" -eq 1 ]
-  bash "$TOOL" collect
-  [ -L "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/link" ]
-  [ "$(cat "$BATS_TEST_TMPDIR/elsewhere")" = private ]
+@test "tmpfiles creates private persistent storage and stock unit has no ordering cycle" {
+  root="$BATS_TEST_TMPDIR/root"
+  mkdir -p "$root"
+  sed "s/root root/$(id -u) $(id -g)/" "$REPO/mkosi/runtime/ceralive-pstore.tmpfiles.conf" > "$BATS_TEST_TMPDIR/tmpfiles.conf"
+  systemd-tmpfiles --root="$root" --create "$BATS_TEST_TMPDIR/tmpfiles.conf"
+  [ "$(stat -c %a "$root/data/ceralive/pstore")" = 700 ]
+  mkdir -p "$root/etc/systemd/system/systemd-pstore.service.d"
+  cp "$REPO/mkosi/runtime/ceralive-pstore.service.conf" "$root/etc/systemd/system/systemd-pstore.service.d/60-ceralive.conf"
+  mkdir -p "$root/etc/systemd/system/systemd-tmpfiles-setup.service.d"
+  cp "$REPO/mkosi/runtime/ceralive-pstore-tmpfiles.service.conf" "$root/etc/systemd/system/systemd-tmpfiles-setup.service.d/60-ceralive-pstore.conf"
+  printf '[Mount]\nWhat=/dev/disk/by-label/data\nWhere=/data\nType=ext4\n' > "$root/etc/systemd/system/data.mount"
+  SYSTEMD_UNIT_PATH="$root/etc/systemd/system:/usr/lib/systemd/system" systemd-analyze verify systemd-pstore.service systemd-tmpfiles-setup.service data.mount
 }
-@test "bootloader properties agree with compiled overlay" {
-  dtc -@ -I dts -O dtb -o "$BATS_TEST_TMPDIR/o.dtbo" "$REPO/mkosi/platform/boot/rk3588-ramoops.dts"
-  for prop in reg record-size console-size max-reason; do
-    value="$(fdtget -tx "$BATS_TEST_TMPDIR/o.dtbo" /fragment@0/__overlay__/ramoops@1f000000 "$prop")"
-    line="$(grep "fdt set /reserved-memory/ramoops@1f000000 $prop " "$REPO/mkosi/platform/boot/boot.scr.cmd")"
-    cells="$(printf '%s' "$line" | sed 's/.*<//;s/>.*//;s/0x//g')"
-    [ "$cells" = "$value" ]
-  done
-}
-
-@test "fsync failure cannot acknowledge pstore" {
-  echo panic > "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/dmesg-ramoops-0"
-  mkdir "$BATS_TEST_TMPDIR/bin"
-  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/sync"
-  chmod +x "$BATS_TEST_TMPDIR/bin/sync"
-  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash "$TOOL" collect
-  [ "$status" -ne 0 ]
-  [ -f "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/dmesg-ramoops-0" ]
-}
-@test "latest follows durable sequence rather than wall clock or file mtime" {
-  bash "$TOOL" collect
-  first="$(find "$CERALIVE_EVIDENCE_ROOT/data/log/reset-evidence" -name evidence.json)"
-  echo 00000002-1234-1234-1234-123456789abc > "$CERALIVE_EVIDENCE_ROOT/proc/sys/kernel/random/boot_id"
-  bash "$TOOL" collect
-  second="$(find "$CERALIVE_EVIDENCE_ROOT/data/log/reset-evidence" -name '*00000002*')"
-  touch -d '2038-01-01' "$(dirname "$first")"
-  touch -d '1970-01-02' "$second"
-  run bash "$TOOL" latest
-  [ "$status" -eq 0 ]
-  [[ "$output" == *'00000002-1234-1234-1234-123456789abc'* ]]
-}
-@test "stale partial copy is recovered and archives remain private" {
-  mkdir -p "$CERALIVE_EVIDENCE_ROOT/data/log/reset-evidence/.pending-abandoned"
-  echo panic > "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/dmesg-ramoops-0"
-  bash "$TOOL" collect
-  [ ! -d "$CERALIVE_EVIDENCE_ROOT/data/log/reset-evidence/.pending-abandoned" ]
-  file="$(find "$CERALIVE_EVIDENCE_ROOT/data/log/reset-evidence" -name evidence.json)"
-  [ "$(stat -c %a "$file")" = 600 ]
-  [ "$(stat -c %a "$(dirname "$file")")" = 700 ]
-}
-@test "failed production data mount stops before accessing evidence sources" {
-  mkdir "$BATS_TEST_TMPDIR/bin"
-  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/mountpoint"
-  chmod +x "$BATS_TEST_TMPDIR/bin/mountpoint"
-  run env CERALIVE_EVIDENCE_ROOT=/ PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash "$TOOL" collect
-  [ "$status" -eq 1 ]
-  [[ "$output" == *'/data is not mounted; preserving pstore'* ]]
-}
-@test "retention remains bounded when pstore acknowledgement is refused" {
-  mkdir "$BATS_TEST_TMPDIR/bin"
-  cat > "$BATS_TEST_TMPDIR/bin/rm" <<'STUB'
-#!/bin/sh
-case "$*" in
-  */sys/fs/pstore/*) exit 1 ;;
-  *) exec /bin/rm "$@" ;;
-esac
-STUB
-  chmod +x "$BATS_TEST_TMPDIR/bin/rm"
-  echo panic > "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/dmesg-ramoops-0"
-  for n in {1..10}; do
-    printf '%08d-1234-1234-1234-123456789abc\n' "$n" > "$CERALIVE_EVIDENCE_ROOT/proc/sys/kernel/random/boot_id"
-    run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash "$TOOL" collect
-    [ "$status" -ne 0 ]
-  done
-  [ "$(find "$CERALIVE_EVIDENCE_ROOT/data/log/reset-evidence" -name evidence.json | wc -l)" -eq 8 ]
-  [ -f "$CERALIVE_EVIDENCE_ROOT/sys/fs/pstore/dmesg-ramoops-0" ]
+@test "documented stock output reader handles empty and populated fixture trees without writes" {
+  store="$BATS_TEST_TMPDIR/pstore"
+  mkdir -p "$store/123"
+  run find "$store" -type f -name '*ramoops*' -exec cat -- '{}' +
+  [ "$status" = 0 ]; [ -z "$output" ]
+  printf 'panic fixture\n' > "$store/123/dmesg-ramoops-0"
+  printf 'console fixture\n' > "$store/console-ramoops-0"
+  before="$(find "$store" -type f -exec sha256sum '{}' +)"
+  run find "$store" -type f -name '*ramoops*' -exec cat -- '{}' +
+  [ "$status" = 0 ]; [[ "$output" == *'panic fixture'* && "$output" == *'console fixture'* ]]
+  [ "$before" = "$(find "$store" -type f -exec sha256sum '{}' +)" ]
+  grep -Fq -- "-name '*ramoops*' -exec cat" "$REPO/docs/reset-evidence.md"
 }
