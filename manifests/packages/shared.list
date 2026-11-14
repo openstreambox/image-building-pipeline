@@ -496,3 +496,4 @@ zstd                     # initramfs-tools uses it in the target rootfs to compr
                          # Config/enrollment: mkosi/runtime/hawkbit-updater/. decisions.md Task 5.
 
 python3                  # standard-library power-key gesture service; no pip dependencies
+systemd-repart           # grow the existing data partition before /data mounts
