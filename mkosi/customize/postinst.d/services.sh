@@ -163,6 +163,7 @@ configure_services() {
   setup_cpu_governor
   setup_hdmirx_edid
   setup_pipewire_system_mode
+  setup_power_policy
   setup_rauc_activation
   setup_slot_sync
   setup_boot_script_sync
@@ -181,6 +182,15 @@ setup_dpkg_recovery() {
   enable_service ceralive-dpkg-recover.service
 }
 
+# Power-key safety and the optional maintenance entrypoint apply without RAUC.
+setup_power_policy() {
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "$src" && -f "$src/60-ceralive-power-key.conf" && -f "$src/ceralive-power.sh" ]] \
+    || die 'power policy source missing'
+  install -D -m 0644 "$src/60-ceralive-power-key.conf" "${CERALIVE_LOGIND_CONF_DIR:-/etc/systemd/logind.conf.d}/60-ceralive-power-key.conf"
+  install -D -m 0755 "$src/ceralive-power.sh" "${CERALIVE_POWER_HELPER_DIR:-/usr/libexec/ceralive}/ceralive-power"
+}
+
 # The unit is installed on both architectures from one source; x86's GRUB ESP
 # lives at /boot/efi, while RK3588's boot-state FAT is mounted at /boot.
 setup_rauc_activation() {
@@ -191,8 +201,6 @@ setup_rauc_activation() {
   for artifact in ceralive-rauc-activate.sh ceralive-rauc-activate.service ceralive-rauc-arm@.service; do
     [[ -f "$src/$artifact" ]] || die "RAUC activation artifact missing: $src/$artifact"
   done
-  install -D -m 0644 "$src/60-ceralive-power-key.conf" "${CERALIVE_LOGIND_CONF_DIR:-/etc/systemd/logind.conf.d}/60-ceralive-power-key.conf"
-  install -D -m 0755 "$src/ceralive-power.sh" "$helper_dir/ceralive-power"
   arch="$(dpkg --print-architecture)" || die 'cannot detect target architecture for boot mount'
   case "$arch" in amd64|arm64) ;; *) die "unsupported activation architecture: $arch" ;; esac
   install -D -m 0755 "$src/ceralive-rauc-activate.sh" "$helper_dir/ceralive-rauc-activate"

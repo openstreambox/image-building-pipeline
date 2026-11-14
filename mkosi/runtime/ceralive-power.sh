@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Opt-in planned maintenance and recovery power entrypoint (root, systemd 257).
 set -euo pipefail
+uncertain() {
+  echo 'The power request could not be confirmed. Please check the box before trying again.' >&2
+  exit 70
+}
+trap uncertain HUP INT TERM
 case "${1:-}" in
   reboot|poweroff) action="$1" ;;
   *) echo 'Usage: ceralive-power reboot|poweroff' >&2; exit 64 ;;
@@ -12,8 +17,7 @@ else
   status=$?
 fi
 if (( status >= 128 )); then
-  echo 'The power request could not be confirmed. Please check the box before trying again.' >&2
-  exit 70
+  uncertain
 fi
 if (( status == 127 )); then
   echo 'Shutdown command unavailable. Check the system service before trying again.' >&2

@@ -167,8 +167,8 @@ The helper calls plain `systemctl reboot` or `systemctl poweroff` as root.
 On systemd 257 logind honours a strong shutdown block even for non-interactive
 root, without polkit. It omits `--check-inhibitors=yes`, whose additional
 session check refuses an otherwise idle box while a support SSH user is logged
-in. Exit 75 means command submission failed; exit 70 means the child was
-interrupted and its outcome is uncertain. It never forces or queues a fallback.
+in. Exit 75 means command submission failed; exit 70 means the helper or its child
+was interrupted and the outcome is uncertain. It never forces or queues a fallback.
 The disposable kernel runner uses the same plain root shutdown path.
 
 CeraUI holds a logind **block** inhibitor while encoder or client-carrying
@@ -192,6 +192,7 @@ suppresses its automatic restart; the reboot still checks other strong locks.
 The companion CeraUI service watchdog kills and restarts a hung owner, closing
 its descriptor rather than holding a lock forever.
 
+Power policy is installed independently of RAUC activation setup.
 `60-ceralive-power-key.conf` sets `HandlePowerKey=poweroff`,
 `HandlePowerKeyLongPress=poweroff` and `PowerKeyIgnoreInhibited=yes`. A safety
 power-key request must reach clean poweroff even during a stream. On systemd
