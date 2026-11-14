@@ -126,26 +126,30 @@ class Controller:
                     self.links[interface] = (signature, link)
             else:
                 link = self.links[interface][1]
-                link.repair_routes()
-                if time.monotonic() - getattr(link, 'refreshed', time.monotonic()) >= 60:
-                    try:
-                        prefix = discover(link.interface, link.source, link.resolvers)
-                        link.failures = 0
-                        if prefix != link.prefix:
-                            link.stop()
-                            del self.links[interface]
+                try:
+                    link.repair_routes()
+                    if time.monotonic() - getattr(link, 'refreshed', time.monotonic()) >= 60:
+                        try:
+                            prefix = discover(link.interface, link.source, link.resolvers)
+                            link.failures = 0
+                            if prefix != link.prefix:
+                                link.stop()
+                                del self.links[interface]
+                                continue
+                        except ValueError as error:
+                            link.failures += 1
+                            if link.failures >= 3:
+                                link.stop('error', str(error))
+                                del self.links[interface]
+                                continue
+                            link.status('up', str(error))
                             continue
-                    except ValueError as error:
-                        link.failures += 1
-                        if link.failures >= 3:
-                            link.stop('error', str(error))
-                            del self.links[interface]
-                            continue
-                        link.status('up', str(error))
-                        continue
-                    finally:
-                        link.refreshed = time.monotonic()
-                link.status('up')
+                        finally:
+                            link.refreshed = time.monotonic()
+                    link.status('up')
+                except (OSError, subprocess.SubprocessError) as error:
+                    link.stop('error', str(error))
+                    del self.links[interface]
         if not self.links:
             restore_forwarding()
 
@@ -208,11 +212,11 @@ class Link:
 
     def repair_routes(self):
         # Device down/up removes these routes without changing NM's grant.
-        for family, route in [('-4', ['default', 'dev', self.tun]),
+        for family, route in [('-4', ['default', 'dev', self.tun, 'mtu', 'lock', str(self.ipv4_mtu)]),
                               ('-6', ['default'] + (['via', self.gateway, 'onlink'] if self.gateway else []) + ['dev', self.interface])]:
             command('ip', family, 'route', 'replace', 'table', self.table, *route)
         command('ip', '-6', 'route', 'replace', self.v6 + '/128', 'dev', self.tun)
-        command('ip', '-4', 'route', 'replace', 'default', 'dev', self.tun, 'metric', self.table)
+        command('ip', '-4', 'route', 'replace', 'default', 'dev', self.tun, 'metric', self.table, 'mtu', 'lock', str(self.ipv4_mtu))
 
     def start(self):
         try:
@@ -247,14 +251,15 @@ class Link:
             cfg.write_text(f'tun-device {self.tun}\nipv4-addr 192.0.0.2\nipv6-addr fd46:4:ffff::{self.index:x}\nprefix {self.prefix}\nmap {self.v4} {self.v6}\n')
             self.add([TAYGA, '-c', str(cfg), '--mktun'], ['ip', 'link', 'del', self.tun])
             command('ip', 'link', 'set', self.tun, 'up')
-            mtu = int(json.loads(command('ip', '-j', 'link', 'show', 'dev', self.interface))[0]['mtu']) - 20
-            if mtu < 1280:
+            mtu = int(json.loads(command('ip', '-j', 'link', 'show', 'dev', self.interface))[0]['mtu'])
+            self.ipv4_mtu = mtu - 20
+            if self.ipv4_mtu < 1280:
                 raise ValueError('uplink MTU too small for CLAT')
             command('ip', 'link', 'set', self.tun, 'mtu', str(mtu))
             command('ip', 'addr', 'add', self.v4 + '/32', 'dev', self.tun)
             # Loose checks are needed only on our synthetic link; do not change WAN settings.
             command('sysctl', '-qw', f'net.ipv4.conf.{self.tun}.rp_filter=2')
-            for family, route in [('-4', ['default', 'dev', self.tun]),
+            for family, route in [('-4', ['default', 'dev', self.tun, 'mtu', 'lock', str(self.ipv4_mtu)]),
                                   ('-6', ['default'] + (['via', self.gateway, 'onlink'] if self.gateway else []) + ['dev', self.interface])]:
                 self.add(['ip', family, 'route', 'add', 'table', self.table] + route,
                          ['ip', family, 'route', 'flush', 'table', self.table])
@@ -263,13 +268,20 @@ class Link:
                          ['ip', family, 'rule', 'del', 'priority', self.priority, 'from', src, 'lookup', self.table])
             self.add(['ip', '-6', 'route', 'add', self.v6 + '/128', 'dev', self.tun],
                      ['ip', '-6', 'route', 'del', self.v6 + '/128', 'dev', self.tun])
-            self.add(['ip', '-4', 'route', 'add', 'default', 'dev', self.tun, 'metric', self.table],
+            self.add(['ip', '-4', 'route', 'add', 'default', 'dev', self.tun, 'metric', self.table, 'mtu', 'lock', str(self.ipv4_mtu)],
                      ['ip', '-4', 'route', 'del', 'default', 'dev', self.tun, 'metric', self.table])
             self.add(['nft', 'create', 'table', 'inet', self.nft],
                      ['nft', 'delete', 'table', 'inet', self.nft])
+            # The reply route points to the LAN, so rt mtu alone would use its
+            # larger MTU. Cap both directions at this translator's IPv4 ceiling.
             command('nft', '-f', '-', data=f'''add chain inet {self.nft} post {{ type nat hook postrouting priority 110; }}
 add rule inet {self.nft} post oifname "{self.tun}" ip saddr != {self.v4} snat ip to {self.v4}
 add rule inet {self.nft} post oifname "{self.interface}" ip6 saddr {self.v6} snat ip6 to {self.source}
+add chain inet {self.nft} mss_forward {{ type filter hook forward priority mangle; }}
+add rule inet {self.nft} mss_forward meta nfproto ipv4 oifname "{self.tun}" tcp flags & syn == syn tcp option maxseg size > {self.ipv4_mtu - 40} tcp option maxseg size set {self.ipv4_mtu - 40}
+add rule inet {self.nft} mss_forward meta nfproto ipv4 iifname "{self.tun}" tcp flags & syn == syn tcp option maxseg size > {self.ipv4_mtu - 40} tcp option maxseg size set {self.ipv4_mtu - 40}
+add chain inet {self.nft} mss_output {{ type route hook output priority mangle; }}
+add rule inet {self.nft} mss_output meta nfproto ipv4 oifname "{self.tun}" tcp flags & syn == syn tcp option maxseg size > {self.ipv4_mtu - 40} tcp option maxseg size set {self.ipv4_mtu - 40}
 add chain inet {self.nft} forward {{ type filter hook forward priority 0; }}
 add rule inet {self.nft} forward iifname "{self.tun}" oifname "{self.interface}" ip6 saddr {self.v6} ip6 daddr {self.prefix} accept
 add rule inet {self.nft} forward iifname "{self.interface}" oifname "{self.tun}" ip6 daddr {self.v6} ct state established,related accept

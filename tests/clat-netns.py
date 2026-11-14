@@ -57,7 +57,7 @@ try:
     sink="""import socket
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(('192.0.2.2',9010))
 while True:
- b,a=s.recvfrom(999);s.sendto(b,a)
+ b,a=s.recvfrom(65535);s.sendto(b,a)
 """
     spawn(ns(peer,'python3','-c',sink))
     dns="""import socket,struct,pathlib
@@ -132,14 +132,75 @@ while True:
     probe(links[1].v4)
     print('PASS route repair after interface flap',flush=True)
     for link in links:
-        assert int(json.loads(run('ip','-j','link','show','dev',link.tun))[0]['mtu']) == 1480
         assert run('sysctl','-n',f'net/ipv6/conf/{link.interface}/accept_ra').strip() == '0'
         assert run('sysctl','-n',f'net/ipv6/conf/{link.interface}/forwarding').strip() == '0'
-    # Forwarding is restricted to the translated mapping and discovered prefix.
+    # A single transmission must fit in both directions without PTB/retry.
+    def packet_too_big():
+        fields = Path('/proc/net/snmp6').read_text().split()
+        return int(fields[fields.index('Icmp6OutPktTooBigs') + 1])
+    before = packet_too_big()
+    large = """import socket
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+s.bind((%r,0));s.settimeout(3)
+s.setsockopt(socket.IPPROTO_IP,10,2) # IP_MTU_DISCOVER = IP_PMTUDISC_DO
+b=b'x'*1452 # IPv4 total 1480, translated IPv6 total 1500
+s.sendto(b,('192.0.2.2',9010));assert s.recv(65535)==b
+"""
     for link in links:
-        rules = run('nft','list','table','inet',link.nft)
-        assert 'hook forward' in rules and 'drop' in rules
-    print('PASS MTU and uplink sysctl preservation with scoped forward filter',flush=True)
+        run('python3','-c',large % link.v4)
+        assert int(json.loads(run('ip','-j','link','show','dev',link.tun))[0]['mtu']) == 1500
+        for args in [('table',link.table),('dev',link.tun)]:
+            routes = json.loads(run('ip','-j','-4','route','show',*args))
+            default = next(r for r in routes if r['dst']=='default')
+            metrics = default['metrics']
+            if isinstance(metrics, list):
+                metrics = {key: value for item in metrics for key, value in item.items()}
+            assert metrics['mtu'] == 1480, default
+            assert 'mtu lock 1480' in run('ip','-4','route','show',*args), default
+    run(*ns(client,'python3','-c',large % '10.42.0.2'))
+    assert packet_too_big() == before
+    print('PASS IPv4 1480 / IPv6 1500 first datagram each way without PMTUD',flush=True)
+    # Check negotiated MSS at both ends, including the hotspot's 1500-byte LAN.
+    tcp_server="""import socket,pathlib
+s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(('192.0.2.2',9011));s.listen()
+while True:
+ c,a=s.accept();m=c.getsockopt(socket.IPPROTO_TCP,socket.TCP_MAXSEG)
+ c.sendall(str(m).encode());c.close()
+"""
+    spawn(ns(peer,'python3','-c',tcp_server));time.sleep(.2)
+    tcp_client="""import socket
+s=socket.socket();s.bind((%r,0));s.settimeout(3);s.connect(('192.0.2.2',9011))
+m=s.getsockopt(socket.IPPROTO_TCP,socket.TCP_MAXSEG)
+r=int(s.recv(100));assert 1400 <= m <= 1440 and 1400 <= r <= 1440,(m,r)
+"""
+    for link in links:run('python3','-c',tcp_client % link.v4)
+    run(*ns(client,'python3','-c',tcp_client % '10.42.0.2'))
+    small = tcp_client.replace("s.bind(", "s.setsockopt(socket.IPPROTO_TCP,socket.TCP_MAXSEG,1200);s.bind(").replace('1400 <= m <= 1440 and 1400 <= r <= 1440', '1100 <= m <= 1200 and 1100 <= r <= 1200')
+    run('python3','-c',small % links[0].v4)
+    run(*ns(client,'python3','-c',small % '10.42.0.2'))
+    print('PASS TCP MSS clamp for box and hotspot in both directions, smaller MSS preserved',flush=True)
+    # Unrelated IPv6 traffic must not inherit forwarding enabled for CLAT.
+    run('ip','addr','add','fd52::1/64','dev','lan0','nodad')
+    run(*ns(client,'ip','addr','add','fd52::2/64','dev','cli0','nodad'))
+    run(*ns(client,'ip','-6','route','add','fd51:1::/64','via','fd52::1'))
+    run('ip','-6','route','add','fd51:1::/64','dev','cell.1')
+    run(*ns(peer,'ip','-6','route','add','fd52::/64','via','fd51:1::1'))
+    ping=ns(client,'ping','-6','-c','1','-W','1','fd51:1::2')
+    assert sp.run(ping,stdout=sp.DEVNULL,stderr=sp.DEVNULL).returncode != 0
+    # Stop all links, then emulate another owner's pre-existing forwarding.
+    controller.sync({})
+    assert run('sysctl','-n','net.ipv6.conf.all.forwarding').strip() == '0'
+    run('sysctl','-qw','net.ipv6.conf.all.forwarding=1')
+    for link in links:link.start()
+    assert sp.run(ping,stdout=sp.DEVNULL,stderr=sp.DEVNULL).returncode == 0
+    for link in links:link.stop()
+    c.restore_forwarding()
+    assert run('sysctl','-n','net.ipv6.conf.all.forwarding').strip() == '1'
+    run('sysctl','-qw','net.ipv6.conf.all.forwarding=0')
+    controller.sync(signature)
+    links = [controller.links[name][1] for name in signature]
+    print('PASS scoped IPv6 filter blocks unrelated traffic and preserves prior forwarding',flush=True)
     run('ip','link','set','cell.1','down')
     controller.sync({'cell.2': (links[1].source,links[1].gateway,links[1].resolvers)})
     probe(links[1].v4)

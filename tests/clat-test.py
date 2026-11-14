@@ -95,6 +95,24 @@ class Recovery(unittest.TestCase):
         link.stop.assert_called_once_with()
         self.assertFalse(controller.links)
 
+    def test_route_repair_failure_does_not_starve_other_links(self):
+        from unittest.mock import Mock, patch
+        import subprocess
+        for error in (subprocess.CalledProcessError(2, 'ip'), subprocess.TimeoutExpired('ip', 10)):
+            with self.subTest(error=type(error).__name__):
+                broken = Mock(process=None)
+                broken.repair_routes.side_effect = error
+                signature = ('a', 'b', ())
+                controller = clat.Controller()
+                controller.links['wan1'] = (signature, broken)
+                healthy = Mock(undo=['owned'])
+                with patch.object(clat, 'Link', return_value=healthy):
+                    controller.sync({'wan1': signature, 'wan2': signature})
+                healthy.start.assert_called_once_with()
+                self.assertIn('wan2', controller.links)
+                broken.stop.assert_called_once()
+                self.assertNotIn('wan1', controller.links)
+
     def test_retry_survives_sync_exception(self):
         from unittest.mock import Mock
         action = Mock(side_effect=[OSError('status unavailable'), None])
