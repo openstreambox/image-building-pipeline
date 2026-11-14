@@ -47,7 +47,8 @@ Two overlays exist, and both build from pinned source:
 
 `manifests/families/rk3588.yaml` pins `patches_commit`
 `c65b7ddc5fee14abc0f9de54a104fb5f8db087f2` in the fork's retained
-`osb/T294` ref. It extends the previous merged 32-patch series at
+annotated tag `rock5bplus-wwan-cold-start-v1`. It extends the previous merged
+32-patch series at
 `bc7e44fa35d3eded23567dd48e65f6dc799f4b34` with 0052, the ROCK 5B+
 B-key cold-start sequence. The [previous merged series](https://github.com/CERALIVE/rk3588-kernel-patches/pull/28)
 keeps the Rock Type-C connector sink-first and the Orange connector source-first.

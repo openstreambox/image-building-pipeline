@@ -482,8 +482,9 @@ generate_modem_slot_uid_rules() {
 
 
 # Limit boot-time radio release to the board's GPIO-backed WWAN rfkill device.
-# Late rule ordering disables persistent restore for this device only. An add
-# event unblocks it; change events (including a deliberate block) are untouched.
+# Give this device a stable, dedicated rfkill state key and remove its saved
+# block before udev initialization completes (systemd-rfkill waits for it).
+# Change events, including a deliberate block during this boot, are untouched.
 setup_internal_modem_rfkill() {
   local rules_dir="${MODEM_SLOT_RULES_DIR:-/etc/udev/rules.d}"
   local config_dir="${MODEM_MODPROBE_DIR:-/etc/modprobe.d}"
@@ -497,7 +498,9 @@ setup_internal_modem_rfkill() {
   printf '%s\n' 'options rfkill default_state=1' >"$config"
   cat >"$rule" <<'EOF'
 # W_DISABLE1# (GPIO3_A6): active-high shutdown GPIO, unblocked = physical high.
-SUBSYSTEM=="rfkill", ATTR{name}=="rfkill-m2-wwan", ENV{SYSTEMD_RFKILL}="0"
+# ID_PATH here namespaces rfkill persistence, not the modem USB position UID.
+SUBSYSTEM=="rfkill", ATTR{name}=="rfkill-m2-wwan", ENV{ID_PATH}="platform-ceralive-internal-wwan"
+ACTION=="add", SUBSYSTEM=="rfkill", ATTR{name}=="rfkill-m2-wwan", RUN+="/usr/bin/rm -f /var/lib/systemd/rfkill/platform-ceralive-internal-wwan:wwan"
 ACTION=="add", SUBSYSTEM=="rfkill", ATTR{name}=="rfkill-m2-wwan", ATTR{soft}="0"
 EOF
 }

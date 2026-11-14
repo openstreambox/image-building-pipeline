@@ -8,7 +8,8 @@ host-validated source behavior; physical qualification is still required.
 ## Kernel sequence and radio release
 
 The existing kernel-source builder applies the immutable fork series at
-`c65b7ddc5fee14abc0f9de54a104fb5f8db087f2`, including patch 0052, to the pinned
+`c65b7ddc5fee14abc0f9de54a104fb5f8db087f2` (annotated fork tag
+`rock5bplus-wwan-cold-start-v1`), including patch 0052, to the pinned
 v7.2 kernel. No overlay or bootloader rebuild is involved. Both production and
 edge-test inherit that series; the candidate package revision is 9.
 
@@ -24,10 +25,22 @@ card is off; qualify that combination too.
 W_DISABLE1# (pin 8, GPIO3_A6) is owned by `rfkill-gpio`, whose active-high
 shutdown output is `!blocked`. The final kernel config requires both rfkill
 modules and MBIM. `options rfkill default_state=1` sets the module's initial
-unblocked state. The late `99-zz-ceralive-internal-wwan.rules` rule opts only
-`rfkill-m2-wwan` out of systemd's saved rfkill restore and clears its software
-block on **add**. It runs after `99-systemd.rules`; Wi-Fi/Bluetooth restore
-and subsequent deliberate WWAN block requests are unchanged. The line may
+unblocked state (also the kernel default). The late
+`99-zz-ceralive-internal-wwan.rules` gives only `rfkill-m2-wwan` the stable
+rfkill state key `platform-ceralive-internal-wwan:wwan`, deletes that saved
+state with a udev **add** RUN action, and clears its software block on **add**.
+[Systemd v257](https://github.com/systemd/systemd/blob/v257/src/rfkill/rfkill.c)
+waits for udev initialization, including RUN completion, before
+loading saved state; a saved block therefore cannot override the release.
+Its [completion check](https://github.com/systemd/systemd/blob/v257/src/shared/udev-util.c)
+waits while `ID_PROCESSING=1`, which covers pending RUN commands.
+`SYSTEMD_RFKILL` is only a udev database marker, not a restore opt-out.
+The dedicated state key avoids depending on an unmeasured path_id and changes
+neither the modem's USB ID_PATH nor its ModemManager position identity.
+Old state under the original rfkill path is no longer read. Wi-Fi/Bluetooth
+and external WWAN persistence keep their own keys. Later deliberate WWAN
+blocks work during this boot, but are intentionally cleared on the next add
+(including driver reload or reboot). The line may
 remain low until rfkill-gpio probes; this does not promise a high level in
 U-Boot or before driver load. Check that it ends high once Linux is running.
 
@@ -59,8 +72,10 @@ use a raw GPIO command against a live board.
 This image has no modem-service slot power-cycle implementation and grants no
 such hook. `uhubctl` remains a manual external-USB tool, not an internal-slot
 recovery mechanism. `ci/check-internal-modem-power.py` guards the absence of
-runtime GPIO, regulator and hub power-control commands, with a negative
-fixture. A future recovery owner must replace that absence guard with a
+GPIO, regulator and hub power-control commands in every text file under
+`mkosi/`, including application/platform layers and extensionless payloads.
+Negative fixtures exercise each forbidden mechanism across those file types.
+A future recovery owner must replace that absence guard with a
 reviewed FULL_CARD_POWER_OFF# implementation and behavioral tests; adding a
 shared-rail or internal-hub cycle is not an acceptable workaround.
 
@@ -95,15 +110,47 @@ Before enabling this candidate for use:
   ModemManager object for the internal card.
 - SIM visible, registration succeeds, and the normal modem owner manages the
   link alongside an external USB Dell, with distinct position identities.
+- On **each** of the five cold boots, enable
+  `trace_event=gpio:gpio_direction,gpio:gpio_value,regulator:regulator_enable,regulator:regulator_enable_delay,regulator:regulator_enable_complete tp_printk`
+  on the kernel command line, or collect `/sys/kernel/tracing/trace` with those
+  tracepoints enabled from boot. Confirm GPIO2_B1's global number with
+  `/sys/kernel/debug/gpio` (expected 73). Record `t_off`, the first direction/value
+  event driving that line low, and `t_on`, `regulator_enable_complete` for
+  `vcc3v3_wwan_pwr`. Require **t_on − t_off ≥ 2 s and probe (t_off) ≤ 1 s**
+  on every boot. Require the first `usb 1-1.4: new high-speed USB device` in
+  `dmesg` only after `t_on`, and no regulator entry in
+  `/sys/kernel/debug/devices_deferred`. Save timestamps, interval and USB time
+  beside any scope trace. A missing event or failed bound is not a pass.
+- Block WWAN with `rfkill block wwan`, allow systemd-rfkill to persist it
+  (wait for the service to exit), then cold boot. Verify this device's software
+  block is zero and W_DISABLE1# ends high; Wi-Fi/Bluetooth saved-state restore
+  still works. A later deliberate block must remain effective during that boot.
+- Read `udevadm info -q property -p /sys/bus/usb/devices/1-1.4` for the internal
+  Dell's physical USB device: require
+  `ID_PATH=platform-fc800000.usb-usb-0:1.4` and
+  `ID_MM_PHYSDEV_UID=internal 4G`. `mmcli -m N` must show Device `internal 4G`
+  for it and a different Device for the external USB Dell.
 - Passive meter check, fine tip and grounded reference, without bridging pins:
-  at the 7.2 U-Boot prompt record 3V3_4G, RESET#, FULL_CARD_POWER_OFF# and
-  W_DISABLE1#. RESET# below 0.6 V supports the ordering diagnosis; about 1.8 V
-  refutes it. Under Linux expect RESET# about 1.8 V and pins 6 and 8 high.
-  With a scope, confirm pin 6 stays low for at least two seconds after kernel
-  probe while 3V3_4G remains about 3.3 V, before being released.
+  at **both vendor and 7.2 U-Boot prompts**, record 3V3_4G, RESET# pin 67,
+  FULL_CARD_POWER_OFF# pin 6 and W_DISABLE1# pin 8. The diagnosis predicts
+  slot supply about 0 V at the vendor prompt and about 3.3 V at the 7.2 prompt.
+  RESET# below 0.6 V at 7.2 supports the reset-ordering diagnosis; about 1.8 V
+  refutes it. In that latter branch, expect W_DISABLE1# about 0 V at the 7.2
+  prompt and investigate radio release separately. Record both lines together.
+  Under Linux expect RESET# about 1.8 V and pins 6 and 8 high. With a scope,
+  confirm pin 6 stays low for at least two seconds after kernel probe while
+  3V3_4G remains about 3.3 V, before being released.
 - Confirm onboard Wi-Fi stays powered and usable, SIM seating/detect workaround,
   and actual board revision. Record voltage readings and boot results; a host
   test or successful build cannot substitute for these measurements.
+
+The kernel patch semantics are unchanged: the four-second delay is still
+anchored to boottime, so the trace gate is mandatory. A small follow-up could
+initialize the regulator's `last_off` when the fixed-regulator driver requests
+its enable GPIO low, so enable waits from the actual switch-off. That needs a
+reviewed regulator-core/driver change, including deferred-probe tests; simply
+raising the constant does not remove the dependency on probe time. No such
+kernel change is included in this candidate.
 
 English and Spanish (es-419) external user guidance is a release follow-up;
 this engineering candidate is not a released or hardware-qualified image.

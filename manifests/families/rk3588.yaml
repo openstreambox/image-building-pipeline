@@ -302,7 +302,7 @@ variants:
       # Scope/receipts: docs/kernel-build-from-source.md, RGA ownership section.
       # Changes require independent exact-head review before merge.
       # Fork candidate extends that 32-patch base with 0052. The immutable
-      # commit is retained by osb/T294 in the fork, not an orphaned PR head.
+      # commit is retained by the annotated fork tag rock5bplus-wwan-cold-start-v1.
       # FULL_CARD_POWER_OFF# holds the card off after RESET# is released;
       # the Wi-Fi/WWAN buck is untouched. Hardware qualification remains open:
       # docs/rock5bplus-internal-modem.md.
