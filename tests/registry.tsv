@@ -246,3 +246,4 @@ tests/attention-vt-vm.test.sh	shell	integration	opt-in	Disposable RAM-only guest
 tests/unsafe-storage.test.sh	shell	unit	default-shell	Terminal unsafe storage messages and onboarding HTTP probe
 tests/host-test-harness.test.sh	shell	unit	default-shell	checks scratch forwarding across the privilege boundary and failure propagation
 tests/ext4-population.test.sh	shell	unit	default-shell	x86 native and container formatter tool floor, explicit epoch and filesystem identity
+tests/real-rauc-fixture-lib.sh	helper	support	invoked-by-suite	Shared real RAUC slot geometry and isolated service device lookup
