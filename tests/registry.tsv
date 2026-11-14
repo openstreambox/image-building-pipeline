@@ -231,3 +231,4 @@ tests/power-button-contract.py	helper	support	invoked-by-suite	Production gestur
 tests/button-ingress.bats	bats	unit	default-bats	Device-bound browser front door and Unix ingress contracts
 tests/button-ingress-contract.py	helper	support	invoked-by-suite	Synthetic ingress and actual Unix transport contracts
 tests/button-ingress-kernel.py	helper	support	invoked-by-suite	Isolated actual kernel device binding contract
+tests/board-identity.bats	bats	unit	default-bats	image board identity contract
