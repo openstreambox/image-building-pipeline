@@ -12,7 +12,7 @@ HERE = Path(__file__).resolve().parent
 class VectorTest(unittest.TestCase):
     def test_conformance(self):
         vectors = sorted((HERE / 'fixtures/vectors').glob('*.txt'))
-        self.assertEqual(len(vectors), 35)
+        self.assertEqual(len(vectors), 36)
         self.assertEqual({p.stem for p in vectors},
                          {p.stem for p in (HERE / 'fixtures/vectors').glob('*.json')})
         for wire in vectors:

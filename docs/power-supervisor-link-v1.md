@@ -88,7 +88,8 @@ status <=48 unique keys; `seq` and `up` <=4294967295; status `up`, `seq`, `boot`
 required. Split a pair at its first `=` (later `=` bytes belong to its value).
 EVT parsing starts at the rightmost seven space-delimited pairs; text may itself
 contain `seq=`, `boot=` or ` crc=`. Only `up`, `seq`, `boot` are numeric framing
-fields; trailer diagnostics are bounded strings. The final CRC separator is a
+fields; EVT `up` has at most 31 decimal digits (including leading zeros);
+trailer diagnostics are bounded strings. The final CRC separator is a
 single space. Receivers also tolerate repeated/trailing spaces around status pairs; emitters
 should use single spaces. CRLF is not valid. Blank/non-protocol lines are ignored.
 A truncated line is not decoded until LF; discard it on disconnect.

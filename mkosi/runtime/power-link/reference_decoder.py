@@ -85,7 +85,7 @@ class Decoder:
                     raise ValueError('event trailer')
                 fields = self.pairs(trailer)
                 uptime, space, human = prefix[4:].partition(' ')
-                if not uptime.startswith('up='):
+                if not uptime.startswith('up=') or len(uptime[3:]) > 31:
                     raise ValueError('event uptime')
                 up = self.uint(uptime[3:])
             else:

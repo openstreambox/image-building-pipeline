@@ -1,2 +1,4 @@
-# Keep the deliberate CRLF rejection vector byte-exact and whitespace-checkable.
+# Keep every wire vector byte-exact on hosts with newline conversion enabled.
+mkosi/runtime/power-link/fixtures/vectors/*.txt -text
+# The deliberate CRLF rejection vector is whitespace-checkable.
 mkosi/runtime/power-link/fixtures/vectors/crlf.txt -text whitespace=cr-at-eol
