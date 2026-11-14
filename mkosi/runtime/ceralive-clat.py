@@ -128,28 +128,29 @@ class Controller:
                 link = self.links[interface][1]
                 try:
                     link.repair_routes()
-                    if time.monotonic() - getattr(link, 'refreshed', time.monotonic()) >= 60:
-                        try:
-                            prefix = discover(link.interface, link.source, link.resolvers)
-                            link.failures = 0
-                            if prefix != link.prefix:
-                                link.stop()
-                                del self.links[interface]
-                                continue
-                        except ValueError as error:
-                            link.failures += 1
-                            if link.failures >= 3:
-                                link.stop('error', str(error))
-                                del self.links[interface]
-                                continue
-                            link.status('up', str(error))
-                            continue
-                        finally:
-                            link.refreshed = time.monotonic()
-                    link.status('up')
-                except (OSError, subprocess.SubprocessError) as error:
+                except subprocess.SubprocessError as error:
                     link.stop('error', str(error))
                     del self.links[interface]
+                    continue
+                if time.monotonic() - getattr(link, 'refreshed', time.monotonic()) >= 60:
+                    try:
+                        prefix = discover(link.interface, link.source, link.resolvers)
+                        link.failures = 0
+                        if prefix != link.prefix:
+                            link.stop()
+                            del self.links[interface]
+                            continue
+                    except ValueError as error:
+                        link.failures += 1
+                        if link.failures >= 3:
+                            link.stop('error', str(error))
+                            del self.links[interface]
+                            continue
+                        link.status('up', str(error))
+                        continue
+                    finally:
+                        link.refreshed = time.monotonic()
+                link.status('up')
         if not self.links:
             restore_forwarding()
 
@@ -184,14 +185,17 @@ class Link:
         self.failures = 0
 
     def status(self, state, error=None):
-        RUN.mkdir(parents=True, exist_ok=True)
-        path = RUN / f'{self.index}.json'
-        temp = path.with_suffix('.tmp')
-        temp.write_text(json.dumps(dict(schema_version=1, interface=self.interface,
-            tun=self.tun, prefix=self.prefix, ipv4=self.v4, state=state,
-            last_error=error, updated_at=int(time.time()))) + '\n')
-        temp.chmod(0o644)
-        temp.replace(path)
+        try:
+            RUN.mkdir(parents=True, exist_ok=True)
+            path = RUN / f'{self.index}.json'
+            temp = path.with_suffix('.tmp')
+            temp.write_text(json.dumps(dict(schema_version=1, interface=self.interface,
+                tun=self.tun, prefix=self.prefix, ipv4=self.v4, state=state,
+                last_error=error, updated_at=int(time.time()))) + '\n')
+            temp.chmod(0o644)
+            temp.replace(path)
+        except OSError as error:
+            print(f'CLAT {self.interface} status write failed: {error}', file=sys.stderr, flush=True)
 
     def add(self, args, undo):
         self.undo.append(undo)
@@ -212,11 +216,11 @@ class Link:
 
     def repair_routes(self):
         # Device down/up removes these routes without changing NM's grant.
-        for family, route in [('-4', ['default', 'dev', self.tun, 'mtu', 'lock', str(self.ipv4_mtu)]),
+        for family, route in [('-4', ['default', 'dev', self.tun, 'mtu', str(self.ipv4_mtu)]),
                               ('-6', ['default'] + (['via', self.gateway, 'onlink'] if self.gateway else []) + ['dev', self.interface])]:
             command('ip', family, 'route', 'replace', 'table', self.table, *route)
         command('ip', '-6', 'route', 'replace', self.v6 + '/128', 'dev', self.tun)
-        command('ip', '-4', 'route', 'replace', 'default', 'dev', self.tun, 'metric', self.table, 'mtu', 'lock', str(self.ipv4_mtu))
+        command('ip', '-4', 'route', 'replace', 'default', 'dev', self.tun, 'metric', self.table, 'mtu', str(self.ipv4_mtu))
 
     def start(self):
         try:
@@ -259,7 +263,7 @@ class Link:
             command('ip', 'addr', 'add', self.v4 + '/32', 'dev', self.tun)
             # Loose checks are needed only on our synthetic link; do not change WAN settings.
             command('sysctl', '-qw', f'net.ipv4.conf.{self.tun}.rp_filter=2')
-            for family, route in [('-4', ['default', 'dev', self.tun, 'mtu', 'lock', str(self.ipv4_mtu)]),
+            for family, route in [('-4', ['default', 'dev', self.tun, 'mtu', str(self.ipv4_mtu)]),
                                   ('-6', ['default'] + (['via', self.gateway, 'onlink'] if self.gateway else []) + ['dev', self.interface])]:
                 self.add(['ip', family, 'route', 'add', 'table', self.table] + route,
                          ['ip', family, 'route', 'flush', 'table', self.table])
@@ -268,7 +272,7 @@ class Link:
                          ['ip', family, 'rule', 'del', 'priority', self.priority, 'from', src, 'lookup', self.table])
             self.add(['ip', '-6', 'route', 'add', self.v6 + '/128', 'dev', self.tun],
                      ['ip', '-6', 'route', 'del', self.v6 + '/128', 'dev', self.tun])
-            self.add(['ip', '-4', 'route', 'add', 'default', 'dev', self.tun, 'metric', self.table, 'mtu', 'lock', str(self.ipv4_mtu)],
+            self.add(['ip', '-4', 'route', 'add', 'default', 'dev', self.tun, 'metric', self.table, 'mtu', str(self.ipv4_mtu)],
                      ['ip', '-4', 'route', 'del', 'default', 'dev', self.tun, 'metric', self.table])
             self.add(['nft', 'create', 'table', 'inet', self.nft],
                      ['nft', 'delete', 'table', 'inet', self.nft])
@@ -299,17 +303,33 @@ add rule inet {self.nft} forward meta nfproto ipv6 oifname "{self.tun}" drop
             self.stop('error', str(error))
 
     def stop(self, state='down', error=None):
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait()
+        try:
+            if self.process and self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=3)
+        except (OSError, subprocess.SubprocessError) as failure:
+            print(f'CLAT {self.interface} process cleanup failed: {failure}', file=sys.stderr, flush=True)
+        pending = []
         for args in reversed(self.undo):
-            command(*args, check=False)
+            try:
+                command(*args, check=False)
+            except (OSError, subprocess.SubprocessError) as failure:
+                pending.insert(0, args)
+                print(f'CLAT {self.interface} cleanup failed: {failure}', file=sys.stderr, flush=True)
+        self.undo = pending
+        try:
+            if pending:
+                self.save_cleanup()
+            else:
+                (RUN / f'{self.index}.cleanup').unlink(missing_ok=True)
+        except OSError as failure:
+            print(f'CLAT {self.interface} cleanup journal failed: {failure}', file=sys.stderr, flush=True)
+        # Pending recovery belongs to the journal, not the live-link marker.
         self.undo.clear()
-        (RUN / f'{self.index}.cleanup').unlink(missing_ok=True)
         self.status(state, error)
 
 

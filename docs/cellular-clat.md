@@ -28,9 +28,11 @@ consecutive failures, spaced 60 seconds apart, withdraw it. A successful refresh
 resets the failure count. Each reconciliation repairs owned routes, including
 after an interface down/up with an unchanged grant. A route repair error withdraws
 only that link and leaves other links reconciling. Unexpected synchronization
-errors are logged and the ten-second retry remains scheduled. Snapshots refresh
-on each reconciliation (at most ten
-seconds apart while discovery is healthy).
+errors are logged and the ten-second retry remains scheduled. Status-write
+faults are logged without withdrawing a working translator. Teardown continues
+after cleanup command timeouts and retains those commands in the recovery journal.
+Snapshots refresh on each reconciliation (at most ten seconds apart while
+discovery is healthy).
 
 Each link gets `clat<ifindex>`, an IPv4 /32 in reserved service space
 `10.254.0.0/19`, and a private IPv6 mapping in `fd46:4:4::/112`.
@@ -56,10 +58,13 @@ prefix and established replies on that translator. If IPv6 forwarding was
 previously disabled, unrelated IPv6 forwarding is dropped while CLAT is active;
 existing IPv4 hotspot admission remains with its owner. The shared IPv4/IPv6
 TUN keeps the uplink MTU so full-size incoming IPv6 packets fit. Both IPv4
-default routes through it use `mtu lock` at uplink MTU minus 20 bytes for
+default routes through it use plain `mtu` at uplink MTU minus 20 bytes for
 translation overhead (minimum IPv4 MTU 1280; smaller uplinks fail with a
-diagnostic). TCP SYN and SYN-ACK MSS is capped at that IPv4 MTU minus 40,
-for hotspot forwarding in both directions and locally originated traffic.
+diagnostic). The route MTU stays unlocked so default local sockets retain DF
+and path-MTU discovery; locking it clears DF and makes tayga fragment ordinary
+stream-sized UDP and TCP packets into IPv6 fragments. TCP SYN and SYN-ACK MSS
+is capped at that IPv4 MTU minus 40, for hotspot forwarding in both directions
+and locally originated traffic.
 Smaller advertised MSS values are preserved. This avoids an extra path-MTU
 discovery round for full-sized TCP traffic; non-TCP traffic remains subject
 to the IPv4 route MTU.
@@ -115,8 +120,10 @@ A private D-Bus fixture also runs the actual service through dual-stack, two
 IPv6-only grants and link-loss states. Foreign-table refusal, crash-journal
 cleanup and restoration of the global forwarding switch are also exercised.
 It also checks route repair after a flap, preserved NM sysctls, TUN MTU and
-full-size datagrams without extra PMTUD, TCP MSS (including smaller advertised
-values), and the scoped IPv6 filter with forwarding initially disabled or already
+DF-forced full-size datagrams without extra PTB responses, default-socket UDP
+(1332, 1372 and 1452-byte payloads) and TCP bulk sends with zero IPv6 fragments
+from both the box and hotspot, TCP MSS (including smaller advertised values),
+and the scoped IPv6 filter with forwarding initially disabled or already
 enabled by another owner. Tayga runs in foreground mode without debug output.
 The real service lifecycle runs with the unit's restricted capability set and
 no-new-privileges.

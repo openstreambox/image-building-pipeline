@@ -134,6 +134,47 @@ while True:
     for link in links:
         assert run('sysctl','-n',f'net/ipv6/conf/{link.interface}/accept_ra').strip() == '0'
         assert run('sysctl','-n',f'net/ipv6/conf/{link.interface}/forwarding').strip() == '0'
+    # Observe fragments before conntrack reassembly on the NAT64 peer. Default
+    # sockets deliberately retain IP_PMTUDISC_WANT, as ordinary senders do.
+    run(*ns(peer,'nft','add','table','inet','fragment_probe'))
+    run(*ns(peer,'nft','add','chain','inet','fragment_probe','ingress',
+            '{ type filter hook prerouting priority -450; }'))
+    run(*ns(peer,'nft','add','rule','inet','fragment_probe','ingress',
+            'ip6','nexthdr','44','counter'))
+    def fragments():
+        rules = json.loads(run(*ns(peer,'nft','-j','list','chain','inet','fragment_probe','ingress')))
+        return sum(expr['counter']['packets'] for item in rules['nftables']
+                   for expr in item.get('rule', {}).get('expr', []) if 'counter' in expr)
+    bulk_server = """import socket
+s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(('192.0.2.2',9012));s.listen()
+while True:
+ c,a=s.accept();total=0
+ while True:
+  b=c.recv(65535)
+  if not b:break
+  total+=len(b)
+ c.sendall(str(total).encode());c.close()
+"""
+    spawn(ns(peer,'python3','-c',bulk_server));time.sleep(.2)
+    default_udp = """import socket
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind((%r,0));s.settimeout(3)
+for size in (1332,1372,1452):
+ b=b'x'*size;s.sendto(b,('192.0.2.2',9010));assert s.recv(65535)==b
+"""
+    default_tcp = """import socket
+s=socket.socket();s.bind((%r,0));s.settimeout(3);s.connect(('192.0.2.2',9012))
+s.sendall(b'x'*200000);s.shutdown(socket.SHUT_WR)
+assert s.recv(100)==b'200000'
+"""
+    for label, source, prefix in [('box '+link.interface,link.v4,[]) for link in links] + [('hotspot','10.42.0.2',ns(client))]:
+        for protocol, code in [('UDP',default_udp),('TCP',default_tcp)]:
+            before_fragments = fragments()
+            run(*(prefix+['python3','-c',code % source]))
+            count = fragments()-before_fragments
+            assert count == 0, (label,protocol,count)
+            print(f'PASS default-socket {label} {protocol}: zero IPv6 fragments',flush=True)
+    run(*ns(peer,'nft','delete','table','inet','fragment_probe'))
     # A single transmission must fit in both directions without PTB/retry.
     def packet_too_big():
         fields = Path('/proc/net/snmp6').read_text().split()
@@ -156,10 +197,11 @@ s.sendto(b,('192.0.2.2',9010));assert s.recv(65535)==b
             if isinstance(metrics, list):
                 metrics = {key: value for item in metrics for key, value in item.items()}
             assert metrics['mtu'] == 1480, default
-            assert 'mtu lock 1480' in run('ip','-4','route','show',*args), default
+            assert 'mtu 1480' in run('ip','-4','route','show',*args), default
+            assert 'lock' not in run('ip','-4','route','show',*args), default
     run(*ns(client,'python3','-c',large % '10.42.0.2'))
     assert packet_too_big() == before
-    print('PASS IPv4 1480 / IPv6 1500 first datagram each way without PMTUD',flush=True)
+    print('PASS DF-forced IPv4 1480 / IPv6 1500 datagram each way without PTB',flush=True)
     # Check negotiated MSS at both ends, including the hotspot's 1500-byte LAN.
     tcp_server="""import socket,pathlib
 s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)

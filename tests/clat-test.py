@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import pathlib
 import unittest
 
@@ -105,13 +106,55 @@ class Recovery(unittest.TestCase):
                 signature = ('a', 'b', ())
                 controller = clat.Controller()
                 controller.links['wan1'] = (signature, broken)
-                healthy = Mock(undo=['owned'])
+                healthy = Mock(undo=['owned'], process=None, refreshed=clat.time.monotonic())
                 with patch.object(clat, 'Link', return_value=healthy):
                     controller.sync({'wan1': signature, 'wan2': signature})
                 healthy.start.assert_called_once_with()
                 self.assertIn('wan2', controller.links)
                 broken.stop.assert_called_once()
                 self.assertNotIn('wan1', controller.links)
+
+    def test_status_fault_preserves_link_and_serves_other_links(self):
+        from unittest.mock import Mock, patch
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory, patch.object(clat, 'RUN', pathlib.Path(directory)), patch.object(clat.socket, 'if_nametoindex', return_value=3):
+            link = clat.Link('wan1', '2001:db8::1', '', ())
+            (clat.RUN/'3.json').mkdir()
+            link.refreshed = clat.time.monotonic()
+            signature = ('a', 'b', ())
+            controller = clat.Controller()
+            controller.links['wan1'] = (signature, link)
+            healthy = Mock(undo=['owned'], process=None, refreshed=clat.time.monotonic())
+            with patch.object(link, 'repair_routes'), patch.object(link, 'stop') as stop, patch.object(clat, 'Link', return_value=healthy):
+                for _ in range(2):
+                    controller.sync({'wan1': signature, 'wan2': signature})
+                stop.assert_not_called()
+                self.assertIn('wan1', controller.links)
+                healthy.start.assert_called_once()
+                healthy.repair_routes.assert_called_once()
+
+    def test_stop_continues_after_undo_timeout_and_status_fault(self):
+        from unittest.mock import Mock, patch
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory, patch.object(clat, 'RUN', pathlib.Path(directory)), patch.object(clat.socket, 'if_nametoindex', return_value=3):
+            link = clat.Link('wan1', '2001:db8::1', '', ())
+            (clat.RUN/'3.json').mkdir()
+            link.undo = [['first'], ['second']]
+            link.save_cleanup()
+            signature = ('a', 'b', ())
+            controller = clat.Controller()
+            controller.links['wan1'] = (signature, link)
+            healthy = Mock(undo=['owned'], process=None, refreshed=clat.time.monotonic())
+            with patch.object(clat, 'command', side_effect=[subprocess.TimeoutExpired('second', 10), '']) as command, patch.object(clat, 'Link', return_value=healthy):
+                controller.sync({'wan2': signature})
+            self.assertEqual(command.call_count, 2)
+            self.assertEqual(command.call_args.args, ('first',))
+            healthy.start.assert_called_once()
+            self.assertNotIn('wan1', controller.links)
+            self.assertFalse(link.undo) # Failed startup must not look like a live link.
+            # Failed cleanup remains journalled for recovery.
+            self.assertEqual(json.loads((clat.RUN/'3.cleanup').read_text()), [['second']])
 
     def test_retry_survives_sync_exception(self):
         from unittest.mock import Mock
