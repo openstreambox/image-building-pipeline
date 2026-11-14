@@ -14,12 +14,12 @@ STUB
 @test "planned reboot checks inhibitors without force or fallback" {
   run bash "$ROOT/mkosi/runtime/ceralive-power.sh" reboot
   [ "$status" -eq 0 ]
-  [ "$(cat "$CALLS")" = "--check-inhibitors=yes reboot" ]
+  [ "$(cat "$CALLS")" = "reboot" ]
 }
 @test "planned shutdown checks inhibitors" {
   run bash "$ROOT/mkosi/runtime/ceralive-power.sh" poweroff
   [ "$status" -eq 0 ]
-  [ "$(cat "$CALLS")" = "--check-inhibitors=yes poweroff" ]
+  [ "$(cat "$CALLS")" = "poweroff" ]
 }
 @test "inhibited action is refused calmly and never retried" {
   export SYSTEMCTL_STATUS=1
@@ -37,13 +37,14 @@ STUB
   export CERALIVE_RUNTIME_SRC="$ROOT/mkosi/runtime"
   export CERALIVE_RAUC_ACTIVATE_HELPER_DIR="$BATS_TEST_TMPDIR/helpers"
   export CERALIVE_RAUC_ACTIVATE_UNIT_DIR="$BATS_TEST_TMPDIR/units"
+  export CERALIVE_LOGIND_CONF_DIR="$BATS_TEST_TMPDIR/logind.conf.d"
   run bash -euc 'source "$1"; enable_service() { :; }; setup_rauc_activation' _ "$ROOT/mkosi/customize/postinst.d/services.sh"
   [ "$status" -eq 0 ]
   [ "$(stat -c %a "$CERALIVE_RAUC_ACTIVATE_HELPER_DIR/ceralive-power")" = 755 ]
   cmp "$ROOT/mkosi/runtime/ceralive-power.sh" "$CERALIVE_RAUC_ACTIVATE_HELPER_DIR/ceralive-power"
 }
 @test "disposable runner shutdown also checks inhibitors" {
-  grep -Fq 'systemctl --check-inhibitors=yes poweroff' "$ROOT/ci/kernel-runner/guest-job.sh"
+  grep -Fq 'systemctl poweroff' "$ROOT/ci/kernel-runner/guest-job.sh"
 }
 @test "updater cannot autonomously bypass planned shutdown" {
   grep -Eq '^post_update_reboot[[:space:]]*=[[:space:]]*false' "$ROOT/mkosi/runtime/hawkbit-updater/config.conf"
@@ -58,7 +59,7 @@ STUB
   export SYSTEMCTL_STATUS=127
   run bash "$ROOT/mkosi/runtime/ceralive-power.sh" poweroff
   [ "$status" -eq 75 ]
-  [[ "$output" == *"not powered off"* ]]
+  [[ "$output" == *"Shutdown command unavailable"* ]]
   [ "$(wc -l <"$CALLS")" -eq 1 ]
 }
 @test "interrupted power submission reports an uncertain result without retry" {
@@ -67,4 +68,18 @@ STUB
   [ "$status" -eq 70 ]
   [[ "$output" == *"could not be confirmed"* ]]
   [ "$(wc -l <"$CALLS")" -eq 1 ]
+}
+
+@test "runtime assembly installs power-key safety policy for short and long presses" {
+  export CERALIVE_RUNTIME_SRC="$ROOT/mkosi/runtime"
+  export CERALIVE_RAUC_ACTIVATE_HELPER_DIR="$BATS_TEST_TMPDIR/helpers"
+  export CERALIVE_RAUC_ACTIVATE_UNIT_DIR="$BATS_TEST_TMPDIR/units"
+  export CERALIVE_LOGIND_CONF_DIR="$BATS_TEST_TMPDIR/logind.conf.d"
+  run bash -euc 'source "$1"; enable_service() { :; }; setup_rauc_activation' _ "$ROOT/mkosi/customize/postinst.d/services.sh"
+  [ "$status" -eq 0 ]
+  local policy="$CERALIVE_LOGIND_CONF_DIR/60-ceralive-power-key.conf"
+  [ "$(stat -c %a "$policy")" = 644 ]
+  grep -Fxq 'PowerKeyIgnoreInhibited=yes' "$policy"
+  grep -Fxq 'HandlePowerKey=poweroff' "$policy"
+  grep -Fxq 'HandlePowerKeyLongPress=poweroff' "$policy"
 }

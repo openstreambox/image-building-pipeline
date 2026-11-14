@@ -191,6 +191,7 @@ setup_rauc_activation() {
   for artifact in ceralive-rauc-activate.sh ceralive-rauc-activate.service ceralive-rauc-arm@.service; do
     [[ -f "$src/$artifact" ]] || die "RAUC activation artifact missing: $src/$artifact"
   done
+  install -D -m 0644 "$src/60-ceralive-power-key.conf" "${CERALIVE_LOGIND_CONF_DIR:-/etc/systemd/logind.conf.d}/60-ceralive-power-key.conf"
   install -D -m 0755 "$src/ceralive-power.sh" "$helper_dir/ceralive-power"
   arch="$(dpkg --print-architecture)" || die 'cannot detect target architecture for boot mount'
   case "$arch" in amd64|arm64) ;; *) die "unsupported activation architecture: $arch" ;; esac
