@@ -95,56 +95,12 @@ verification; a PTY cannot prove that a board will not reset or enter download
 mode. Enumeration, reset behavior, power isolation and thermal protection are
 not qualified by host tests.
 
-## Open USB serial power-supervisor interface (version 1)
+## Wire interface
 
-`OSB1` is the historical wire identifier, retained byte-for-byte for firmware
-compatibility; it is not a vendor check or a requirement to use a named board.
-Implementers may emit these ASCII frames from any USB serial microcontroller.
-No host commands, handshake or command responses are required. Emit status
-at least once per second for the five-second freshness window. Use a new boot
-identifier on each restart and a shared increasing sequence across frame kinds.
-The reader preserves the tty baud setting and configures raw input; USB CDC
-implementations must not require a host baud-rate handshake. A physical UART
-bridge needs its baud setting configured separately. Unsupported measurements
-should be omitted or use the documented unavailable values, never fabricated as healthy.
-
-ASCII lines end in LF; the whole line including LF is at most 512 bytes.
-Non-OSB1 text is ignored and counted. `waiting for download` on non-OSB text marks bootloader
-mode (best effort: opening after the one-shot ROM banner can show silent).
-Only an `OSB<digits> ` version prefix marks unknown_version. Overlong
-input is discarded through the next LF, using bounded memory. Disconnect drops
-any partial line. Embedded NUL/control bytes are rejected.
-
-CRC is the final ` crc=HHHH` field: CRC-16/CCITT-FALSE (polynomial 0x1021,
-initial 0xffff, no reflection or final XOR) over all preceding bytes, excluding
-the separator before crc and LF. `123456789` produces `29B1`.
-
-Status uses `OSB1 key=value ...`; events use `OSB1 EVT up=... human text ...`.
-EVT has `up=<uint32>` followed by opaque printable text and the fixed trailing
-fields `seq boot rst alive hot shutdowns fw`, in that order, then CRC. Parse
-these seven fields from the right; key-like tokens and ` crc=` in the human
-text have no field meaning. Event trailer fields cannot be reordered.
-
-`seq` is uint32 decimal and `boot` is eight hex digits. Both are required.
-Status also requires uint32 decimal `up`. Missing other fields stay unknown;
-no zero/healthy defaults are synthesized. Status field order is immaterial and new
-bounded key/value fields are preserved without assigning meaning. Duplicate
-keys, invalid counters and malformed fields are rejected. Bounds are 48 keys,
-31 bytes/key and 159 bytes/value, within the 512-byte frame limit.
-
-Sequence spans status and events. A decrease in validated `up` compared with the previous accepted frame of the
-same kind (status with status, EVT with EVT) within a repeated boot id immediately establishes a restart, retaining even the first boot event. Forward modulo-2^32 deltas count missing
-lines; wrap is continuous. Duplicates and backwards/half-range deltas are
-rejected without refreshing status. Three consecutive CRC-valid backward
-frames with sequence numbers increasing by one establish a restart even if
-boot repeats. Duplicates or a forward frame reset that candidate; the first
-two backward frames remain rejected. Recovery increments restarts, invalidates
-old status and does not add a giant missed-lines gap. A changed boot increments restarts and
-invalidates current status immediately, even if first observed in an event.
-Only a valid status refreshes `rx_mono_ms` and replaces fields. Events never
-patch status fields. Current firmware fields including `pack_cal`, `start`,
-`gaps` and `gaps2` are retained; unknown protection-gap bits must never be
-interpreted as full protection.
+The versioned [Power supervisor link v1](power-supervisor-link-v1.md) defines
+framing, core vocabulary and the two-input/reserve board profile. Shared
+[conformance vectors](../mkosi/runtime/power-link/fixtures/vectors/README.md)
+are checked by the C reader and an independent host-only Python decoder.
 
 ## CeraUI file contract: schema version 1
 
@@ -257,69 +213,3 @@ values. Read a new timestamp on each check; do not reuse these example numbers.
 The executable used a fake serial source; no hardware was involved.
 
 If the clock call is unavailable, show unknown; do not substitute wall time.
-
-## Measurement field grammar
-
-All values remain strings. Unknown enum values/flag bits mean unknown, not
-healthy. Decimal measurements carry suffixes V, A and C; `na` is unavailable,
-`uncal` is an uncalibrated temperature. Negative currents/temperatures are
-valid. Hex flags are bit sets, not decimal counters.
-
-- `a`, `b`: `state[:cause]/voltage/current/temperature/flags-hex`.
-  States: absent, present, healthy, sagging, standing_down, stood_down,
-  recovering, fault. Causes: none, thermal, sag, holdup, pack_overtemp.
-  Bank flag bits 0..7: sink, overvolt, reverse, overload, probe, latched,
-  command, sense.
-- `pack`: `state/temperature/flags-hex`; states filling, ready, discharging,
-  fault. Pack flag bits 0..6: probe, uncal, blind, overtemp, assumed,
-  untrusted (supply not proven), jump.
-- `sbc`: `state[:cause]`; states run, shutdown_requested, rock_off,
-  wait_power, main_off; same causes as banks.
-- `gaps` and `gaps2`: four hex digits each; combined mask is
-  `parseInt(gaps,16) + 65536 * parseInt(gaps2,16)`.
-  Combined bits 0..17: unarmed, pack_uncal, pack_est, pack_probe, a_probe,
-  b_probe, blind, no_alive, shdn, nvs, wdt, skip, loop, blind_start,
-  pack_flaky, sink, supply_unproven, pack_jump. Each set bit denotes missing
-  or weaker protection; zero is not a qualification claim.
-
-These names mirror the protective firmware's status formatter, enum names,
-Flag/PackFlag and Gap definitions. Consumers must tolerate future additions.
-
-
-## Warning fields for compatible consumers
-
-The framing layer requires only `up`, `seq` and `boot` in a status. Meaningful
-power warnings also require the corresponding status fields below; a valid
-minimal frame alone does not establish healthy power or complete protection.
-There is no battery percentage or runtime estimate in version 1.
-
-| Field | Meaning |
-| --- | --- |
-| `power` | `low`: input power is weak; `holdup`: reserve supplies the box. Other values do not trigger those warnings. |
-| `redundant` | `0`: no confirmed backup input; `1`: confirmed backup. Omit when unknown. |
-| `thermal` | `normal`, `warm`, `hot`, `critical`, `shutdown`: the board's warning level, not a host temperature threshold. |
-| `hot` | Comma-separated `a`, `b`, `pack` affected by that level, or `none`. |
-| `armed` | `0`: protection is not armed (development mode); `1`: armed. This is a board report, not host qualification. |
-| `sbc` | Host power state, including `run` and `shutdown_requested[:cause]`; descriptive only, never a host command. |
-| `pack_cal` | `none`: uncalibrated; `datasheet`: estimated from datasheet constants. Other values are retained without a calibration guarantee. |
-| `gaps`, `gaps2` | Protection limitations, using the bit grammar above. Missing/unknown protection information must not imply full protection. |
-| `rst`, `alive`, `shutdowns`, `fw` | Reset reason, observed host-alive flag, shutdown counter and firmware label; retained diagnostic strings. Required in event trailers, optional in status. |
-
-A board should map only conditions it actually measures into this vocabulary.
-For example, a single-input UPS can report `power=holdup` while its battery is
-supporting the host and omit the unused input and unsupported thermal fields.
-Its firmware remains responsible for protection and shutdown policy. Extending
-this vocabulary or adapting a different UPS protocol needs separate consumer
-support; the reader does not infer electrical behavior from arbitrary keys.
-
-For a synthetic minimal status, this host-side example generates a complete
-frame (including CRC); it requires no board or command channel:
-
-```python
-import binascii
-body = b"OSB1 up=1 power=holdup seq=0 boot=12345678"
-print(body.decode() + f" crc={binascii.crc_hqx(body, 0xffff):04X}")
-```
-
-The existing firmware fixtures exercise a richer two-input/reserve-pack profile.
-They are interoperability examples, not required board topology.
