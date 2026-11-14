@@ -27,8 +27,9 @@ the kernel-patches PR #28 pin; tag creation, the drill
 and publication remain owner steps. Revision 4 is already on stable APT.
 
 **Kernel slot roles [PARTIAL: images on beta only; kernels on the stable APT only].** Slot marking stays scoped. The
-healthcheck is the only `mark-good` caller for the BOOTED slot, after boot
-identity and service checks. Slot-sync marks only the OTHER slot good, after a
+mark-good service is the only `mark-good` caller for the BOOTED slot, after
+`boot-complete.target` requires the streaming healthcheck to succeed. Slot-sync
+marks only the OTHER slot good, after a
 verified mirror. `/usr/lib/ceralive/ceralive-kernel-stage` marks OTHER eligible
 only after mirror, install and boot/firmware/filesystem verification, and never
 confirms health. Kernel state, quarantine and per-slot
@@ -117,7 +118,12 @@ Full policy, freshness limitation and rollback procedure:
 `ceralive-healthcheck.service` always dispatches after CeraUI; it has no persistent
 marker existence gate. The script accepts `.slot-marked-good` only when its
 `boot-id` line matches the current kernel boot ID, and writes that identity only
-after all existing checks and RAUC mark-good succeed. Legacy timestamp-only
+after all existing checks and RAUC mark-good succeed. The healthcheck is required
+before `boot-complete.target`; `ceralive-mark-good.service` requires and follows
+that target, invoking the script with `--mark-good` to retain the confirmation
+records and kernel-state handling. Slot-sync and boot-script sync follow this
+confirmation service. Health thresholds and retry policy are unchanged. Legacy
+timestamp-only
 markers and previous-boot markers cannot suppress verification, on either an A/B
 swap or an ordinary reboot. Boot identity read failure is fail-closed.
 The manual OTA marker remover remains compatible but is not required for correctness.

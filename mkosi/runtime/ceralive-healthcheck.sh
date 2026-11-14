@@ -1,12 +1,14 @@
 #!/bin/bash
 #
 # ceralive-healthcheck.sh — gate RAUC `mark-good` on REAL streaming health.
+# Default: assess health. --mark-good: confirmation phase after boot-complete.target.
 #
 # THE HIGHEST-SEVERITY OPERATIONAL TRAP (decisions.md / task 29): a bad bundle
 # that merely BOOTS but cannot ENCODE must NOT confirm itself. A naive "kernel
 # booted → mark-good" healthcheck would permanently brick every device that
 # received that update (recovery = physical reflash). So this script proves the
-# streaming stack actually works before calling `rauc mark-good`; if it does not,
+# streaming stack actually works before boot-complete.target permits the separate
+# confirmation unit to call `rauc mark-good`; if it does not,
 # the slot is left UNCONFIRMED and the bootcount adapter rolls it back on the next
 # reboot (see platform/boot/ceralive-rauc-boot-adapter.sh + ceralive-boot-state).
 #
@@ -501,6 +503,13 @@ main() {
     log "marker ${MARKER} belongs to an earlier boot — re-verifying current slot"
   fi
 
+  # The confirmation unit enters this phase only after boot-complete.target.
+  # Reuse the boot identity and receipt handling without repeating the probes.
+  if [[ "${1:-}" == --mark-good ]]; then
+    mark_good
+    exit $?
+  fi
+
   local now deadline attempt
   now="$(date +%s)"
   deadline=$(( now + HEALTHCHECK_TIMEOUT ))
@@ -511,8 +520,8 @@ main() {
     log "streaming healthcheck attempt #${attempt} (deadline in $(( deadline - $(date +%s) ))s)"
    if run_checks; then
         partlabel_guard_ok && dpkg_integrity_ok && drill_guard_ok || exit 1
-      mark_good
-      exit $?
+      log "all health checks passed — ready for boot completion"
+      exit 0
     fi
     if [ "$(date +%s)" -ge "${deadline}" ]; then
       fail "streaming health NOT reached within ${HEALTHCHECK_TIMEOUT}s — NOT calling mark-good; this slot rolls back on the next reboot"

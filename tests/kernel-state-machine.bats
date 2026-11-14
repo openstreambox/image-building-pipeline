@@ -31,7 +31,13 @@ setup() {
   mkdir -p "$FIXTURE/bin" "$FIXTURE/state" "$FIXTURE/updates"
   export PATH="$FIXTURE/bin:$PATH"
   export ACTIVATE_SCRIPT="${ACTIVATE_SCRIPT_OVERRIDE:-$ROOT/mkosi/runtime/ceralive-rauc-activate.sh}"
-  export HEALTH_SCRIPT="${HEALTH_SCRIPT_OVERRIDE:-$ROOT/mkosi/runtime/ceralive-healthcheck.sh}"
+  export HEALTH_PHASE_SCRIPT="${HEALTH_SCRIPT_OVERRIDE:-$ROOT/mkosi/runtime/ceralive-healthcheck.sh}"
+  export HEALTH_SCRIPT="$FIXTURE/bin/assess-boot"
+  cat > "$HEALTH_SCRIPT" <<'SH'
+#!/bin/bash
+bash "$HEALTH_PHASE_SCRIPT" && bash "$HEALTH_PHASE_SCRIPT" --mark-good
+SH
+
   export EXPECTED_PACKAGE=linux-image-7.2.0-ceralive-rk3588
   export EXPECTED_VERSION=7.2.0-ceralive2
   export EXPECTED_SHA
