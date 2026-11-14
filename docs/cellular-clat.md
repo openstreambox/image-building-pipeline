@@ -32,7 +32,8 @@ uplink address, allowing raw-IP /128 grants without assuming an extra routed
 IPv6 address or SLAAC /64. Reply conntrack restores the private mapping and
 routes it to that link's TUN. Each translator drops to nobody:nogroup after
 opening its TUN. The controller retains only network administration/raw socket
-and identity-drop capabilities, with systemd filesystem/device restrictions.
+and identity-drop capabilities plus CAP_KILL (to signal its tracked child
+after that child drops UID), with systemd filesystem/device restrictions.
 
 Source rules (priority 10000+index) select tables 46000+index for IPv4 sources
 and private IPv6 mappings. An IPv4 fallback default of metric 46000+index
@@ -83,5 +84,8 @@ It checks two simultaneously active translators, source-bound IPv4 transport,
 a real sender/IPv4 receiver, hotspot forwarding, native-IPv4 exclusion,
 link withdrawal with a surviving second link, teardown, and absent/bad prefixes.
 A private D-Bus fixture also runs the actual service through dual-stack, two
-IPv6-only grants and link-loss states.
+IPv6-only grants and link-loss states. Foreign-table refusal, crash-journal
+cleanup and restoration of the global forwarding switch are also exercised.
+The real service lifecycle runs with the unit's restricted capability set and
+no-new-privileges.
 This proves packet forwarding, not encrypted SRT/video or carrier hardware.

@@ -54,14 +54,23 @@ while True:
     dns = dns % str(c.RUN/'bad-dns')
     spawn(ns(peer,'python3','-c',dns))
     for i in [1,2]:
-        wan=f'wan{i}';srv=f'srv{i}'
+        wan=f'cell.{i}';srv=f'srv{i}'
         run('ip','link','add',wan,'type','veth','peer','name',srv)
         run('ip','link','set',srv,'netns',str(peer.pid))
-        for a,dev,p in [(f'fd51:{i}::1/64',wan,None),(f'fd51:{i}::2/64',srv,peer)]:
+        for a,dev,p in [(f'fd51:{i}::1/'+('128' if i==2 else '64'),wan,None),(f'fd51:{i}::2/64',srv,peer)]:
             cmd=['ip','addr','add',a,'dev',dev,'nodad']; run(*(ns(p,*cmd) if p else cmd))
             cmd=['ip','link','set',dev,'up'];run(*(ns(p,*cmd) if p else cmd))
+        if i == 2:
+            run('ip','-6','route','add','fd51:2::2/128','dev','cell.2')
         time.sleep(.5)
         link=c.Link(wan,f'fd51:{i}::1',f'fd51:{i}::2',[f'fd51:{i}::2']);links.append(link)
+        if i == 1:
+            # A foreign table must survive a refused ownership claim.
+            run('nft','create','table','inet',link.nft)
+            link.start()
+            assert not link.undo
+            run('nft','list','table','inet',link.nft)
+            run('nft','delete','table','inet',link.nft)
         link.start()
         assert json.loads((c.RUN/f'{link.index}.json').read_text())['state']=='up', (c.RUN/f'{link.index}.json').read_text()
         probe(link.v4)
@@ -92,20 +101,20 @@ while True:
     print('PASS real srtla_send -> IPv4 srtla_rec through each CLAT',flush=True)
     controller=c.Controller()
     for link in links:controller.links[link.interface]=((link.source,link.gateway,link.resolvers),link)
-    run('ip','link','set','wan1','down')
-    controller.sync({'wan2': (links[1].source,links[1].gateway,links[1].resolvers)})
+    run('ip','link','set','cell.1','down')
+    controller.sync({'cell.2': (links[1].source,links[1].gateway,links[1].resolvers)})
     probe(links[1].v4)
     assert not json.loads(run('ip','-j','link','show','type','tun')) == [] # second remains
     # Native IPv4 arrives: admission excludes the former IPv6-only grant.
-    run('ip','addr','add','198.51.100.1/24','dev','wan2')
-    addresses=json.loads(run('ip','-j','addr','show','dev','wan2'))[0]['addr_info']
+    run('ip','addr','add','198.51.100.1/24','dev','cell.2')
+    addresses=json.loads(run('ip','-j','addr','show','dev','cell.2'))[0]['addr_info']
     assert not c.eligible(addresses)
     controller.sync({})
     assert not any('clat' in a['ifname'] for a in json.loads(run('ip','-j','link')))
     assert 'clat_' not in run('nft','list','ruleset')
-    run('ip','link','set','wan1','up')
-    run('ip','addr','replace','fd51:1::1/64','dev','wan1','nodad')
-    bad=c.Link('wan1','fd51:1::1','fd51:1::2',[]);bad.start()
+    run('ip','link','set','cell.1','up')
+    run('ip','addr','replace','fd51:1::1/64','dev','cell.1','nodad')
+    bad=c.Link('cell.1','fd51:1::1','fd51:1::2',[]);bad.start()
     assert json.loads((c.RUN/f'{bad.index}.json').read_text())['state']=='error' and not bad.undo
     assert not any('lookup 4600' in run('ip',family,'rule') for family in ['-4','-6'])
     print('PASS link teardown, survivor, absent prefix fails closed',flush=True)
@@ -113,25 +122,33 @@ while True:
     bus = sp.Popen(['dbus-daemon','--session','--nofork','--print-address=1'],stdout=sp.PIPE,text=True)
     processes.append(bus)
     address = bus.stdout.readline().strip()
-    state = c.RUN/'nm-state';state.write_text(json.dumps({'1':100,'2':100}))
+    state = c.RUN/'nm-state';state.write_text(json.dumps({'1':100,'2':100,'ipv4_only':True}))
     fixture = spawn(['/usr/bin/python3',str(Path(__file__).with_name('clat-nm-fixture.py')),address,str(state)])
-    run('ip','addr','add','198.51.100.2/24','dev','wan1')
+    run('ip','addr','add','198.51.100.2/24','dev','cell.1')
     # Both dual stack: the service must create no translator.
-    code = "import importlib.util,os,pathlib; s=importlib.util.spec_from_file_location('clat',%r); c=importlib.util.module_from_spec(s);s.loader.exec_module(c);c.RUN=pathlib.Path(%r);c.TAYGA=%r;os.environ['DBUS_SYSTEM_BUS_ADDRESS']=%r;c.main()" % (str(Path(c.__file__)),str(c.RUN),c.TAYGA,address)
+    module=c.RUN/'runtime.py';module.write_text(Path(c.__file__).read_text())
+    code = "import importlib.util,os,pathlib; s=importlib.util.spec_from_file_location('clat',%r); c=importlib.util.module_from_spec(s);s.loader.exec_module(c);c.RUN=pathlib.Path(%r);c.TAYGA=%r;os.environ['DBUS_SYSTEM_BUS_ADDRESS']=%r;c.main()" % (str(module),str(c.RUN),c.TAYGA,address)
     time.sleep(.3)
-    daemon=spawn(['/usr/bin/python3','-c',code])
+    daemon=spawn(['setpriv','--bounding-set=-all,+net_admin,+net_raw,+kill,+setuid,+setgid','--no-new-privs','/usr/bin/python3','-c',code])
     time.sleep(.7)
     assert daemon.poll() is None
     assert not any('clat' in a['ifname'] for a in json.loads(run('ip','-j','link')))
-    run('ip','addr','del','198.51.100.2/24','dev','wan1')
-    run('ip','addr','del','198.51.100.1/24','dev','wan2')
     def wait_state(index, expected):
         for _ in range(100):
             path=c.RUN/f'{index}.json'
             if path.exists() and json.loads(path.read_text())['state']==expected:return
             time.sleep(.1)
         raise AssertionError(path.read_text() if path.exists() else 'no service status')
+    run('ip','addr','del','198.51.100.1/24','dev','cell.2')
+    wait_state(links[1].index,'up');probe(links[1].v4)
+    assert links[0].tun not in [a['ifname'] for a in json.loads(run('ip','-j','link'))]
+    run('ip','addr','del','198.51.100.2/24','dev','cell.1')
+    state.write_text(json.dumps({'1':100,'2':100}))
     for link in links:wait_state(link.index,'up');probe(link.v4)
+    state.write_text(json.dumps({'1':100,'2':100,'ipv4_only':True}))
+    wait_state(links[0].index,'down')
+    assert json.loads((c.RUN/f'{links[1].index}.json').read_text())['state']=='up'
+    probe(links[1].v4)
     state.write_text(json.dumps({'1':30,'2':100}))
     wait_state(links[0].index,'down');probe(links[1].v4)
     state.write_text(json.dumps({'1':30,'2':30}))
@@ -139,8 +156,17 @@ while True:
     daemon.terminate();daemon.wait(timeout=5)
     assert not any('clat' in a['ifname'] for a in json.loads(run('ip','-j','link')))
     (c.RUN/'bad-dns').touch()
-    bad=c.Link('wan1','fd51:1::1','fd51:1::2',['fd51:1::2']);bad.start()
+    bad=c.Link('cell.1','fd51:1::1','fd51:1::2',['fd51:1::2']);bad.start()
     assert not bad.undo and json.loads((c.RUN/f'{bad.index}.json').read_text())['state']=='error'
+    (c.RUN/'bad-dns').unlink()
+    orphan=c.Link('cell.1','fd51:1::1','fd51:1::2',['fd51:1::2']);orphan.start()
+    assert orphan.undo
+    orphan.process.kill();orphan.process.wait()
+    c.cleanup()
+    assert not any('clat' in a['ifname'] for a in json.loads(run('ip','-j','link')))
+    assert 'clat_' not in run('nft','list','ruleset')
+    assert run('sysctl','-n','net.ipv6.conf.all.forwarding').strip() == '0'
+    print('PASS crash journal cleanup and global forwarding restoration',flush=True)
     print('PASS malformed DNS64 prefix fails closed',flush=True)
     print('PASS actual D-Bus service: dual-stack exclusion, two grants, link loss and clean stop',flush=True)
 

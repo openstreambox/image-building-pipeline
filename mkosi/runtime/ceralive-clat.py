@@ -209,7 +209,7 @@ class Link:
             self.add([TAYGA, '-c', str(cfg), '--mktun'], ['ip', 'link', 'del', self.tun])
             command('ip', 'link', 'set', self.tun, 'up')
             for device, key, value in [(self.interface, 'accept_ra', '2'), (self.interface, 'forwarding', '1'), (self.tun, 'forwarding', '1')]:
-                setting = f'net.ipv6.conf.{device}.{key}'
+                setting = f'net/ipv6/conf/{device}/{key}'
                 old = command('sysctl', '-n', setting).strip()
                 self.add(['sysctl', '-qw', setting + '=' + value], ['sysctl', '-qw', setting + '=' + old])
             command('ip', 'addr', 'add', self.v4 + '/32', 'dev', self.tun)
@@ -272,18 +272,24 @@ def main():
         try:
             manager = dbus.Interface(bus.get_object(name, '/org/freedesktop/NetworkManager'), name)
             for path in manager.GetDevices():
-                dev = props(path, name + '.Device')
-                if int(dev['DeviceType']) != 8 or int(dev['State']) != 100:
+                try:
+                    dev = props(path, name + '.Device')
+                    if int(dev['DeviceType']) != 8 or int(dev['State']) != 100:
+                        continue
+                    interface = str(dev['IpInterface'])
+                    addr = json.loads(command('ip', '-j', 'addr', 'show', 'dev', interface))[0]['addr_info']
+                    sources = eligible(addr)
+                    if not sources:
+                        continue
+                    config = props(dev['Ip6Config'], name + '.IP6Config')
+                    gateway = str(config['Gateway'])
+                    dns = tuple(str(d['address']) for d in config.get('NameserverData', []))
+                    has_default = gateway or json.loads(command('ip', '-j', '-6', 'route', 'show', 'default', 'dev', interface))
+                    if sources and has_default:
+                        wanted[interface] = (sources[0], gateway, dns)
+                except Exception:
+                    # A disappearing/incomplete device must not withdraw its neighbours.
                     continue
-                interface = str(dev['IpInterface'])
-                addr = json.loads(command('ip', '-j', 'addr', 'show', 'dev', interface))[0]['addr_info']
-                sources = eligible(addr)
-                config = props(dev['Ip6Config'], name + '.IP6Config')
-                gateway = str(config['Gateway'])
-                dns = tuple(str(d['address']) for d in config.get('NameserverData', []))
-                has_default = gateway or json.loads(command('ip', '-j', '-6', 'route', 'show', 'default', 'dev', interface))
-                if sources and has_default:
-                    wanted[interface] = (sources[0], gateway, dns)
         except Exception:
             # Manager loss invalidates every previous grant; no stale translation.
             wanted = {}

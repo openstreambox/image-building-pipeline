@@ -19,10 +19,11 @@ class Object(dbus.service.Object):
     @dbus.service.method('org.freedesktop.DBus.Properties', in_signature='s', out_signature='a{sv}')
     def GetAll(self, interface):
         i = self.__dbus_object_path__[-1]
-        state = json.load(open(state_path))[i]
+        snapshot = json.load(open(state_path))
+        state = snapshot[i]
         if interface.endswith('.Device'):
-            return dict(DeviceType=dbus.UInt32(8),State=dbus.UInt32(state),IpInterface='wan'+i,
-                        Ip6Config=dbus.ObjectPath(base+'/IP6Config/'+i))
+            return dict(DeviceType=dbus.UInt32(8),State=dbus.UInt32(state),IpInterface='cell.'+i,
+                        Ip6Config=dbus.ObjectPath('/' if snapshot.get('ipv4_only') and i=='1' else base+'/IP6Config/'+i))
         return dict(Gateway=f'fd51:{i}::2',NameserverData=dbus.Array([
             dbus.Dictionary(dict(address=f'fd51:{i}::2'),signature='sv')], signature='a{sv}'))
 
