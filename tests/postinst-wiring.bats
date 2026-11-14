@@ -508,13 +508,13 @@ os_release_version_writer() {
   printf '%s\n' "$output"
 }
 
-@test "modem_ports schema: rock-5b-plus ships status: unverified and validates" {
+@test "modem_ports schema: rock-5b-plus ships a position map and validates" {
   run validate_manifest "$PIPELINE_DIR/manifests/boards/rock-5b-plus.yaml" "$BOARD_SCHEMA"
   [ "$status" -eq 0 ]
   [[ "$output" == *"VALID"* ]]
   run python3 -c "import yaml; d=yaml.safe_load(open('$PIPELINE_DIR/manifests/boards/rock-5b-plus.yaml')); print(d['modem_ports']['status'])"
   [ "$status" -eq 0 ]
-  [[ "$output" == "unverified" ]]
+  [[ "$output" == "verified" ]]
 }
 
 @test "modem_ports schema: a verified board with slot ID_PATHs validates" {

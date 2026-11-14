@@ -918,3 +918,7 @@ CONFIG_REED_SOLOMON=y
 # CONFIG_ARCH_VISCONTI is not set
 # CONFIG_ARCH_XGENE is not set
 # CONFIG_ARCH_ZYNQMP is not set
+
+# ROCK 5B+ W_DISABLE1# is owned by rfkill-gpio; retain module options support.
+CONFIG_RFKILL=m
+CONFIG_RFKILL_GPIO=m

@@ -21,9 +21,11 @@ the shared non-cancelling `ceralive-kernel-floor` job group. Strict channel JSON
 is unchanged.
 See [kernel reuse](../kernel-build-from-source.md#released-kernel-reuse-exists)
 and [release admission](../RELEASE-PROCESS.md#signed-channel-publishing-ceraui-os-agent).
-The production source revision is `7.2.0-ceralive8`, adding nftables reject for
+The fork candidate source revision is `7.2.0-ceralive9`, adding the B-key
+cold-start sequence and explicit rfkill requirements to revision 8 (nftables reject for
 NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
-the kernel-patches PR #28 pin; tag creation, the drill
+the kernel-patches PR #28 pin). Hardware qualification of revision 9 is open;
+see [the candidate guide](../rock5bplus-internal-modem.md). Tag creation, the drill
 and publication remain owner steps. Revision 4 is already on stable APT.
 
 **Kernel slot roles [PARTIAL: images on beta only; kernels on the stable APT only].** Slot marking stays scoped. The

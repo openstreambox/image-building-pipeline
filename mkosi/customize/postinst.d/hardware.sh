@@ -428,3 +428,76 @@ QUIRK_M2_SIM
 
   log "board quirks: dispatch complete — ${applied} applied"
 }
+
+# generate_modem_slot_uid_rules — fail-closed generator for per-slot ModemManager
+# UID naming. The permanent generic modem rules in setup_hardware_access (the
+# "USB Modem Devices (4G/5G)" block, dialout group-tagging by kernel node + vendor
+# ID) always ship and are NOT touched here. This function emits an ADDITIONAL
+# 78-mm-ceralive-slot-uid.rules ONLY when the board's modem_ports status is
+# `verified` and carries slot ID_PATHs — mapping each physical slot to a stable
+# ID_MM_PHYSDEV_UID so ModemManager reports a deterministic slot identity
+# regardless of ttyUSB enumeration order.
+#
+# FAIL-CLOSED (no permissive fallback): any status other than an explicit
+# `verified` — `unverified` (the shipped default), unset, or anything else —
+# emits ZERO generated slot-uid rules and removes any stale generated file, so an
+# A/B slot never keeps rules the current manifest no longer authorizes. Slot
+# verification is a hardware-gated step (docs/modem-matrix.md §7); until it is
+# done, the generic rules alone govern modem access.
+generate_modem_slot_uid_rules() {
+  local rules_dir="${MODEM_SLOT_RULES_DIR:-/etc/udev/rules.d}"
+  local rules_file="${rules_dir}/78-mm-ceralive-slot-uid.rules"
+  local status="${CERALIVE_MODEM_PORTS_STATUS:-unverified}"
+
+  if [[ "${status}" != "verified" ]]; then
+    rm -f "${rules_file}"
+    log "modem slot-uid rules: modem_ports status='${status}' (not verified) — emitting NO generated slot-uid rules (fail-closed; generic modem rules still apply)"
+    return 0
+  fi
+
+  local slots="${CERALIVE_MODEM_PORTS_SLOTS:-}"
+  [[ -n "${slots}" ]] \
+    || die "modem_ports status=verified but no slot definitions (CERALIVE_MODEM_PORTS_SLOTS empty) — refusing to emit an empty verified rule set"
+
+  mkdir -p "${rules_dir}"
+  {
+    printf '# CeraLive generated modem slot-UID rules — DO NOT EDIT.\n'
+    printf '# Emitted from board modem_ports (status: verified). One stable\n'
+    printf '# ID_MM_PHYSDEV_UID per hardware-verified physical modem slot.\n'
+    # USB-device events do not necessarily carry ID_PATH before MM probes.
+    printf 'ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", IMPORT{builtin}="path_id"\n'
+    local pair name id_path
+    for pair in ${slots}; do
+      name="${pair%%=*}"
+      id_path="${pair#*=}"
+      [[ -n "${name}" && -n "${id_path}" && "${name}" != "${id_path}" ]] \
+        || die "malformed modem slot definition '${pair}' (expected <name>=<ID_PATH>)"
+      [[ "$name" != internal_4g ]] || name="internal 4G"
+      printf 'ACTION=="add|bind", SUBSYSTEM=="usb", ENV{ID_PATH}=="%s", ENV{ID_MM_PHYSDEV_UID}="%s"\n' \
+        "${id_path}" "${name}"
+    done
+  } >"${rules_file}"
+  log "modem slot-uid rules: emitted $(basename "${rules_file}") for verified slots: ${slots}"
+}
+
+
+# Limit boot-time radio release to the board's GPIO-backed WWAN rfkill device.
+# Late rule ordering disables persistent restore for this device only. An add
+# event unblocks it; change events (including a deliberate block) are untouched.
+setup_internal_modem_rfkill() {
+  local rules_dir="${MODEM_SLOT_RULES_DIR:-/etc/udev/rules.d}"
+  local config_dir="${MODEM_MODPROBE_DIR:-/etc/modprobe.d}"
+  local rule="${rules_dir}/99-zz-ceralive-internal-wwan.rules"
+  local config="${config_dir}/ceralive-internal-wwan.conf"
+  if [[ "${BOARD_ID:-unknown}" != rock-5b-plus ]]; then
+    rm -f "$rule" "$config"
+    return 0
+  fi
+  mkdir -p "$rules_dir" "$config_dir"
+  printf '%s\n' 'options rfkill default_state=1' >"$config"
+  cat >"$rule" <<'EOF'
+# W_DISABLE1# (GPIO3_A6): active-high shutdown GPIO, unblocked = physical high.
+SUBSYSTEM=="rfkill", ATTR{name}=="rfkill-m2-wwan", ENV{SYSTEMD_RFKILL}="0"
+ACTION=="add", SUBSYSTEM=="rfkill", ATTR{name}=="rfkill-m2-wwan", ATTR{soft}="0"
+EOF
+}

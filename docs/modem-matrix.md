@@ -276,8 +276,8 @@ Proof: `run-tests` section 17.
 
 The board manifest carries an optional `modem_ports` block that drives
 deterministic ModemManager slot-UID naming. It is **fail-closed**: while
-`status: unverified` (the shipped default on every board) the udev generator
-`mkosi/customize/udev.sh::generate_modem_slot_uid_rules` emits **NO** generated
+`status: unverified` (the default without a verified map) the udev generator
+`mkosi/customize/postinst.d/hardware.sh::generate_modem_slot_uid_rules` emits **NO** generated
 `78-mm-ceralive-slot-uid.rules` — there is no permissive fallback. The permanent
 generic modem rules (§"USB Modem Devices" in `setup_hardware_access`) always ship
 and govern access on their own until a slot map is verified.
@@ -329,8 +329,12 @@ ACTION=="add|bind", SUBSYSTEM=="usb", ENV{ID_PATH}=="<id_path>", ENV{ID_MM_PHYSD
 ```
 
 `ID_MM_PHYSDEV_UID` gives ModemManager a stable per-slot identity regardless of
-ttyUSB enumeration order. The flip is a distinct change from this integration —
-it is the "verified" half of the two-state contract and is **not** performed here.
+ttyUSB enumeration order. The ROCK 5B+ map names its fixed B-key port "internal 4G"; other maps
+require the same physical discovery before enabling them.
 
 Proof: `run-tests` — the generator matrix (unverified ⇒ zero generated rules;
 verified fixture ⇒ rules emitted) in `postinst-wiring.bats`.
+
+The ROCK 5B+ has a position map for its internal B-key port and a separate
+[DW5821e candidate and qualification guide](rock5bplus-internal-modem.md).
+The live runtime installer and decomposed installer now share the generator.

@@ -228,7 +228,7 @@ variants:
       # The patch series is a BUILD INPUT and is exact-pinned like every other
       # BSP input — an IMMUTABLE commit, never a branch.
       #
-      # WHAT THIS PIN IS. 365b24632940 is the `main` commit of
+      # PATCH-SERIES HISTORY. 365b24632940 is the `main` commit of
       # CERALIVE/rk3588-kernel-patches produced by the squash-merge of PR #15,
       # which advances the `island/` lane to v2026.9.2. At it, patches/series carries 24 ACTIVE
       # members in FOUR lanes:
@@ -301,8 +301,13 @@ variants:
       # Island v2026.9.4: artifact-bound Rock qualification passed 2026-09-15.
       # Scope/receipts: docs/kernel-build-from-source.md, RGA ownership section.
       # Changes require independent exact-head review before merge.
-      patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: bc7e44fa35d3eded23567dd48e65f6dc799f4b34
+      # Fork candidate extends that 32-patch base with 0052. The immutable
+      # commit is retained by osb/T294 in the fork, not an orphaned PR head.
+      # FULL_CARD_POWER_OFF# holds the card off after RESET# is released;
+      # the Wi-Fi/WWAN buck is untouched. Hardware qualification remains open:
+      # docs/rock5bplus-internal-modem.md.
+      patches_git_url: https://github.com/openstreambox/rk3588-kernel-patches.git
+      patches_commit: c65b7ddc5fee14abc0f9de54a104fb5f8db087f2
       patches_series: patches/series
 
       defconfig_base: defconfig
@@ -323,6 +328,7 @@ variants:
       # base spelled its own three components. A "7.2-ceralive-rk3588" spelling
       # looks right, matches the tag, and would fail build-kernel.sh's own
       # `kernelrelease != KERNEL_RELEASE` assertion before one object compiles.
+      # Revision 9 adds 0052 and explicit rfkill configuration.
       # package_version uses KERNELVERSION + -ceralive<revision>; revision 8
       # re-tags revision 7's kernel (nftables reject for NetworkManager shared mode and
       # Rock 5B+ sink-first Type-C through the PR #28 patch pin) on a master that carries
@@ -331,7 +337,7 @@ variants:
       # never published to APT; revision 7's release run failed in the Avahi contract.
       local_version: -ceralive-rk3588
       kernel_release: 7.2.0-ceralive-rk3588
-      package_version: 7.2.0-ceralive8
+      package_version: 7.2.0-ceralive9
 
       # PLATFORM-LAYER INSTALL MAPPING. bindeb-pkg puts arm64 in-tree DTBs under
       # /usr/lib/linux-image-<KERNELRELEASE>/<soc-vendor>/; the U-Boot boot script
@@ -390,6 +396,6 @@ variants:
       # It carries the same `.0` for the same reason edge does.
       local_version: -ceralive-rk3588-test
       kernel_release: 7.2.0-ceralive-rk3588-test
-      package_version: 7.2.0-ceralive1+test1
+      package_version: 7.2.0-ceralive9+test1
 
       dtb_deb_dir: /usr/lib/linux-image-7.2.0-ceralive-rk3588-test/rockchip
