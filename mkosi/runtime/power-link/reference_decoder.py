@@ -135,7 +135,39 @@ class Decoder:
             r.update(fields=fields, have_status=True, rx_ms=self.now)
 
 
+def interpret(fields):
+    power = fields.get('power')
+    if power not in ('ok', 'none', 'low', 'holdup'):
+        power = 'unknown'
+    thermal = fields.get('thermal')
+    if thermal not in ('normal', 'warm', 'hot', 'critical', 'shutdown'):
+        thermal = 'unknown'
+    gaps = [fields.get(key, '') for key in ('gaps', 'gaps2')]
+    protection = 'unknown'
+    profile_known = fields.get('profile', 'dual-input-reserve-v1') == 'dual-input-reserve-v1'
+    if profile_known and all(re.fullmatch(r'[0-9a-fA-F]{4}', value) for value in gaps):
+        protection = 'reduced' if any(int(value, 16) for value in gaps) else 'no_reported_gaps'
+    temperatures = {}
+    for key in ('a', 'b', 'pack'):
+        parts = fields.get(key, '').split('/') if profile_known else []
+        index = 1 if key == 'pack' else 3
+        value = parts[index] if len(parts) > index else ''
+        quality = 'unknown'
+        if value in ('na', 'uncal'):
+            quality = value
+        elif re.fullmatch(r'-?[0-9]+(?:\.[0-9]+)?C', value):
+            try:
+                if -273.15 <= float(value[:-1]) <= 1000:
+                    quality = 'reported'
+            except ValueError:
+                pass
+        temperatures[key] = quality
+    return dict(power=power, power_healthy=power == 'ok', thermal=thermal,
+                protection=protection, temperature_quality=temperatures)
+
+
 if __name__ == '__main__':
     decoder = Decoder()
     for wire in sys.stdin.buffer:
-        print(json.dumps(decoder.decode(wire), sort_keys=True))
+        result = decoder.decode(wire)
+        print(json.dumps(interpret(result['fields']) if '--semantics' in sys.argv else result))

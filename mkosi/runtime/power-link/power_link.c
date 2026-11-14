@@ -199,11 +199,6 @@ static const char *link_state(const struct state *s, int connected, uint64_t now
     if (s->special == 2) return "unknown_version";
     return s->have_status && now >= s->rx_ms && now - s->rx_ms < 5000 ? "ok" : "silent";
 }
-#ifndef POWER_LINK_NO_MAIN
-static uint64_t mono_ms(void) {
-    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
 static void json_string(FILE *f, const char *p) {
     fputc('"', f);
     for (; *p; ++p) {
@@ -211,6 +206,78 @@ static void json_string(FILE *f, const char *p) {
         fputc(*p, f);
     }
     fputc('"', f);
+}
+static const char *temperature_quality(const char *raw, int bank, double *celsius) {
+    char value[160];
+    if (!raw) return "unknown";
+    snprintf(value, sizeof value, "%s", raw);
+    char *part = value;
+    for (int i = 0; i < (bank ? 3 : 1); ++i) {
+        part = strchr(part, '/');
+        if (!part) return "unknown";
+        ++part;
+    }
+    char *end = strchr(part, '/');
+    if (end) *end = 0;
+    if (!strcmp(part, "na")) return "na";
+    if (!strcmp(part, "uncal")) return "uncal";
+    const char *digit = part;
+    if (*digit == '-') ++digit;
+    if (!isdigit((unsigned char)*digit)) return "unknown";
+    while (isdigit((unsigned char)*digit)) ++digit;
+    if (*digit == '.') {
+        ++digit;
+        if (!isdigit((unsigned char)*digit)) return "unknown";
+        while (isdigit((unsigned char)*digit)) ++digit;
+    }
+    if (strcmp(digit, "C")) return "unknown";
+    double n = strtod(part, &end);
+    if (end != part && !strcmp(end, "C") && n >= -273.15 && n <= 1000) {
+        *celsius = n; return "reported";
+    }
+    return "unknown";
+}
+#ifndef POWER_LINK_NO_MAIN
+static void temperature(FILE *f, const char *raw, int bank) {
+    double n = 0;
+    const char *quality = temperature_quality(raw, bank, &n);
+    if (!strcmp(quality, "reported")) fprintf(f, "{\"celsius\":%.3f,", n);
+    else fputs("{\"celsius\":null,", f);
+    fprintf(f, "\"quality\":\"%s\"}", quality);
+}
+#endif
+static const char *known(const char *value, const char *const *names) {
+    for (; *names; ++names) if (value && !strcmp(value, *names)) return value;
+    return "unknown";
+}
+static void semantics(FILE *f, const struct state *s) {
+    const char *const powers[] = {"ok", "none", "low", "holdup", NULL};
+    const char *const thermals[] = {"normal", "warm", "hot", "critical", "shutdown", NULL};
+    const char *power = known(get(s, "power"), powers);
+    uint32_t lo, hi;
+    const char *g = get(s, "gaps"), *g2 = get(s, "gaps2");
+    const char *protection = "unknown";
+    const char *profile = get(s, "profile");
+    int profile_known = !profile || !strcmp(profile, "dual-input-reserve-v1");
+    if (profile_known && g && g2 && strlen(g) == 4 && strlen(g2) == 4 &&
+        number(g, 16, &lo) && number(g2, 16, &hi))
+        protection = lo || hi ? "reduced" : "no_reported_gaps";
+    fprintf(f, "{\"power\":\"%s\",\"power_healthy\":%s,\"thermal\":\"%s\",\"protection\":\"%s\",\"temperature_quality\":{",
+            power, !strcmp(power, "ok") ? "true" : "false",
+            known(get(s, "thermal"), thermals), protection);
+    const char *keys[] = {"a", "b", "pack"};
+    for (int i = 0; i < 3; ++i) {
+        if (i) fputc(',', f);
+        json_string(f, keys[i]); fputc(':', f);
+        double n = 0;
+        json_string(f, temperature_quality(profile_known ? get(s, keys[i]) : NULL, i < 2, &n));
+    }
+    fputs("}}", f);
+}
+#ifndef POWER_LINK_NO_MAIN
+static uint64_t mono_ms(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 static FILE *atomic_start(const char *dir, const char *name, char *tmp, size_t size) {
     if (snprintf(tmp, size, "%s/.%s.XXXXXX", dir, name) >= (int)size) return NULL;
@@ -231,33 +298,6 @@ static int atomic_finish(FILE *f, const char *tmp, const char *dir, const char *
     }
     unlink(tmp); return -1;
 }
-static void temperature(FILE *f, const char *raw, int bank) {
-    char value[160]; value[0] = 0;
-    if (raw) {
-        snprintf(value, sizeof value, "%s", raw);
-        /* Bank: state/V/A/C/flags. Pack: state/C/flags. */
-        char *part = value;
-        for (int i = 0; i < (bank ? 3 : 1); ++i) {
-            part = strchr(part, '/');
-            if (!part) break;
-            ++part;
-        }
-        if (part) {
-            char *end = strchr(part, '/');
-            if (end) *end = 0;
-        }
-        if (part) {
-            if (!strcmp(part, "na") || !strcmp(part, "uncal")) {
-                fprintf(f, "{\"celsius\":null,\"quality\":\"%s\"}", part); return;
-            }
-            char *end; double n = strtod(part, &end);
-            if (end != part && !strcmp(end, "C") && n >= -273.15 && n <= 1000) {
-                fprintf(f, "{\"celsius\":%.3f,\"quality\":\"reported\"}", n); return;
-            }
-        }
-    }
-    fputs("{\"celsius\":null,\"quality\":\"unknown\"}", f);
-}
 static int publish(struct state *s, int connected, int ambiguous, uint64_t now, const char *dir) {
     char tmp[4096]; FILE *f = atomic_start(dir, "supervisor.json", tmp, sizeof tmp);
     if (!f) return -1;
@@ -272,7 +312,8 @@ static int publish(struct state *s, int connected, int ambiguous, uint64_t now, 
         if (i) fputc(',', f);
         json_string(f, s->fields[i].key); fputc(':', f); json_string(f, s->fields[i].value);
     }
-    fputs("},\"temperatures\":{", f);
+    fputs("},\"semantics\":", f); semantics(f, s);
+    fputs(",\"temperatures\":{", f);
     const char *keys[] = {"a", "b", "pack"};
     for (int i = 0; i < 3; ++i) {
         if (i) fputc(',', f);

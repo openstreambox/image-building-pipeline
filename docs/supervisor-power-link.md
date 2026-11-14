@@ -132,7 +132,7 @@ changes, with an empty ring published at process startup.
 | `rx_mono_ms` | Integer CLOCK_MONOTONIC milliseconds of the last accepted **status**, or null before one. It is never refreshed by events or rejected input. |
 | `fields` | Object of original string key/value pairs from the last accepted status, including seq/boot and all available measurements. Empty before one; fields can remain present while stale. CRC is validated, then omitted. Missing fields mean unknown. |
 | `temperatures` | Object with `a`, `b`, `pack`; each has `celsius` (number or null) and `quality` (`reported`, `na`, `uncal`, `unknown`). Pack calibration provenance remains in `fields.pack_cal`. Reported does not mean calibrated or present: gate bank temperatures on bank state (absent banks may report 25 C). |
-| `restarts` | Boot changes, same-kind uptime decreases and recovered sequence regressions observed during this reader process. The uint32 millisecond firmware clocks wrap after 49.7 days and can cause a benign restart count. |
+| `restarts` | Boot changes, uptime decreases (including the documented first-kind fallback) and recovered sequence regressions observed during this reader process. A forward-sequence uint32 millisecond clock rollover near 49.7 days does not count as a restart. |
 | `missed_lines` | Sum of forward sequence gaps in the same boot, across events and status. |
 | `accepted_lines` | Valid, forward status and event count. |
 | `rejected` | Counters: `crc`, `malformed`, `oversize`, `ignored`, `unknown_version`, `out_of_order`. All counters reset on reader restart. Normal firmware CSV rows increment ignored about once per second; do not alarm on that counter. |
@@ -213,3 +213,13 @@ values. Read a new timestamp on each check; do not reuse these example numbers.
 The executable used a fake serial source; no hardware was involved.
 
 If the clock call is unavailable, show unknown; do not substitute wall time.
+
+The optional `semantics` object interprets the current raw status fields:
+`power` is `ok`, `none`, `low`, `holdup` or `unknown`; `power_healthy` is true
+only for `ok`. `thermal` preserves recognized levels or reports `unknown`.
+`protection` is `reduced` for any nonzero combined gap mask (including unknown
+bits), `no_reported_gaps` for two valid zero masks, and `unknown` if either
+mask is absent/invalid. This is never a qualification claim. An explicit
+unknown `profile` makes profile interpretation unknown. `temperature_quality`
+contains `a`, `b`, `pack` qualities (`reported`, `na`, `uncal`, `unknown`).
+Consumers must still check schema, heartbeat and freshness before using it.

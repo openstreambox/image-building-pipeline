@@ -14,9 +14,9 @@
     "have_status": true,
     "rx_ms": 1000,
     "fields": {
-      "up": "0002",
+      "boot": "ABCDEF12",
       "seq": "01",
-      "boot": "ABCDEF12"
+      "up": "0002"
     },
     "events": [],
     "link": "ok"

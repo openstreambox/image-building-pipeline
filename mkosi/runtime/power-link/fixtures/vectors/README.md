@@ -36,3 +36,19 @@ streams cover offset uptime clocks, same-kind decreases and clock reset,
 changed boot in an event, modulo sequence wrap/gaps, duplicate/half-range
 rejection and three-frame sequence recovery. The separate firmware simulation
 fixture and service tests remain in the same gate.
+
+`../semantics.json` defines fixed vocabulary/profile cases (status fields to
+interpretation). The adapters' `--semantics` mode checks these separately from
+framing counters, using the same C interpretation published by the service.
+Only `power=ok` yields `power_healthy:true`; `none`, missing and unfamiliar
+values never do. Unknown gap bits mean reduced protection, missing/invalid
+masks mean unknown, and a zero mask means only no reported gaps. Explicit
+unknown profiles have unknown profile interpretation; legacy omitted profiles
+use the globally reserved v1 meanings. Temperature quality is tested for
+reported, unavailable, uncalibrated and invalid values; absent banks stay unknown.
+
+Run `python3 -I test_fuzz.py` after building `test-vectors` for a reproducible,
+single-worker C/Python comparison: three fixed seeds, 400 streams each. It
+compares every framing snapshot and semantic interpretation, with mutations
+covering CRC, byte rejection, prefix classification, boot/uptime and sequence
+boundaries. It is a differential check, separate from the fixed expectations.

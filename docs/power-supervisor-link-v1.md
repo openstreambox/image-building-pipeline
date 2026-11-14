@@ -1,6 +1,6 @@
 # Power supervisor link v1
 
-Version 1.0.0. Text licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+Version 1.1.0 (draft). Text licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 Decoder code and vectors use the repository license. Initial version: framing,
 core vocabulary and two-input/reserve profile; no wire changes.
 
@@ -10,16 +10,20 @@ core vocabulary and two-input/reserve profile; no wire changes.
 compatibility; it is not a vendor check or a requirement to use a named board.
 Implementers may emit these ASCII frames from any USB serial microcontroller.
 No host commands, handshake or command responses are required. Emit status
-at least once per second for the five-second freshness window. This is an open specification, not a USB class or an Internet standard. Use a new boot
+at least once per second for the five-second freshness window. This is an open
+specification, not a USB class or an Internet standard. Emitters use a new boot
 identifier on each restart and a shared increasing sequence across frame kinds.
+`up` is elapsed whole seconds. Keep it non-decreasing within each frame kind,
+except for a documented clock rollover; status and event clock origins can differ.
 The reader preserves the tty baud setting and configures raw input; USB CDC
 implementations must not require a host baud-rate handshake. A physical UART
 bridge needs its baud setting configured separately. Unsupported measurements
 should be omitted or use the documented unavailable values, never fabricated as healthy.
 
 ASCII lines end in LF; the whole line including LF is at most 512 bytes.
-Non-OSB1 text is ignored and counted. `waiting for download` on non-OSB text marks bootloader
-mode (best effort: opening after the one-shot ROM banner can show silent).
+Non-OSB1 text is ignored and counted. As an ESP32-family ROM heuristic,
+`waiting for download` on non-OSB text marks bootloader mode (best effort:
+opening after the one-shot ROM banner can show silent).
 Only a different `OSB<digits> ` version prefix marks unknown_version. Overlong
 input is discarded through the next LF, using bounded memory. Disconnect drops
 any partial line. Embedded NUL/control bytes are rejected.
@@ -41,25 +45,64 @@ bounded key/value fields are preserved without assigning meaning. Duplicate
 keys, invalid counters and malformed fields are rejected. Bounds are 48 keys,
 31 bytes/key and 159 bytes/value, within the 512-byte frame limit.
 
-Sequence spans status and events. A decrease in validated `up` compared with the previous accepted frame of the
-same kind (status with status, EVT with EVT) within a repeated boot id immediately establishes a restart, retaining even the first boot event. Forward modulo-2^32 deltas count missing
-lines; wrap is continuous. Duplicates and backwards/half-range deltas are
-rejected without refreshing status. Three consecutive CRC-valid backward
-frames with sequence numbers increasing by one establish a restart even if
-boot repeats. Duplicates or a forward frame reset that candidate; the first
-two backward frames remain rejected. Recovery increments restarts, invalidates
-old status and does not add a giant missed-lines gap. A changed boot increments restarts and
-invalidates current status immediately, even if first observed in an event.
-Only a valid status refreshes `rx_mono_ms` and replaces fields. Events never
-patch status fields. Profile fields are retained; unknown protection-gap bits must never be
-interpreted as full protection.
+Sequence spans status and events. Boot ids compare by numeric value
+(case-insensitive hex), with lowercase canonical output. A changed boot id
+immediately establishes a restart, even when first observed in an event.
+Within a repeated boot id, a decrease in `up` against the last accepted frame
+of the same kind establishes a restart before sequence ordering is checked.
+Consequently a stale lower-uptime frame can become the current status; receivers
+assume an ordered serial stream, not a replay-resistant transport.
 
-The two uptime histories are cleared together on any detected restart. A first
-frame of a kind has no previous same-kind uptime and cannot prove a decrease.
-Only accepted frames update that history. Firmware millisecond clocks may wrap
-after 49.7 days, yielding a benign restart indication. A repeated boot id with
-no observable same-kind decrease and no recoverable sequence regression cannot
-be distinguished from the same life; use distinct boot ids.
+With no same-kind history, a backward/half-range sequence delta plus an `up`
+more than two seconds below the other kind's last accepted uptime establishes
+a restart. This fallback retains the first boot EVT after status-only history
+(and the first status after EVT-only history). The two-second tolerance allows
+small clock-origin offsets; larger offsets combined with backward sequence
+numbers are indistinguishable from a restart. Emitters should use distinct boot
+ids. A first frame of a kind otherwise cannot prove an uptime decrease.
+
+A known rollover is exempt from the decrease rule: previous same-kind `up`
+in 4294965..4294967, new `up` in 0..2, and a strictly forward sequence delta
+less than 2^31. These are the seconds around a uint32 millisecond-clock wrap
+at 4294967.296 seconds (about 49.7 days). Each kind wraps independently,
+without clearing the other history or incrementing restarts. Other emitter
+clock widths/rollover points are not inferred; a 64-bit clock need not wrap.
+
+Forward modulo-2^32 sequence deltas count missing lines; sequence wrap is
+continuous. Duplicates and backwards/half-range deltas are rejected without
+refreshing status. Three consecutive otherwise-valid backward frames with
+sequence numbers increasing by one establish a restart even if boot repeats.
+Duplicates or a forward frame reset that candidate; the first two backward
+frames remain rejected. Recovery increments restarts, invalidates old status
+and adds no giant missed-lines gap. Every detected restart clears both uptime
+histories. Only accepted frames update history.
+
+Only a valid status refreshes `rx_mono_ms` and replaces fields. Events never
+patch status fields. Restart invalidates status but preserves diagnostic fields
+and event history, retaining even the first boot event under the rules above.
+Unknown protection-gap bits never mean full protection.
+
+### Receiver processing order
+
+Each rejected complete line contributes to exactly one counter, in this order:
+
+1. Buffer bytes through LF. At most 511 bytes precede LF. At offset 511
+   (zero-based), any non-LF byte, including NUL, increments `oversize`.
+   Before that offset, NUL increments `malformed`, even in non-protocol text.
+   After either error discard through LF without another count.
+2. Check the prefix before CRC. Exact `OSB1 ` proceeds. Other `OSB<digits> `
+   prefixes increment `unknown_version`; other text increments `ignored`.
+   Bare `OSB1` and `OSB1x` are ignored. Non-OSB text may set the bootloader
+   heuristic above. These special link states persist through ignored or
+   rejected lines until another special indication or an accepted frame;
+   an accepted frame clears them. Disconnect also clears them.
+3. Validate the final CRC field and checksum before checking printable bytes.
+   Missing/invalid checksum increments `crc`. CRLF therefore fails CRC; a
+   bad-CRC control byte counts as `crc`, but a good-CRC TAB is `malformed`.
+4. Validate printable ASCII and field grammar/bounds; failures increment
+   `malformed`. Parse boot ids by numeric value, not textual spelling.
+5. Apply boot/uptime restart rules, then sequence ordering. Rejected sequence
+   candidates increment `out_of_order`; no rejected frame refreshes status.
 
 ABNF (case-sensitive literals; RFC 7405 `%s` notation):
 
@@ -103,12 +146,14 @@ There is no battery percentage or runtime estimate in version 1.
 
 | Field | Meaning |
 | --- | --- |
-| `power` | `low`: input power is weak; `holdup`: reserve supplies the box. Other values do not trigger those warnings. |
+| `power` | `ok`: healthy input reported; `low`: weak input; `holdup`: reserve supplies the host; `none`: no usable supply reported (`power=none` is never healthy). Missing or unrecognized values are unknown, never healthy. Only `ok` establishes healthy input. |
 | `redundant` | `0`: no confirmed backup input; `1`: confirmed backup. Omit when unknown. |
 | `thermal` | `normal`, `warm`, `hot`, `critical`, `shutdown`: the board's warning level, not a host temperature threshold. |
 | `hot` | Comma-separated sensor identifiers affected by that level, or `none`; the profile defines their locations. |
 | `sbc` | Host power state, including `run` and `shutdown_requested[:cause]`; descriptive only, never a host command. |
 | `rst`, `alive`, `shutdowns`, `fw` | Reset reason, observed host-alive flag, shutdown counter and firmware label; retained diagnostic strings. Required in event trailers, optional in status. |
+
+Unknown enum values in every core field are unknown, never healthy.
 
 A board should map only conditions it actually measures into this vocabulary.
 For example, a single-input UPS can report `power=holdup` while its battery is
@@ -126,9 +171,9 @@ adapter mappings, not automatic NUT status flags or a HID descriptor.
 
 | Semantic name | Wire representation | Meaning and mapping limits |
 | --- | --- | --- |
-| `device.uptime` | `up` | Seconds, with separate status and event origins as above. |
+| `device.uptime` | `up` | Elapsed seconds; status and event clock origins may differ. |
 | `ups.firmware` | `fw` | Firmware label; opaque text. |
-| `input.voltage`, `input.current` | profile bank V/A components | Per-input voltage/current in V/A, matching HID Voltage/Current quantities. |
+| `input.voltage`, `input.current` | profile bank V/A components | Per-input voltage/current in V/A, matching HID Voltage/Current quantities. Mapping two inputs to one NUT input loses information. |
 | `battery.temperature` | profile reserve temperature | Degrees C, matching HID Temperature after unit conversion. `na`, `uncal`, missing or invalid is unknown. |
 | `ups.realpower` | profile `load` in W | Real power only; do not map to NUT `ups.load` (percent) or apparent power. |
 | input supplying / reserve discharging | `power=ok` / `holdup` | Similar to OL / OB only when the board's source topology supports that interpretation. A DC input is not necessarily utility mains. |
@@ -147,6 +192,20 @@ References: [NUT variable vocabulary](https://networkupstools.org/docs/developer
 
 ## 3. Two-input/reserve board profile
 
+Profile identifier: `dual-input-reserve-v1`. Emitters should include
+`profile=dual-input-reserve-v1` in status. For legacy emitters without this key,
+the profile keys below are globally reserved in wire v1 with exactly these
+meanings; other boards must not reuse them for different meanings. An unknown
+explicit profile remains unknown and must not imply this board's protection.
+Receivers preserve all bounded unknown keys as strings without interpreting
+or rejecting the frame. Consumers must not infer healthy protection from them.
+
+Core keys and the profile keys documented here are reserved globally. New
+vendor/board-specific keys use `x_<owner>_<name>`, with a stable owner token
+and the existing ASCII key grammar and 31-byte bound; for example
+`x_example_input`. Do not repurpose another owner's keys. New standardized
+keys require a documented meaning and must not collide with reserved keys.
+
 | Profile field | Meaning |
 | --- | --- |
 | `armed` | `0`: protection is not armed (development mode); `1`: armed. This is a board report, not host qualification. |
@@ -157,7 +216,10 @@ The sensor identifiers `a`, `b` and `pack` refer to input A, input B and the res
 All values remain strings. Unknown enum values/flag bits mean unknown, not
 healthy. Decimal measurements carry suffixes V, A and C; `na` is unavailable,
 `uncal` is an uncalibrated temperature. Negative currents/temperatures are
-valid. Hex flags are bit sets, not decimal counters.
+valid. Decimal measurements use an optional minus sign, decimal digits, an optional
+fraction (`.` followed by digits), then the unit suffix. Bank/pack flags use
+two hex digits; unknown set bits provide no protection assurance. Hex flags
+are bit sets, not decimal counters.
 
 - `a`, `b`: `state[:cause]/voltage/current/temperature/flags-hex`.
   States: absent, present, healthy, sagging, standing_down, stood_down,
@@ -168,16 +230,19 @@ valid. Hex flags are bit sets, not decimal counters.
   fault. Pack flag bits 0..6: probe, uncal, blind, overtemp, assumed,
   untrusted (supply not proven), jump.
 - `sbc`: `state[:cause]`; states run, shutdown_requested, rock_off,
-  wait_power, main_off; same causes as banks.
+  wait_power, main_off; same causes as banks. `rock_off` means the host
+  computer is powered off; it is a historical wire spelling.
 - `gaps` and `gaps2`: four hex digits each; combined mask is
-  `parseInt(gaps,16) + 65536 * parseInt(gaps2,16)`.
+  `gaps | (gaps2 << 16)`, after decoding both as unsigned hexadecimal.
   Combined bits 0..17: unarmed, pack_uncal, pack_est, pack_probe, a_probe,
   b_probe, blind, no_alive, shdn, nvs, wdt, skip, loop, blind_start,
   pack_flaky, sink, supply_unproven, pack_jump. Each set bit denotes missing
   or weaker protection; zero is not a qualification claim.
 
-These names mirror the protective firmware's status formatter, enum names,
-Flag/PackFlag and Gap definitions. Consumers must tolerate future additions.
+The board firmware monitors electrical/thermal limits and controls its own
+protective actions independently of the host reader. This table defines the
+public meanings; consumers need no firmware source. Unknown flags remain
+unknown. Consumers must tolerate future additions.
 
 
 `load` is real power with a W suffix. `last_shutdown`, `pack_charge`, `fan`
@@ -185,11 +250,26 @@ and `start` are diagnostic strings; their absence or unfamiliar values imply
 no assurance. The profile defines no battery charge gauge. A simpler board
 can omit the entire profile and still emit core/framing fields.
 
+## Versioning
+
+Document versions use semantic versioning independently of the `OSB1` wire
+prefix. Corrections/clarifications are patch releases; compatible optional
+keys, new profiles and enum/flag additions are minor releases. Receivers must
+preserve bounded unknown keys and treat unfamiliar enum values/flag bits as
+unknown, so these additions never silently establish health. Changing an
+existing key's meaning, unit or field format, required fields, framing, CRC,
+bounds or ordering rules requires a new wire major prefix (`OSB2` for v2).
+A profile with incompatible meanings needs a new profile identifier and new
+keys wherever globally reserved v1 keys would otherwise change meaning.
+
 ## Conformance vectors and reference decoder
 
 [Vectors](../mkosi/runtime/power-link/fixtures/vectors/README.md) contain exact
 wire lines with expected decoded state after each line. They include the
-corrected same-kind restart rule. The C test adapter invokes the production
+same-kind and first-kind restart rules, plus uptime rollover. Separate
+semantic cases cover core power/thermal vocabulary and profile protection
+and temperature quality. A zero gap mask means only no reported gaps, never
+hardware qualification. The C test adapter invokes the production
 parser; the independent Python reference decoder uses only the standard library
 and runs with `python3 -I`. Both run under `make -C mkosi/runtime/power-link check`.
 Python is host-only and is not installed on the device.

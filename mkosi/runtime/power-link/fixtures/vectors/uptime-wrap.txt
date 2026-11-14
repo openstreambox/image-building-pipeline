@@ -1,0 +1,6 @@
+OSB1 up=4294965 seq=0 boot=1234abcd crc=2647
+OSB1 EVT up=4294966 boot record left-out=ina seq=1 boot=1234abcd rst=wdt alive=1 hot=none shutdowns=0 fw=test crc=C04F
+OSB1 EVT up=0 boot record left-out=ina seq=2 boot=1234abcd rst=wdt alive=1 hot=none shutdowns=0 fw=test crc=E3D3
+OSB1 up=4294966 seq=3 boot=1234abcd crc=AB59
+OSB1 up=0 seq=4 boot=1234abcd crc=062A
+OSB1 EVT up=1 boot record left-out=ina seq=5 boot=1234abcd rst=wdt alive=1 hot=none shutdowns=0 fw=test crc=D8E7

@@ -1,12 +1,15 @@
 /* Host-only adapter: exercise the actual C parser without a serial device. */
-#define main service_main
+#define POWER_LINK_NO_MAIN
 #include "power_link.c"
-#undef main
-int main(void) {
+
+int main(int argc, char **argv) {
     static struct state s;
     char *line = NULL; size_t capacity = 0; ssize_t n; uint64_t now = 0;
     while ((n = getline(&line, &capacity, stdin)) >= 0) {
         now += 1000; feed(&s, line, (size_t)n, now);
+        if (argc == 2 && !strcmp(argv[1], "--semantics")) {
+            semantics(stdout, &s); putchar('\n'); continue;
+        }
         printf("{\"accepted\":%" PRIu64 ",\"restarts\":%" PRIu64 ",\"missed\":%" PRIu64
                ",\"crc\":%" PRIu64 ",\"malformed\":%" PRIu64 ",\"oversize\":%" PRIu64
                ",\"ignored\":%" PRIu64 ",\"unknown_version\":%" PRIu64 ",\"out_of_order\":%" PRIu64 ",\"link\":",
@@ -27,5 +30,6 @@ int main(void) {
         }
         puts("]}");
     }
+    disconnect_source(&s);
     free(line); return ferror(stdin) ? 1 : 0;
 }

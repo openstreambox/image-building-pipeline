@@ -1,0 +1,3 @@
+OSB1 up=100 seq=500 boot=1234abcd crc=72EF
+OSB1 EVT up=0 boot record left-out=ina seq=0 boot=1234abcd rst=wdt alive=1 hot=none shutdowns=0 fw=test crc=856C
+OSB1 up=0 seq=1 boot=1234abcd crc=3364

@@ -130,5 +130,11 @@ int main(void) {
     assert(sim_rows > 80 && simulated.accepted == sim_rows);
     assert(simulated.restarts == 0 && simulated.missed == 0);
     assert(simulated.out_of_order == 0 && simulated.event_count > 0);
+    FILE *semantic_test = tmpfile(); assert(semantic_test);
+    semantics(semantic_test, &s); rewind(semantic_test);
+    char semantic_json[512] = {0};
+    assert(fread(semantic_json, 1, sizeof semantic_json - 1, semantic_test) > 0);
+    assert(strstr(semantic_json, "\"power_healthy\":false"));
+    fclose(semantic_test);
     puts("power-link parser/state tests passed");
 }

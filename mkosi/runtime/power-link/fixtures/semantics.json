@@ -1,0 +1,128 @@
+[
+  {
+    "fields": "",
+    "expected": {
+      "power": "unknown",
+      "power_healthy": false,
+      "thermal": "unknown",
+      "protection": "unknown",
+      "temperature_quality": {
+        "a": "unknown",
+        "b": "unknown",
+        "pack": "unknown"
+      }
+    }
+  },
+  {
+    "fields": "profile=dual-input-reserve-v1 power=ok thermal=normal gaps=0000 gaps2=0000 a=healthy/5V/1A/25C/00 pack=ready/uncal/00",
+    "expected": {
+      "power": "ok",
+      "power_healthy": true,
+      "thermal": "normal",
+      "protection": "no_reported_gaps",
+      "temperature_quality": {
+        "a": "reported",
+        "b": "unknown",
+        "pack": "uncal"
+      }
+    }
+  },
+  {
+    "fields": "power=none thermal=warm gaps=0000 gaps2=8000 a=absent/na/na/na/00",
+    "expected": {
+      "power": "none",
+      "power_healthy": false,
+      "thermal": "warm",
+      "protection": "reduced",
+      "temperature_quality": {
+        "a": "na",
+        "b": "unknown",
+        "pack": "unknown"
+      }
+    }
+  },
+  {
+    "fields": "power=surprise thermal=unfamiliar gaps=0000",
+    "expected": {
+      "power": "unknown",
+      "power_healthy": false,
+      "thermal": "unknown",
+      "protection": "unknown",
+      "temperature_quality": {
+        "a": "unknown",
+        "b": "unknown",
+        "pack": "unknown"
+      }
+    }
+  },
+  {
+    "fields": "power=low thermal=hot gaps=0001 gaps2=0000 pack=fault/invalid/00",
+    "expected": {
+      "power": "low",
+      "power_healthy": false,
+      "thermal": "hot",
+      "protection": "reduced",
+      "temperature_quality": {
+        "a": "unknown",
+        "b": "unknown",
+        "pack": "unknown"
+      }
+    }
+  },
+  {
+    "fields": "power=holdup thermal=critical gaps=zzzz gaps2=0000",
+    "expected": {
+      "power": "holdup",
+      "power_healthy": false,
+      "thermal": "critical",
+      "protection": "unknown",
+      "temperature_quality": {
+        "a": "unknown",
+        "b": "unknown",
+        "pack": "unknown"
+      }
+    }
+  },
+  {
+    "fields": "power=ok thermal=shutdown gaps=0000 gaps2=0000 b=healthy/5V/1A/-2C/00",
+    "expected": {
+      "power": "ok",
+      "power_healthy": true,
+      "thermal": "shutdown",
+      "protection": "no_reported_gaps",
+      "temperature_quality": {
+        "a": "unknown",
+        "b": "reported",
+        "pack": "unknown"
+      }
+    }
+  },
+  {
+    "fields": "profile=unrecognized power=ok thermal=normal gaps=0000 gaps2=0000 a=healthy/5V/1A/25C/00 pack=ready/uncal/00",
+    "expected": {
+      "power": "ok",
+      "power_healthy": true,
+      "thermal": "normal",
+      "protection": "unknown",
+      "temperature_quality": {
+        "a": "unknown",
+        "b": "unknown",
+        "pack": "unknown"
+      }
+    }
+  },
+  {
+    "fields": "power=none a=healthy/5V/1A/0x1p0C/00 b=healthy/5V/1A/1e2C/00 pack=ready/+1C/00",
+    "expected": {
+      "power": "none",
+      "power_healthy": false,
+      "thermal": "unknown",
+      "protection": "unknown",
+      "temperature_quality": {
+        "a": "unknown",
+        "b": "unknown",
+        "pack": "unknown"
+      }
+    }
+  }
+]
