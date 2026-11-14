@@ -1,0 +1,4 @@
+OSB1 EVT up=1000 boot seq=0 boot=1234abcd rst=wdt alive=1 hot=none shutdowns=0 fw=test crc=7F09
+OSB1 up=4294966 seq=1 boot=1234abcd crc=E680
+OSB1 up=0 seq=2 boot=1234abcd crc=D041
+OSB1 EVT up=1 boot seq=3 boot=1234abcd rst=wdt alive=1 hot=none shutdowns=0 fw=test crc=CF4A

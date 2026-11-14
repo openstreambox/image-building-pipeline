@@ -1,0 +1,24 @@
+[
+  {
+    "power": "ok",
+    "power_healthy": true,
+    "thermal": "unknown",
+    "protection": "no_reported_gaps",
+    "temperature_quality": {
+      "a": "unknown",
+      "b": "unknown",
+      "pack": "unknown"
+    }
+  },
+  {
+    "power": "unknown",
+    "power_healthy": false,
+    "thermal": "unknown",
+    "protection": "unknown",
+    "temperature_quality": {
+      "a": "unknown",
+      "b": "unknown",
+      "pack": "unknown"
+    }
+  }
+]

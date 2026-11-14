@@ -125,6 +125,8 @@ class Decoder:
             r['restarts'] += 1
             r['have_status'] = False
             self.clocks.clear()
+        if wrap and self.clocks.get(not event, 0) > up:
+            del self.clocks[not event]
         self.regression = []
         self.clocks[event] = up
         r.update(seq=seq, boot=boot, accepted=r['accepted']+1)
@@ -170,4 +172,7 @@ if __name__ == '__main__':
     decoder = Decoder()
     for wire in sys.stdin.buffer:
         result = decoder.decode(wire)
-        print(json.dumps(interpret(result['fields']) if '--semantics' in sys.argv else result))
+        if '--published-semantics' in sys.argv:
+            print(json.dumps(interpret(result['fields'] if result['link'] == 'ok' else {})))
+        else:
+            print(json.dumps(interpret(result['fields']) if '--semantics' in sys.argv else result))

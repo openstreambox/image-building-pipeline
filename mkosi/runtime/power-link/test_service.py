@@ -17,11 +17,12 @@ import unittest
 HERE = Path(__file__).resolve().parent
 
 
-def frame(seq):
+def frame(seq, extra=""):
     body = (f'OSB1 up=100 thermal=normal pack=ready/25.0C/00 '
             'a=healthy/na/na/22.0C/00 b=healthy/5.0V/1.0A/uncal/00 '
             f'pack_cal=datasheet start=on gaps=0000 seq={seq} boot=12345678 '
             'rst=poweron alive=1 hot=none shutdowns=0 fw=field-12345678').encode()
+    body += extra.encode()
     return body + f' crc={binascii.crc_hqx(body, 0xffff):04X}\n'.encode()
 
 
@@ -423,16 +424,19 @@ class ServiceTest(unittest.TestCase):
                 flags = int(next(row.split()[1] for row in info.splitlines()
                                  if row.startswith('flags:')), 8)
                 self.assertEqual(flags & os.O_ACCMODE, os.O_RDONLY)
-                os.write(master, frame(0))
+                os.write(master, frame(0, " power=ok gaps2=0000"))
                 state = wait_for(lambda s: s['link'] == 'ok')
                 self.assertEqual(state['temperatures']['pack']['celsius'], 25)
                 self.assertEqual(state['temperatures']['a']['celsius'], 22)
                 self.assertIsNone(state['temperatures']['b']['celsius'])
                 self.assertEqual(state['temperatures']['b']['quality'], 'uncal')
+                self.assertTrue(state['semantics']['power_healthy'])
                 self.assertTrue(state['expected'])
                 self.assertEqual((root / 'supervisor.json').stat().st_mode & 0o777, 0o644)
                 os.write(master, b'OSB1 truncated')
-                wait_for(lambda s: s['stale'], timeout=7)
+                stale = wait_for(lambda s: s['stale'], timeout=7)
+                self.assertFalse(stale['semantics']['power_healthy'])
+                self.assertEqual(stale['semantics']['protection'], 'unknown')
                 self.assertEqual(select.select([master], [], [], 0)[0], [])
                 os.kill(proc.pid, signal.SIGKILL)
                 proc.wait(timeout=2)

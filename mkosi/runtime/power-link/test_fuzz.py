@@ -62,12 +62,13 @@ def main():
                         'ignored', 'unknown_version', 'out_of_order'):
                 totals[key] = totals.get(key, 0) + results[0][-1][key]
             # The same streams exercise both semantic interpretations too.
-            outputs = [subprocess.run([*cmd, '--semantics'], input=stream,
-                                      capture_output=True, check=True).stdout for cmd in commands]
-            if [json.loads(x) for x in outputs[0].splitlines()] != [json.loads(x) for x in outputs[1].splitlines()]:
-                raise AssertionError(f'semantic disagreement: seed={seed}, sample={sample}')
+            for mode in ('--semantics', '--published-semantics'):
+                outputs = [subprocess.run([*cmd, mode], input=stream,
+                                          capture_output=True, check=True).stdout for cmd in commands]
+                if [json.loads(x) for x in outputs[0].splitlines()] != [json.loads(x) for x in outputs[1].splitlines()]:
+                    raise AssertionError(f'{mode} disagreement: seed={seed}, sample={sample}')
     assert all(totals.values()), totals
-    print(f'1200 streams, {states} states, framing and semantics: 0 disagreements')
+    print(f'1200 streams, {states} states, framing, pure and published semantics: 0 disagreements')
     print(json.dumps(totals, sort_keys=True))
 
 

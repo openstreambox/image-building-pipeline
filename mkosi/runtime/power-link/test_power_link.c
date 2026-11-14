@@ -130,11 +130,20 @@ int main(void) {
     assert(sim_rows > 80 && simulated.accepted == sim_rows);
     assert(simulated.restarts == 0 && simulated.missed == 0);
     assert(simulated.out_of_order == 0 && simulated.event_count > 0);
-    FILE *semantic_test = tmpfile(); assert(semantic_test);
-    semantics(semantic_test, &s); rewind(semantic_test);
-    char semantic_json[512] = {0};
-    assert(fread(semantic_json, 1, sizeof semantic_json - 1, semantic_test) > 0);
-    assert(strstr(semantic_json, "\"power_healthy\":false"));
-    fclose(semantic_test);
+    /* Published interpretation must ignore retained fields on every invalid link. */
+    struct state health = {0};
+    frame(line, "OSB1 up=10 seq=0 boot=01234567 power=ok gaps=0000 gaps2=0000");
+    feed(&health, line, strlen(line), 1000);
+    for (int mode = 0; mode < 4; ++mode) {
+        FILE *out = tmpfile(); assert(out);
+        if (mode == 3) disconnect_source(&health);
+        published_semantics(out, &health, mode != 2, mode == 1 ? 6000 : 1000);
+        rewind(out);
+        char json[512] = {0};
+        assert(fread(json, 1, sizeof json - 1, out) > 0);
+        assert(strstr(json, mode ? "\"power_healthy\":false" : "\"power_healthy\":true"));
+        assert(strstr(json, mode ? "\"protection\":\"unknown\"" : "\"protection\":\"no_reported_gaps\""));
+        fclose(out);
+    }
     puts("power-link parser/state tests passed");
 }

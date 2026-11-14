@@ -149,7 +149,6 @@ static void line_received(struct state *s, char *line, uint64_t now) {
     int fallback = !s->have_up[event] && s->have_up[!event] && backward &&
                    s->up[!event] > up && s->up[!event] - up > 2;
     if (s->have_seq && !strcmp(s->boot, canonical) && !decrease && !fallback) {
-        uint32_t delta = seq - s->seq;
         if (!delta || delta >= UINT32_C(0x80000000)) {
             if (delta && (!s->regressions || seq - s->regression_seq == 1)) ++s->regressions;
             else s->regressions = delta ? 1 : 0;
@@ -164,6 +163,7 @@ static void line_received(struct state *s, char *line, uint64_t now) {
         s->have_status = 0;
         s->have_up[0] = s->have_up[1] = 0;
     }
+    if (wrap && s->have_up[!event] && s->up[!event] > up) s->have_up[!event] = 0;
     s->regressions = 0;
     strcpy(s->boot, canonical); s->seq = seq; s->up[event] = up; s->have_up[event] = 1; s->have_seq = 1;
     s->expected = 1; ++s->accepted; s->special = 0;
@@ -274,6 +274,10 @@ static void semantics(FILE *f, const struct state *s) {
     }
     fputs("}}", f);
 }
+static void published_semantics(FILE *f, const struct state *s, int connected, uint64_t now) {
+    static const struct state unknown;
+    semantics(f, !strcmp(link_state(s, connected, now), "ok") ? s : &unknown);
+}
 #ifndef POWER_LINK_NO_MAIN
 static uint64_t mono_ms(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -312,7 +316,7 @@ static int publish(struct state *s, int connected, int ambiguous, uint64_t now, 
         if (i) fputc(',', f);
         json_string(f, s->fields[i].key); fputc(':', f); json_string(f, s->fields[i].value);
     }
-    fputs("},\"semantics\":", f); semantics(f, s);
+    fputs("},\"semantics\":", f); published_semantics(f, s, connected, now);
     fputs(",\"temperatures\":{", f);
     const char *keys[] = {"a", "b", "pack"};
     for (int i = 0; i < 3; ++i) {

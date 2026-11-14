@@ -22,9 +22,18 @@ class VectorTest(unittest.TestCase):
                     result = subprocess.run(command, input=wire, capture_output=True, check=True)
                     self.assertEqual(json.loads(result.stdout), case['expected'])
 
+    def test_invalidated_semantics(self):
+        wire = (HERE / 'fixtures/published-semantics.txt').read_bytes()
+        expected = json.loads((HERE / 'fixtures/published-semantics.json').read_text())
+        for command in ([os.fspath(HERE / 'test-vectors'), '--published-semantics'],
+                        [sys.executable, '-I', os.fspath(HERE / 'reference_decoder.py'), '--published-semantics']):
+            with self.subTest(decoder=command[0]):
+                result = subprocess.run(command, input=wire, capture_output=True, check=True)
+                self.assertEqual([json.loads(row) for row in result.stdout.splitlines()], expected)
+
     def test_conformance(self):
         vectors = sorted((HERE / 'fixtures/vectors').glob('*.txt'))
-        self.assertEqual(len(vectors), 39)
+        self.assertEqual(len(vectors), 40)
         self.assertEqual({p.stem for p in vectors},
                          {p.stem for p in (HERE / 'fixtures/vectors').glob('*.json')})
         for wire in vectors:

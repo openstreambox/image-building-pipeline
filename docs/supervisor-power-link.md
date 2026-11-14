@@ -214,7 +214,15 @@ The executable used a fake serial source; no hardware was involved.
 
 If the clock call is unavailable, show unknown; do not substitute wall time.
 
-The optional `semantics` object interprets the current raw status fields:
+The optional `semantics` object interprets status fields only while `link` is
+`ok`. Otherwise all interpretations are `unknown` and `power_healthy` is false,
+including after restart, disconnect, and the five-second freshness deadline.
+Raw `fields` and the older `temperatures` object retain diagnostic readings;
+`temperatures` parses raw values even under an unknown explicit profile, while
+`semantics.temperature_quality` requires a known profile. Use the latter for
+profile-aware interpretation and check link freshness for any diagnostic value.
+
+The object contains:
 `power` is `ok`, `none`, `low`, `holdup` or `unknown`; `power_healthy` is true
 only for `ok`. `thermal` preserves recognized levels or reports `unknown`.
 `protection` is `reduced` for any nonzero combined gap mask (including unknown

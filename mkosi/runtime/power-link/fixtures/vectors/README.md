@@ -52,3 +52,9 @@ single-worker C/Python comparison: three fixed seeds, 400 streams each. It
 compares every framing snapshot and semantic interpretation, with mutations
 covering CRC, byte rejection, prefix classification, boot/uptime and sequence
 boundaries. It is a differential check, separate from the fixed expectations.
+
+`../published-semantics.txt` and its expected JSON check that a boot event
+invalidates a previously healthy status in `--published-semantics` mode.
+The pure `--semantics` mapping remains available independently of freshness.
+The sparse-event rollover stream checks that a status rollover clears old
+event uptime history without invalidating status or counting a restart.

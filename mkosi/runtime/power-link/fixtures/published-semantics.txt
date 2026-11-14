@@ -1,0 +1,2 @@
+OSB1 up=10 seq=0 boot=1234abcd power=ok gaps=0000 gaps2=0000 crc=FD80
+OSB1 EVT up=0 boot seq=1 boot=1234abce rst=wdt alive=1 hot=none shutdowns=0 fw=test crc=893E

@@ -7,8 +7,10 @@ int main(int argc, char **argv) {
     char *line = NULL; size_t capacity = 0; ssize_t n; uint64_t now = 0;
     while ((n = getline(&line, &capacity, stdin)) >= 0) {
         now += 1000; feed(&s, line, (size_t)n, now);
-        if (argc == 2 && !strcmp(argv[1], "--semantics")) {
-            semantics(stdout, &s); putchar('\n'); continue;
+        if (argc == 2 && (!strcmp(argv[1], "--semantics") || !strcmp(argv[1], "--published-semantics"))) {
+            if (!strcmp(argv[1], "--published-semantics")) published_semantics(stdout, &s, 1, now);
+            else semantics(stdout, &s);
+            putchar('\n'); continue;
         }
         printf("{\"accepted\":%" PRIu64 ",\"restarts\":%" PRIu64 ",\"missed\":%" PRIu64
                ",\"crc\":%" PRIu64 ",\"malformed\":%" PRIu64 ",\"oversize\":%" PRIu64

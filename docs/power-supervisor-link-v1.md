@@ -1,8 +1,8 @@
 # Power supervisor link v1
 
-Version 1.1.0 (draft). Text licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
-Decoder code and vectors use the repository license. Initial version: framing,
-core vocabulary and two-input/reserve profile; no wire changes.
+Version 1.0.0 (draft). Text licensed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+Decoder code and vectors use the repository license.
 
 ## 1. Framing
 
@@ -64,9 +64,13 @@ ids. A first frame of a kind otherwise cannot prove an uptime decrease.
 A known rollover is exempt from the decrease rule: previous same-kind `up`
 in 4294965..4294967, new `up` in 0..2, and a strictly forward sequence delta
 less than 2^31. These are the seconds around a uint32 millisecond-clock wrap
-at 4294967.296 seconds (about 49.7 days). Each kind wraps independently,
-without clearing the other history or incrementing restarts. Other emitter
-clock widths/rollover points are not inferred; a 64-bit clock need not wrap.
+at 4294967.296 seconds (about 49.7 days). An accepted rollover clears the
+other kind's history if its last uptime is above the new uptime, so a sparse
+kind does not cause a second restart.
+Neither rollover increments restarts. Detection requires a frame of one kind
+on each side within this window; larger gaps may be counted as a restart.
+Other emitter clock widths/rollover points are not inferred; a 64-bit clock
+need not wrap.
 
 Forward modulo-2^32 sequence deltas count missing lines; sequence wrap is
 continuous. Duplicates and backwards/half-range deltas are rejected without
@@ -92,8 +96,9 @@ Each rejected complete line contributes to exactly one counter, in this order:
    After either error discard through LF without another count.
 2. Check the prefix before CRC. Exact `OSB1 ` proceeds. Other `OSB<digits> `
    prefixes increment `unknown_version`; other text increments `ignored`.
-   Bare `OSB1` and `OSB1x` are ignored. Non-OSB text may set the bootloader
-   heuristic above. These special link states persist through ignored or
+   Bare `OSB1` and `OSB1x` are ignored. Text that does not start with `OSB`
+   may set the bootloader heuristic above. These special link states persist
+   through ignored or
    rejected lines until another special indication or an accepted frame;
    an accepted frame clears them. Disconnect also clears them.
 3. Validate the final CRC field and checksum before checking printable bytes.
@@ -128,13 +133,16 @@ HEXDIG     = DIGIT / %x41-46 / %x61-66
 
 Semantic constraints override the grammar: whole line <=512 bytes including LF;
 status <=48 unique keys; `seq` and `up` <=4294967295; status `up`, `seq`, `boot`
-required. Split a pair at its first `=` (later `=` bytes belong to its value).
+required. Keys and enum values compare byte-exactly (case-sensitive).
+Split a pair at its first `=` (later `=` bytes belong to its value).
 EVT parsing starts at the rightmost seven space-delimited pairs; text may itself
 contain `seq=`, `boot=` or ` crc=`. Only `up`, `seq`, `boot` are numeric framing
 fields; EVT `up` has at most 31 decimal digits (including leading zeros);
 trailer diagnostics are bounded strings. The final CRC separator is a
-single space. Receivers also tolerate repeated/trailing spaces around status pairs; emitters
-should use single spaces. CRLF is not valid. Blank/non-protocol lines are ignored.
+single space immediately before `crc=`. Extra spaces before that separator
+are accepted when covered by the CRC. Receivers also tolerate repeated/trailing
+spaces around status pairs; emitters should use single spaces. CRLF is not
+valid. Blank/non-protocol lines are ignored.
 A truncated line is not decoded until LF; discard it on disconnect.
 
 ## 2. Core vocabulary
@@ -200,8 +208,12 @@ explicit profile remains unknown and must not imply this board's protection.
 Receivers preserve all bounded unknown keys as strings without interpreting
 or rejecting the frame. Consumers must not infer healthy protection from them.
 
-Core keys and the profile keys documented here are reserved globally. New
-vendor/board-specific keys use `x_<owner>_<name>`, with a stable owner token
+Globally reserved keys: `up`, `seq`, `boot`, `profile`, `power`, `redundant`,
+`thermal`, `hot`, `sbc`, `rst`, `alive`, `shutdowns`, `fw`, `armed`, `pack_cal`,
+`gaps`, `gaps2`, `a`, `b`, `pack`, `load`, `last_shutdown`, `pack_charge`, `fan`,
+`start`.
+
+New vendor/board-specific keys use `x_<owner>_<name>`, with a stable owner token
 and the existing ASCII key grammar and 31-byte bound; for example
 `x_example_input`. Do not repurpose another owner's keys. New standardized
 keys require a documented meaning and must not collide with reserved keys.
@@ -243,7 +255,6 @@ The board firmware monitors electrical/thermal limits and controls its own
 protective actions independently of the host reader. This table defines the
 public meanings; consumers need no firmware source. Unknown flags remain
 unknown. Consumers must tolerate future additions.
-
 
 `load` is real power with a W suffix. `last_shutdown`, `pack_charge`, `fan`
 and `start` are diagnostic strings; their absence or unfamiliar values imply
