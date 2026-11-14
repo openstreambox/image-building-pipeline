@@ -58,6 +58,66 @@ class ServiceTest(unittest.TestCase):
             self.assertEqual(binary.stat().st_mode & 0o777, 0o755)
             self.assertIn('u supervisor-power -', (HERE / 'supervisor-power.conf').read_text())
 
+    def test_consumer_documentation(self):
+        doc = (HERE.parents[2] / 'docs/supervisor-power-link.md').read_text()
+        self.assertIn('| `silent` |', doc)
+        self.assertIn('Check `schema_version` first', doc)
+        self.assertIn('once per second (heartbeat), plus once at stop', doc)
+        self.assertIn('its age is 3000 ms or more', doc)
+        self.assertIn('expected false and persist_error false', doc)
+
+    def test_missing_data_at_startup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / 'tty').mkdir()
+            binary = root / 'reader'
+            # Production mount check, with an absent mountpoint in this fixture.
+            source = (HERE / 'power_link.c').read_text().replace('stat("/data",', 'stat("/nonexistent-supervisor-data",')
+            (root / 'reader.c').write_text(source)
+            subprocess.run(['cc', str(root / 'reader.c'), '-o', str(binary)], check=True)
+            proc = subprocess.Popen([str(binary), '--sysfs-dir', str(root / 'tty'), '--state-dir', tmp])
+            try:
+                deadline = time.monotonic() + 3
+                while not (root / 'supervisor.json').exists() and time.monotonic() < deadline:
+                    time.sleep(.02)
+                state = json.loads((root / 'supervisor.json').read_text())
+                self.assertEqual(state['link'], 'absent')
+                self.assertFalse(state['expected'])
+                self.assertTrue(state['persist_error'])
+            finally:
+                proc.terminate(); proc.wait(timeout=3)
+
+    def test_discovery_during_backoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); sysfs = root / 'tty'; sysfs.mkdir()
+            # Redirect only discovered device paths to regular fixture files:
+            # open succeeds, tty setup fails, and backoff reaches eight seconds.
+            source = (HERE / 'power_link.c').read_text().replace('"/dev/%s"', '"' + tmp + '/%s"')
+            (root / 'reader.c').write_text(source)
+            binary = root / 'reader'
+            subprocess.run(['cc', str(root / 'reader.c'), '-o', str(binary)], check=True)
+            def match(i):
+                usb = root / f'usb{i}'; interface = usb / 'interface'; interface.mkdir(parents=True)
+                (usb / 'idVendor').write_text('303a')
+                (usb / 'idProduct').write_text('1001')
+                (interface / 'bInterfaceNumber').write_text('00')
+                tty = sysfs / f'ttyACM{i}'; tty.mkdir(); (tty / 'device').symlink_to(interface)
+                (root / f'ttyACM{i}').touch()
+            match(0)
+            proc = subprocess.Popen([str(binary), '--sysfs-dir', str(sysfs), '--state-dir', tmp, '--persistent-dir', tmp])
+            try:
+                time.sleep(7.4)  # attempts at 0, 1, 3, 7; next open at 15
+                match(1)
+                time.sleep(1.8)
+                self.assertTrue(json.loads((root / 'supervisor.json').read_text())['ambiguous'])
+                shutil.rmtree(sysfs / 'ttyACM0'); shutil.rmtree(sysfs / 'ttyACM1')
+                time.sleep(1.8)
+                state = json.loads((root / 'supervisor.json').read_text())
+                self.assertFalse(state['ambiguous'])
+                self.assertEqual(state['link'], 'absent')
+                self.assertEqual(state['open_error'], 0)
+            finally:
+                proc.terminate(); proc.wait(timeout=3)
+
     def test_no_device_is_idle(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); sysfs = root / 'tty'; sysfs.mkdir()
@@ -188,7 +248,9 @@ class ServiceTest(unittest.TestCase):
                 self.assertEqual((root / 'events.jsonl').stat().st_mode & 0o777, 0o644)
                 proc.terminate(); self.assertEqual(proc.wait(timeout=3), 0)
                 self.assertEqual(json.loads((root / 'supervisor.json').read_text())['link'], 'stopped')
-                self.assertEqual(proc.stderr.read().count(b'persist expected'), 1)
+                log = proc.stderr.read()
+                self.assertEqual(log.count(b'persist expected'), 1)
+                self.assertIn(os.strerror(2).encode(), log)
                 proc.stderr.close()
             finally:
                 if proc.poll() is None: proc.terminate(); proc.wait(timeout=3)

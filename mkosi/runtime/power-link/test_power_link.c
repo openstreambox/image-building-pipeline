@@ -10,7 +10,33 @@ static void status(char *out, unsigned seq, const char *boot) {
     snprintf(body, sizeof body, "OSB1 up=100 thermal=normal pack=ready/25.0C/00 pack_cal=datasheet start=on gaps=0000 gaps2=0000 seq=%u boot=%s rst=poweron alive=1 hot=none shutdowns=0 fw=field-12345678", seq, boot);
     frame(out, body);
 }
+static void test_separate_firmware_clocks(void) {
+    struct state clocks = {0}; char line[513], body[450];
+    /* Firmware simulator model: first tick is 1200 ms after millis zero;
+     * events sample millis at emission, rows sample time since first tick. */
+    for (unsigned tick = 0; tick < 40; ++tick) {
+        unsigned now = 1200 + tick * 100;
+        snprintf(body, sizeof body, "OSB1 EVT up=%u sample seq=%u boot=01234567 rst=poweron alive=1 hot=none shutdowns=0 fw=test", now/1000, tick*2);
+        frame(line, body); feed(&clocks, line, strlen(line), now);
+        snprintf(body, sizeof body, "OSB1 up=%u seq=%u boot=01234567", (now-1200)/1000, tick*2+1);
+        frame(line, body); feed(&clocks, line, strlen(line), now);
+    }
+    assert(clocks.restarts == 0 && clocks.missed == 0 && clocks.accepted == 80);
+    /* Same-kind decreases remain restart evidence; clear both clocks. */
+    frame(line, "OSB1 EVT up=0 armed seq=0 boot=01234567 rst=wdt alive=1 hot=none shutdowns=0 fw=test");
+    feed(&clocks, line, strlen(line), 6000);
+    assert(clocks.restarts == 1 && !clocks.have_status);
+    frame(line, "OSB1 up=0 seq=1 boot=01234567");
+    feed(&clocks, line, strlen(line), 6001);
+    assert(clocks.restarts == 1 && clocks.have_status);
+    frame(line, "OSB1 up=5 seq=2 boot=01234567");
+    feed(&clocks, line, strlen(line), 11000);
+    frame(line, "OSB1 up=0 seq=0 boot=01234567");
+    feed(&clocks, line, strlen(line), 12000);
+    assert(clocks.restarts == 2);
+}
 int main(void) {
+    test_separate_firmware_clocks();
     assert(crc16("123456789", 9) == 0x29b1);
     struct state s = {0}; char line[513];
     status(line, 0, "01234567"); feed(&s, line, strlen(line), 1000);
@@ -73,13 +99,16 @@ int main(void) {
     /* A repeated boot id must retain the first boot events, even at old seq=1. */
     for (unsigned old = 1; old <= 500; old += 499) {
         struct state repeated = {0};
+        char previous[200]; snprintf(previous, sizeof previous, "OSB1 EVT up=100 previous seq=%u boot=01234567 rst=poweron alive=1 hot=none shutdowns=0 fw=test", old-1);
+        frame(line, previous);
+        feed(&repeated, line, strlen(line), 1);
         status(line, old, "01234567"); feed(&repeated, line, strlen(line), 1);
         frame(line, "OSB1 EVT up=0 armed seq=0 boot=01234567 rst=wdt alive=1 hot=none shutdowns=0 fw=field-12345678");
         feed(&repeated, line, strlen(line), 2);
-        assert(repeated.restarts == 1 && repeated.event_count == 1 && !repeated.have_status);
+        assert(repeated.restarts == 1 && repeated.event_count == 2 && !repeated.have_status);
         frame(line, "OSB1 EVT up=0 boot field left-out=ina seq=1 boot=01234567 rst=wdt alive=1 hot=none shutdowns=0 fw=field-12345678");
         feed(&repeated, line, strlen(line), 3);
-        assert(repeated.event_count == 2 && repeated.out_of_order == 0 && repeated.missed == 0);
+        assert(repeated.event_count == 3 && repeated.out_of_order == 0 && repeated.missed == 0);
     }
     struct state opaque = {0};
     frame(line, "OSB1 EVT up=0 waiting for download crc=oops seq=77 left-out=ina left-out=storage restart-record=stale seq=0 boot=01234567 rst=wdt alive=1 hot=none shutdowns=0 fw=field-12345678");
@@ -95,5 +124,14 @@ int main(void) {
         ++rows;
     }
     fclose(gold); assert(rows == 11);
+    FILE *sim = fopen("fixtures/clock-offset.txt", "r"); assert(sim);
+    struct state simulated = {0}; unsigned sim_rows = 0;
+    while (fgets(line, sizeof line, sim)) {
+        feed(&simulated, line, strlen(line), 1000 + sim_rows++ * 100);
+    }
+    fclose(sim);
+    assert(sim_rows > 80 && simulated.accepted == sim_rows);
+    assert(simulated.restarts == 0 && simulated.missed == 0);
+    assert(simulated.out_of_order == 0 && simulated.event_count > 0);
     puts("power-link parser/state tests passed");
 }

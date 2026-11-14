@@ -77,7 +77,7 @@ while pending; only a second consecutive failed attempt publishes error. A
 successful attempt or disappearance clears this debounce. Post-open setup
 failures retry after 1, 2, 4, 8, 16, then 30 seconds (capped), reducing repeated
 open-time driver side effects; success or a changed/disappeared device resets
-backoff. Ordinary pre-open failures retry each second.
+backoff. Discovery continues every second during backoff; only opening is delayed. Ordinary pre-open failures retry each second.
 
 The port stays open with `O_RDONLY|O_NOCTTY|O_NONBLOCK|O_CLOEXEC`, `TIOCEXCL`, raw
 input, no HUPCL and no hardware flow control. There are no modem-control ioctls
@@ -132,8 +132,8 @@ bounded key/value fields are preserved without assigning meaning. Duplicate
 keys, invalid counters and malformed fields are rejected. Bounds are 48 keys,
 31 bytes/key and 159 bytes/value, within the 512-byte frame limit.
 
-Sequence spans status and events. A decrease in validated `up` within a repeated
-boot id immediately establishes a restart, retaining even the first boot event. Forward modulo-2^32 deltas count missing
+Sequence spans status and events. A decrease in validated `up` compared with the previous accepted frame of the
+same kind (status with status, EVT with EVT) within a repeated boot id immediately establishes a restart, retaining even the first boot event. Forward modulo-2^32 deltas count missing
 lines; wrap is continuous. Duplicates and backwards/half-range deltas are
 rejected without refreshing status. Three consecutive CRC-valid backward
 frames with sequence numbers increasing by one establish a restart even if
@@ -152,7 +152,7 @@ All paths are local to the device. Directories are 0755; published files are
 0644, readable by an ordinary CeraUI account. Each file is written to a private
 temporary file, flushed and renamed atomically. Readers see either the old or
 new complete file. The two files are independently atomic, not a transaction.
-Publication is at most once per second, including during a flood. A graceful
+Publication is once per second (heartbeat), plus once at stop, including during a flood. A graceful
 stop publishes `stopped`, retaining the last open_error for diagnosis. RuntimeDirectoryPreserve=yes keeps that snapshot across
 stop/restart (not host reboot). Do not give another unit ownership of the
 parent `/run/ceralive` via RuntimeDirectory: its cleanup could remove these
@@ -168,7 +168,7 @@ changes, with an empty ring published at process startup.
 | `schema_version` | Integer `1`; consumers reject unsupported schemas. |
 | `link` | `absent`, `silent`, `bootloader`, `unknown_version`, `error`, `stopped`, `ok`. Stopped means the writer has exited gracefully. Error means a matched device could not be opened/configured; it is not evidence of an unfitted board. |
 | `open_error` | Linux errno integer for open/configuration failure (e.g. EACCES=13, EBUSY=16), zero otherwise. |
-| `persist_error` | Boolean; expected marker could not be saved; retries continue. |
+| `persist_error` | Boolean; expected marker is unavailable at startup or could not be saved; retries continue. |
 | `ambiguous` | Boolean; multiple devices matched, so none was opened. |
 | `expected` | Boolean learned after the first accepted status or event, retained across reader restarts and host reboots. An absent board need not warn until expected. |
 | `stale` | Boolean calculated at publication; anything except `ok` is stale. |
@@ -176,17 +176,23 @@ changes, with an empty ring published at process startup.
 | `rx_mono_ms` | Integer CLOCK_MONOTONIC milliseconds of the last accepted **status**, or null before one. It is never refreshed by events or rejected input. |
 | `fields` | Object of original string key/value pairs from the last accepted status, including seq/boot and all available measurements. Empty before one; fields can remain present while stale. CRC is validated, then omitted. Missing fields mean unknown. |
 | `temperatures` | Object with `a`, `b`, `pack`; each has `celsius` (number or null) and `quality` (`reported`, `na`, `uncal`, `unknown`). Pack calibration provenance remains in `fields.pack_cal`. Reported does not mean calibrated or present: gate bank temperatures on bank state (absent banks may report 25 C). |
-| `restarts` | Boot changes and recovered sequence regressions observed during this reader process. |
+| `restarts` | Boot changes, same-kind uptime decreases and recovered sequence regressions observed during this reader process. The uint32 millisecond firmware clocks wrap after 49.7 days and can cause a benign restart count. |
 | `missed_lines` | Sum of forward sequence gaps in the same boot, across events and status. |
 | `accepted_lines` | Valid, forward status and event count. |
 | `rejected` | Counters: `crc`, `malformed`, `oversize`, `ignored`, `unknown_version`, `out_of_order`. All counters reset on reader restart. Normal firmware CSV rows increment ignored about once per second; do not alarm on that counter. |
 
+Link state detail:
+
+| State | Meaning |
+| --- | --- |
+| `silent` | The device is open with no fresh status, or an open is pending retry. |
+
 **Consumers must independently calculate freshness**, even if `stale:false` is
-saved in the file. First require a valid `published_mono_ms` and
-`0 <= CLOCK_MONOTONIC_ms - published_mono_ms < 3000`. At exactly three seconds,
-a missing/invalid heartbeat, or `link:stopped`, show unknown/unavailable even
+saved in the file. Check `schema_version` first; require schema 1. Then require a valid `published_mono_ms` and
+`0 <= CLOCK_MONOTONIC_ms - published_mono_ms < 3000`. If the heartbeat is missing or invalid,
+its age is 3000 ms or more, or `link` is `stopped`, show unknown/unavailable even
 when expected is false and the retained link is absent. A live absent snapshot
-with expected false alone means no board fitted. Only then evaluate status
+with expected false and persist_error false means no board fitted. Only then evaluate status
 freshness. Current data requires all of: schema 1, link ok, stale false,
 non-null rx_mono_ms, and `0 <= CLOCK_MONOTONIC_ms - rx_mono_ms < 5000`.
 Missing/unreadable/invalid files mean unknown. At exactly five seconds show
@@ -207,7 +213,7 @@ The service has ordering-only `After=data.mount`, with no hard mount requirement
 A privileged, failure-tolerant ExecStartPre checks mountpoint and creates the
 0755 supervisor-power-owned directory only when /data is mounted. The main writer
 stays sandboxed. Without /data it still publishes runtime state and skips the
-persistent marker (persist_error after a frame teaches expected). Nothing
+persistent marker (persist_error from startup). Nothing
 creates this directory through unordered tmpfiles on the root slot.
 To intentionally forget a removed board: stop the reader, remove this marker,
 then restart the reader. A live attached board will immediately teach it again.

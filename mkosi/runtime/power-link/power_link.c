@@ -30,7 +30,7 @@ struct state {
     char events[EVENTS][513]; size_t event_count, event_next;
     uint64_t event_generation, published_generation;
     int events_published, persist_error, open_error, stopped, opening;
-    uint32_t up;
+    uint32_t up[2]; int have_up[2];
     unsigned regressions; uint32_t regression_seq;
     int special; /* 1 download mode, 2 unsupported version */
 };
@@ -137,7 +137,7 @@ static void line_received(struct state *s, char *line, uint64_t now) {
         if (!number(get_fields(&parsed, "up"), 10, &up)) { ++s->malformed; return; }
     }
     char canonical[9]; snprintf(canonical, sizeof canonical, "%08" PRIx32, boot);
-    if (s->have_seq && !strcmp(s->boot, canonical) && up >= s->up) {
+    if (s->have_seq && !strcmp(s->boot, canonical) && (!s->have_up[event] || up >= s->up[event])) {
         uint32_t delta = seq - s->seq;
         if (!delta || delta >= UINT32_C(0x80000000)) {
             if (delta && (!s->regressions || seq - s->regression_seq == 1)) ++s->regressions;
@@ -145,14 +145,16 @@ static void line_received(struct state *s, char *line, uint64_t now) {
             s->regression_seq = seq;
             if (s->regressions < 3) { ++s->out_of_order; return; }
             ++s->restarts; s->have_status = 0;
+            s->have_up[0] = s->have_up[1] = 0;
         } else s->missed += delta - 1;
     } else if (s->have_seq) {
         ++s->restarts;
         /* An event from a new boot invalidates the old status immediately. */
         s->have_status = 0;
+        s->have_up[0] = s->have_up[1] = 0;
     }
     s->regressions = 0;
-    strcpy(s->boot, canonical); s->seq = seq; s->up = up; s->have_seq = 1;
+    strcpy(s->boot, canonical); s->seq = seq; s->up[event] = up; s->have_up[event] = 1; s->have_seq = 1;
     s->expected = 1; ++s->accepted; s->special = 0;
     if (event) {
         snprintf(s->events[s->event_next], 513, "%s", original);
@@ -336,8 +338,9 @@ int main(int argc, char **argv) {
     static struct state s;
     char expected[4096]; snprintf(expected, sizeof expected, "%s/expected", persist);
     s.expected = persistence_available(persist) && access(expected, F_OK) == 0; int saved = s.expected;
+    s.persist_error = !persistence_available(persist);
     signal(SIGTERM, stop); signal(SIGINT, stop);
-    int fd = -1, ambiguous = 0; uint64_t next_scan = 0, next_publish = 0, next_save = 0;
+    int fd = -1, ambiguous = 0; uint64_t next_scan = 0, next_publish = 0, next_save = 0, next_open = 0;
     unsigned open_failures = 0, retry_seconds = 1;
     char retry_device[4096] = "";
     while (!stopping) {
@@ -349,10 +352,9 @@ int main(int argc, char **argv) {
             ambiguous = count > 1;
             if (count != 1 && fd >= 0) { close(fd); fd = -1; disconnect_source(&s); }
             if (count != 1 || strcmp(device, retry_device)) {
-                s.open_error = 0; s.opening = 0; open_failures = 0; retry_seconds = 1;
+                s.open_error = 0; s.opening = 0; open_failures = 0; retry_seconds = 1; next_open = 0;
             }
-            unsigned scan_seconds = 1;
-            if (count == 1 && fd < 0) {
+            if (count == 1 && fd < 0 && now >= next_open) {
                 snprintf(retry_device, sizeof retry_device, "%s", device);
                 int opened = 0;
                 fd = open_serial(device, &opened);
@@ -362,24 +364,25 @@ int main(int argc, char **argv) {
                     s.opening = open_failures < 2;
                     s.open_error = s.opening ? 0 : error;
                     if (opened) {
-                        scan_seconds = retry_seconds;
+                        next_open = now + retry_seconds * 1000;
                         retry_seconds = retry_seconds < 16 ? retry_seconds * 2 : 30;
                     }
                 } else {
                     s.open_error = 0; s.opening = 0; open_failures = 0; retry_seconds = 1;
                 }
             }
-            next_scan = now + scan_seconds * 1000;
+            next_scan = now + 1000;
         }
         if (s.expected && !saved && now >= next_save) {
             /* Never write beneath an unmounted production /data mountpoint. */
             char tmp[4096];
+            errno = ENODEV;
             FILE *f = persistence_available(persist) ? atomic_start(persist, "expected", tmp, sizeof tmp) : NULL;
             if (f) {
                 fputs("1\n", f);
                 saved = atomic_finish(f, tmp, persist, "expected") == 0;
             }
-            if (!saved && !s.persist_error) fputs("persist expected: unavailable; retrying quietly\n", stderr);
+            if (!saved && !s.persist_error) fprintf(stderr, "persist expected: %s; retrying quietly\n", strerror(errno));
             s.persist_error = !saved;
             next_save = now + 1000;
         }
