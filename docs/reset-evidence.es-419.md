@@ -15,8 +15,15 @@ antes de ensamblar una imagen de producción; este borrador no lo publica.
 `Storage=external` y `Unlink=yes` usan el archivador estándar. El servicio
 requiere el montaje de `/data` y la preparación de tmpfiles. Un bind privado
 del servicio conecta `/data/ceralive/pstore` con `/var/lib/systemd/pstore`.
-Tmpfiles crea el directorio con permisos 0700 y retención de 30 días por edad,
-sin límite personalizado de bytes o cantidad. Los archivos sobreviven al cambio
+Tmpfiles crea el directorio con permisos 0700. Un paso previo mueve los archivos
+ramoops existentes a un directorio único antes de que el archivador estándar
+reemplace sus nombres. Conserva hasta 31 colecciones anteriores y la actual;
+elimina primero los directorios más antiguos y limita el historial a 31 MiB de
+tamaño aparente. La reserva de RAM limita la colección actual a 1 MiB, más la
+sobrecarga del sistema de archivos. No se promete conservar cada fallo para
+siempre. Tmpfiles permite limpiar después de 30 días según sus reglas de acceso,
+modificación y cambio; las lecturas pueden retrasarlo y los límites pueden
+eliminar registros antes. Los archivos sobreviven al cambio
 de raíz A/B. Si falta `/data`, el servicio no ejecuta ni borra los registros.
 
 Lectura sin modificar archivos (requiere permisos de root):
@@ -26,12 +33,17 @@ sudo find /data/ceralive/pstore -type f -name '*ramoops*' -exec cat -- '{}' +
 sudo journalctl -u systemd-pstore.service
 ```
 
+El diario tiene su propia retención; `journalctl -u systemd-pstore.service -o
+verbose --all` muestra también el contenido `FILE=`.
 No hay colector propio, esquema JSON ni lector de último arranque. CeraUI no
 consume el lector retirado. Las causas de reinicio de U-Boot y el bootstatus
 del watchdog corresponden a un registro de arranque separado.
 
 Falta validar la dirección, reservas de firmware, rangos del cargador y
 conservación de RAM en cada tamaño de memoria y combinación kernel/cargador.
+El initrd debe terminar antes de `0x1f000000`: desde `0x0a200000`, menos de
+334 MiB; desde `0x12180000`, menos de 206.5 MiB. ECC está desactivado;
+validar `ecc-size = <16>` y la capacidad reducida antes de activarlo.
 Se deben repetir pánicos y reinicios por watchdog y comprobar los archivos y
 su eliminación del pstore. Un corte de energía borra RAM; un bloqueo puede
 dejar solo la consola. Las pruebas del host no califican hardware.

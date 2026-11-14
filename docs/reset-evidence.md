@@ -31,8 +31,16 @@ marks it `nofail`. A service-local bind maps `/data/ceralive/pstore` to
 The bind exists only in that service's mount namespace. Outside it, read the
 persistent directory directly. Missing `/data` prevents service execution, so
 pstore remains available for recovery. Tmpfiles creates the private 0700
-archive and ages its contents out after 30 days. This is age retention, not a
-byte cap; filesystem free-space monitoring remains necessary.
+archive. Before each stock collection, a small ordered pre-step moves existing
+flat ramoops files into a unique history directory so a later warm reboot cannot
+replace them. It retains at most 31 previous collections plus the current one,
+pruning the oldest directories first and limiting history to 31 MiB of apparent
+size. The current collection is bounded by the configured 1 MiB RAM reservation;
+filesystem metadata and block allocation add overhead. This is a rolling bound,
+not a promise to keep every crash indefinitely. A larger reservation requires
+reviewing this budget. Tmpfiles also makes files eligible for cleanup after
+30 days under its normal access/modification/change-time rules; reads can delay
+cleanup and the count/size limit can remove records sooner.
 
 For support export, use stock files (root permissions are required):
 
@@ -44,16 +52,25 @@ sudo journalctl -u systemd-pstore.service
 The find command is read-only, supports both direct and nested archive files,
 and prints nothing for an empty archive. systemd owns the filenames and layout;
 there is no custom JSON schema, latest-boot reader, collector or clearing script.
+The small pre-step only rotates saved files; stock pstore still reads and clears
+the kernel store.
 CeraUI currently has no consumer of the removed reader. Watchdog bootstatus and
 U-Boot reset causes belong in a separate boot record; they are not collected here.
-Persistent `/data` survives A/B rootfs replacement. No custom archive-count or
-collection-size limiter is retained.
+Persistent `/data` survives A/B rootfs replacement. Journal copies have independent
+journald retention; use
+`journalctl -u systemd-pstore.service -o verbose --all` to include the `FILE=`
+contents rather than just the move messages.
 
 ## Qualification still required
 
 The proposed address is below 512 MiB, but it needs measured checks of the
 firmware reservations, full loader relocation/load ranges, DT and `/proc/iomem`
-for every RAM size and kernel/bootloader pair. Confirm registration, then repeat
+for every RAM size and kernel/bootloader pair. In particular, the initrd loaded
+at `0x0a200000` must end below `0x1f000000` (size below 334 MiB); a loader using
+`0x12180000` has only 206.5 MiB available. Check actual load addresses and sizes.
+ECC is currently disabled in the node; the Reed-Solomon Kconfig dependency does
+not enable it. Qualify `ecc-size = <16>` and its reduced record capacity together
+with warm-reset preservation before enabling it. Confirm registration, then repeat
 panic and watchdog warm resets and verify the stock saved files and clearing.
 DDR initialization can erase RAM. Power loss destroys RAM contents; a hang may
 leave only console output. No hardware qualification is claimed by host tests.

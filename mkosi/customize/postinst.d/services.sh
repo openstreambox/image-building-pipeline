@@ -576,6 +576,8 @@ setup_rtmp_gateway() {
 # Stock pstore owns archiving and acknowledgement in every rootfs slot.
 setup_reset_evidence() {
   local src="${CERALIVE_RUNTIME_SRC:-}" dest="${PSTORE_DESTROOT:-}"
+  [[ -n "$src" && -f "$src/ceralive-pstore-rotate.sh" ]] || die "pstore runtime source not found"
+  install -D -m 0755 "${src}/ceralive-pstore-rotate.sh" "${dest}/usr/lib/ceralive/ceralive-pstore-rotate"
   install -D -m 0644 "${src}/ceralive-pstore.conf" "${dest}/etc/systemd/pstore.conf.d/60-ceralive.conf"
   install -D -m 0644 "${src}/ceralive-pstore.service.conf" "${dest}/etc/systemd/system/systemd-pstore.service.d/60-ceralive.conf"
   install -D -m 0644 "${src}/ceralive-pstore.tmpfiles.conf" "${dest}/etc/tmpfiles.d/ceralive-pstore.conf"

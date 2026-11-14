@@ -41,9 +41,10 @@ setup() {
   export CALLS="$BATS_TEST_TMPDIR/calls"
   run bash -c 'source "$1/mkosi/customize/postinst.d/services.sh"; enable_service() { echo "enable $*" >> "$CALLS"; }; mask_service() { echo "mask $*" >> "$CALLS"; }; setup_reset_evidence' _ "$REPO"
   [ "$status" -eq 0 ]
+  [ -x "$PSTORE_DESTROOT/usr/lib/ceralive/ceralive-pstore-rotate" ]
   grep -qx 'Storage=external' "$PSTORE_DESTROOT/etc/systemd/pstore.conf.d/60-ceralive.conf"
   grep -qx 'Unlink=yes' "$PSTORE_DESTROOT/etc/systemd/pstore.conf.d/60-ceralive.conf"
-  grep -qx 'RequiresMountsFor=/data/ceralive/pstore /var/lib/systemd/pstore' "$PSTORE_DESTROOT/etc/systemd/system/systemd-pstore.service.d/60-ceralive.conf"
+  grep -qx 'RequiresMountsFor=/data/ceralive/pstore' "$PSTORE_DESTROOT/etc/systemd/system/systemd-pstore.service.d/60-ceralive.conf"
   grep -qx 'BindPaths=/data/ceralive/pstore:/var/lib/systemd/pstore' "$PSTORE_DESTROOT/etc/systemd/system/systemd-pstore.service.d/60-ceralive.conf"
   grep -qx 'd /data/ceralive/pstore 0700 root root 30d' "$PSTORE_DESTROOT/etc/tmpfiles.d/ceralive-pstore.conf"
   grep -qx 'After=data.mount' "$PSTORE_DESTROOT/etc/systemd/system/systemd-tmpfiles-setup.service.d/60-ceralive-pstore.conf"
@@ -59,11 +60,12 @@ setup() {
   systemd-tmpfiles --root="$root" --create "$BATS_TEST_TMPDIR/tmpfiles.conf"
   [ "$(stat -c %a "$root/data/ceralive/pstore")" = 700 ]
   mkdir -p "$root/etc/systemd/system/systemd-pstore.service.d"
-  cp "$REPO/mkosi/runtime/ceralive-pstore.service.conf" "$root/etc/systemd/system/systemd-pstore.service.d/60-ceralive.conf"
+  sed "s|/usr/lib/ceralive/ceralive-pstore-rotate|$REPO/mkosi/runtime/ceralive-pstore-rotate.sh|" "$REPO/mkosi/runtime/ceralive-pstore.service.conf" > "$root/etc/systemd/system/systemd-pstore.service.d/60-ceralive.conf"
   mkdir -p "$root/etc/systemd/system/systemd-tmpfiles-setup.service.d"
   cp "$REPO/mkosi/runtime/ceralive-pstore-tmpfiles.service.conf" "$root/etc/systemd/system/systemd-tmpfiles-setup.service.d/60-ceralive-pstore.conf"
-  printf '[Mount]\nWhat=/dev/disk/by-label/data\nWhere=/data\nType=ext4\n' > "$root/etc/systemd/system/data.mount"
-  SYSTEMD_UNIT_PATH="$root/etc/systemd/system:/usr/lib/systemd/system" systemd-analyze verify systemd-pstore.service systemd-tmpfiles-setup.service data.mount
+  printf '[Unit]\nDefaultDependencies=no\nAfter=systemd-fsck@dev-disk-by-label-data.service\nRequires=systemd-fsck@dev-disk-by-label-data.service\nBefore=systemd-growfs@data.service\nWants=systemd-growfs@data.service\n[Mount]\nWhat=/dev/disk/by-label/data\nWhere=/data\nType=ext4\nOptions=defaults,noatime,nofail,x-systemd.growfs\n' > "$root/etc/systemd/system/data.mount"
+  printf '[Unit]\nDefaultDependencies=no\nBefore=local-fs.target\nRequiresMountsFor=/data/log\n[Mount]\nWhat=/data/log\nWhere=/var/log\nOptions=bind\n' > "$root/etc/systemd/system/var-log.mount"
+  SYSTEMD_UNIT_PATH="$root/etc/systemd/system:/usr/lib/systemd/system" systemd-analyze --man=no verify systemd-pstore.service systemd-tmpfiles-setup.service data.mount var-log.mount
 }
 @test "documented stock output reader handles empty and populated fixture trees without writes" {
   store="$BATS_TEST_TMPDIR/pstore"
@@ -77,4 +79,64 @@ setup() {
   [ "$status" = 0 ]; [[ "$output" == *'panic fixture'* && "$output" == *'console fixture'* ]]
   [ "$before" = "$(find "$store" -type f -exec sha256sum '{}' +)" ]
   grep -Fq -- "-name '*ramoops*' -exec cat" "$REPO/docs/reset-evidence.md"
+}
+
+@test "consecutive stock archive runs preserve the crash before a clean warm reboot" {
+  store="$BATS_TEST_TMPDIR/store"
+  source="$BATS_TEST_TMPDIR/source"
+  mkdir -p "$store" "$source"
+  printf 'panic console\n' > "$source/console-ramoops-0"
+  printf 'panic record\n' > "$source/dmesg-ramoops-0"
+  /usr/lib/systemd/systemd-pstore "$source" "$store"
+  [ ! -e "$source/console-ramoops-0" ]
+  # Run the same ordered pre-step used by the service.
+  helper="$REPO/mkosi/runtime/ceralive-pstore-rotate.sh"
+  bash "$helper" "$store"
+  printf 'clean boot console\n' > "$source/console-ramoops-0"
+  printf 'second panic\n' > "$source/dmesg-ramoops-0"
+  /usr/lib/systemd/systemd-pstore "$source" "$store"
+  grep -rx 'panic console' "$store"
+  grep -rx 'panic record' "$store"
+  grep -qx 'clean boot console' "$store/console-ramoops-0"
+  grep -qx 'second panic' "$store/dmesg-ramoops-0"
+}
+
+@test "rotation bounds retained generations and leaves an empty archive alone" {
+  store="$BATS_TEST_TMPDIR/store"
+  mkdir -p "$store"
+  helper="$REPO/mkosi/runtime/ceralive-pstore-rotate.sh"
+  bash "$helper" "$store"
+  [ ! -d "$store/history" ]
+  for i in $(seq 1 35); do
+    printf 'crash %s\n' "$i" > "$store/console-ramoops-0"
+    bash "$helper" "$store"
+  done
+  [ "$(find "$store/history" -mindepth 1 -maxdepth 1 -type d | wc -l)" = 31 ]
+  ! grep -rx 'crash 1' "$store"
+  grep -rx 'crash 35' "$store"
+  grep -qx 'ExecStartPre=/usr/lib/ceralive/ceralive-pstore-rotate' "$REPO/mkosi/runtime/ceralive-pstore.service.conf"
+}
+@test "stock pstore retains source records when archive creation fails" {
+  source="$BATS_TEST_TMPDIR/source"
+  mkdir -p "$source"
+  printf 'panic console\n' > "$source/console-ramoops-0"
+  # A regular file blocks destination creation without touching host mounts.
+  touch "$BATS_TEST_TMPDIR/blocked"
+  /usr/lib/systemd/systemd-pstore "$source" "$BATS_TEST_TMPDIR/blocked/archive" || :
+  grep -qx 'panic console' "$source/console-ramoops-0"
+}
+
+@test "rotation trims oversized historical collections" {
+  store="$BATS_TEST_TMPDIR/store"
+  mkdir -p "$store/history/000-old" "$store/history/999-new"
+  truncate -s 33554432 "$store/history/000-old/console-ramoops-0"
+  printf 'keep me\n' > "$store/history/999-new/console-ramoops-0"
+  bash "$REPO/mkosi/runtime/ceralive-pstore-rotate.sh" "$store"
+  [ ! -d "$store/history/000-old" ]
+  grep -qx 'keep me' "$store/history/999-new/console-ramoops-0"
+}
+@test "installer rejects a missing runtime source with a useful error" {
+  run bash -c 'source "$1/mkosi/customize/postinst.d/services.sh"; unset CERALIVE_RUNTIME_SRC; setup_reset_evidence' _ "$REPO"
+  [ "$status" != 0 ]
+  [[ "$output" == *'pstore runtime source not found'* ]]
 }
