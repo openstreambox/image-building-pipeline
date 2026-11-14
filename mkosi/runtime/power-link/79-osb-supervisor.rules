@@ -1,2 +1,0 @@
-# Match the native USB serial interface, never its enumeration order.
-SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ENV{ID_USB_INTERFACE_NUM}=="00", GROUP="osb-power", MODE="0440", ENV{ID_MM_DEVICE_IGNORE}="1", TAG+="systemd"

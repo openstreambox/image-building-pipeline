@@ -27,21 +27,81 @@ def frame(seq):
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "Linux PTY and /proc contracts")
 class ServiceTest(unittest.TestCase):
+    def test_udev_identity_and_read_only_permissions(self):
+        rule = (HERE / '79-power-supervisor.rules').read_text()
+        clauses = [part.strip() for part in rule.splitlines()[-1].split(',')]
+        # Pin the complete match: no broad tty or enumeration-order fallback.
+        matches = [part for part in clauses if '==' in part]
+        self.assertEqual(matches, ['SUBSYSTEM=="tty"', 'ATTRS{idVendor}=="303a"',
+                                  'ATTRS{idProduct}=="1001"',
+                                  'ENV{ID_USB_INTERFACE_NUM}=="00"'])
+        self.assertEqual([part for part in clauses if '==' not in part],
+                         ['GROUP="supervisor-power"', 'MODE="0440"',
+                          'ENV{ID_MM_DEVICE_IGNORE}="1"', 'TAG+="systemd"'])
+
+    def test_renamed_staged_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(['make', '-C', str(HERE), f'DESTDIR={tmp}', 'install'], check=True)
+            unit = 'supervisor-power-link.service'
+            self.assertEqual((root / 'usr/lib/systemd/system' / unit).read_bytes(),
+                             (HERE / unit).read_bytes())
+            self.assertEqual(os.readlink(root / 'etc/systemd/system/multi-user.target.wants' / unit),
+                             f'/usr/lib/systemd/system/{unit}')
+            for directory, name, source in [
+                ('sysusers.d', 'supervisor-power.conf', 'supervisor-power.conf'),
+                ('tmpfiles.d', 'supervisor-power.conf', 'supervisor-power-tmpfiles.conf'),
+                ('udev/rules.d', '79-power-supervisor.rules', '79-power-supervisor.rules')]:
+                self.assertEqual((root / 'usr/lib' / directory / name).read_bytes(),
+                                 (HERE / source).read_bytes())
+            binary = root / 'usr/libexec/supervisor-power-link'
+            self.assertEqual(binary.stat().st_mode & 0o777, 0o755)
+            self.assertIn('u supervisor-power -', (HERE / 'supervisor-power.conf').read_text())
+
+    def test_no_device_is_idle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); sysfs = root / 'tty'; sysfs.mkdir()
+            binary = root / 'reader'
+            subprocess.run(['cc', str(HERE / 'power_link.c'), '-o', str(binary)], check=True)
+            proc = subprocess.Popen([str(binary), '--sysfs-dir', str(sysfs),
+                                     '--state-dir', tmp, '--persistent-dir', tmp])
+            try:
+                deadline = time.monotonic() + 3
+                state = None
+                first = None
+                while time.monotonic() < deadline:
+                    try:
+                        state = json.loads((root / 'supervisor.json').read_text())
+                        if first is None: first = state['published_mono_ms']
+                        elif state['published_mono_ms'] > first: break
+                    except FileNotFoundError: pass
+                    time.sleep(.02)
+                self.assertEqual(state['link'], 'absent')
+                self.assertFalse(state['expected'])
+                self.assertFalse(state['ambiguous'])
+                self.assertEqual(state['accepted_lines'], 0)
+                self.assertGreater(state['published_mono_ms'], first)
+                self.assertFalse((root / 'expected').exists())
+                self.assertFalse(any(os.readlink(fd).startswith('/dev/tty')
+                                     for fd in Path(f'/proc/{proc.pid}/fd').iterdir()))
+            finally:
+                proc.terminate(); proc.wait(timeout=3)
+
     def test_unit_lifecycle_and_persistent_path(self):
-        unit = (HERE / 'osb-power-link.service').read_text()
+        unit = (HERE / 'supervisor-power-link.service').read_text()
         self.assertIn('RuntimeDirectoryPreserve=yes', unit)
         self.assertNotIn('RequiresMountsFor=', unit)
         self.assertIn('data.mount', unit.split('After=')[1].splitlines()[0])
         self.assertIn('mountpoint -q /data', unit)
         self.assertIn('ExecStartPre=+-', unit)
         self.assertNotIn('StateDirectory=', unit)
-        self.assertIn('ReadWritePaths=/run/ceralive/power -/data/osb-power', unit)
-        self.assertNotIn('d /data/', (HERE / 'osb-power-tmpfiles.conf').read_text())
-        self.assertIn('tmpfiles.d/osb-power.conf', (HERE / 'Makefile').read_text())
+        self.assertIn('ReadWritePaths=/run/ceralive/power -/data/supervisor-power', unit)
+        self.assertNotIn('d /data/', (HERE / 'supervisor-power-tmpfiles.conf').read_text())
+        self.assertIn('tmpfiles.d/supervisor-power.conf', (HERE / 'Makefile').read_text())
 
     def test_mount_checked_directory_preparation(self):
         # Execute the unit's actual shell fragment with host-only fake tools.
-        unit = (HERE / 'osb-power-link.service').read_text()
+        unit = (HERE / 'supervisor-power-link.service').read_text()
         command = shlex.split(unit.split('ExecStartPre=+-', 1)[1].splitlines()[0])
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); calls = root / 'calls'
@@ -55,13 +115,13 @@ class ServiceTest(unittest.TestCase):
             env['MOUNT_RESULT'] = '0'
             subprocess.run(command, env=env, check=True)
             self.assertEqual(calls.read_text().splitlines(),
-                             ['-d', '-o', 'osb-power', '-g', 'osb-power', '-m', '0755', '/data/osb-power'])
+                             ['-d', '-o', 'supervisor-power', '-g', 'supervisor-power', '-m', '0755', '/data/supervisor-power'])
 
     @unittest.skipUnless(shutil.which('systemd-analyze'), 'systemd-analyze unavailable')
     def test_unit_verifies(self):
         with tempfile.TemporaryDirectory() as tmp:
-            unit = Path(tmp) / 'osb-power-link.service'
-            unit.write_text((HERE / unit.name).read_text().replace('/usr/libexec/osb-power-link', '/usr/bin/true'))
+            unit = Path(tmp) / 'supervisor-power-link.service'
+            unit.write_text((HERE / unit.name).read_text().replace('/usr/libexec/supervisor-power-link', '/usr/bin/true'))
             subprocess.run(['systemd-analyze', 'verify', str(unit)], check=True)
 
     def test_permission_failure_is_not_absent(self):

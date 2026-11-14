@@ -4,10 +4,10 @@ After=systemd-udevd.service systemd-tmpfiles-setup.service data.mount
 
 [Service]
 Type=simple
-User=osb-power
-Group=osb-power
-ExecStartPre=+-/bin/sh -c 'mountpoint -q /data && exec install -d -o osb-power -g osb-power -m 0755 /data/osb-power'
-ExecStart=/usr/libexec/osb-power-link
+User=supervisor-power
+Group=supervisor-power
+ExecStartPre=+-/bin/sh -c 'mountpoint -q /data && exec install -d -o supervisor-power -g supervisor-power -m 0755 /data/supervisor-power'
+ExecStart=/usr/libexec/supervisor-power-link
 Restart=always
 RestartSec=2
 RuntimeDirectory=ceralive/power
@@ -42,7 +42,7 @@ SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources @mount @reboot @swap
 DevicePolicy=closed
 DeviceAllow=char-ttyACM r
-ReadWritePaths=/run/ceralive/power -/data/osb-power
+ReadWritePaths=/run/ceralive/power -/data/supervisor-power
 MemoryMax=32M
 CPUQuota=10%
 TasksMax=4

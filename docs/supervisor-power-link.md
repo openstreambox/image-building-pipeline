@@ -1,9 +1,19 @@
 # Read-only supervisor telemetry
 
-`mkosi/runtime/power-link/` provides `osb-power-link`, a libc-only Linux service.
-It reads the supervisor's native USB serial stream. It has no command channel,
+`mkosi/runtime/power-link/` provides `supervisor-power-link`, a libc-only Linux service.
+It reads an external power supervisor over USB serial. It has no command channel,
 never opens the serial port for writing, and issues no modem-control ioctls. It does not
 handle shutdown GPIOs or control power. CeraUI reads its files independently.
+
+Any power board or UPS HAT can implement this documented interface without
+using a particular board design. The OpenStreamBox power board is one example
+implementation. This is a protocol adapter, not a driver for arbitrary existing
+UPS protocols; I2C-only HATs need a firmware/serial bridge. Missing measurements
+remain unknown, so a one-input board need not invent a second battery bank.
+With the matching [CeraUI change](https://github.com/openstreambox/CeraUI/pull/72),
+a CeraLive box can show power/battery warnings and reported temperatures.
+Without matching hardware the reader stays idle (apart from publishing its
+availability heartbeat); it does not alter streaming or power policy.
 
 ## Build and installation
 
@@ -24,13 +34,14 @@ make -C mkosi/runtime/power-link DESTDIR=/path/to/target-rootfs install
 ```
 
 Installation stages the executable, unit, sysusers definition, udev rule and
-boot enablement through systemctl --root enable. It does not start a host service. This is an explicit
-staging target; existing image builds do not automatically include it. No
+boot enablement through `systemctl --root enable`. With DESTDIR set it does
+not start a host service; without DESTDIR, install enables the unit on the
+build host. This is an explicit staging target; existing image builds do not automatically include it. No
 compiler or Python runtime is needed on the target. Before a live start the
-`osb-power` account must exist (`systemd-sysusers` processes its definition at
+`supervisor-power` account must exist (`systemd-sysusers` processes its definition at
 boot), and udev must have applied the rule. No service is deployed by the tests.
 
-The unit runs as `osb-power`, without capabilities, network access, or writable
+The unit runs as `supervisor-power`, without capabilities, network access, or writable
 system paths. It can write only its runtime and persistent directories. Device
 cgroup access is read-only for the ttyACM class; DAC restricts that account to
 matching supervisor interfaces, without granting membership in `dialout`.
@@ -43,6 +54,23 @@ No match means absent; two or more matches close the reader and publish
 prevents ModemManager probing that interface. USB identity is not authentication:
 only valid OSB1 status frames establish telemetry. This identity is shared by
 other boards; use a dedicated connection.
+
+For a different USB identity, install a local udev rule granting only the
+`supervisor-power` group read access (`MODE="0440"`) and excluding ModemManager
+for that exact interface. Give it a stable `/dev/power-supervisor` symlink and
+use a systemd drop-in:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/libexec/supervisor-power-link --device /dev/power-supervisor
+```
+
+The shipped device cgroup permits ttyACM only. A ttyUSB adapter additionally
+needs `DeviceAllow=char-ttyUSB r` in that drop-in. Never match all serial ports
+or add the account to dialout. The default identity is a transport preset, not
+proof that the attached device speaks this protocol. Other USB devices sharing
+it can be opened, so review the rule before enabling on a general-purpose host.
 
 A single matched device with an initial open/setup failure publishes silent
 while pending; only a second consecutive failed attempt publishes error. A
@@ -67,7 +95,18 @@ verification; a PTY cannot prove that a board will not reset or enter download
 mode. Enumeration, reset behavior, power isolation and thermal protection are
 not qualified by host tests.
 
-## OSB1 wire contract
+## Open USB serial power-supervisor interface (version 1)
+
+`OSB1` is the historical wire identifier, retained byte-for-byte for firmware
+compatibility; it is not a vendor check or a requirement to use a named board.
+Implementers may emit these ASCII frames from any USB serial microcontroller.
+No host commands, handshake or command responses are required. Emit status
+at least once per second for the five-second freshness window. Use a new boot
+identifier on each restart and a shared increasing sequence across frame kinds.
+The reader preserves the tty baud setting and configures raw input; USB CDC
+implementations must not require a host baud-rate handshake. A physical UART
+bridge needs its baud setting configured separately. Unsupported measurements
+should be omitted or use the documented unavailable values, never fabricated as healthy.
 
 ASCII lines end in LF; the whole line including LF is at most 512 bytes.
 Non-OSB1 text is ignored and counted. `waiting for download` on non-OSB text marks bootloader
@@ -162,18 +201,20 @@ ring, not a durable/auditable timeline; events can be missed across shutdowns
 or reader restarts. File size is bounded by the wire limit and JSON escaping.
 Do not derive current state or shutdown actions from it.
 
-`/data/osb-power/expected` contains `1\n` after the first accepted frame;
+`/data/supervisor-power/expected` contains `1\n` after the first accepted frame;
 absence means not yet learned. `/data` survives A/B OTA slot changes.
 The service has ordering-only `After=data.mount`, with no hard mount requirement.
 A privileged, failure-tolerant ExecStartPre checks mountpoint and creates the
-0755 osb-power-owned directory only when /data is mounted. The main writer
+0755 supervisor-power-owned directory only when /data is mounted. The main writer
 stays sandboxed. Without /data it still publishes runtime state and skips the
 persistent marker (persist_error after a frame teaches expected). Nothing
 creates this directory through unordered tmpfiles on the root slot.
 To intentionally forget a removed board: stop the reader, remove this marker,
 then restart the reader. A live attached board will immediately teach it again.
-Existing installations may copy the old `/var/lib/osb-power/expected` marker
-into this directory with owner osb-power and mode 0644 before restarting. It is not a consumer acknowledgment store. No
+When migrating an earlier installation, stop and disable its reader first,
+copy its learned expected marker to `/data/supervisor-power/expected` with
+owner supervisor-power and mode 0644, then enable the renamed reader. Never
+run two readers against the same port. It is not a consumer acknowledgment store. No
 last-shutdown notification acknowledgments are written by this reader; a
 consumer must own its own deduplication/acknowledgment contract. No command or
 control file is consumed by this service.
@@ -237,3 +278,42 @@ valid. Hex flags are bit sets, not decimal counters.
 
 These names mirror the protective firmware's status formatter, enum names,
 Flag/PackFlag and Gap definitions. Consumers must tolerate future additions.
+
+
+## Warning fields for compatible consumers
+
+The framing layer requires only `up`, `seq` and `boot` in a status. Meaningful
+power warnings also require the corresponding status fields below; a valid
+minimal frame alone does not establish healthy power or complete protection.
+There is no battery percentage or runtime estimate in version 1.
+
+| Field | Meaning |
+| --- | --- |
+| `power` | `low`: input power is weak; `holdup`: reserve supplies the box. Other values do not trigger those warnings. |
+| `redundant` | `0`: no confirmed backup input; `1`: confirmed backup. Omit when unknown. |
+| `thermal` | `normal`, `warm`, `hot`, `critical`, `shutdown`: the board's warning level, not a host temperature threshold. |
+| `hot` | Comma-separated `a`, `b`, `pack` affected by that level, or `none`. |
+| `armed` | `0`: protection is not armed (development mode); `1`: armed. This is a board report, not host qualification. |
+| `sbc` | Host power state, including `run` and `shutdown_requested[:cause]`; descriptive only, never a host command. |
+| `pack_cal` | `none`: uncalibrated; `datasheet`: estimated from datasheet constants. Other values are retained without a calibration guarantee. |
+| `gaps`, `gaps2` | Protection limitations, using the bit grammar above. Missing/unknown protection information must not imply full protection. |
+| `rst`, `alive`, `shutdowns`, `fw` | Reset reason, observed host-alive flag, shutdown counter and firmware label; retained diagnostic strings. Required in event trailers, optional in status. |
+
+A board should map only conditions it actually measures into this vocabulary.
+For example, a single-input UPS can report `power=holdup` while its battery is
+supporting the host and omit the unused input and unsupported thermal fields.
+Its firmware remains responsible for protection and shutdown policy. Extending
+this vocabulary or adapting a different UPS protocol needs separate consumer
+support; the reader does not infer electrical behavior from arbitrary keys.
+
+For a synthetic minimal status, this host-side example generates a complete
+frame (including CRC); it requires no board or command channel:
+
+```python
+import binascii
+body = b"OSB1 up=1 power=holdup seq=0 boot=12345678"
+print(body.decode() + f" crc={binascii.crc_hqx(body, 0xffff):04X}")
+```
+
+The existing firmware fixtures exercise a richer two-input/reserve-pack profile.
+They are interoperability examples, not required board topology.

@@ -317,14 +317,14 @@ static int discover(const char *sysfs, char *device, size_t size) {
 }
 static int persistence_available(const char *persist) {
     struct stat data_stat, root_stat;
-    return strcmp(persist, "/data/osb-power") ||
+    return strcmp(persist, "/data/supervisor-power") ||
         (!stat("/data", &data_stat) && !stat("/", &root_stat) && data_stat.st_dev != root_stat.st_dev);
 }
 static volatile sig_atomic_t stopping;
 static void stop(int sig) { (void)sig; stopping = 1; }
 int main(int argc, char **argv) {
     const char *sysfs = "/sys/class/tty";
-    const char *explicit_device = NULL, *dir = "/run/ceralive/power", *persist = "/data/osb-power";
+    const char *explicit_device = NULL, *dir = "/run/ceralive/power", *persist = "/data/supervisor-power";
     for (int i = 1; i < argc; i += 2) {
         if (i+1 == argc) return 2;
         if (!strcmp(argv[i], "--device")) explicit_device = argv[i+1];
