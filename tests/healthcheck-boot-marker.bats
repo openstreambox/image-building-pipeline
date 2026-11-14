@@ -531,7 +531,8 @@ SH
   grep -Fxq 'mark-good B' "$TEST_CALLS"
   ! grep -Fxq check-service "$TEST_CALLS"
   # Unit-driven confirmation first pulls health; a new failed assessment
-  # invalidates that retained verdict, even after direct confirmation.
+  # invalidates that retained verdict for a slot still awaiting confirmation.
+  rm "$CERALIVE_HEALTHCHECK_MARKER" "$CERALIVE_HEALTHY_STATE_FILE"
   run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
   [ "$status" -ne 0 ]
   : > "$TEST_CALLS"
