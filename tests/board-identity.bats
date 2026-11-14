@@ -97,3 +97,28 @@ PY
     grep -qx "UPDATE_BOARD='$board'" "$baseline"
   done
 }
+
+@test "x86 resolver architecture writes the runtime record under errexit" {
+  root="${BATS_TEST_DIRNAME}/.."
+  run bash -euo pipefail -c '
+    eval "$(bash "$1/lib/resolve.sh" x86-minipc)"
+    [[ "$ARCH" == x86-64 ]]
+    source "$1/mkosi/customize/board-identity.sh"
+    write_board_identity "$2" "$BOARD_ID" "$FAMILY" "$CAPABILITIES"
+    [[ "$ARCH" == x86-64 ]]
+  ' _ "$root" "$BATS_TEST_TMPDIR/release"
+  [ "$status" -eq 0 ]
+  grep -qx 'BOARD=x86-minipc' "$BATS_TEST_TMPDIR/release"
+  grep -qx 'UPDATE_BOARD=x86-minipc' "$BATS_TEST_TMPDIR/release"
+  grep -qx 'UPDATE_COMPATIBLE=ceralive-x86-minipc' "$BATS_TEST_TMPDIR/release"
+  grep -qx 'KERNEL_ARCH=amd64' "$BATS_TEST_TMPDIR/release"
+  [ "$(stat -c %a "$BATS_TEST_TMPDIR/release")" = 444 ]
+}
+@test "unsupported kernel architecture is rejected before opening the record" {
+  run env ARCH='x86-64;id' bash -c '
+    source "$1/mkosi/customize/board-identity.sh"
+    write_board_identity "$2" x86-minipc x86_64 os-updates
+  ' _ "${BATS_TEST_DIRNAME}/.." "$BATS_TEST_TMPDIR/release"
+  [ "$status" -ne 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/release" ]
+}
