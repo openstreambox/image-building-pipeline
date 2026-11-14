@@ -152,3 +152,23 @@ command boundaries stubbed. Named SIGKILL checkpoints cover selection,
 mark-good and terminal-side-effect interruption. The slot-sync and post-install
 tests cover overlay replacement and retirement. These host tests do not replace
 the two-board kernel drill or privileged loop/chroot acceptance.
+
+## Planned reboot and power-off
+
+Update staging and activation do not reboot the device. Planned maintenance and
+recovery callers should use `/usr/libexec/ceralive/ceralive-power reboot` (or
+`poweroff`). The helper calls `systemctl --check-inhibitors=yes` even for root
+and non-interactive callers. Exit 75 means the action was not submitted: it prints
+a calm explanation and leaves retry to the caller. Exit 70 means the command
+was interrupted and its outcome is uncertain; check the box before retrying. It never forces or queues a
+fallback reboot. The disposable kernel runner also checks inhibitors on shutdown.
+
+CeraUI's companion shutdown protection holds a logind **block** inhibitor while
+the encoder or client-carrying protection is active, including uncertain startup
+and cleanup. A delay inhibitor would expire during a long live session. Do not
+replace these calls with `reboot`, `shutdown`, `systemctl --force`, or direct
+shutdown-target activation: those can bypass the planned-action policy. Forced
+emergency power actions and loss of electrical power remain outside this guard.
+The image helper requires a systemd version supporting `--check-inhibitors=yes`;
+an unsupported option fails closed, with no fallback. No device continuity or
+physical power-loss qualification is implied by the hardware-free tests.
