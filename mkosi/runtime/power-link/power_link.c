@@ -137,7 +137,18 @@ static void line_received(struct state *s, char *line, uint64_t now) {
         if (!number(get_fields(&parsed, "up"), 10, &up)) { ++s->malformed; return; }
     }
     char canonical[9]; snprintf(canonical, sizeof canonical, "%08" PRIx32, boot);
-    if (s->have_seq && !strcmp(s->boot, canonical) && (!s->have_up[event] || up >= s->up[event])) {
+    uint32_t delta = seq - s->seq;
+    int backward = delta >= UINT32_C(0x80000000);
+    /* A uint32 millisecond emitter wraps seconds from 4294967 to zero.
+     * Require a forward sequence and the narrow rollover window. */
+    int wrap = s->have_up[event] && s->up[event] >= 4294965 &&
+               s->up[event] <= 4294967 && up <= 2 && delta && !backward;
+    int decrease = s->have_up[event] && up < s->up[event] && !wrap;
+    /* First frame of a kind: tolerate two seconds of clock-origin offset.
+     * Only a backward sequence plus a larger decrease establishes a restart. */
+    int fallback = !s->have_up[event] && s->have_up[!event] && backward &&
+                   s->up[!event] > up && s->up[!event] - up > 2;
+    if (s->have_seq && !strcmp(s->boot, canonical) && !decrease && !fallback) {
         uint32_t delta = seq - s->seq;
         if (!delta || delta >= UINT32_C(0x80000000)) {
             if (delta && (!s->regressions || seq - s->regression_seq == 1)) ++s->regressions;
@@ -339,6 +350,8 @@ int main(int argc, char **argv) {
     char expected[4096]; snprintf(expected, sizeof expected, "%s/expected", persist);
     s.expected = persistence_available(persist) && access(expected, F_OK) == 0; int saved = s.expected;
     s.persist_error = !persistence_available(persist);
+    if (s.persist_error)
+        fprintf(stderr, "persistence unavailable at startup: /data not mounted or persistence path unavailable; retrying quietly\n");
     signal(SIGTERM, stop); signal(SIGINT, stop);
     int fd = -1, ambiguous = 0; uint64_t next_scan = 0, next_publish = 0, next_save = 0, next_open = 0;
     unsigned open_failures = 0, retry_seconds = 1;

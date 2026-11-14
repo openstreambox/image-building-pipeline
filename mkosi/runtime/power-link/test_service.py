@@ -74,7 +74,7 @@ class ServiceTest(unittest.TestCase):
             source = (HERE / 'power_link.c').read_text().replace('stat("/data",', 'stat("/nonexistent-supervisor-data",')
             (root / 'reader.c').write_text(source)
             subprocess.run(['cc', str(root / 'reader.c'), '-o', str(binary)], check=True)
-            proc = subprocess.Popen([str(binary), '--sysfs-dir', str(root / 'tty'), '--state-dir', tmp])
+            proc = subprocess.Popen([str(binary), '--sysfs-dir', str(root / 'tty'), '--state-dir', tmp], stderr=subprocess.PIPE, text=True)
             try:
                 deadline = time.monotonic() + 3
                 while not (root / 'supervisor.json').exists() and time.monotonic() < deadline:
@@ -84,7 +84,8 @@ class ServiceTest(unittest.TestCase):
                 self.assertFalse(state['expected'])
                 self.assertTrue(state['persist_error'])
             finally:
-                proc.terminate(); proc.wait(timeout=3)
+                proc.terminate(); _, logs = proc.communicate(timeout=3)
+                self.assertIn("persistence unavailable at startup", logs)
 
     def test_discovery_during_backoff(self):
         with tempfile.TemporaryDirectory() as tmp:

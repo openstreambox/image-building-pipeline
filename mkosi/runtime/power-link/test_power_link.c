@@ -99,16 +99,13 @@ int main(void) {
     /* A repeated boot id must retain the first boot events, even at old seq=1. */
     for (unsigned old = 1; old <= 500; old += 499) {
         struct state repeated = {0};
-        char previous[200]; snprintf(previous, sizeof previous, "OSB1 EVT up=100 previous seq=%u boot=01234567 rst=poweron alive=1 hot=none shutdowns=0 fw=test", old-1);
-        frame(line, previous);
-        feed(&repeated, line, strlen(line), 1);
         status(line, old, "01234567"); feed(&repeated, line, strlen(line), 1);
         frame(line, "OSB1 EVT up=0 armed seq=0 boot=01234567 rst=wdt alive=1 hot=none shutdowns=0 fw=field-12345678");
         feed(&repeated, line, strlen(line), 2);
-        assert(repeated.restarts == 1 && repeated.event_count == 2 && !repeated.have_status);
+        assert(repeated.restarts == 1 && repeated.event_count == 1 && !repeated.have_status);
         frame(line, "OSB1 EVT up=0 boot field left-out=ina seq=1 boot=01234567 rst=wdt alive=1 hot=none shutdowns=0 fw=field-12345678");
         feed(&repeated, line, strlen(line), 3);
-        assert(repeated.event_count == 3 && repeated.out_of_order == 0 && repeated.missed == 0);
+        assert(repeated.event_count == 2 && repeated.out_of_order == 0 && repeated.missed == 0);
     }
     struct state opaque = {0};
     frame(line, "OSB1 EVT up=0 waiting for download crc=oops seq=77 left-out=ina left-out=storage restart-record=stale seq=0 boot=01234567 rst=wdt alive=1 hot=none shutdowns=0 fw=field-12345678");

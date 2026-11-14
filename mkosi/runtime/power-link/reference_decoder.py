@@ -98,8 +98,14 @@ class Decoder:
         except (ValueError, KeyError):
             r['malformed'] += 1
             return
+        delta = (seq-r['seq']) & 0xffffffff
+        previous = self.clocks.get(event)
+        wrap = (previous is not None and 4294965 <= previous <= 4294967
+                and up <= 2 and 0 < delta < 0x80000000)
+        fallback = (previous is None and (not event) in self.clocks and delta >= 0x80000000
+                    and self.clocks[not event] - up > 2)
         restart = bool(r['accepted'] and (boot != r['boot'] or
-                       (event in self.clocks and up < self.clocks[event])))
+                       (previous is not None and up < previous and not wrap) or fallback))
         if r['accepted'] and not restart:
             delta = (seq-r['seq']) & 0xffffffff
             if delta == 0 or delta >= 0x80000000:
