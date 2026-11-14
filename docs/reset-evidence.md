@@ -65,7 +65,9 @@ U-Boot reset causes belong in a separate boot record; they are not collected her
 Persistent `/data` survives A/B rootfs replacement. Journal copies have independent
 journald retention; use
 `journalctl -u systemd-pstore.service -o verbose --all` to include the `FILE=`
-contents rather than just the move messages.
+contents rather than just the move messages. After a boot without an RTC, journal
+files containing those `FILE=` copies can be vacuumed early because their first
+entries predate clock synchronization. The archive on `/data` is the durable copy.
 
 ## Qualification still required
 

@@ -30,7 +30,8 @@ setup() {
     dtc -I dts -O dtb -o "$BATS_TEST_TMPDIR/$board.dtb" "$tree/$board.dts"
     [ "$(fdtget -ts "$BATS_TEST_TMPDIR/$board.dtb" /reserved-memory/ramoops@1f000000 compatible)" = ramoops ]
   done
-  ! grep -q ramoops "$tree/rk3588-orangepi-5-plus.dts"
+  run grep -q ramoops "$tree/rk3588-orangepi-5-plus.dts"
+  [ "$status" -eq 1 ]
   grep -q 'bash /in/ramoops.sh /src/linux /in/ramoops.dtsi' "$REPO/lib/build-kernel.sh"
   grep -q 'rk3588-ramoops.dtsi' "$REPO/lib/kernel/artifact-cache.sh"
   ! grep -q ramoops "$REPO/mkosi/platform/boot/boot.scr.cmd"
@@ -49,7 +50,8 @@ setup() {
   grep -qx 'd /data/ceralive/pstore 0700 root root -' "$PSTORE_DESTROOT/etc/tmpfiles.d/ceralive-pstore.conf"
   grep -qx 'After=data.mount' "$PSTORE_DESTROOT/etc/systemd/system/systemd-tmpfiles-setup.service.d/60-ceralive-pstore.conf"
   grep -qx 'enable systemd-pstore.service' "$CALLS"
-  ! grep -q mask "$CALLS"
+  run grep -q mask "$CALLS"
+  [ "$status" -eq 1 ]
   [ ! -e "$REPO/mkosi/runtime/ceralive-reset-evidence.sh" ]
   [ ! -e "$REPO/mkosi/runtime/ceralive-reset-evidence.service" ]
 }
@@ -116,7 +118,8 @@ setup() {
     bash "$helper" "$store"
   done
   [ "$(find "$store/history" -mindepth 1 -maxdepth 1 -type d | wc -l)" = 31 ]
-  ! grep -rx 'crash 1' "$store"
+  run grep -rx 'crash 1' "$store"
+  [ "$status" -eq 1 ]
   grep -rx 'crash 35' "$store"
   grep -qx 'ExecStartPre=/usr/lib/ceralive/ceralive-pstore-rotate' "$REPO/mkosi/runtime/ceralive-pstore.service.conf"
 }

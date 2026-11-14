@@ -40,7 +40,10 @@ sudo journalctl -u systemd-pstore.service
 ```
 
 El diario tiene su propia retención; `journalctl -u systemd-pstore.service -o
-verbose --all` muestra también el contenido `FILE=`.
+verbose --all` muestra también el contenido `FILE=`. Después de arrancar sin RTC,
+los archivos del diario con esas copias `FILE=` pueden eliminarse antes de tiempo
+porque sus primeras entradas son anteriores a la sincronización del reloj.
+El archivo en `/data` es la copia duradera.
 No hay colector propio, esquema JSON ni lector de último arranque. CeraUI no
 consume el lector retirado. Las causas de reinicio de U-Boot y el bootstatus
 del watchdog corresponden a un registro de arranque separado.
