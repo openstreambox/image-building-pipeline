@@ -30,7 +30,10 @@ after an interface down/up with an unchanged grant. A route repair error withdra
 only that link and leaves other links reconciling. Unexpected synchronization
 errors are logged and the ten-second retry remains scheduled. Status-write
 faults are logged without withdrawing a working translator. Teardown continues
-after cleanup command timeouts and retains those commands in the recovery journal.
+after cleanup command timeouts and keeps the recovery journal. Before retrying a
+still-wanted link, startup replays that journal ahead of discovery and ownership
+checks. An interrupted replay keeps the journal for the next retry; only a
+completed replay removes it.
 Snapshots refresh on each reconciliation (at most ten seconds apart while
 discovery is healthy).
 

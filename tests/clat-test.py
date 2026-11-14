@@ -152,9 +152,90 @@ class Recovery(unittest.TestCase):
             self.assertEqual(command.call_args.args, ('first',))
             healthy.start.assert_called_once()
             self.assertNotIn('wan1', controller.links)
-            self.assertFalse(link.undo) # Failed startup must not look like a live link.
+            self.assertFalse(link.undo) # Pending undo lives in the journal, not the live-link marker.
             # Failed cleanup remains journalled for recovery.
             self.assertEqual(json.loads((clat.RUN/'3.cleanup').read_text()), [['second']])
+
+    def test_same_grant_recovers_after_cleanup_timeout(self):
+        from unittest.mock import Mock, patch
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory, patch.object(clat, 'RUN', pathlib.Path(directory)), patch.object(clat.socket, 'if_nametoindex', return_value=3):
+            signature = ('2001:db8::1', '', ())
+            link = clat.Link('wan1', *signature)
+            link.ipv4_mtu = 1480
+            undo = ['ip', 'link', 'del', link.tun]
+            link.undo = [undo]
+            link.save_cleanup()
+            controller = clat.Controller()
+            controller.links['wan1'] = (signature, link)
+            present = [True]
+            attempts = []
+            def command(*args, **kwargs):
+                if args[:4] == ('ip', '-4', 'route', 'replace'):
+                    raise subprocess.TimeoutExpired('ip', 10)
+                if list(args) == undo:
+                    attempts.append(args)
+                    if len(attempts) == 1:
+                        raise subprocess.TimeoutExpired('ip', 10)
+                    present[0] = False
+                if args == ('ip', '-j', 'addr'):
+                    return '[]'
+                if args[:4] == ('ip', '-j', 'link', 'show'):
+                    return '[{"mtu": 1500}]'
+                if args[:2] == ('ip', '-j'):
+                    return '[]'
+                if args == ('nft', '-j', 'list', 'tables'):
+                    return '{"nftables": []}'
+                if args[:2] == ('sysctl', '-n'):
+                    return '1'
+                return ''
+            process = Mock()
+            process.poll.return_value = None
+            with patch.object(clat, 'command', side_effect=command), patch.object(clat.socket, 'if_nameindex', side_effect=lambda: [(3, 'wan1')] + ([(4, 'clat3')] if present[0] else [])), patch.object(clat, 'discover', return_value='64:ff9b::/96'), patch.object(clat.subprocess, 'Popen', return_value=process), patch.object(clat.time, 'sleep'):
+                controller.sync({'wan1': signature})
+                self.assertNotIn('wan1', controller.links)
+                self.assertEqual(json.loads((clat.RUN/'3.cleanup').read_text()), [undo])
+                controller.sync({'wan1': signature})
+                self.assertIn('wan1', controller.links)
+                self.assertEqual(len(attempts), 2)
+                self.assertEqual(json.loads((clat.RUN/'3.json').read_text())['state'], 'up')
+                # The new link has replaced the replayed journal with its own undo.
+                self.assertGreater(len(json.loads((clat.RUN/'3.cleanup').read_text())), 1)
+
+    def test_failed_replay_preserves_journal_before_setup(self):
+        from unittest.mock import patch
+        import subprocess
+        import tempfile
+        for error in (subprocess.TimeoutExpired('ip', 10), subprocess.CalledProcessError(2, 'ip'), OSError('ip unavailable')):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as directory, patch.object(clat, 'RUN', pathlib.Path(directory)), patch.object(clat.socket, 'if_nametoindex', return_value=3):
+                journal = clat.RUN/'3.cleanup'
+                undo = [['ip', 'link', 'del', 'clat3']]
+                journal.write_text(json.dumps(undo))
+                with patch.object(clat, 'command', side_effect=error), patch.object(clat, 'discover') as discover:
+                    link = clat.Link('wan1', '2001:db8::1', '', ())
+                    link.start()
+                discover.assert_not_called()
+                self.assertFalse(link.undo)
+                self.assertEqual(json.loads(journal.read_text()), undo)
+                self.assertEqual(json.loads((clat.RUN/'3.json').read_text())['state'], 'error')
+
+    def test_replay_keeps_only_failed_undo_in_original_order(self):
+        from unittest.mock import patch
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory, patch.object(clat, 'RUN', pathlib.Path(directory)), patch.object(clat.socket, 'if_nametoindex', return_value=3):
+            journal = clat.RUN/'3.cleanup'
+            undo = [['first'], ['second'], ['third']]
+            journal.write_text(json.dumps(undo))
+            errors = [subprocess.TimeoutExpired('third', 10), '', subprocess.CalledProcessError(2, 'first')]
+            with patch.object(clat, 'command', side_effect=errors) as command, patch.object(clat, 'discover') as discover:
+                link = clat.Link('wan1', '2001:db8::1', '', ())
+                link.start()
+            self.assertEqual([call.args for call in command.call_args_list], [('third',), ('second',), ('first',)])
+            self.assertEqual(json.loads(journal.read_text()), [undo[0], undo[2]])
+            self.assertFalse(link.undo)
+            discover.assert_not_called()
 
     def test_retry_survives_sync_exception(self):
         from unittest.mock import Mock

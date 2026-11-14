@@ -223,6 +223,30 @@ class Link:
         command('ip', '-4', 'route', 'replace', 'default', 'dev', self.tun, 'metric', self.table, 'mtu', str(self.ipv4_mtu))
 
     def start(self):
+        # Replay before discovery or ownership checks can reject leftover resources.
+        # Retain failed undo commands until a later retry succeeds.
+        journal = RUN / f'{self.index}.cleanup'
+        try:
+            if journal.exists():
+                pending = []
+                for args in reversed(json.loads(journal.read_text())):
+                    try:
+                        command(*args)
+                    except (OSError, subprocess.SubprocessError) as error:
+                        pending.insert(0, args)
+                        print(f'CLAT {self.interface} cleanup replay failed: {error}', file=sys.stderr, flush=True)
+                if pending:
+                    self.undo = pending
+                    try:
+                        self.save_cleanup()
+                    finally:
+                        self.undo.clear()
+                    self.status('error', 'cleanup replay incomplete')
+                    return
+                journal.unlink()
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            self.status('error', str(error))
+            return
         try:
             self.prefix = discover(self.interface, self.source, self.resolvers)
             self.refreshed = time.monotonic()
