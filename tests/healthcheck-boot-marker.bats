@@ -2,6 +2,7 @@
 
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  export CERALIVE_HEALTHCHECK_ASSESSMENT="$BATS_TEST_TMPDIR/health-assessment"
   export CERALIVE_HEALTHCHECK_CONF="$BATS_TEST_TMPDIR/update.conf"
   export CERALIVE_HEALTHCHECK_MARKER="$BATS_TEST_TMPDIR/.slot-marked-good"
   export CERALIVE_HEALTHCHECK_BOOT_ID_FILE="$BATS_TEST_TMPDIR/boot_id"
@@ -388,7 +389,7 @@ assess_boot() {
 }
 
 @test "systemd verifies the enabled boot assessment graph and both ordering edges" {
-  command -v systemd-analyze >/dev/null || skip 'systemd-analyze unavailable'
+  command -v systemd-analyze >/dev/null
   local root="$BATS_TEST_TMPDIR/root" units
   units="$root/etc/systemd/system"
   mkdir -p "$units" "$root/usr/local/bin" "$root/usr/bin"
@@ -406,14 +407,71 @@ assess_boot() {
   systemctl --root="$root" enable ceralive-healthcheck.service ceralive-mark-good.service
   [ -L "$units/boot-complete.target.requires/ceralive-healthcheck.service" ]
   [ -L "$units/multi-user.target.wants/ceralive-mark-good.service" ]
-  run systemd-analyze --root="$root" verify multi-user.target ceralive-mark-good.service
+  run systemd-analyze --man=no --root="$root" verify multi-user.target ceralive-mark-good.service
   [ "$status" -eq 0 ]
   # An inverse edge must close a cycle: proves the edges are in the loaded graph.
   local edge
   for edge in 'boot-complete.target ceralive-healthcheck.service' 'ceralive-mark-good.service boot-complete.target'; do
     read -r later earlier <<< "$edge"
     printf '[Unit]\nDescription=Ordering probe\nAfter=%s\nBefore=%s\n[Service]\nExecStart=/usr/bin/true\n' "$later" "$earlier" > "$units/probe.service"
-    run systemd-analyze --root="$root" verify multi-user.target probe.service
+    run systemd-analyze --man=no --root="$root" verify multi-user.target probe.service
     [[ "$output" == *'ordering cycle'* ]]
   done
+}
+
+replay_hostname_retry() {
+  local original="$SYSTEMCTL_BIN"
+  export TEST_HEALTH_SYSTEMCTL="$original" TEST_HEALTH_SCRIPT="$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  local ctl="$BATS_TEST_TMPDIR/hostname-systemctl"
+  cat > "$ctl" <<'SH'
+#!/bin/bash
+case "$*" in
+  'is-active --quiet '*) exec "$TEST_HEALTH_SYSTEMCTL" "$@" ;;
+  '--no-block restart '*) bash "$TEST_HEALTH_SCRIPT" ;;
+  '--no-block start ceralive-mark-good.service') bash "$TEST_HEALTH_SCRIPT" --mark-good ;;
+  *) exit 90 ;;
+esac
+SH
+  chmod +x "$ctl"
+  eval "$(sed -n '/^restart_identity_consumers() {/,/^}/p' "$ROOT/mkosi/customize/postinst.d/hostname.sh")"
+  local -a CONSUMER_UNITS=(ceralive-healthcheck.service)
+  SYSTEMCTL_BIN="$ctl" restart_identity_consumers
+}
+
+@test "hostname retry confirms a slot when the failed first assessment recovers" {
+  TEST_SERVICE_FAIL=1 run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -ne 0 ]
+  run replay_hostname_retry
+  [ "$status" -eq 0 ]
+  grep -Fxq 'mark-good B' "$TEST_CALLS"
+}
+
+@test "hostname retry leaves the slot unconfirmed when assessment fails again" {
+  export TEST_SERVICE_FAIL=1
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -ne 0 ]
+  run replay_hostname_retry
+  run grep -q mark-good "$TEST_CALLS"
+  [ "$status" -eq 1 ]
+}
+
+@test "confirmation requires a successful assessment for this boot" {
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh" --mark-good
+  [ "$status" -ne 0 ]
+  run grep -q mark-good "$TEST_CALLS"
+  [ "$status" -eq 1 ]
+  bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  printf '2d7b1750-d034-4d34-91e3-a1d4c7a71257\n' > "$CERALIVE_HEALTHCHECK_BOOT_ID_FILE"
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh" --mark-good
+  [ "$status" -ne 0 ]
+}
+
+@test "a failed reassessment invalidates an earlier successful verdict" {
+  bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  TEST_SERVICE_FAIL=1 run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -ne 0 ]
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh" --mark-good
+  [ "$status" -ne 0 ]
+  run grep -q mark-good "$TEST_CALLS"
+  [ "$status" -eq 1 ]
 }

@@ -226,6 +226,7 @@ mock_run_healthcheck() {
    MOCK_RAUC_CALLS_FILE="${SIM}/rauc-calls" \
    MOCK_DPKG_AUDIT_FILE="${SIM}/dpkg-audit" \
    PATH="${SIM}/bin:${PATH}" \
+   CERALIVE_HEALTHCHECK_ASSESSMENT="${SIM}/health-assessment" \
    CERALIVE_HEALTHCHECK_CONF="${SIM}/data/ceralive/update.conf" \
    CERALIVE_HEALTHCHECK_MARKER="${SIM}/data/ceralive/.slot-marked-good" \
    CERALIVE_HEALTHCHECK_BOOT_ID_FILE="${SIM}/boot-id" \

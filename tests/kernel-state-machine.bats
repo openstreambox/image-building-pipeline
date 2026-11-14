@@ -10,6 +10,7 @@ setup() {
   export CERALIVE_KERNEL_STATE_LIB="${KERNEL_STATE_LIB_OVERRIDE:-$ROOT/mkosi/runtime/ceralive-kernel-state-lib.sh}"
   export CERALIVE_BOOT_STATE_FILE="$FIXTURE/boot-state"
   export BOOT_STATE_BIN="$ROOT/mkosi/platform/boot/ceralive-boot-state.sh"
+  export CERALIVE_HEALTHCHECK_ASSESSMENT="$FIXTURE/health-assessment"
   export CERALIVE_HEALTHCHECK_BOOT_ID_FILE="$FIXTURE/boot-id"
   export CERALIVE_HEALTHCHECK_CMDLINE_FILE="$FIXTURE/cmdline"
   export CERALIVE_HEALTHCHECK_CONF="$FIXTURE/update.conf"

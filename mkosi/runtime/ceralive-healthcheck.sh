@@ -66,6 +66,7 @@ source "${CERALIVE_KERNEL_STATE_LIB:-${state_lib}}"
 CONF="${CERALIVE_HEALTHCHECK_CONF:-/data/ceralive/update.conf}"
 MARKER="${CERALIVE_HEALTHCHECK_MARKER:-/data/ceralive/.slot-marked-good}"
 BOOT_ID_FILE="${CERALIVE_HEALTHCHECK_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+ASSESSMENT="${CERALIVE_HEALTHCHECK_ASSESSMENT:-/run/ceralive/health-assessment}"
 PARTLABEL_FAILURE="${CERALIVE_PARTLABEL_FAILURE:-/run/ceralive/partlabel-guard.failed}"
 UPDATES_DIR="${CERALIVE_DPKG_UPDATES_DIR:-/var/lib/dpkg/updates}"
 DPKG_STATUS_FILE="${CERALIVE_DPKG_STATUS_FILE:-/var/lib/dpkg/status}"
@@ -473,13 +474,32 @@ mark_good() {
   return 1
 }
 
+record_assessment() {
+  local temporary="${ASSESSMENT}.tmp.$$"
+  if mkdir -p "$(dirname "${ASSESSMENT}")" &&
+    printf '%s\n' "${BOOT_ID}" >"${temporary}" && mv -f "${temporary}" "${ASSESSMENT}"; then
+    return 0
+  fi
+  rm -f "${temporary}"
+  fail 'cannot record successful boot assessment'
+  return 1
+}
+
 main() {
+  # Never retain a passed verdict across a later failed assessment.
+  if [[ "${1:-}" != --mark-good ]]; then
+    rm -f "${ASSESSMENT}" || exit 1
+  fi
    partlabel_guard_ok && dpkg_integrity_ok && drill_guard_ok || exit 1
   load_conf
 
   if ! BOOT_ID="$(cat "${BOOT_ID_FILE}")" ||
     [[ ! ${BOOT_ID} =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
     fail "cannot establish current boot identity — slot left unconfirmed"
+    exit 1
+  fi
+  if [[ "${1:-}" == --mark-good ]] && ! grep -Fxq "${BOOT_ID}" "${ASSESSMENT}" 2>/dev/null; then
+    fail 'no successful assessment for this boot — slot left unconfirmed'
     exit 1
   fi
   if ! kernel_load_state "${CERALIVE_UPDATE_STATE_DIR:-${HEALTHY_STATE_FILE%/*}}"; then
@@ -496,6 +516,7 @@ main() {
   fi
   if marker_matches_boot && healthy_state_matches_boot; then
     kernel_confirm_boot || { fail 'kernel confirmation persistence failed'; exit 1; }
+    [[ "${1:-}" == --mark-good ]] || record_assessment || exit 1
     log "marker ${MARKER} matches this boot — already confirmed good; no-op"
     exit 0
   fi
@@ -520,6 +541,7 @@ main() {
     log "streaming healthcheck attempt #${attempt} (deadline in $(( deadline - $(date +%s) ))s)"
    if run_checks; then
         partlabel_guard_ok && dpkg_integrity_ok && drill_guard_ok || exit 1
+      record_assessment || exit 1
       log "all health checks passed — ready for boot completion"
       exit 0
     fi

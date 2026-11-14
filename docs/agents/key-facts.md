@@ -122,8 +122,11 @@ after all existing checks and RAUC mark-good succeed. The healthcheck is require
 before `boot-complete.target`; `ceralive-mark-good.service` requires and follows
 that target, invoking the script with `--mark-good` to retain the confirmation
 records and kernel-state handling. Slot-sync and boot-script sync follow this
-confirmation service. Health thresholds and retry policy are unchanged. Legacy
-timestamp-only
+confirmation service. A boot-ID-scoped verdict under `/run/ceralive/` is written
+only after successful assessment, cleared before reassessment, and required by
+the confirmation phase even when invoked directly. Hostname recovery requeues
+confirmation after restarting health so an initially failed boot can recover.
+Health thresholds and retry policy are unchanged. Legacy timestamp-only
 markers and previous-boot markers cannot suppress verification, on either an A/B
 swap or an ordinary reboot. Boot identity read failure is fail-closed.
 The manual OTA marker remover remains compatible but is not required for correctness.
@@ -1429,7 +1432,9 @@ booted: on 2026-09-21 the Rock 5B+ and the Orange Pi 5+ each promoted the image
 built from these pins to RAUC slot A and read `cerastream 2026.9.6` and
 `ceralive-device 2026.9.3-20260920T155654.ec522ad` back through `dpkg-query` on
 the booted slot, `systemctl --failed` empty, `ceralive-healthcheck.service`
-self-marking the slot good, `apt-get update` exit 0, and the previous production
+self-marking the slot good (that historical image combined assessment and
+confirmation; current images use the separate `ceralive-mark-good.service`),
+`apt-get update` exit 0, and the previous production
 payload retained good on slot B. That is a boot receipt, not hardware
 qualification of every stream path; the drill rows keep their own verdicts.
 
@@ -3361,7 +3366,8 @@ no replacement userspace build is needed.
   PR #187 cerastream `2026.9.6` pin) to RAUC slot A, booted it, and read
   `gstreamer1.0-rockchip-ceralive 1.14.4+ceralive.7` back through `dpkg-query`
   on the booted slot with `ceralive-healthcheck.service` self-marking the slot
-  good. That boot is the installed-package receipt; the per-element drill
+  good (before assessment and confirmation were split into separate services).
+  That boot is the installed-package receipt; the per-element drill
   verdicts stay in the fork's `tests/board/DRILL-RESULTS.md` and root
   `docs/COMPLETENESS-MATRIX.md` §2.2. The MPP pin is unchanged; the RGA R1 pin
   is described below.
