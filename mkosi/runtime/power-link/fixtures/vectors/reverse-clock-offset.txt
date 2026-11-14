@@ -1,0 +1,4 @@
+OSB1 up=10 seq=0 boot=1234abcd crc=D047
+OSB1 EVT up=8 diagnostic seq=1 boot=1234abcd rst=poweron alive=1 hot=none shutdowns=0 fw=test crc=DAB2
+OSB1 up=11 seq=2 boot=1234abcd crc=4868
+OSB1 EVT up=9 diagnostic seq=3 boot=1234abcd rst=poweron alive=1 hot=none shutdowns=0 fw=test crc=EA2D

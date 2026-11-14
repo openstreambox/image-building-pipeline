@@ -1,0 +1,1 @@
+OSB1 EVT up=0 seq=0 boot=1234abcd rst=poweron alive=1 hot=none shutdowns=0 fw=test crc=D789

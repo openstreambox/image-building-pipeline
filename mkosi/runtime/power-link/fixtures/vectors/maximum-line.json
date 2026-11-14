@@ -1,0 +1,27 @@
+[
+  {
+    "accepted": 1,
+    "restarts": 0,
+    "missed": 0,
+    "crc": 0,
+    "malformed": 0,
+    "oversize": 0,
+    "ignored": 0,
+    "unknown_version": 0,
+    "out_of_order": 0,
+    "seq": 0,
+    "boot": "1234abcd",
+    "have_status": true,
+    "rx_ms": 1000,
+    "fields": {
+      "up": "0",
+      "seq": "0",
+      "boot": "1234abcd",
+      "x": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "y": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "z": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "events": [],
+    "link": "ok"
+  }
+]

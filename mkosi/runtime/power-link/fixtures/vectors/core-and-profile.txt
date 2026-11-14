@@ -1,0 +1,1 @@
+OSB1 up=8 seq=9 boot=1234abcd power=holdup pack=discharging/23.5C/00 a=healthy/20.0V/-0.1A/na/00 gaps=0000 gaps2=8000 extension=x=y crc=D159

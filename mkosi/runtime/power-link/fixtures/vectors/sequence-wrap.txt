@@ -1,0 +1,3 @@
+OSB1 up=9 seq=4294967295 boot=1234abcd crc=7E2F
+OSB1 up=9 seq=0 boot=1234abcd crc=8718
+OSB1 up=9 seq=3 boot=1234abcd crc=643D

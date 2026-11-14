@@ -42,3 +42,6 @@ bsp-provenance.json
 # output tree so finished subimages are renamed rather than copied across devices.
 .mkosi-workspace/
 .build-secrets/
+
+# Host-only power-link vector adapter
+/mkosi/runtime/power-link/test-vectors

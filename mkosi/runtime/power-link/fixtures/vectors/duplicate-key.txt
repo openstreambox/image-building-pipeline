@@ -1,0 +1,1 @@
+OSB1 up=0 seq=0 boot=1234abcd seq=1 crc=3D08

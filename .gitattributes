@@ -1,0 +1,2 @@
+# Keep the deliberate CRLF rejection vector byte-exact and whitespace-checkable.
+mkosi/runtime/power-link/fixtures/vectors/crlf.txt -text whitespace=cr-at-eol

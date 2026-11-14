@@ -9,8 +9,11 @@ supervisor-power-link: power_link.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(LDFLAGS) -o $@ $<
 test-power-link: test_power_link.c power_link.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(LDFLAGS) -o $@ test_power_link.c
-check: test-power-link
+test-vectors: test_vectors.c power_link.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(LDFLAGS) -o $@ test_vectors.c
+check: test-power-link test-vectors
 	./test-power-link
+	python3 -I test_vectors.py
 	@if [ "$$(uname -s)" = Linux ]; then python3 test_service.py; else echo "Linux service tests require Linux"; fi
 install: supervisor-power-link
 	install -D -m 0755 supervisor-power-link $(DESTDIR)/usr/libexec/supervisor-power-link
@@ -20,4 +23,4 @@ install: supervisor-power-link
 	install -D -m 0644 79-power-supervisor.rules $(DESTDIR)/usr/lib/udev/rules.d/79-power-supervisor.rules
 	systemctl $(if $(DESTDIR),--root="$(DESTDIR)") enable supervisor-power-link.service
 clean:
-	rm -f supervisor-power-link test-power-link
+	rm -f supervisor-power-link test-power-link test-vectors

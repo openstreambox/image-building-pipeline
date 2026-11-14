@@ -1,0 +1,1 @@
+OSB1 EVT up=0 text boot=1234abcd seq=0 rst=x alive=1 hot=none shutdowns=0 fw=test crc=8325

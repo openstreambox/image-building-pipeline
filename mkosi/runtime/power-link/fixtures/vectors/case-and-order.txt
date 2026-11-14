@@ -1,0 +1,2 @@
+OSB1 boot=ABCDEF12  seq=01 up=0002 crc=37F7
+OSB1 up=2 seq=2 boot=abcdef12 crc=6B06

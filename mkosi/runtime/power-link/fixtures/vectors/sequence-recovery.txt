@@ -1,0 +1,4 @@
+OSB1 up=9 seq=100 boot=1234abcd crc=60B3
+OSB1 up=9 seq=0 boot=1234abcd crc=8718
+OSB1 up=9 seq=1 boot=1234abcd crc=29E4
+OSB1 up=9 seq=2 boot=1234abcd crc=CAC1

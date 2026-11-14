@@ -1,0 +1,1 @@
+OSB1 seq=0 boot=1234abcd crc=A283
