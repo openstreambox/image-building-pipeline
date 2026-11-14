@@ -247,3 +247,7 @@ tests/unsafe-storage.test.sh	shell	unit	default-shell	Terminal unsafe storage me
 tests/host-test-harness.test.sh	shell	unit	default-shell	checks scratch forwarding across the privilege boundary and failure propagation
 tests/ext4-population.test.sh	shell	unit	default-shell	x86 native and container formatter tool floor, explicit epoch and filesystem identity
 tests/real-rauc-fixture-lib.sh	helper	support	invoked-by-suite	Shared real RAUC slot geometry and isolated service device lookup
+tests/cellular-clat.bats	bats	unit	default-bats	RFC 7050, link lifecycle and image-owned service packaging
+tests/clat-test.py	helper	unit	invoked-by-suite	CLAT discovery and state regression tests
+tests/clat-netns.py	helper	privileged	opt-in	two synthetic cellular links, hotspot and real SRTLA through tayga
+tests/clat-nm-fixture.py	helper	privileged	invoked-by-suite	private NetworkManager D-Bus fixture for the CLAT network test
