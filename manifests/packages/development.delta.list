@@ -70,7 +70,8 @@
 #
 # Format: one package per line; `#` comments justify entries.
 
-# Python is now a shared runtime dependency of the power-key service.
+# Python is a shared runtime dependency of the power-key and attention services.
+# The historical size measurement above predates that change.
 
 # --- Kernel/syscall + wire tracing (ceraui-base DEVELOPMENT, removed.md §(e)) --
 strace                   # syscall tracing — the first tool reached for when a

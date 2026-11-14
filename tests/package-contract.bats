@@ -1900,11 +1900,14 @@ REPRO
   [ "$status" -eq 0 ]
 }
 
-@test "dev delta: strace is in the delta and NOT in the production shared list" {
-  # Use strace as the variant probe; Python now runs the shared button service.
+@test "dev delta: strace stays debug-only while attention's Python runtime is shared" {
   run grep -Ex 'strace[[:space:]]*(#.*)?' "$(DEV_DELTA_LIST)"
   [ "$status" -eq 0 ]
   run grep -qxF strace <(active_pkgs_of "$PIPELINE_DIR/manifests/packages/shared.list")
+  [ "$status" -ne 0 ]
+  run grep -qxF python3 <(active_pkgs_of "$PIPELINE_DIR/manifests/packages/shared.list")
+  [ "$status" -eq 0 ]
+  run grep -qxF python3 <(active_pkgs_of "$(DEV_DELTA_LIST)")
   [ "$status" -ne 0 ]
 }
 
@@ -2041,6 +2044,7 @@ REPRO
   run env CERALIVE_DEBUG_IMAGE=1 "$LIB_DIR/parity-check.sh" "$root"
   [ "$status" -ne 0 ]
   [[ "$output" == *"tcpdump"* ]]
+  [[ "$output" != *"python3"* ]]
   [[ "$output" == *"strace"* ]]
 }
 
