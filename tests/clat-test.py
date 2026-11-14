@@ -42,6 +42,7 @@ class Admission(unittest.TestCase):
             def start(self): self.undo.append('owned')
             def stop(self): self.undo.clear()
             def status(self,*args): pass
+            def repair_routes(self): pass
         with patch.object(clat, 'Link', Fake):
             controller = clat.Controller()
             controller.sync({'wan1': ('a','b',()), 'wan2': ('c','d',())})
@@ -51,5 +52,70 @@ class Admission(unittest.TestCase):
             self.assertTrue(made[1].undo)
             controller.sync({})
             self.assertFalse(made[1].undo)
+
+
+class Recovery(unittest.TestCase):
+    def test_nm_ipv6_dns_wire_shape(self):
+        import socket
+        self.assertEqual(clat.ip6_dns({'Nameservers': [list(socket.inet_pton(socket.AF_INET6, 'fe80::53'))]}), ('fe80::53',))
+
+    def test_temporary_source_is_excluded_and_order_is_stable(self):
+        def a(local, **kw): return dict(family='inet6', scope='global', local=local, **kw)
+        addresses = [a('2001:db8::3', temporary=True), a('2001:db8::2'), a('2001:db8::1')]
+        self.assertEqual(clat.eligible(addresses), ['2001:db8::1', '2001:db8::2'])
+        self.assertEqual(clat.eligible(addresses[::-1]), clat.eligible(addresses))
+
+    def test_revalidation_hysteresis_and_recovery(self):
+        from unittest.mock import Mock, patch
+        link = Mock(process=None, refreshed=0, failures=0, prefix='64:ff9b::/96')
+        controller = clat.Controller()
+        signature = ('a', 'b', ())
+        controller.links['wan1'] = (signature, link)
+        with patch.object(clat.time, 'monotonic', return_value=61), patch.object(clat, 'discover', side_effect=ValueError('timeout')):
+            controller.sync({'wan1': signature})
+        link.stop.assert_not_called()
+        self.assertEqual(link.failures, 1)
+        self.assertEqual(link.refreshed, 61)
+        with patch.object(clat.time, 'monotonic', return_value=122), patch.object(clat, 'discover', return_value=link.prefix):
+            controller.sync({'wan1': signature})
+        self.assertEqual(link.failures, 0)
+        with patch.object(clat.time, 'monotonic', side_effect=lambda: link.refreshed+61), patch.object(clat, 'discover', side_effect=ValueError('timeout')), patch.object(clat, 'restore_forwarding'):
+            for _ in range(3): controller.sync({'wan1': signature})
+        link.stop.assert_called_once_with('error', 'timeout')
+        self.assertFalse(controller.links)
+
+    def test_validated_prefix_change_withdraws(self):
+        from unittest.mock import Mock, patch
+        link = Mock(process=None, refreshed=0, failures=0, prefix='64:ff9b::/96')
+        controller = clat.Controller()
+        signature = ('a', 'b', ())
+        controller.links['wan1'] = (signature, link)
+        with patch.object(clat.time, 'monotonic', return_value=61), patch.object(clat, 'discover', return_value='2001:db8:64::/96'), patch.object(clat, 'restore_forwarding'):
+            controller.sync({'wan1': signature})
+        link.stop.assert_called_once_with()
+        self.assertFalse(controller.links)
+
+    def test_retry_survives_sync_exception(self):
+        from unittest.mock import Mock
+        action = Mock(side_effect=[OSError('status unavailable'), None])
+        self.assertTrue(clat.retry(action))
+        self.assertTrue(clat.retry(action))
+        self.assertEqual(action.call_count, 2)
+
+    def test_journal_precedes_mutation(self):
+        from unittest.mock import patch
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory, patch.object(clat, 'RUN', pathlib.Path(directory)), patch.object(clat.socket, 'if_nametoindex', return_value=3):
+            link = clat.Link('wan1', '2001:db8::1', '', ())
+            undo = ['ip', 'link', 'del', link.tun]
+            def crash(*args, **kw):
+                import json
+                self.assertEqual(json.loads((clat.RUN/'3.cleanup').read_text()), [undo])
+                raise SystemExit('crash')
+            with patch.object(clat, 'command', side_effect=crash) as mutate:
+                with self.assertRaises(SystemExit): link.add(['create'], undo)
+                mutate.assert_called_once()
+            self.assertEqual(link.undo, [undo])
+            self.assertTrue((clat.RUN/'3.cleanup').exists())
 
 if __name__ == '__main__': unittest.main()

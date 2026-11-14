@@ -6,9 +6,12 @@ stream receivers and IPv4 hotspot clients then need translation on the box.
 change modem profiles, reconnect a modem, or use NetworkManager dispatchers.
 
 The image service reads NetworkManager D-Bus device state (activated modem
-interfaces only). A native global IPv4 address excludes the link. A usable
-IPv6 source, default route (with or without a gateway), and per-link DNS
-servers are required. D-Bus changes
+interfaces only). A native global IPv4 address excludes the link. A stable,
+non-temporary IPv6 source, default route (with or without a gateway), and per-link DNS
+servers are required. IPv6 DNS comes from `IP6Config.Nameservers` (`aay`),
+as specified by the [NM 1.52 introspection XML](https://github.com/NetworkManager/NetworkManager/blob/1.52.0/introspection/org.freedesktop.NetworkManager.IP6Config.xml)
+and [NM 1.58 XML](https://github.com/NetworkManager/NetworkManager/blob/1.58.0/introspection/org.freedesktop.NetworkManager.IP6Config.xml).
+Link-local resolver scope stays bound to that interface. D-Bus changes
 trigger reconciliation, with a ten-second retry for failed discovery or a dead
 translator. Manager disappearance withdraws all grants.
 
@@ -20,7 +23,12 @@ same discovery confirms it; there is no guessed fallback. DNS64 is evidence
 from the network, not authenticated proof of an operator's identity. Prefixes
 are revalidated every 60 seconds and when the address/gateway/DNS grant
 changes. A changed prefix withdraws translation until the next retry; existing
-flows are not migrated. Snapshots refresh on each reconciliation (at most ten
+flows are not migrated. A failed refresh retains the current translation; three
+consecutive failures, spaced 60 seconds apart, withdraw it. A successful refresh
+resets the failure count. Each reconciliation repairs owned routes, including
+after an interface down/up with an unchanged grant. Unexpected synchronization
+errors are logged and the ten-second retry remains scheduled. Snapshots refresh
+on each reconciliation (at most ten
 seconds apart while discovery is healthy).
 
 Each link gets `clat<ifindex>`, an IPv4 /32 in reserved service space
@@ -41,14 +49,22 @@ lets hotspot clients use an available translator; ordinary lower-metric native
 routes take precedence. This is availability/failover, not hotspot bonding.
 NAT44 on each TUN supports forwarded IPv4 clients. Existing hotspot ownership,
 IPv4 forwarding, firewall and client admission remain with NetworkManager and
-the sharing service. This service owns only its `inet clat_<index>` NAT table.
+the sharing service. This service owns its `inet clat_<index>` NAT/filter table.
+Its IPv6 forward filter permits only the mapped source toward the discovered
+prefix and established replies on that translator. If IPv6 forwarding was
+previously disabled, unrelated IPv6 forwarding is dropped while CLAT is active;
+existing IPv4 hotspot admission remains with its owner. The TUN MTU is the
+uplink MTU minus 20 bytes for translation overhead (minimum TUN MTU 1280;
+smaller uplinks fail with a diagnostic). This keeps full-sized IPv4 TCP packets
+within the uplink MTU without relying on an MSS rewrite.
 It never flushes another owner's rules or tables.
 
 IPv6 forwarding is needed for translation. The controller enables the global
-switch while preserving other devices' forwarding values, enables forwarding
-on the owned TUN and cellular link, and sets that link's accept_ra=2 so RA
-continues during forwarding. Link settings and owned routes/rules/firewall/TUNs
-are restored/removed on withdrawal. A root-only runtime cleanup journal and
+switch while preserving devices' forwarding values. It does not change
+`accept_ra` or per-interface forwarding on NM-managed links: NetworkManager
+continues processing router advertisements in userspace. Owned
+routes/rules/firewall/TUNs are removed on withdrawal. A root-only runtime cleanup
+journal, written before each resource creation, and
 ExecStopPost handle service failure/restart. The previous global forwarding
 switch is restored when no translators remain and on service shutdown. The stock single-instance tayga service
 is masked; the image installs no replacement translator build.
@@ -74,6 +90,12 @@ the image contract only; CeraUI consumption is a separate change.
 ## Tests
 
 `bats tests/cellular-clat.bats` runs offline discovery/admission tests.
+`CERALIVE_RUN_CLAT_CONTRACT=required ./run-tests` runs the complete network
+contract. CI uses `CERALIVE_RUN_CLAT_CONTRACT=service` to run its service and UDP
+transport coverage without requiring first-party sender/receiver binaries; the
+complete mode additionally checks SRTLA. Missing dependencies fail the enabled
+gate.
+
 `tests/clat-netns.py` needs root, iproute2, nftables, tayga, Python with
 dnspython, dbus-python and PyGObject, and real
 `srtla_send` / `srtla_rec` binaries. Run it only inside fresh PID, mount and
@@ -86,6 +108,8 @@ link withdrawal with a surviving second link, teardown, and absent/bad prefixes.
 A private D-Bus fixture also runs the actual service through dual-stack, two
 IPv6-only grants and link-loss states. Foreign-table refusal, crash-journal
 cleanup and restoration of the global forwarding switch are also exercised.
+It also checks route repair after a flap, preserved NM sysctls, TUN MTU and
+the scoped IPv6 filter. Tayga runs in foreground mode without debug output.
 The real service lifecycle runs with the unit's restricted capability set and
 no-new-privileges.
 This proves packet forwarding, not encrypted SRT/video or carrier hardware.

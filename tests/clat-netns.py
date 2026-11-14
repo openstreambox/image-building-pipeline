@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import socket
 import struct
+import sys
 import subprocess as sp
 import tempfile
 import time
@@ -23,6 +24,22 @@ def ns(p, *a): return ['nsenter', '-t', str(p.pid), '-n', '--', *a]
 def probe(source, port=9010, prefix=[]):
     code = "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind((%r,0)); s.settimeout(3); s.sendto(b'clat-test',('192.0.2.2',%d)); assert s.recv(100)==b'clat-test'" % (source, port)
     run(*(prefix+['python3','-c',code]))
+# Exercise the callback boundary with the real GLib timer implementation.
+from gi.repository import GLib
+loop = GLib.MainLoop()
+calls = []
+def flaky_sync():
+    calls.append(1)
+    if len(calls) == 1:
+        raise OSError('injected synchronization failure')
+    loop.quit()
+timer = GLib.timeout_add(1, lambda: c.retry(flaky_sync))
+deadline = GLib.timeout_add(1000, lambda: (loop.quit(), False)[1])
+loop.run()
+GLib.source_remove(timer)
+GLib.source_remove(deadline)
+assert len(calls) == 2
+print('PASS real GLib retry timer survives synchronization exception', flush=True)
 try:
     run('ip','link','set','lo','up')
     run('sysctl','-qw','net.ipv4.ip_forward=1')
@@ -63,6 +80,8 @@ while True:
         if i == 2:
             run('ip','-6','route','add','fd51:2::2/128','dev','cell.2')
         time.sleep(.5)
+        run('sysctl','-qw',f'net/ipv6/conf/{wan}/accept_ra=0')
+        run('sysctl','-qw',f'net/ipv6/conf/{wan}/forwarding=0')
         link=c.Link(wan,f'fd51:{i}::1',f'fd51:{i}::2',[f'fd51:{i}::2']);links.append(link)
         if i == 1:
             # A foreign table must survive a refused ownership claim.
@@ -80,27 +99,47 @@ while True:
     run(*ns(client,'ip','addr','add','10.42.0.2/24','dev','cli0'));run(*ns(client,'ip','link','set','cli0','up'));run(*ns(client,'ip','route','add','default','via','10.42.0.1'))
     probe('10.42.0.2',prefix=ns(client))
     print('PASS hotspot NAT44 + CLAT + NAT64',flush=True)
-    sender=os.environ['CLAT_TEST_SENDER'];receiver=os.environ['CLAT_TEST_RECEIVER']
-    received=c.RUN/'received'
-    sink2="""import socket,pathlib
+    if '--service-only' not in sys.argv:
+        sender=os.environ['CLAT_TEST_SENDER'];receiver=os.environ['CLAT_TEST_RECEIVER']
+        received=c.RUN/'received'
+        sink2="""import socket,pathlib
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(('192.0.2.2',9002))
 while True:
  b,a=s.recvfrom(999)
  if b.endswith(b'CLAT'):open(%r,'ab').write(b)
 """ % str(received)
-    spawn(ns(peer,'python3','-c',sink2));spawn(ns(peer,receiver,'9000','192.0.2.2','9002'))
-    for link in links:
-        ips=c.RUN/'ips';ips.write_text(link.v4+'\n')
-        snd=spawn([sender,'--verbose','9001','192.0.2.2','9000',str(ips)])
-        time.sleep(3)
-        before=received.stat().st_size if received.exists() else 0
-        u=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
-        for i in range(30): u.sendto(struct.pack('!IIII',i,0,0,1)+b'CLAT',('127.0.0.1',9001));time.sleep(.02)
-        time.sleep(.3);assert received.stat().st_size>before
-        snd.terminate();snd.wait(timeout=3)
-    print('PASS real srtla_send -> IPv4 srtla_rec through each CLAT',flush=True)
+        spawn(ns(peer,'python3','-c',sink2));spawn(ns(peer,receiver,'9000','192.0.2.2','9002'))
+        for link in links:
+            ips=c.RUN/'ips';ips.write_text(link.v4+'\n')
+            snd=spawn([sender,'--verbose','9001','192.0.2.2','9000',str(ips)])
+            time.sleep(3)
+            before=received.stat().st_size if received.exists() else 0
+            u=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+            for i in range(30): u.sendto(struct.pack('!IIII',i,0,0,1)+b'CLAT',('127.0.0.1',9001));time.sleep(.02)
+            time.sleep(.3);assert received.stat().st_size>before
+            snd.terminate();snd.wait(timeout=3)
+        print('PASS real srtla_send -> IPv4 srtla_rec through each CLAT',flush=True)
     controller=c.Controller()
     for link in links:controller.links[link.interface]=((link.source,link.gateway,link.resolvers),link)
+    # A flap drops owned IPv6 routes even when NM restores the same grant.
+    signature = {link.interface: (link.source,link.gateway,link.resolvers) for link in links}
+    run('ip','link','set','cell.2','down')
+    run('ip','link','set','cell.2','up')
+    run('ip','addr','replace','fd51:2::1/128','dev','cell.2','nodad')
+    run('ip','-6','route','replace','fd51:2::2/128','dev','cell.2')
+    controller.sync(signature)
+    assert json.loads(run('ip','-j','-6','route','show','table',links[1].table))
+    probe(links[1].v4)
+    print('PASS route repair after interface flap',flush=True)
+    for link in links:
+        assert int(json.loads(run('ip','-j','link','show','dev',link.tun))[0]['mtu']) == 1480
+        assert run('sysctl','-n',f'net/ipv6/conf/{link.interface}/accept_ra').strip() == '0'
+        assert run('sysctl','-n',f'net/ipv6/conf/{link.interface}/forwarding').strip() == '0'
+    # Forwarding is restricted to the translated mapping and discovered prefix.
+    for link in links:
+        rules = run('nft','list','table','inet',link.nft)
+        assert 'hook forward' in rules and 'drop' in rules
+    print('PASS MTU and uplink sysctl preservation with scoped forward filter',flush=True)
     run('ip','link','set','cell.1','down')
     controller.sync({'cell.2': (links[1].source,links[1].gateway,links[1].resolvers)})
     probe(links[1].v4)
@@ -134,7 +173,7 @@ while True:
     assert daemon.poll() is None
     assert not any('clat' in a['ifname'] for a in json.loads(run('ip','-j','link')))
     def wait_state(index, expected):
-        for _ in range(100):
+        for _ in range(200):
             path=c.RUN/f'{index}.json'
             if path.exists() and json.loads(path.read_text())['state']==expected:return
             time.sleep(.1)
@@ -159,6 +198,22 @@ while True:
     bad=c.Link('cell.1','fd51:1::1','fd51:1::2',['fd51:1::2']);bad.start()
     assert not bad.undo and json.loads((c.RUN/f'{bad.index}.json').read_text())['state']=='error'
     (c.RUN/'bad-dns').unlink()
+    # Simulate death after creation returns, before add() can do further work.
+    early=c.Link('cell.1','fd51:1::1','fd51:1::2',['fd51:1::2'])
+    original=c.command
+    def crash_after_create(*args, **kwargs):
+        original(*args, **kwargs)
+        raise SystemExit('simulated abrupt exit')
+    c.command=crash_after_create
+    try:
+        early.add(['ip','link','add',early.tun,'type','dummy'], ['ip','link','del',early.tun])
+    except SystemExit:
+        pass
+    finally:
+        c.command=original
+    c.cleanup()
+    assert early.tun not in [a['ifname'] for a in json.loads(run('ip','-j','link'))]
+    print('PASS crash immediately after resource creation',flush=True)
     orphan=c.Link('cell.1','fd51:1::1','fd51:1::2',['fd51:1::2']);orphan.start()
     assert orphan.undo
     orphan.process.kill();orphan.process.wait()

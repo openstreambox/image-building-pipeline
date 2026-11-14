@@ -88,8 +88,22 @@ def set_forwarding(value):
 def eligible(addresses):
     if any(a['family'] == 'inet' and a['scope'] == 'global' for a in addresses):
         return []
-    return [a['local'] for a in addresses if a['family'] == 'inet6' and a['scope'] == 'global'
-            and not any(a.get(flag) for flag in ('tentative', 'deprecated', 'dadfailed'))]
+    return sorted(a['local'] for a in addresses if a['family'] == 'inet6' and a['scope'] == 'global'
+            and not any(a.get(flag) for flag in ('tentative', 'deprecated', 'dadfailed', 'temporary')))
+
+
+def ip6_dns(config):
+    # NM 1.52 and 1.58 IP6Config.Nameservers is aay, including link-local DNS.
+    return tuple(socket.inet_ntop(socket.AF_INET6, bytes(address))
+                 for address in config.get('Nameservers', []))
+
+
+def retry(action):
+    try:
+        action()
+    except Exception as error:
+        print(f'CLAT reconciliation failed: {error}', file=sys.stderr, flush=True)
+    return True
 
 
 class Controller:
@@ -112,18 +126,25 @@ class Controller:
                     self.links[interface] = (signature, link)
             else:
                 link = self.links[interface][1]
+                link.repair_routes()
                 if time.monotonic() - getattr(link, 'refreshed', time.monotonic()) >= 60:
                     try:
                         prefix = discover(link.interface, link.source, link.resolvers)
-                        link.refreshed = time.monotonic()
+                        link.failures = 0
                         if prefix != link.prefix:
                             link.stop()
                             del self.links[interface]
                             continue
                     except ValueError as error:
-                        link.stop('error', str(error))
-                        del self.links[interface]
+                        link.failures += 1
+                        if link.failures >= 3:
+                            link.stop('error', str(error))
+                            del self.links[interface]
+                            continue
+                        link.status('up', str(error))
                         continue
+                    finally:
+                        link.refreshed = time.monotonic()
                 link.status('up')
         if not self.links:
             restore_forwarding()
@@ -156,6 +177,7 @@ class Link:
         self.undo = []
         self.prefix = None
         self.forwarding = None
+        self.failures = 0
 
     def status(self, state, error=None):
         RUN.mkdir(parents=True, exist_ok=True)
@@ -168,9 +190,14 @@ class Link:
         temp.replace(path)
 
     def add(self, args, undo):
-        command(*args)
         self.undo.append(undo)
         self.save_cleanup()
+        try:
+            command(*args)
+        except subprocess.CalledProcessError:
+            self.undo.pop()
+            self.save_cleanup()
+            raise
 
     def save_cleanup(self):
         path = RUN / f'{self.index}.cleanup'
@@ -178,6 +205,14 @@ class Link:
         temp.write_text(json.dumps(self.undo))
         temp.chmod(0o600)
         temp.replace(path)
+
+    def repair_routes(self):
+        # Device down/up removes these routes without changing NM's grant.
+        for family, route in [('-4', ['default', 'dev', self.tun]),
+                              ('-6', ['default'] + (['via', self.gateway, 'onlink'] if self.gateway else []) + ['dev', self.interface])]:
+            command('ip', family, 'route', 'replace', 'table', self.table, *route)
+        command('ip', '-6', 'route', 'replace', self.v6 + '/128', 'dev', self.tun)
+        command('ip', '-4', 'route', 'replace', 'default', 'dev', self.tun, 'metric', self.table)
 
     def start(self):
         try:
@@ -197,6 +232,10 @@ class Link:
                 rules = json.loads(command('ip', '-j', family, 'rule'))
                 if any(str(rule.get('priority')) == self.priority for rule in rules):
                     raise ValueError('CLAT rule priority already owned')
+            tables = json.loads(command('nft', '-j', 'list', 'tables')).get('nftables', [])
+            if any(t.get('table', {}).get('family') == 'inet' and
+                   t['table'].get('name') == self.nft for t in tables):
+                raise ValueError('CLAT firewall table already owned')
             self.status('starting')
             self.forwarding = command('sysctl', '-n', 'net.ipv6.conf.all.forwarding').strip()
             if self.forwarding != '1':
@@ -208,10 +247,10 @@ class Link:
             cfg.write_text(f'tun-device {self.tun}\nipv4-addr 192.0.0.2\nipv6-addr fd46:4:ffff::{self.index:x}\nprefix {self.prefix}\nmap {self.v4} {self.v6}\n')
             self.add([TAYGA, '-c', str(cfg), '--mktun'], ['ip', 'link', 'del', self.tun])
             command('ip', 'link', 'set', self.tun, 'up')
-            for device, key, value in [(self.interface, 'accept_ra', '2'), (self.interface, 'forwarding', '1'), (self.tun, 'forwarding', '1')]:
-                setting = f'net/ipv6/conf/{device}/{key}'
-                old = command('sysctl', '-n', setting).strip()
-                self.add(['sysctl', '-qw', setting + '=' + value], ['sysctl', '-qw', setting + '=' + old])
+            mtu = int(json.loads(command('ip', '-j', 'link', 'show', 'dev', self.interface))[0]['mtu']) - 20
+            if mtu < 1280:
+                raise ValueError('uplink MTU too small for CLAT')
+            command('ip', 'link', 'set', self.tun, 'mtu', str(mtu))
             command('ip', 'addr', 'add', self.v4 + '/32', 'dev', self.tun)
             # Loose checks are needed only on our synthetic link; do not change WAN settings.
             command('sysctl', '-qw', f'net.ipv4.conf.{self.tun}.rp_filter=2')
@@ -226,14 +265,20 @@ class Link:
                      ['ip', '-6', 'route', 'del', self.v6 + '/128', 'dev', self.tun])
             self.add(['ip', '-4', 'route', 'add', 'default', 'dev', self.tun, 'metric', self.table],
                      ['ip', '-4', 'route', 'del', 'default', 'dev', self.tun, 'metric', self.table])
-            command('nft', 'create', 'table', 'inet', self.nft)
-            self.undo.append(['nft', 'delete', 'table', 'inet', self.nft])
-            self.save_cleanup()
+            self.add(['nft', 'create', 'table', 'inet', self.nft],
+                     ['nft', 'delete', 'table', 'inet', self.nft])
             command('nft', '-f', '-', data=f'''add chain inet {self.nft} post {{ type nat hook postrouting priority 110; }}
 add rule inet {self.nft} post oifname "{self.tun}" ip saddr != {self.v4} snat ip to {self.v4}
 add rule inet {self.nft} post oifname "{self.interface}" ip6 saddr {self.v6} snat ip6 to {self.source}
+add chain inet {self.nft} forward {{ type filter hook forward priority 0; }}
+add rule inet {self.nft} forward iifname "{self.tun}" oifname "{self.interface}" ip6 saddr {self.v6} ip6 daddr {self.prefix} accept
+add rule inet {self.nft} forward iifname "{self.interface}" oifname "{self.tun}" ip6 daddr {self.v6} ct state established,related accept
+add rule inet {self.nft} forward meta nfproto ipv6 iifname "{self.tun}" drop
+add rule inet {self.nft} forward meta nfproto ipv6 oifname "{self.tun}" drop
 ''')
-            self.process = subprocess.Popen([TAYGA, '-c', str(cfg), '-d', '-u', 'nobody', '-g', 'nogroup'])
+            if (RUN / 'forwarding').exists() and (RUN / 'forwarding').read_text().strip() == '0':
+                command('nft', '-f', '-', data=f'add rule inet {self.nft} forward meta nfproto ipv6 iifname != "clat*" oifname != "clat*" drop\n')
+            self.process = subprocess.Popen([TAYGA, '-c', str(cfg), '-n', '-u', 'nobody', '-g', 'nogroup'])
             time.sleep(.1)
             if self.process.poll() is not None:
                 raise RuntimeError('tayga exited during startup')
@@ -283,7 +328,7 @@ def main():
                         continue
                     config = props(dev['Ip6Config'], name + '.IP6Config')
                     gateway = str(config['Gateway'])
-                    dns = tuple(str(d['address']) for d in config.get('NameserverData', []))
+                    dns = ip6_dns(config)
                     has_default = gateway or json.loads(command('ip', '-j', '-6', 'route', 'show', 'default', 'dev', interface))
                     if sources and has_default:
                         wanted[interface] = (sources[0], gateway, dns)
@@ -293,8 +338,7 @@ def main():
         except Exception:
             # Manager loss invalidates every previous grant; no stale translation.
             wanted = {}
-        controller.sync(wanted)
-        return True
+        return retry(lambda: controller.sync(wanted))
     # D-Bus changes trigger reconciliation; periodic retry also recovers DNS/startup failures.
     pending = [False]
     def changed(*args, **kwargs):
