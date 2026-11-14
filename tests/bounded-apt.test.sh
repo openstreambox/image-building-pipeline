@@ -12,3 +12,12 @@ grep -Fxq 'Dir::Cache::pkgcache "";' "$w/config"
 grep -Fxq 'Dir::Cache::srcpkgcache "";' "$w/config"
 # No transaction hooks remove the lists that an install following update needs.
 ! grep -q 'Post-Invoke' "$w/etc/apt/apt.conf.d/82bounded-metadata"
+# Board-specific setup must follow the shared attention installation so every
+# board receives diagnostics before customization enters its optional path.
+python3 - <<'PY'
+from pathlib import Path
+s = Path('mkosi/customize/postinst.d/persistence.sh').read_text()
+body = s[s.index('setup_data_persistence() {'):]
+assert body.index('ceralive-attention.py') < body.index('install_bounded_apt_metadata /')
+assert body.count('install_bounded_apt_metadata /') == 1
+PY

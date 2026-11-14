@@ -80,9 +80,6 @@ setup_data_persistence() {
 
   log "persisting CeraLive state on ${data_root} (config/logs/wifi/srtla)"
 
-  if [[ "${BOARD_ID:-}" == rock-5b-plus ]]; then
-    install_bounded_apt_metadata /
-  fi
   local grow_order=""
   [[ "${BOARD_ID:-}" != rock-5b-plus ]] || grow_order=",x-systemd.after=ceralive-grow-data.service,x-systemd.requires=ceralive-grow-data.service"
   if ! grep -qE "^[^#]*[[:space:]]${data_root}[[:space:]]" /etc/fstab 2>/dev/null; then
@@ -103,6 +100,7 @@ setup_data_persistence() {
     install -m 0644 "${CERALIVE_RUNTIME_SRC:?}/${diagnostic_unit}" "/etc/systemd/system/${diagnostic_unit}"
   done
   if [[ "${BOARD_ID:-}" == rock-5b-plus ]]; then
+    install_bounded_apt_metadata /
     mkdir -p /etc/systemd/system/local-fs-pre.target.wants
     install -D -m 0755 "${CERALIVE_RUNTIME_SRC:?}/ceralive-grow-data.sh" /usr/libexec/ceralive/ceralive-grow-data
     cat >/etc/systemd/system/ceralive-grow-data.service <<UNIT
