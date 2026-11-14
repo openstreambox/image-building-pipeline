@@ -103,6 +103,7 @@ PY
   run bash -euo pipefail -c '
     eval "$(bash "$1/lib/resolve.sh" x86-minipc)"
     [[ "$ARCH" == x86-64 ]]
+    export COMPATIBLE_STRING="${COMPATIBLE_STRING:-ceralive-${BOARD_ID}}"
     source "$1/mkosi/customize/board-identity.sh"
     write_board_identity "$2" "$BOARD_ID" "$FAMILY" "$CAPABILITIES"
     [[ "$ARCH" == x86-64 ]]
