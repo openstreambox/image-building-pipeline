@@ -70,15 +70,17 @@ setup() {
 @test "documented stock output reader handles empty and populated fixture trees without writes" {
   store="$BATS_TEST_TMPDIR/pstore"
   mkdir -p "$store/123"
-  run find "$store" -type f -name '*ramoops*' -exec cat -- '{}' +
+  run find "$store" -type f -name '*ramoops*' -exec tail -v -n +1 -- '{}' +
   [ "$status" = 0 ]; [ -z "$output" ]
   printf 'panic fixture\n' > "$store/123/dmesg-ramoops-0"
   printf 'console fixture\n' > "$store/console-ramoops-0"
   before="$(find "$store" -type f -exec sha256sum '{}' +)"
-  run find "$store" -type f -name '*ramoops*' -exec cat -- '{}' +
+  run find "$store" -type f -name '*ramoops*' -exec tail -v -n +1 -- '{}' +
   [ "$status" = 0 ]; [[ "$output" == *'panic fixture'* && "$output" == *'console fixture'* ]]
+  [[ "$output" == *"==> $store/123/dmesg-ramoops-0 <=="* ]]
+  [[ "$output" == *"==> $store/console-ramoops-0 <=="* ]]
   [ "$before" = "$(find "$store" -type f -exec sha256sum '{}' +)" ]
-  grep -Fq -- "-name '*ramoops*' -exec cat" "$REPO/docs/reset-evidence.md"
+  grep -Fq -- "-name '*ramoops*' -exec tail -v -n +1" "$REPO/docs/reset-evidence.md"
 }
 
 @test "consecutive stock archive runs preserve the crash before a clean warm reboot" {
@@ -92,6 +94,8 @@ setup() {
   # Run the same ordered pre-step used by the service.
   helper="$REPO/mkosi/runtime/ceralive-pstore-rotate.sh"
   bash "$helper" "$store"
+  [ ! -e "$store/dmesg-ramoops-0" ]
+  [ ! -e "$store/console-ramoops-0" ]
   printf 'clean boot console\n' > "$source/console-ramoops-0"
   printf 'second panic\n' > "$source/dmesg-ramoops-0"
   /usr/lib/systemd/systemd-pstore "$source" "$store"
@@ -128,15 +132,89 @@ setup() {
 
 @test "rotation trims oversized historical collections" {
   store="$BATS_TEST_TMPDIR/store"
-  mkdir -p "$store/history/000-old" "$store/history/999-new"
-  truncate -s 33554432 "$store/history/000-old/console-ramoops-0"
-  printf 'keep me\n' > "$store/history/999-new/console-ramoops-0"
+  mkdir -p "$store/history/0000000001" "$store/history/0000000002" "$store/history/0000000003"
+  touch "$store/history/0000000003/.incomplete"
+  truncate -s 47185920 "$store/history/0000000001/console-ramoops-0"
+  printf 'keep me\n' > "$store/history/0000000002/console-ramoops-0"
   bash "$REPO/mkosi/runtime/ceralive-pstore-rotate.sh" "$store"
-  [ ! -d "$store/history/000-old" ]
-  grep -qx 'keep me' "$store/history/999-new/console-ramoops-0"
+  [ ! -d "$store/history/0000000001" ]
+  grep -qx 'keep me' "$store/history/0000000002/console-ramoops-0"
 }
 @test "installer rejects a missing runtime source with a useful error" {
   run bash -c 'source "$1/mkosi/customize/postinst.d/services.sh"; unset CERALIVE_RUNTIME_SRC; setup_reset_evidence' _ "$REPO"
   [ "$status" != 0 ]
   [[ "$output" == *'pstore runtime source not found'* ]]
+}
+
+clock_history() {
+  store="$BATS_TEST_TMPDIR/store"
+  mkdir -p "$store" "$BATS_TEST_TMPDIR/bin"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$CLOCK"\n' > "$BATS_TEST_TMPDIR/bin/date"
+  chmod +x "$BATS_TEST_TMPDIR/bin/date"
+  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  for i in $(seq 1 40); do
+    if [ "$1" = backward ] && [ "$i" -gt 31 ]; then
+      export CLOCK=2020-01-01T00:00:00Z
+    else
+      export CLOCK=2026-11-14T00:00:00Z
+    fi
+    printf 'crash %s\n' "$i" > "$store/dmesg-ramoops-0"
+    bash "$REPO/mkosi/runtime/ceralive-pstore-rotate.sh" "$store"
+  done
+  [ "$(find "$store/history" -mindepth 1 -maxdepth 1 -type d | wc -l)" = 31 ]
+  for i in $(seq 1 9); do ! grep -rx "crash $i" "$store"; done
+  for i in $(seq 10 40); do
+    grep -qx "crash $i" "$store/history/$(printf '%010d' "$i")/dmesg-ramoops-0"
+  done
+  grep -qx "$CLOCK" "$store/history/0000000040/collected-at"
+}
+@test "sequence pruning retains newest collections after a backward clock step" {
+  clock_history backward
+}
+@test "sequence pruning retains newest collections with a repeated boot epoch" {
+  clock_history repeated
+}
+@test "empty and interrupted rotations do not consume extra generations" {
+  store="$BATS_TEST_TMPDIR/store"
+  mkdir -p "$store/history/0000000001" "$store/history/0000000002" "$store/history/0000000003"
+  touch "$store/history/0000000003/.incomplete"
+  touch "$store/history/0000000002/.incomplete"
+  printf 'partial console\n' > "$store/history/0000000002/console-ramoops-0"
+  printf 'remaining crash\n' > "$store/dmesg-ramoops-0"
+  bash "$REPO/mkosi/runtime/ceralive-pstore-rotate.sh" "$store"
+  [ ! -d "$store/history/0000000001" ]
+  [ ! -e "$store/history/0000000002/.incomplete" ]
+  [ "$(find "$store/history" -mindepth 1 -maxdepth 1 -type d | wc -l)" = 1 ]
+  grep -qx 'remaining crash' "$store/history/0000000002/dmesg-ramoops-0"
+  grep -qx 'partial console' "$store/history/0000000002/console-ramoops-0"
+  [ ! -e "$store/dmesg-ramoops-0" ]
+}
+@test "sequence allocation retries a mkdir collision without merging collections" {
+  store="$BATS_TEST_TMPDIR/store"
+  mkdir -p "$store" "$BATS_TEST_TMPDIR/bin"
+  cat > "$BATS_TEST_TMPDIR/bin/mkdir" <<'SH'
+#!/bin/bash
+if [[ "$*" == *history/0000000001* ]]; then
+  /usr/bin/mkdir "$@"
+  printf 'other collection\n' > history/0000000001/console-ramoops-0
+  exit 1
+fi
+exec /usr/bin/mkdir "$@"
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/mkdir"
+  printf 'new crash\n' > "$store/dmesg-ramoops-0"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash "$REPO/mkosi/runtime/ceralive-pstore-rotate.sh" "$store"
+  grep -qx 'other collection' "$store/history/0000000001/console-ramoops-0"
+  grep -qx 'new crash' "$store/history/0000000002/dmesg-ramoops-0"
+}
+@test "decompressed collections fit the history size budget" {
+  store="$BATS_TEST_TMPDIR/store"
+  mkdir -p "$store/history"
+  for i in $(seq 1 31); do
+    dir="$store/history/$(printf '%010d' "$i")"
+    mkdir "$dir"
+    truncate -s 1398104 "$dir/dmesg-ramoops-0"
+  done
+  bash "$REPO/mkosi/runtime/ceralive-pstore-rotate.sh" "$store"
+  [ "$(find "$store/history" -mindepth 1 -maxdepth 1 -type d | wc -l)" = 31 ]
 }

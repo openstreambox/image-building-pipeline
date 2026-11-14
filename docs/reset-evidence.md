@@ -34,8 +34,12 @@ pstore remains available for recovery. Tmpfiles creates the private 0700
 archive. Before each stock collection, a small ordered pre-step moves existing
 flat ramoops files into a unique history directory so a later warm reboot cannot
 replace them. It retains at most 31 previous collections plus the current one,
-pruning the oldest directories first and limiting history to 31 MiB of apparent
-size. The current collection is bounded by the configured 1 MiB RAM reservation;
+pruning by zero-padded sequence number and limiting history to 44 MiB of apparent
+size. Allocation uses exclusive directory creation and retries collisions. The
+wall clock is saved only in `collected-at`; backward steps and repeated boot
+epochs do not affect retention. Empty allocations are removed, and interrupted
+moves resume in the same generation. With pstore decompression, the configured
+1 MiB RAM reservation can yield about 1.4 MiB in the current collection;
 filesystem metadata and block allocation add overhead. This is a rolling bound,
 not a promise to keep every crash indefinitely. A larger reservation requires
 reviewing this budget. Tmpfiles also makes files eligible for cleanup after
@@ -45,7 +49,7 @@ cleanup and the count/size limit can remove records sooner.
 For support export, use stock files (root permissions are required):
 
 ```sh
-sudo find /data/ceralive/pstore -type f -name '*ramoops*' -exec cat -- '{}' +
+sudo find /data/ceralive/pstore -type f -name '*ramoops*' -exec tail -v -n +1 -- '{}' +
 sudo journalctl -u systemd-pstore.service
 ```
 

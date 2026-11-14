@@ -18,8 +18,12 @@ del servicio conecta `/data/ceralive/pstore` con `/var/lib/systemd/pstore`.
 Tmpfiles crea el directorio con permisos 0700. Un paso previo mueve los archivos
 ramoops existentes a un directorio único antes de que el archivador estándar
 reemplace sus nombres. Conserva hasta 31 colecciones anteriores y la actual;
-elimina primero los directorios más antiguos y limita el historial a 31 MiB de
-tamaño aparente. La reserva de RAM limita la colección actual a 1 MiB, más la
+elimina por número de secuencia con ceros iniciales y limita el historial a 44 MiB de
+tamaño aparente. La creación exclusiva del directorio reintenta las colisiones.
+La hora queda solo como metadato en `collected-at`; los retrocesos del reloj o
+una época de arranque repetida no alteran el orden. Se eliminan las asignaciones
+vacías y los movimientos interrumpidos continúan en la misma generación. La
+descompresión de pstore puede producir unos 1.4 MiB desde la reserva de 1 MiB, más la
 sobrecarga del sistema de archivos. No se promete conservar cada fallo para
 siempre. Tmpfiles permite limpiar después de 30 días según sus reglas de acceso,
 modificación y cambio; las lecturas pueden retrasarlo y los límites pueden
@@ -29,7 +33,7 @@ de raíz A/B. Si falta `/data`, el servicio no ejecuta ni borra los registros.
 Lectura sin modificar archivos (requiere permisos de root):
 
 ```sh
-sudo find /data/ceralive/pstore -type f -name '*ramoops*' -exec cat -- '{}' +
+sudo find /data/ceralive/pstore -type f -name '*ramoops*' -exec tail -v -n +1 -- '{}' +
 sudo journalctl -u systemd-pstore.service
 ```
 
