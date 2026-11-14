@@ -90,3 +90,10 @@ PY
   [[ "$output" == *$'FAMILY\trk3566'* ]]
   [[ "$output" == *$'UPDATE_BOARD\texample'* ]]
 }
+@test "production baselines declare the exact profile update slug" {
+  for board in rock-5b-plus orange-pi-5-plus x86-minipc; do
+    baseline="$BATS_TEST_DIRNAME/manifests/fixtures/production-baseline/$board.params"
+    [ "$(grep -c '^UPDATE_BOARD=' "$baseline")" -eq 1 ]
+    grep -qx "UPDATE_BOARD='$board'" "$baseline"
+  done
+}
