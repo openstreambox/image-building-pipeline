@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Offline APT/cache policy and populated ext4 measurement; no mounts or network.
-set -euo pipefail
+set -Eeuo pipefail
+trap 'printf "FAIL: APT root reserve at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+for tool in apt-cache apt-get mkfs.ext4 dumpe2fs; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    printf 'SKIP: APT root reserve requires %s\n' "$tool"
+    exit 0
+  fi
+done
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/.." && pwd)"
 WORK="$(mktemp -d)"
@@ -55,9 +62,14 @@ apt-cache gencaches >/dev/null
 [[ ! -e "${WORK}/tree/var/cache/apt/pkgcache.bin" ]]
 [[ ! -e "${WORK}/tree/var/cache/apt/srcpkgcache.bin" ]]
 apt-cache show example | grep -q '^Version: 1.0$'
+apt-get -s install example >"${WORK}/install"
+grep -q '^Inst example ' "${WORK}/install"
+[[ ! -e "${WORK}/tree/var/cache/apt/pkgcache.bin" ]]
+[[ ! -e "${WORK}/tree/var/cache/apt/srcpkgcache.bin" ]]
 measure without-caches >"${WORK}/after"
 before="$(sed -n 's/.* field=bavail free=\([0-9]*\).*/\1/p' "${WORK}/before")"
 after="$(sed -n 's/.* field=bavail free=\([0-9]*\).*/\1/p' "${WORK}/after")"
 (( after > before ))
 cat "${WORK}/before" "${WORK}/after"
 printf 'APT binary-cache policy recovers %s available bytes in populated ext4 fixture\n' "$((after - before))"
+printf 'PASS: APT queries and simulated install do not regenerate binary caches\n'

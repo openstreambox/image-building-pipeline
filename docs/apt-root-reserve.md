@@ -40,10 +40,15 @@ lists remain slot-local; binary-cache suppression alone cannot budget them.
 
 `tests/apt-root-reserve.test.sh` uses isolated APT configuration, a synthetic
 package index and real `apt-cache gencaches`. It proves queries still work when
-both binary caches are disabled, and compares actual available bytes in populated
+both binary caches are disabled, including an `apt-get -s install` simulation.
+The absence of both cache files after the queries is the regression proof.
+It also compares actual available bytes in populated
 1 GiB ext4 fixtures before/after removal using `slot_reserve_assert_ext4`. No
 network, host APT state, mounts, device or full image build is involved. The
-small synthetic saving is not an estimate of production package-index size.
+small synthetic saving illustrates the space occupied by the removed files;
+it is not independent proof of cache suppression or an estimate of production
+package-index size. Query latency and peak RAM with a real Debian index remain
+unmeasured.
 
 For release evidence, run the existing populated-slot gate on each actual clean
 slot image (or `lib/verify-disk.sh check-slot <slot.ext4> rootfs_a`, then B).
