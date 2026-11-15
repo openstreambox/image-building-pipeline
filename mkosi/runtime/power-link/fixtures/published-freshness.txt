@@ -1,0 +1,12 @@
+OSB1 up=10 seq=0 boot=1234abcd power=ok gaps=0000 gaps2=0000 crc=FD80
+1,2,3 csv row
+1,2,3 csv row
+1,2,3 csv row
+1,2,3 csv row
+1,2,3 csv row
+OSB1 up=11 seq=1 boot=1234abcd power=ok gaps=0000 gaps2=0000 crc=6DD0
+OSB1 up=11 seq=1 boot=1234abcd power=ok gaps=0000 gaps2=0000 crc=6DD0
+OSB2 up=1 seq=9
+OSB1 up=12 seq=2 boot=1234abcd power=ok gaps=0000 gaps2=0000 crc=CD01
+waiting for download
+OSB1 up=13 seq=3 boot=1234abcd power=ok gaps=0000 gaps2=0000 crc=5D51

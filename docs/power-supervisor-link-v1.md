@@ -10,7 +10,8 @@ Decoder code and vectors use the repository license.
 compatibility; it is not a vendor check or a requirement to use a named board.
 Implementers may emit these ASCII frames from any USB serial microcontroller.
 No host commands, handshake or command responses are required. Emit status
-at least once per second for the five-second freshness window. This is an open
+at least once per second for the five-second freshness window (see
+[Interpretation and freshness](#interpretation-and-freshness)). This is an open
 specification, not a USB class or an Internet standard. Emitters use a new boot
 identifier on each restart and a shared increasing sequence across frame kinds.
 `up` is elapsed whole seconds. Keep it non-decreasing within each frame kind,
@@ -170,6 +171,18 @@ Its firmware remains responsible for protection and shutdown policy. Extending
 this vocabulary or adapting a different UPS protocol needs separate consumer
 support; the reader does not infer electrical behavior from arbitrary keys.
 
+### Interpretation and freshness
+
+A receiver interprets only a current status. A status is current while it was
+accepted less than 5000 ms ago on the receiver's monotonic clock, with no
+restart, disconnect, bootloader indication or `unknown_version` line since; at
+exactly 5000 ms it is no longer current. A status frame that itself establishes
+a restart becomes the new current status. Other rejected or ignored lines
+neither refresh nor invalidate it. While no status is current, every
+interpretation is unknown and nothing is healthy: `power`, `thermal`,
+protection and every temperature quality are unknown. Retained fields stay
+available as diagnostics, never as current readings.
+
 ### Alignment with existing power-device names
 
 The semantic names below follow NUT and USB HID Power Device terminology where
@@ -229,9 +242,12 @@ All values remain strings. Unknown enum values/flag bits mean unknown, not
 healthy. Decimal measurements carry suffixes V, A and C; `na` is unavailable,
 `uncal` is an uncalibrated temperature. Negative currents/temperatures are
 valid. Decimal measurements use an optional minus sign, decimal digits, an optional
-fraction (`.` followed by digits), then the unit suffix. Bank/pack flags use
-two hex digits; unknown set bits provide no protection assurance. Hex flags
-are bit sets, not decimal counters.
+fraction (`.` followed by digits), then the unit suffix. A temperature is
+reported only when its value, read as the nearest IEEE 754 double, lies
+from -273.15 to 1000 degrees C inclusive. Anything outside that range is
+unknown, as is any value not matching this grammar: `5000C` is unknown, not
+reported. Bank/pack flags use two hex digits; unknown set bits provide no
+protection assurance. Hex flags are bit sets, not decimal counters.
 
 - `a`, `b`: `state[:cause]/voltage/current/temperature/flags-hex`.
   States: absent, present, healthy, sagging, standing_down, stood_down,
@@ -246,6 +262,8 @@ are bit sets, not decimal counters.
   computer is powered off; it is a historical wire spelling.
 - `gaps` and `gaps2`: four hex digits each; combined mask is
   `gaps | (gaps2 << 16)`, after decoding both as unsigned hexadecimal.
+  Protection needs both masks; if either is missing or invalid, protection is
+  unknown. Any set bit, including an unknown one, means reduced protection.
   Combined bits 0..17: unarmed, pack_uncal, pack_est, pack_probe, a_probe,
   b_probe, blind, no_alive, shdn, nvs, wdt, skip, loop, blind_start,
   pack_flaky, sink, supply_unproven, pack_jump. Each set bit denotes missing
@@ -279,7 +297,11 @@ keys wherever globally reserved v1 keys would otherwise change meaning.
 wire lines with expected decoded state after each line. They include the
 same-kind and first-kind restart rules, plus uptime rollover. Separate
 semantic cases cover core power/thermal vocabulary and profile protection
-and temperature quality. A zero gap mask means only no reported gaps, never
+and temperature quality, including the temperature range limits. The
+`sparse-event-rollover` vector covers a rollover seen by only one frame kind.
+`published-semantics` and `published-freshness` check that every
+interpretation becomes unknown after a restart, at the 5000 ms deadline and on
+a special link state. A zero gap mask means only no reported gaps, never
 hardware qualification. The C test adapter invokes the production
 parser; the independent Python reference decoder uses only the standard library
 and runs with `python3 -I`. Both run under `make -C mkosi/runtime/power-link check`.

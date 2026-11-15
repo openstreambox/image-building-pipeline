@@ -48,15 +48,11 @@ static int find_fields(const struct field *fields, size_t nfields, const char *k
         if (!strcmp(fields[i].key, key)) return (int)i;
     return -1;
 }
+static const char *get_field(const struct field *fields, size_t nfields, const char *key) {
+    int i = find_fields(fields, nfields, key); return i < 0 ? NULL : fields[i].value;
+}
 static const char *get_fields(const struct fieldset *s, const char *key) {
-    int i = find_fields(s->fields, s->nfields, key);
-    return i < 0 ? NULL : s->fields[i].value;
-}
-static int find_field(const struct state *s, const char *key) {
-    return find_fields(s->fields, s->nfields, key);
-}
-static const char *get(const struct state *s, const char *key) {
-    int i = find_field(s, key); return i < 0 ? NULL : s->fields[i].value;
+    return get_field(s->fields, s->nfields, key);
 }
 static int number(const char *p, unsigned base, uint32_t *out) {
     if (!p || !*p) return 0;
@@ -250,33 +246,35 @@ static const char *known(const char *value, const char *const *names) {
     for (; *names; ++names) if (value && !strcmp(value, *names)) return value;
     return "unknown";
 }
-static void semantics(FILE *f, const struct state *s) {
+/* Interpret a status field list. An empty list (NULL, 0) yields all unknown. */
+static void semantics(FILE *f, const struct field *fields, size_t nfields) {
     const char *const powers[] = {"ok", "none", "low", "holdup", NULL};
     const char *const thermals[] = {"normal", "warm", "hot", "critical", "shutdown", NULL};
-    const char *power = known(get(s, "power"), powers);
+    const char *power = known(get_field(fields, nfields, "power"), powers);
     uint32_t lo, hi;
-    const char *g = get(s, "gaps"), *g2 = get(s, "gaps2");
+    const char *g = get_field(fields, nfields, "gaps"), *g2 = get_field(fields, nfields, "gaps2");
     const char *protection = "unknown";
-    const char *profile = get(s, "profile");
+    const char *profile = get_field(fields, nfields, "profile");
     int profile_known = !profile || !strcmp(profile, "dual-input-reserve-v1");
     if (profile_known && g && g2 && strlen(g) == 4 && strlen(g2) == 4 &&
         number(g, 16, &lo) && number(g2, 16, &hi))
         protection = lo || hi ? "reduced" : "no_reported_gaps";
     fprintf(f, "{\"power\":\"%s\",\"power_healthy\":%s,\"thermal\":\"%s\",\"protection\":\"%s\",\"temperature_quality\":{",
             power, !strcmp(power, "ok") ? "true" : "false",
-            known(get(s, "thermal"), thermals), protection);
+            known(get_field(fields, nfields, "thermal"), thermals), protection);
     const char *keys[] = {"a", "b", "pack"};
     for (int i = 0; i < 3; ++i) {
         if (i) fputc(',', f);
         json_string(f, keys[i]); fputc(':', f);
         double n = 0;
-        json_string(f, temperature_quality(profile_known ? get(s, keys[i]) : NULL, i < 2, &n));
+        json_string(f, temperature_quality(profile_known ? get_field(fields, nfields, keys[i]) : NULL, i < 2, &n));
     }
     fputs("}}", f);
 }
 static void published_semantics(FILE *f, const struct state *s, int connected, uint64_t now) {
-    static const struct state unknown;
-    semantics(f, !strcmp(link_state(s, connected, now), "ok") ? s : &unknown);
+    /* Retained fields are diagnostics only; interpret just a current status. */
+    if (!strcmp(link_state(s, connected, now), "ok")) semantics(f, s->fields, s->nfields);
+    else semantics(f, NULL, 0);
 }
 #ifndef POWER_LINK_NO_MAIN
 static uint64_t mono_ms(void) {
@@ -321,7 +319,7 @@ static int publish(struct state *s, int connected, int ambiguous, uint64_t now, 
     const char *keys[] = {"a", "b", "pack"};
     for (int i = 0; i < 3; ++i) {
         if (i) fputc(',', f);
-        json_string(f, keys[i]); fputc(':', f); temperature(f, get(s, keys[i]), i < 2);
+        json_string(f, keys[i]); fputc(':', f); temperature(f, get_field(s->fields, s->nfields, keys[i]), i < 2);
     }
     fprintf(f, "},\"restarts\":%" PRIu64 ",\"missed_lines\":%" PRIu64 ",\"accepted_lines\":%" PRIu64
             ",\"rejected\":{\"crc\":%" PRIu64 ",\"malformed\":%" PRIu64 ",\"oversize\":%" PRIu64

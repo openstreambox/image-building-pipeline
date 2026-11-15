@@ -9,7 +9,7 @@ int main(int argc, char **argv) {
         now += 1000; feed(&s, line, (size_t)n, now);
         if (argc == 2 && (!strcmp(argv[1], "--semantics") || !strcmp(argv[1], "--published-semantics"))) {
             if (!strcmp(argv[1], "--published-semantics")) published_semantics(stdout, &s, 1, now);
-            else semantics(stdout, &s);
+            else semantics(stdout, s.fields, s.nfields);
             putchar('\n'); continue;
         }
         printf("{\"accepted\":%" PRIu64 ",\"restarts\":%" PRIu64 ",\"missed\":%" PRIu64

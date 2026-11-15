@@ -66,6 +66,8 @@ class ServiceTest(unittest.TestCase):
         self.assertIn('once per second (heartbeat), plus once at stop', doc)
         self.assertIn('its age is 3000 ms or more', doc)
         self.assertIn('expected false and persist_error false', doc)
+        self.assertIn('when frames of the same kind arrive on both sides of the rollover window', doc)
+        self.assertIn('Only values from -273.15 to 1000 C are reported', doc)
 
     def test_missing_data_at_startup(self):
         with tempfile.TemporaryDirectory() as tmp:

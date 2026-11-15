@@ -124,5 +124,47 @@
         "pack": "unknown"
       }
     }
+  },
+  {
+    "fields": "a=healthy/5V/1A/-273.15C/00 b=healthy/5V/1A/1000C/00 pack=ready/1000.0C/00",
+    "expected": {
+      "power": "unknown",
+      "power_healthy": false,
+      "thermal": "unknown",
+      "protection": "unknown",
+      "temperature_quality": {
+        "a": "reported",
+        "b": "reported",
+        "pack": "reported"
+      }
+    }
+  },
+  {
+    "fields": "a=healthy/5V/1A/-273.150C/00 b=healthy/5V/1A/-0C/00 pack=ready/0999.999C/00",
+    "expected": {
+      "power": "unknown",
+      "power_healthy": false,
+      "thermal": "unknown",
+      "protection": "unknown",
+      "temperature_quality": {
+        "a": "reported",
+        "b": "reported",
+        "pack": "reported"
+      }
+    }
+  },
+  {
+    "fields": "a=healthy/5V/1A/-273.16C/00 b=healthy/5V/1A/1000.01C/00 pack=ready/5000C/00",
+    "expected": {
+      "power": "unknown",
+      "power_healthy": false,
+      "thermal": "unknown",
+      "protection": "unknown",
+      "temperature_quality": {
+        "a": "unknown",
+        "b": "unknown",
+        "pack": "unknown"
+      }
+    }
   }
 ]

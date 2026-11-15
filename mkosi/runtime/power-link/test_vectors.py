@@ -23,13 +23,31 @@ class VectorTest(unittest.TestCase):
                     self.assertEqual(json.loads(result.stdout), case['expected'])
 
     def test_invalidated_semantics(self):
-        wire = (HERE / 'fixtures/published-semantics.txt').read_bytes()
-        expected = json.loads((HERE / 'fixtures/published-semantics.json').read_text())
-        for command in ([os.fspath(HERE / 'test-vectors'), '--published-semantics'],
-                        [sys.executable, '-I', os.fspath(HERE / 'reference_decoder.py'), '--published-semantics']):
-            with self.subTest(decoder=command[0]):
-                result = subprocess.run(command, input=wire, capture_output=True, check=True)
-                self.assertEqual([json.loads(row) for row in result.stdout.splitlines()], expected)
+        # published-freshness: one line per second, so a status expires on the
+        # fifth line after it, and special link states invalidate it at once.
+        for name in ('published-semantics', 'published-freshness'):
+            wire = (HERE / f'fixtures/{name}.txt').read_bytes()
+            expected = json.loads((HERE / f'fixtures/{name}.json').read_text())
+            for command in ([os.fspath(HERE / 'test-vectors'), '--published-semantics'],
+                            [sys.executable, '-I', os.fspath(HERE / 'reference_decoder.py'), '--published-semantics']):
+                with self.subTest(vector=name, decoder=command[0]):
+                    result = subprocess.run(command, input=wire, capture_output=True, check=True)
+                    self.assertEqual([json.loads(row) for row in result.stdout.splitlines()], expected)
+
+    def test_no_state_sized_static_object(self):
+        # struct state holds a 1000-line event ring (about 523 KB). A const
+        # zeroed copy lands in read-only data and ships in every binary;
+        # sanitizer builds of the adapter stay well below this limit.
+        self.assertLess((HERE / 'test-vectors').stat().st_size, 512 * 1024)
+
+    def test_specification_states_interpretation_rules(self):
+        spec = ' '.join((HERE.parents[2] / 'docs/power-supervisor-link-v1.md').read_text().split())
+        for phrase in ('### Interpretation and freshness', 'accepted less than 5000 ms ago',
+                       'every interpretation is unknown and nothing is healthy',
+                       'from -273.15 to 1000 degrees C inclusive',
+                       'if either is missing or invalid, protection is unknown',
+                       '`published-semantics`', '`published-freshness`', '`sparse-event-rollover`'):
+            self.assertTrue(phrase in spec, phrase)
 
     def test_conformance(self):
         vectors = sorted((HERE / 'fixtures/vectors').glob('*.txt'))

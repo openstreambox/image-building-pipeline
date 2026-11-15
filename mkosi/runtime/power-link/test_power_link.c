@@ -40,9 +40,9 @@ int main(void) {
     assert(crc16("123456789", 9) == 0x29b1);
     struct state s = {0}; char line[513];
     status(line, 0, "01234567"); feed(&s, line, strlen(line), 1000);
-    assert(get(&s, "pack_cal") != NULL);
+    assert(get_field(s.fields, s.nfields, "pack_cal") != NULL);
     assert(s.rx_ms == 1000 && s.seq == 0 && s.accepted == 1);
-    assert(!strcmp(s.fields[find_field(&s, "pack_cal")].value, "datasheet"));
+    assert(!strcmp(s.fields[find_fields(s.fields, s.nfields, "pack_cal")].value, "datasheet"));
     line[20] ^= 1; feed(&s, line, strlen(line), 2000);
     assert(s.bad_crc == 1 && s.rx_ms == 1000);
     status(line, 3, "01234567"); feed(&s, line, strlen(line), 3000);
@@ -144,6 +144,35 @@ int main(void) {
         assert(strstr(json, mode ? "\"power_healthy\":false" : "\"power_healthy\":true"));
         assert(strstr(json, mode ? "\"protection\":\"unknown\"" : "\"protection\":\"no_reported_gaps\""));
         fclose(out);
+    }
+    /* Freshness gate: current for 4999 ms after acceptance, unknown from 5000 ms,
+     * and unknown at once on a special link state. */
+    for (int mode = 0; mode < 4; ++mode) {
+        struct state gate = {0};
+        frame(line, "OSB1 up=10 seq=0 boot=01234567 power=ok gaps=0000 gaps2=0000");
+        feed(&gate, line, strlen(line), 1000);
+        if (mode == 2) feed(&gate, "OSB2 up=1\n", 10, 2000);
+        if (mode == 3) feed(&gate, "waiting for download\n", 21, 2000);
+        FILE *out = tmpfile(); assert(out);
+        published_semantics(out, &gate, 1, mode == 1 ? 6000 : 5999);
+        rewind(out);
+        char json[512] = {0};
+        assert(fread(json, 1, sizeof json - 1, out) > 0);
+        assert(strstr(json, mode ? "\"power_healthy\":false" : "\"power_healthy\":true"));
+        assert(strstr(json, mode ? "\"power\":\"unknown\"" : "\"power\":\"ok\""));
+        fclose(out);
+    }
+    /* Temperatures are reported only from -273.15 to 1000 C inclusive. */
+    const struct { const char *raw; const char *quality; double celsius; } temps[] = {
+        {"ready/-273.15C/00", "reported", -273.15}, {"ready/1000C/00", "reported", 1000},
+        {"ready/1000.000C/00", "reported", 1000}, {"ready/-0C/00", "reported", 0},
+        {"ready/-273.16C/00", "unknown", 7}, {"ready/1000.001C/00", "unknown", 7},
+        {"ready/5000C/00", "unknown", 7}, {"ready/-5000C/00", "unknown", 7},
+    };
+    for (size_t i = 0; i < sizeof temps / sizeof temps[0]; ++i) {
+        double celsius = 7;
+        assert(!strcmp(temperature_quality(temps[i].raw, 0, &celsius), temps[i].quality));
+        assert(celsius == temps[i].celsius);
     }
     puts("power-link parser/state tests passed");
 }
