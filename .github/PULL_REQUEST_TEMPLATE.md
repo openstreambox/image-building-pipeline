@@ -1,3 +1,9 @@
+<!--
+This is a working fork of CERALIVE/image-building-pipeline. Please open pull requests upstream:
+https://github.com/CERALIVE/image-building-pipeline/pulls
+Pull requests here are for work on the fork itself.
+-->
+
 ## Summary
 Describe what this PR changes and why.
 
