@@ -20,10 +20,7 @@ assert data["format"] == "verity", "OS bundle is not verity"
 images = [image["rootfs"] for image in data["images"] if "rootfs" in image]
 assert len(images) == 1, "bundle must have exactly one rootfs image"
 assert images[0]["filename"] == "rootfs.ext4", "bundle has wrong rootfs image"
-allowed = [int(sys.argv[1])]
-if data["compatible"] == "ceralive-rock-5b-plus":
-    allowed = [3221225472, 3221225472]
-assert images[0]["size"] in allowed, "bundle rootfs is not a full slot"
+assert images[0]["size"] == int(sys.argv[1]), "bundle rootfs is not a full slot"
 assert "block-hash-index" in images[0]["adaptive"], "bundle lacks adaptive index"
 assert data["compatible"], "bundle has no compatible"
 print(data["compatible"])

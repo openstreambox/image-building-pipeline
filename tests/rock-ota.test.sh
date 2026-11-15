@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source lib/shared/layout.sh
-[[ "$(BOARD_ID=rock-5b-plus ceralive_min_media_bytes)" == 8589934592 ]]
+[[ "$(BOARD_ID=rock-5b-plus ceralive_min_media_bytes)" == 15000000000 ]]
 grep -q 'Unsupported root partition geometry' mkosi/runtime/ceralive-layout-install-check.sh
 if grep -q 'CERALIVE_LAYOUT_PROFILE' lib/shared/layout.sh; then exit 1; fi
 
@@ -15,7 +15,7 @@ rauc_fixture_slot_images "$work"
 rauc_fixture_gpt "$work"
 for part in 1 2; do
   sectors=$(sgdisk -i "$part" "$work/gpt.raw" | awk '/Partition size:/{print $3}')
-  [[ "$((sectors * 512))" == 3221225472 ]]
+  [[ "$((sectors * 512))" == 4294967296 ]]
 done
 rauc_fixture_device_map "$work" "$work/slot-a.ext4" "$work/slot-b.ext4"
 [[ "$(PATH="$work/bin:$PATH" readlink -f /dev/disk/by-partlabel/rootfs_a)" == "$work/slot-a.ext4" ]]
@@ -34,7 +34,7 @@ for slot in a b; do
   rc=0
   PATH="$work/bin:$PATH" sh mkosi/runtime/ceralive-layout-install-check.sh install-check >"$work/refused" 2>&1 || rc=$?
   [[ "$rc" == 78 ]]
-  grep -q 'expected 3 GiB root slots' "$work/refused"
+  grep -q 'expected 4 GiB root slots' "$work/refused"
   rauc_fixture_slot_images "$work"
 done
 # The mapping can switch to GPT partitions without changing the signed hook.

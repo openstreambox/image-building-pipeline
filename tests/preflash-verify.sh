@@ -657,8 +657,8 @@ check_target_capacity() {
   local img="$1" target_bytes="$2" board="$3" image_bytes required_bytes
   image_bytes="$(stat -c '%s' "${img}")"
   required_bytes="$(BOARD_ID="$board" ceralive_min_media_bytes)"
-  if [[ "$board" == rock-5b-plus && "$required_bytes" == 8589934592 ]]; then
-    info 'ROCK 5B+ requires at least 8 GiB (8589934592 measured bytes); a retail 8 GB card is too small.'
+  if [[ "$board" == rock-5b-plus && "$required_bytes" == 15000000000 ]]; then
+    info 'ROCK 5B+ requires a 16 GB card or larger (measured floor 15000000000 bytes).'
   fi
   (( required_bytes >= image_bytes )) || required_bytes="$image_bytes"
   if (( target_bytes >= required_bytes )); then

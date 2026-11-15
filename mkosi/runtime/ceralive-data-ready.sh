@@ -29,7 +29,7 @@ refuse() {
 }
 root=$(readlink -f "$(findmnt -nro SOURCE /)")
 root_bytes=$(lsblk -bdnro SIZE "$root")
-[[ "$root_bytes" == 3221225472 ]] || refuse 'unsupported root partition size'
+[[ "$root_bytes" == 4294967296 ]] || refuse 'unsupported root partition size'
 minimum_media=$CERALIVE_MIN_MEDIA_BYTES
 root_parent=$(lsblk -dnro PKNAME "$root")
 [[ "$root_parent" =~ ^[a-zA-Z0-9._-]+$ ]] || refuse 'invalid boot disk parent'
