@@ -29,13 +29,25 @@ resets the failure count. Each reconciliation repairs owned routes, including
 after an interface down/up with an unchanged grant. A route repair error withdraws
 only that link and leaves other links reconciling. Unexpected synchronization
 errors are logged and the ten-second retry remains scheduled. Status-write
-faults are logged without withdrawing a working translator. Teardown continues
-after cleanup command timeouts and keeps the recovery journal. Before retrying a
+faults are logged without withdrawing a working translator. Teardown first
+atomically publishes `unavailable`, before signalling tayga or
+removing any resource. If that invalidation cannot be written, teardown is
+deferred and retried; the last snapshot still expires. Teardown continues after
+cleanup command timeouts and keeps the recovery journal. Nonzero undo exits
+are failures too: only a successful, resource-specific kernel query proving
+absence makes a failed delete safe to forget. An unreadable/failed query keeps
+the inverse. Failed inverses retain their original order and are replayed on
+subsequent reconciliations, even if the modem's grant never returns. The
+snapshot remains `error` and forwarding restoration is deferred until cleanup
+settles. A failure to stop the child retains all resource inverses. Before
+retrying a
 still-wanted link, startup replays that journal ahead of discovery and ownership
 checks. An interrupted replay keeps the journal for the next retry; only a
 completed replay removes it.
-Snapshots refresh on each reconciliation (at most ten seconds apart while
-discovery is healthy).
+Reconciliation is scheduled every ten seconds, but synchronous discovery and
+route work can delay publication across links. A delayed observation never
+extends its lease: availability expires after 30 seconds, even if translation
+still works. Readers must tolerate a safe, temporary withdrawal under load.
 
 Each link gets `clat<ifindex>`, an IPv4 /32 in reserved service space
 `10.254.0.0/19`, and a private IPv6 mapping in `fd46:4:4::/112`.
@@ -80,7 +92,12 @@ continues processing router advertisements in userspace. Owned
 routes/rules/firewall/TUNs are removed on withdrawal. A root-only runtime cleanup
 journal, written before each resource creation, and
 ExecStopPost handle service failure/restart. The previous global forwarding
-switch is restored when no translators remain and on service shutdown. The stock single-instance tayga service
+switch is restored only when no translators or pending resource inverses remain.
+The runtime directory survives a clean stop as well as a restart, so a failed
+ExecStopPost returns nonzero without losing its recovery intent. Journals are
+fsynced before atomic replacement (including the directory); they survive a
+process crash, not a reboot of the volatile `/run` filesystem. A reboot also
+removes the kernel resources they describe. The stock single-instance tayga service
 is masked; the image installs no replacement translator build.
 
 ## Read-only CeraUI contract
@@ -89,17 +106,71 @@ is masked; the image installs no replacement translator build.
 root-writable directory. Readers never write it or control the service.
 
 ```json
-{"schema_version":1,"interface":"wwan0","tun":"clat3","prefix":"64:ff9b::/96","ipv4":"10.254.0.3","state":"up","last_error":null,"updated_at":1794614400}
+{"schema_version":2,"interface":"wwan0","ifindex":3,"tun":"clat3","tun_ifindex":7,"prefix":"64:ff9b::/96","ipv4":"10.254.0.3","state":"up","last_error":null,"boot_id":"e35d2950-56b9-4324-858a-c577b756106b","invocation_id":"5f31d8d55f3141faa50e248d73538aae","generation":"375be5e8cd6d4179909196f2d42ae78ca","updated_at":1794614400,"observed_at":120.0,"expires_at":150.0}
 ```
 
-`state` is `starting`, `up`, `down` or `error`; `prefix` can be null before
-successful discovery. `last_error` is null or a diagnostic string. Missing
-service/file, unknown schema, stale timestamp or any state other than `up`
-means unavailable. Readers must also check the service is running and TUN
-exists; a snapshot alone is not a liveness lease. Use `ipv4` as the sender bind
-source, and `tun` if specifying an IPv4 bind device; the cellular interface has
-no IPv4 address. Withdraw that source when unavailable. This change supplies
-the image contract only; CeraUI consumption is a separate change.
+All 15 fields are required:
+
+| Field | Type and meaning |
+| --- | --- |
+| `schema_version` | Integer `2`. Version 1 readers must treat v2 as unknown and therefore unavailable; there is no parallel v1 snapshot. |
+| `interface`, `ifindex` | String physical interface name and integer kernel ifindex; filename is `<ifindex>.json`. |
+| `tun`, `tun_ifindex` | String translator TUN name and integer kernel ifindex; the latter is null until the TUN is created. |
+| `prefix` | Validated RFC 6052 prefix string, or null before discovery. |
+| `ipv4` | String translated IPv4 /32 address. |
+| `state` | `starting`, `up`, `unavailable`, `down` or `error`. Only `up` is eligible. |
+| `last_error` | Null or diagnostic string. The first two failed prefix refreshes may retain `up` with a diagnostic. |
+| `boot_id` | Kernel `/proc/sys/kernel/random/boot_id`, UUID string. |
+| `invocation_id` | systemd's 32-hex `INVOCATION_ID`, matching the unit's `InvocationID`. Direct test launches get a fresh random process token instead. |
+| `generation` | Opaque random 32-hex token, renewed on every link activation/setup attempt, even when interface names/ifindices are reused. A changed NM device path or ActiveConnection also withdraws/recreates the link. |
+| `updated_at` | Integer Unix wall-clock seconds when this snapshot was written; diagnostic only, never an availability clock. |
+| `observed_at` | Finite number of seconds on Linux `CLOCK_BOOTTIME`, sampled **before** collecting NM grants and this link's discovery/route/liveness reconciliation, not at publication. This monotonic clock includes suspend and is scoped to `boot_id`. |
+| `expires_at` | Finite `CLOCK_BOOTTIME` seconds: `observed_at + 30` for `up`; equal to `observed_at` for every other state. |
+
+The writer uses a sibling temporary file plus rename, so readers see a complete
+old or new snapshot. Rename is not a transaction with kernel or unit state.
+The producer refuses to publish `up` for an already expired/future observation
+or a dead tayga child. Child death is reconciled on the ten-second callback;
+blocking work can delay it, so the expiry remains mandatory even while the main
+unit is live. Refresh/traffic success is not implied by an `up` lease.
+
+Consumers must fail closed:
+
+- Read only bounded, regular, root-owned files in the trusted root-writable
+  directory. Missing, unreadable, malformed, unknown-version or invalid field
+  types/enums/addresses mean unavailable. Require a supported prefix, usable
+  IPv4, safe names, positive ifindices and nonempty well-formed identity tokens.
+- Require `boot_id` to match this boot, `state == "up"`, and
+  `0 <= observed_at <= now < expires_at` using **CLOCK_BOOTTIME** on the same
+  machine. Require `expires_at - observed_at == 30`; reject stale or future
+  monotonic timestamps with no future-skew allowance. Wall-clock jumps in
+  `updated_at` cannot renew or expire the lease. Never renew it by reading it.
+- Require this specific unit active/running with a live MainPID, and match
+  `invocation_id` to its current `InvocationID`. Invalidate cached eligibility
+  on any boot, invocation or generation change. `Type=simple` active alone
+  does not mean ready.
+- Match filename/physical ifindex and interface to the current modem identity.
+  Require an administratively-up **TUN**, the exact `tun_ifindex`, and the
+  assigned snapshot IPv4 /32. Reused names/ifindices alone confer no identity.
+- Recheck unit, physical device, TUN and snapshot identity immediately before
+  asynchronous publication. Fence publication/withdrawal with the consumer's
+  modem/session generation and existing sender reload path. Reconcile/poll as
+  well as watching: rename replaces a watched inode. Invalidate on mismatches.
+
+These checks provide bounded fail-closed availability, not race-free activation
+authority. A crash during teardown leaves an unavailable snapshot and a replayable
+inverse. Startup and ExecStopPost invalidate all previous snapshots before any
+undo. Cleanup's final `down`/`error` rewrite samples fresh diagnostic and monotonic
+time and gives **zero** availability lifetime; it never preserves or renews an
+old `up` timestamp. It preserves the old activation identity for withdrawal;
+a new service activation publishes its own invocation and generation.
+
+Use `ipv4` as the sender bind source and `tun` as its IPv4 bind device. Keep
+one logical modem/physical-link identity, avoiding a duplicate translated link.
+Withdraw the source when unavailable. CeraUI is a **consumer only**: it must not
+start a translator, repair routes/firewall/TUNs or restore forwarding. Those
+resources have one owner, this image service. This change supplies the image
+contract only; CeraUI consumption is a separate change.
 
 ## Tests
 

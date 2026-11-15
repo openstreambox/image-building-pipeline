@@ -24,6 +24,7 @@ class Object(dbus.service.Object):
         state = snapshot[i]
         if interface.endswith('.Device'):
             return dict(DeviceType=dbus.UInt32(8),State=dbus.UInt32(state),IpInterface='cell.'+i,
+                        ActiveConnection=dbus.ObjectPath(base+'/ActiveConnection/'+i),
                         Ip6Config=dbus.ObjectPath('/' if snapshot.get('ipv4_only') and i=='1' else base+'/IP6Config/'+i))
         return dict(Gateway=f'fd51:{i}::2', Nameservers=dbus.Array([
             dbus.ByteArray(socket.inet_pton(socket.AF_INET6, f'fd51:{i}::2'))], signature='ay'))

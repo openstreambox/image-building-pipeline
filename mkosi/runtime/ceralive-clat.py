@@ -10,9 +10,84 @@ import socket
 import subprocess
 import time
 import sys
+import uuid
 
 RUN = Path('/run/ceralive/clat')
 TAYGA = '/usr/sbin/tayga'
+BOOT_ID = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+INVOCATION_ID = os.environ.get('INVOCATION_ID') or uuid.uuid4().hex
+MAX_AGE = 30
+
+
+def boot_time():
+    # Includes suspend; the lease must expire while the machine is asleep too.
+    return time.clock_gettime(time.CLOCK_BOOTTIME)
+
+
+def atomic_json(path, data, durable=False):
+    temp = path.with_suffix('.tmp')
+    with temp.open('w') as stream:
+        os.fchmod(stream.fileno(), 0o600 if durable else 0o644)
+        stream.write(json.dumps(data) + '\n')
+        if durable:
+            stream.flush()
+            os.fsync(stream.fileno())
+    temp.replace(path)
+    if durable:
+        fd = os.open(path.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def undo_absent(args):
+    # Never infer absence from translated stderr or another failed command.
+    if args[:4] == ['nft', 'delete', 'table', 'inet']:
+        tables = json.loads(command('nft', '-j', 'list', 'tables'))['nftables']
+        return not any(t.get('table', {}).get('family') == 'inet' and
+                       t['table']['name'] == args[4] for t in tables)
+    if args[:3] == ['ip', 'link', 'del']:
+        return not any(d['ifname'] == args[3] for d in json.loads(command('ip', '-j', 'link', 'show')))
+    if args[0] == 'ip' and args[1] in ('-4', '-6'):
+        family = args[1]
+        if args[2:4] == ['rule', 'del']:
+            rules = json.loads(command('ip', '-j', family, 'rule', 'show'))
+            priority, source, table = args[5], args[7], args[9]
+            return not any(str(r.get('priority')) == priority and
+                           r.get('src', '').split('/')[0] == source and
+                           str(r.get('table')) == table for r in rules)
+        if args[2:4] == ['route', 'flush']:
+            routes = json.loads(command('ip', '-j', family, 'route', 'show', 'table', 'all'))
+            return not any(str(r.get('table')) == args[5] for r in routes)
+        if args[2:4] == ['route', 'del']:
+            routes = json.loads(command('ip', '-j', family, 'route', 'show', 'table', 'all'))
+            default = '0.0.0.0/0' if family == '-4' else '::/0'
+            def network(value):
+                return ip.ip_network(default if value == 'default' else value, strict=False)
+            return not any(network(r.get('dst', 'default')) == network(args[4]) and
+                           r.get('dev') == args[6] and
+                           ('metric' not in args or str(r.get('metric')) == args[8]) for r in routes)
+    return False
+
+
+def replay(path):
+    pending = []
+    for args in reversed(json.loads(path.read_text())):
+        try:
+            try:
+                command(*args)
+            except subprocess.CalledProcessError:
+                if not undo_absent(args):
+                    raise
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError) as error:
+            pending.insert(0, args)
+            print(f'CLAT cleanup failed: {error}', file=sys.stderr, flush=True)
+    if pending:
+        atomic_json(path, pending, durable=True)
+    else:
+        path.unlink()
+    return pending
 
 
 def command(*args, check=True, data=None):
@@ -110,41 +185,53 @@ class Controller:
     def __init__(self):
         self.links = {}
 
-    def sync(self, wanted):
+    def sync(self, wanted, observed_at=None):
+        observed_at = boot_time() if observed_at is None else observed_at
+        # Retry orphaned inverses even if their NM grant never returns.
+        cleanup(exclude={link.index for _, link in self.links.values()})
         for interface, (signature, link) in list(self.links.items()):
-            if wanted.get(interface) != signature or (link.process and link.process.poll() is not None):
-                link.stop()
-                del self.links[interface]
+            try:
+                same_index = socket.if_nametoindex(interface) == link.index
+            except OSError:
+                same_index = False
+            if link.stopping or not same_index or wanted.get(interface) != signature or (link.process and link.process.poll() is not None):
+                if link.stop():
+                    del self.links[interface]
         for interface, signature in wanted.items():
             if interface not in self.links:
                 try:
                     link = Link(interface, *signature)
                 except (OSError, ValueError):
                     continue
-                link.start()
+                if any(other.index == link.index for _, other in self.links.values()):
+                    continue
+                link.start(observed_at=observed_at)
                 if link.undo:
                     self.links[interface] = (signature, link)
             else:
                 link = self.links[interface][1]
+                if link.stopping:
+                    continue
+                link.observed_at = observed_at
                 try:
                     link.repair_routes()
                 except subprocess.SubprocessError as error:
-                    link.stop('error', str(error))
-                    del self.links[interface]
+                    if link.stop('error', str(error)):
+                        del self.links[interface]
                     continue
                 if time.monotonic() - getattr(link, 'refreshed', time.monotonic()) >= 60:
                     try:
                         prefix = discover(link.interface, link.source, link.resolvers)
                         link.failures = 0
                         if prefix != link.prefix:
-                            link.stop()
-                            del self.links[interface]
+                            if link.stop():
+                                del self.links[interface]
                             continue
                     except ValueError as error:
                         link.failures += 1
                         if link.failures >= 3:
-                            link.stop('error', str(error))
-                            del self.links[interface]
+                            if link.stop('error', str(error)):
+                                del self.links[interface]
                             continue
                         link.status('up', str(error))
                         continue
@@ -152,7 +239,7 @@ class Controller:
                         link.refreshed = time.monotonic()
                 link.status('up')
         if not self.links:
-            restore_forwarding()
+            cleanup()
 
 
 def restore_forwarding():
@@ -163,7 +250,7 @@ def restore_forwarding():
 
 
 class Link:
-    def __init__(self, interface, source, gateway, resolvers):
+    def __init__(self, interface, source, gateway, resolvers, activation=None):
         if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', interface):
             raise ValueError('unsupported interface name')
         source = str(ip.IPv6Address(source))
@@ -183,19 +270,32 @@ class Link:
         self.prefix = None
         self.forwarding = None
         self.failures = 0
+        self.generation = uuid.uuid4().hex
+        self.stopping = False
+        self.final_state, self.final_error = 'down', None
+        self.observed_at = boot_time()
+        self.tun_index = None
 
     def status(self, state, error=None):
         try:
             RUN.mkdir(parents=True, exist_ok=True)
             path = RUN / f'{self.index}.json'
-            temp = path.with_suffix('.tmp')
-            temp.write_text(json.dumps(dict(schema_version=1, interface=self.interface,
-                tun=self.tun, prefix=self.prefix, ipv4=self.v4, state=state,
-                last_error=error, updated_at=int(time.time()))) + '\n')
-            temp.chmod(0o644)
-            temp.replace(path)
+            now = boot_time()
+            if state == 'up' and (now >= self.observed_at + MAX_AGE or
+                                  self.observed_at > now or
+                                  not self.process or self.process.poll() is not None):
+                state, error = 'unavailable', 'liveness observation expired or translator exited'
+            observed = self.observed_at if state == 'up' else now
+            atomic_json(path, dict(schema_version=2, interface=self.interface,
+                ifindex=self.index, tun=self.tun, tun_ifindex=self.tun_index,
+                prefix=self.prefix, ipv4=self.v4, state=state, last_error=error,
+                boot_id=BOOT_ID, invocation_id=INVOCATION_ID, generation=self.generation,
+                updated_at=int(time.time()), observed_at=observed,
+                expires_at=observed + MAX_AGE if state == 'up' else observed))
+            return True
         except OSError as error:
             print(f'CLAT {self.interface} status write failed: {error}', file=sys.stderr, flush=True)
+            return False
 
     def add(self, args, undo):
         self.undo.append(undo)
@@ -208,11 +308,7 @@ class Link:
             raise
 
     def save_cleanup(self):
-        path = RUN / f'{self.index}.cleanup'
-        temp = path.with_suffix('.journal')
-        temp.write_text(json.dumps(self.undo))
-        temp.chmod(0o600)
-        temp.replace(path)
+        atomic_json(RUN / f'{self.index}.cleanup', self.undo, durable=True)
 
     def repair_routes(self):
         # Device down/up removes these routes without changing NM's grant.
@@ -222,31 +318,22 @@ class Link:
         command('ip', '-6', 'route', 'replace', self.v6 + '/128', 'dev', self.tun)
         command('ip', '-4', 'route', 'replace', 'default', 'dev', self.tun, 'metric', self.table, 'mtu', str(self.ipv4_mtu))
 
-    def start(self):
-        # Replay before discovery or ownership checks can reject leftover resources.
-        # Retain failed undo commands until a later retry succeeds.
+    def start(self, observed_at=None):
+        self.observed_at = boot_time() if observed_at is None else observed_at
+        # Never admit a new activation before the prior inverse has settled.
         journal = RUN / f'{self.index}.cleanup'
         try:
             if journal.exists():
-                pending = []
-                for args in reversed(json.loads(journal.read_text())):
-                    try:
-                        command(*args)
-                    except (OSError, subprocess.SubprocessError) as error:
-                        pending.insert(0, args)
-                        print(f'CLAT {self.interface} cleanup replay failed: {error}', file=sys.stderr, flush=True)
-                if pending:
-                    self.undo = pending
-                    try:
-                        self.save_cleanup()
-                    finally:
-                        self.undo.clear()
+                if not self.status('unavailable', 'cleanup replay in progress'):
+                    return
+                if replay(journal):
                     self.status('error', 'cleanup replay incomplete')
                     return
-                journal.unlink()
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             self.status('error', str(error))
             return
+        self.generation = uuid.uuid4().hex
+        self.stopping = False
         try:
             self.prefix = discover(self.interface, self.source, self.resolvers)
             self.refreshed = time.monotonic()
@@ -268,7 +355,8 @@ class Link:
             if any(t.get('table', {}).get('family') == 'inet' and
                    t['table'].get('name') == self.nft for t in tables):
                 raise ValueError('CLAT firewall table already owned')
-            self.status('starting')
+            if not self.status('starting'):
+                return
             self.forwarding = command('sysctl', '-n', 'net.ipv6.conf.all.forwarding').strip()
             if self.forwarding != '1':
                 global_state = RUN / 'forwarding'
@@ -322,11 +410,18 @@ add rule inet {self.nft} forward meta nfproto ipv6 oifname "{self.tun}" drop
             time.sleep(.1)
             if self.process.poll() is not None:
                 raise RuntimeError('tayga exited during startup')
+            self.tun_index = socket.if_nametoindex(self.tun)
             self.status('up')
         except Exception as error:
             self.stop('error', str(error))
 
     def stop(self, state='down', error=None):
+        if not self.stopping:
+            self.final_state, self.final_error = state, error
+        self.stopping = True
+        # Invalidation is the commit point before any destructive action.
+        if not self.status('unavailable', self.final_error or 'cleanup in progress'):
+            return False
         try:
             if self.process and self.process.poll() is None:
                 self.process.terminate()
@@ -335,26 +430,18 @@ add rule inet {self.nft} forward meta nfproto ipv6 oifname "{self.tun}" drop
                 except subprocess.TimeoutExpired:
                     self.process.kill()
                     self.process.wait(timeout=3)
-        except (OSError, subprocess.SubprocessError) as failure:
-            print(f'CLAT {self.interface} process cleanup failed: {failure}', file=sys.stderr, flush=True)
-        pending = []
-        for args in reversed(self.undo):
-            try:
-                command(*args, check=False)
-            except (OSError, subprocess.SubprocessError) as failure:
-                pending.insert(0, args)
-                print(f'CLAT {self.interface} cleanup failed: {failure}', file=sys.stderr, flush=True)
-        self.undo = pending
-        try:
-            if pending:
+            journal = RUN / f'{self.index}.cleanup'
+            if self.undo and not journal.exists():
                 self.save_cleanup()
-            else:
-                (RUN / f'{self.index}.cleanup').unlink(missing_ok=True)
-        except OSError as failure:
-            print(f'CLAT {self.interface} cleanup journal failed: {failure}', file=sys.stderr, flush=True)
-        # Pending recovery belongs to the journal, not the live-link marker.
-        self.undo.clear()
-        self.status(state, error)
+            if journal.exists():
+                self.undo = replay(journal)
+            if self.undo:
+                self.status('error', 'cleanup incomplete')
+                return False
+        except (OSError, ValueError, subprocess.SubprocessError) as failure:
+            self.status('error', f'cleanup incomplete: {failure}')
+            return False
+        return self.status(self.final_state, self.final_error)
 
 
 def main():
@@ -369,6 +456,7 @@ def main():
     def props(path, interface):
         return dbus.Interface(bus.get_object(name, path), 'org.freedesktop.DBus.Properties').GetAll(interface)
     def reconcile():
+        observed_at = boot_time()
         wanted = {}
         try:
             manager = dbus.Interface(bus.get_object(name, '/org/freedesktop/NetworkManager'), name)
@@ -387,14 +475,14 @@ def main():
                     dns = ip6_dns(config)
                     has_default = gateway or json.loads(command('ip', '-j', '-6', 'route', 'show', 'default', 'dev', interface))
                     if sources and has_default:
-                        wanted[interface] = (sources[0], gateway, dns)
+                        wanted[interface] = (sources[0], gateway, dns, (str(path), str(dev['ActiveConnection'])))
                 except Exception:
                     # A disappearing/incomplete device must not withdraw its neighbours.
                     continue
         except Exception:
             # Manager loss invalidates every previous grant; no stale translation.
             wanted = {}
-        return retry(lambda: controller.sync(wanted))
+        return retry(lambda: controller.sync(wanted, observed_at=observed_at))
     # D-Bus changes trigger reconciliation; periodic retry also recovers DNS/startup failures.
     pending = [False]
     def changed(*args, **kwargs):
@@ -416,25 +504,56 @@ def main():
         loop.run()
     finally:
         controller.sync({})
-        cleanup()
+        cleanup(exclude={link.index for _, link in controller.links.values()})
 
 
-def cleanup():
-    for path in RUN.glob('*.cleanup'):
-        for args in reversed(json.loads(path.read_text())):
-            command(*args, check=False)
-        path.unlink()
-    restore_forwarding()
+def cleanup(exclude=()):
+    failed = False
+    # Invalidate *all* old snapshots before the first destructive command.
+    snapshots = {}
     for path in RUN.glob('*.json'):
-        data = json.loads(path.read_text())
-        data['state'] = 'down'
-        temp = path.with_suffix('.tmp')
-        temp.write_text(json.dumps(data) + '\n')
-        temp.chmod(0o644)
-        temp.replace(path)
+        if int(path.stem) in exclude:
+            continue
+        try:
+            data = json.loads(path.read_text())
+            now = boot_time()
+            for key, value in dict(ifindex=int(path.stem), tun_ifindex=None, boot_id=BOOT_ID,
+                                   invocation_id=INVOCATION_ID, generation=uuid.uuid4().hex).items():
+                data.setdefault(key, value)
+            data.update(schema_version=2, state='unavailable', last_error='cleanup in progress',
+                        updated_at=int(time.time()), observed_at=now, expires_at=now)
+            atomic_json(path, data)
+            snapshots[path.stem] = data
+        except (OSError, ValueError) as error:
+            print(f'CLAT invalidation failed: {error}', file=sys.stderr, flush=True)
+            return False
+    pending = set()
+    for path in RUN.glob('*.cleanup'):
+        if int(path.stem) in exclude:
+            continue
+        try:
+            if replay(path):
+                pending.add(path.stem)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            print(f'CLAT recovery failed: {error}', file=sys.stderr, flush=True)
+            pending.add(path.stem)
+    if not list(RUN.glob('*.cleanup')) and not exclude:
+        try:
+            restore_forwarding()
+        except (OSError, subprocess.SubprocessError) as error:
+            print(f'CLAT forwarding restore failed: {error}', file=sys.stderr, flush=True)
+            failed = True
+    for index, data in snapshots.items():
+        now = boot_time()
+        data.update(state='error' if index in pending or failed else 'down',
+                    last_error='cleanup incomplete' if index in pending or failed else None,
+                    updated_at=int(time.time()), observed_at=now, expires_at=now)
+        atomic_json(RUN / f'{index}.json', data)
+    return not pending and not failed
 
 
 if __name__ == '__main__':
-    cleanup()
-    if '--cleanup' not in sys.argv:
-        main()
+    settled = cleanup()
+    if '--cleanup' in sys.argv:
+        sys.exit(0 if settled else 1)
+    main()

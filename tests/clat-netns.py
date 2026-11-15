@@ -291,6 +291,25 @@ r=int(s.recv(100));assert 1400 <= m <= 1440 and 1400 <= r <= 1440,(m,r)
     wait_state(links[0].index,'down')
     assert json.loads((c.RUN/f'{links[1].index}.json').read_text())['state']=='up'
     probe(links[1].v4)
+    # A live controller is not proof that its translator child survived.
+    old = json.loads((c.RUN/f'{links[1].index}.json').read_text())
+    children = Path(f'/proc/{daemon.pid}/task/{daemon.pid}/children').read_text().split()
+    assert children
+    for child in children:
+        os.kill(int(child), 9)
+    for _ in range(200):
+        current = json.loads((c.RUN/f'{links[1].index}.json').read_text())
+        if current['state'] == 'up' and current['generation'] != old['generation']:
+            break
+        time.sleep(.1)
+    else:
+        raise AssertionError('dead child was not replaced with a new activation')
+    assert daemon.poll() is None
+    assert current['invocation_id'] == old['invocation_id']
+    assert current['boot_id'] == old['boot_id']
+    assert current['observed_at'] <= c.boot_time() < current['expires_at']
+    probe(links[1].v4)
+    print('PASS dead tayga child with live unit/controller rotates generation and recovers', flush=True)
     state.write_text(json.dumps({'1':30,'2':100}))
     wait_state(links[0].index,'down');probe(links[1].v4)
     state.write_text(json.dumps({'1':30,'2':30}))
@@ -320,10 +339,58 @@ r=int(s.recv(100));assert 1400 <= m <= 1440 and 1400 <= r <= 1440,(m,r)
     orphan=c.Link('cell.1','fd51:1::1','fd51:1::2',['fd51:1::2']);orphan.start()
     assert orphan.undo
     orphan.process.kill();orphan.process.wait()
-    c.cleanup()
+    # Real nonzero subprocess exit, with real owned nft state still present.
+    stubs = c.RUN/'stubs'; stubs.mkdir()
+    nft = run('which', 'nft').strip()
+    stub = stubs/'nft'
+    stub.write_text('#!/bin/sh\nif [ "$1" = delete ]; then exit 1; fi\nexec '+nft+' "$@"\n')
+    stub.chmod(0o755)
+    old_path = os.environ['PATH']
+    os.environ['PATH'] = str(stubs)+':'+old_path
+    try:
+        assert not orphan.stop()
+        assert json.loads((c.RUN/f'{orphan.index}.cleanup').read_text()) == [
+            ['nft','delete','table','inet',orphan.nft]]
+        assert json.loads((c.RUN/f'{orphan.index}.json').read_text())['state'] == 'error'
+        assert not c.cleanup()
+        run('nft','list','table','inet',orphan.nft)
+        assert run('sysctl','-n','net.ipv6.conf.all.forwarding').strip() == '1'
+    finally:
+        os.environ['PATH'] = old_path
+    assert c.cleanup()
+    print('PASS failed nft delete retains inverse/error/forwarding until real recovery', flush=True)
+    interrupted=c.Link('cell.1','fd51:1::1','fd51:1::2',['fd51:1::2']);interrupted.start()
+    assert interrupted.undo
+    def crash_during_undo(*args, **kwargs):
+        snapshot = json.loads((c.RUN/f'{interrupted.index}.json').read_text())
+        assert snapshot['state'] == 'unavailable'
+        assert snapshot['expires_at'] == snapshot['observed_at']
+        original(*args, **kwargs)
+        raise SystemExit('crash after first successful undo')
+    c.command=crash_during_undo
+    try:
+        interrupted.stop()
+    except SystemExit:
+        pass
+    finally:
+        c.command=original
+    assert (c.RUN/f'{interrupted.index}.cleanup').exists()
+    assert c.cleanup() # replay accepts the already-absent first deletion
+    # Reuse both a kernel name and explicit ifindex; activation identity changes.
+    run('ip','link','add','reuse0','index','7000','type','dummy')
+    reused=c.Link('reuse0','fd51:1::1','',())
+    reused.status('starting'); first=json.loads((c.RUN/'7000.json').read_text())
+    run('ip','link','del','reuse0')
+    run('ip','link','add','reuse0','index','7000','type','dummy')
+    reused=c.Link('reuse0','fd51:1::1','',())
+    reused.status('starting'); second=json.loads((c.RUN/'7000.json').read_text())
+    assert first['ifindex'] == second['ifindex'] == 7000
+    assert first['generation'] != second['generation']
+    run('ip','link','del','reuse0')
     assert not any('clat' in a['ifname'] for a in json.loads(run('ip','-j','link')))
     assert 'clat_' not in run('nft','list','ruleset')
     assert run('sysctl','-n','net.ipv6.conf.all.forwarding').strip() == '0'
+    print('PASS crash during teardown, idempotent restart replay and explicit ifindex reuse', flush=True)
     print('PASS crash journal cleanup and global forwarding restoration',flush=True)
     print('PASS malformed DNS64 prefix fails closed',flush=True)
     print('PASS actual D-Bus service: dual-stack exclusion, two grants, link loss and clean stop',flush=True)

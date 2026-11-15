@@ -24,7 +24,19 @@ class Discovery(unittest.TestCase):
     def test_short_prefix(self):
         self.assertEqual(clat.prefix_from_answers(['2001:db8:c000:aa::', '2001:db8:c000:ab::']), '2001:db8::/32')
 
-class Admission(unittest.TestCase):
+class Isolated(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from unittest.mock import patch
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        for target, value in [('RUN', pathlib.Path(self.directory.name))]:
+            patcher = patch.object(clat, target, value)
+            patcher.start(); self.addCleanup(patcher.stop)
+        patcher = patch.object(clat.socket, 'if_nametoindex', return_value=3)
+        patcher.start(); self.addCleanup(patcher.stop)
+
+class Admission(Isolated):
     def test_dual_stack_needs_no_clat(self):
         addresses = [dict(family='inet',scope='global',local='192.0.2.1'),dict(family='inet6',scope='global',local='2001:db8::1')]
         self.assertEqual(clat.eligible(addresses), [])
@@ -39,23 +51,24 @@ class Admission(unittest.TestCase):
         made = []
         class Fake:
             def __init__(self, *args):
-                self.undo = []; self.process = None; made.append(self)
-            def start(self): self.undo.append('owned')
-            def stop(self): self.undo.clear()
+                self.undo = []; self.process = None; self.index = len(made)+3; self.stopping = False; made.append(self)
+            def start(self, **kwargs): self.undo.append('owned')
+            def stop(self): self.undo.clear(); return True
             def status(self,*args): pass
             def repair_routes(self): pass
         with patch.object(clat, 'Link', Fake):
             controller = clat.Controller()
             controller.sync({'wan1': ('a','b',()), 'wan2': ('c','d',())})
             self.assertEqual(len(made), 2)
-            controller.sync({'wan2': ('c','d',())})
+            with patch.object(clat.socket, 'if_nametoindex', side_effect=lambda name: 3 if name == 'wan1' else 4):
+                controller.sync({'wan2': ('c','d',())})
             self.assertFalse(made[0].undo)
             self.assertTrue(made[1].undo)
             controller.sync({})
             self.assertFalse(made[1].undo)
 
 
-class Recovery(unittest.TestCase):
+class Recovery(Isolated):
     def test_nm_ipv6_dns_wire_shape(self):
         import socket
         self.assertEqual(clat.ip6_dns({'Nameservers': [list(socket.inet_pton(socket.AF_INET6, 'fe80::53'))]}), ('fe80::53',))
@@ -68,7 +81,7 @@ class Recovery(unittest.TestCase):
 
     def test_revalidation_hysteresis_and_recovery(self):
         from unittest.mock import Mock, patch
-        link = Mock(process=None, refreshed=0, failures=0, prefix='64:ff9b::/96')
+        link = Mock(process=None, index=3, stopping=False, refreshed=0, failures=0, prefix='64:ff9b::/96')
         controller = clat.Controller()
         signature = ('a', 'b', ())
         controller.links['wan1'] = (signature, link)
@@ -87,7 +100,7 @@ class Recovery(unittest.TestCase):
 
     def test_validated_prefix_change_withdraws(self):
         from unittest.mock import Mock, patch
-        link = Mock(process=None, refreshed=0, failures=0, prefix='64:ff9b::/96')
+        link = Mock(process=None, index=3, stopping=False, refreshed=0, failures=0, prefix='64:ff9b::/96')
         controller = clat.Controller()
         signature = ('a', 'b', ())
         controller.links['wan1'] = (signature, link)
@@ -101,15 +114,15 @@ class Recovery(unittest.TestCase):
         import subprocess
         for error in (subprocess.CalledProcessError(2, 'ip'), subprocess.TimeoutExpired('ip', 10)):
             with self.subTest(error=type(error).__name__):
-                broken = Mock(process=None)
+                broken = Mock(process=None, index=3, stopping=False)
                 broken.repair_routes.side_effect = error
                 signature = ('a', 'b', ())
                 controller = clat.Controller()
                 controller.links['wan1'] = (signature, broken)
-                healthy = Mock(undo=['owned'], process=None, refreshed=clat.time.monotonic())
-                with patch.object(clat, 'Link', return_value=healthy):
+                healthy = Mock(undo=['owned'], process=None, index=4, stopping=False, refreshed=clat.time.monotonic())
+                with patch.object(clat, 'Link', return_value=healthy), patch.object(clat.socket, 'if_nametoindex', side_effect=lambda name: 3 if name == 'wan1' else 4):
                     controller.sync({'wan1': signature, 'wan2': signature})
-                healthy.start.assert_called_once_with()
+                healthy.start.assert_called_once()
                 self.assertIn('wan2', controller.links)
                 broken.stop.assert_called_once()
                 self.assertNotIn('wan1', controller.links)
@@ -124,8 +137,8 @@ class Recovery(unittest.TestCase):
             signature = ('a', 'b', ())
             controller = clat.Controller()
             controller.links['wan1'] = (signature, link)
-            healthy = Mock(undo=['owned'], process=None, refreshed=clat.time.monotonic())
-            with patch.object(link, 'repair_routes'), patch.object(link, 'stop') as stop, patch.object(clat, 'Link', return_value=healthy):
+            healthy = Mock(undo=['owned'], process=None, index=4, stopping=False, refreshed=clat.time.monotonic())
+            with patch.object(link, 'repair_routes'), patch.object(link, 'stop') as stop, patch.object(clat, 'Link', return_value=healthy), patch.object(clat.socket, 'if_nametoindex', side_effect=lambda name: 3 if name == 'wan1' else 4):
                 for _ in range(2):
                     controller.sync({'wan1': signature, 'wan2': signature})
                 stop.assert_not_called()
@@ -133,7 +146,7 @@ class Recovery(unittest.TestCase):
                 healthy.start.assert_called_once()
                 healthy.repair_routes.assert_called_once()
 
-    def test_stop_continues_after_undo_timeout_and_status_fault(self):
+    def test_invalidation_fault_preserves_inverse_and_defers_teardown(self):
         from unittest.mock import Mock, patch
         import subprocess
         import tempfile
@@ -145,16 +158,14 @@ class Recovery(unittest.TestCase):
             signature = ('a', 'b', ())
             controller = clat.Controller()
             controller.links['wan1'] = (signature, link)
-            healthy = Mock(undo=['owned'], process=None, refreshed=clat.time.monotonic())
+            healthy = Mock(undo=['owned'], process=None, index=4, stopping=False, refreshed=clat.time.monotonic())
             with patch.object(clat, 'command', side_effect=[subprocess.TimeoutExpired('second', 10), '']) as command, patch.object(clat, 'Link', return_value=healthy):
                 controller.sync({'wan2': signature})
-            self.assertEqual(command.call_count, 2)
-            self.assertEqual(command.call_args.args, ('first',))
+            command.assert_not_called()
             healthy.start.assert_called_once()
-            self.assertNotIn('wan1', controller.links)
-            self.assertFalse(link.undo) # Pending undo lives in the journal, not the live-link marker.
-            # Failed cleanup remains journalled for recovery.
-            self.assertEqual(json.loads((clat.RUN/'3.cleanup').read_text()), [['second']])
+            self.assertIn('wan1', controller.links)
+            self.assertTrue(link.stopping)
+            self.assertEqual(json.loads((clat.RUN/'3.cleanup').read_text()), [['first'], ['second']])
 
     def test_same_grant_recovers_after_cleanup_timeout(self):
         from unittest.mock import Mock, patch
@@ -194,7 +205,8 @@ class Recovery(unittest.TestCase):
             process.poll.return_value = None
             with patch.object(clat, 'command', side_effect=command), patch.object(clat.socket, 'if_nameindex', side_effect=lambda: [(3, 'wan1')] + ([(4, 'clat3')] if present[0] else [])), patch.object(clat, 'discover', return_value='64:ff9b::/96'), patch.object(clat.subprocess, 'Popen', return_value=process), patch.object(clat.time, 'sleep'):
                 controller.sync({'wan1': signature})
-                self.assertNotIn('wan1', controller.links)
+                self.assertIn('wan1', controller.links)
+                self.assertTrue(link.stopping)
                 self.assertEqual(json.loads((clat.RUN/'3.cleanup').read_text()), [undo])
                 controller.sync({'wan1': signature})
                 self.assertIn('wan1', controller.links)
@@ -259,5 +271,247 @@ class Recovery(unittest.TestCase):
                 mutate.assert_called_once()
             self.assertEqual(link.undo, [undo])
             self.assertTrue((clat.RUN/'3.cleanup').exists())
+
+class LifecycleV2(Isolated):
+    def make_link(self):
+        from unittest.mock import Mock
+        link = clat.Link('wan1', '2001:db8::1', '', ())
+        link.prefix = '64:ff9b::/96'
+        link.tun_index = 4
+        link.process = Mock()
+        link.process.poll.return_value = None
+        return link
+
+    def read(self):
+        return json.loads((clat.RUN/'3.json').read_text())
+
+    def test_nonzero_delete_retained_in_both_cleanup_entrypoints(self):
+        from unittest.mock import patch
+        import subprocess
+        for mode in ('stop', 'cleanup'):
+            with self.subTest(mode=mode):
+                link = self.make_link()
+                link.undo = [['nft', 'delete', 'table', 'inet', link.nft]]
+                link.save_cleanup()
+                link.status('up')
+                def run(args, **kwargs):
+                    code = 1 if args[:2] == ('nft', 'delete') else 0
+                    stdout = json.dumps({'nftables': [{'table': {'family': 'inet', 'name': link.nft}}]})
+                    if code and kwargs['check']:
+                        raise subprocess.CalledProcessError(code, args)
+                    return subprocess.CompletedProcess(args, code, stdout=stdout)
+                # Exercise the real command helper's check/nonzero behavior.
+                with patch.object(clat.subprocess, 'run', side_effect=run), patch.object(clat, 'restore_forwarding') as restore:
+                    self.assertFalse(link.stop() if mode == 'stop' else clat.cleanup())
+                    self.assertEqual(self.read()['state'], 'error')
+                    self.assertEqual(json.loads((clat.RUN/'3.cleanup').read_text()), link.undo)
+                    if mode == 'cleanup':
+                        self.assertFalse(clat.cleanup())
+                    restore.assert_not_called()
+                with patch.object(clat, 'command', return_value=''):
+                    self.assertTrue(link.stop() if mode == 'stop' else clat.cleanup())
+                self.assertFalse((clat.RUN/'3.cleanup').exists())
+                self.assertEqual(self.read()['state'], 'down')
+
+    def test_absent_resources_settle_but_failed_existence_query_does_not(self):
+        from unittest.mock import patch
+        import subprocess
+        cases = [(['nft','delete','table','inet','clat_3'], '{"nftables":[]}'),
+                 (['ip','link','del','clat3'], '[]'),
+                 (['ip','-4','rule','del','priority','10003','from','10.254.0.3','lookup','46003'], '[]'),
+                 (['ip','-6','route','del','fd46:4:4::3/128','dev','clat3'], '[]'),
+                 (['ip','-4','route','flush','table','46003'], '[]')]
+        for undo, absent in cases:
+            for query in (absent, subprocess.CalledProcessError(1, 'query')):
+                with self.subTest(undo=undo, query=query):
+                    journal = clat.RUN/'3.cleanup'
+                    journal.write_text(json.dumps([undo]))
+                    with patch.object(clat, 'command', side_effect=[subprocess.CalledProcessError(2, undo), query]):
+                        pending = clat.replay(journal)
+                    self.assertEqual(bool(pending), isinstance(query, Exception))
+                    self.assertEqual(journal.exists(), isinstance(query, Exception))
+
+    def test_failed_delete_does_not_misread_present_route_as_absent(self):
+        from unittest.mock import patch
+        import subprocess
+        cases = [(['ip','-6','route','del','fd46:4:4::3/128','dev','clat3'],
+                  [{'dst':'default','dev':'wan1'}, {'dst':'fd46:4:4::3','dev':'clat3'}]),
+                 (['ip','-4','route','del','default','dev','clat3','metric','46003'],
+                  [{'dst':'default','dev':'clat3','metric':46003}])]
+        for undo, routes in cases:
+            with self.subTest(undo=undo):
+                journal = clat.RUN/'3.cleanup'; journal.write_text(json.dumps([undo]))
+                with patch.object(clat, 'command', side_effect=[subprocess.CalledProcessError(2,undo), json.dumps(routes)]):
+                    self.assertEqual(clat.replay(journal), [undo])
+                self.assertEqual(json.loads(journal.read_text()), [undo])
+
+    def test_child_stop_failure_preserves_all_inverses(self):
+        from unittest.mock import patch
+        import subprocess
+        link = self.make_link(); link.undo = [['remove']]; link.save_cleanup()
+        link.process.wait.side_effect = subprocess.TimeoutExpired('tayga',3)
+        with patch.object(clat, 'command') as run:
+            self.assertFalse(link.stop())
+        run.assert_not_called()
+        self.assertEqual(json.loads((clat.RUN/'3.cleanup').read_text()), [['remove']])
+        self.assertEqual(self.read()['state'], 'error')
+
+    def test_timeout_continues_replay_and_retains_order(self):
+        from unittest.mock import patch
+        import subprocess
+        link = self.make_link()
+        link.undo = [['first'], ['second'], ['third']]
+        link.save_cleanup()
+        with patch.object(clat, 'command', side_effect=[subprocess.TimeoutExpired('third',10), '', subprocess.CalledProcessError(1,'first')]) as run:
+            self.assertFalse(link.stop())
+        self.assertEqual([c.args for c in run.call_args_list], [('third',), ('second',), ('first',)])
+        self.assertEqual(json.loads((clat.RUN/'3.cleanup').read_text()), [['first'], ['third']])
+        self.assertEqual(self.read()['state'], 'error')
+
+    def test_crash_during_teardown_invalidates_before_kill_and_replays(self):
+        from unittest.mock import patch
+        link = self.make_link()
+        link.undo = [['first'], ['second']]
+        link.save_cleanup(); link.status('up')
+        def crash(*args):
+            self.assertEqual(self.read()['state'], 'unavailable')
+            self.assertEqual(self.read()['expires_at'], self.read()['observed_at'])
+            raise SystemExit('crash during teardown')
+        link.process.terminate.side_effect = crash
+        with self.assertRaises(SystemExit): link.stop()
+        self.assertTrue((clat.RUN/'3.cleanup').exists())
+        # A fresh process/invocation replays the full inverse after a crash.
+        with patch.object(clat, 'command', return_value='') as run:
+            self.assertTrue(clat.cleanup())
+        self.assertEqual([c.args for c in run.call_args_list], [('second',), ('first',)])
+        self.assertEqual(self.read()['state'], 'down')
+
+    def test_cleanup_crash_and_retry_does_not_renew_up(self):
+        from unittest.mock import patch
+        link = self.make_link()
+        link.undo = [['remove']]; link.save_cleanup(); link.status('up')
+        with patch.object(clat, 'command', side_effect=SystemExit('crash')):
+            with self.assertRaises(SystemExit): clat.cleanup()
+        self.assertEqual(self.read()['state'], 'unavailable')
+        with patch.object(clat, 'command', return_value=''), patch.object(clat, 'boot_time', return_value=900):
+            self.assertTrue(clat.cleanup())
+        self.assertEqual(self.read()['observed_at'], 900)
+        self.assertEqual(self.read()['expires_at'], 900)
+
+    def test_delayed_stale_and_future_observations_fail_closed(self):
+        from unittest.mock import patch
+        link = self.make_link()
+        for observed, now, expected in [(100,100,'up'), (100,129,'up'), (100,130,'unavailable'),
+                                         (100,1000,'unavailable'), (101,100,'unavailable')]:
+            with self.subTest(observed=observed, now=now), patch.object(clat, 'boot_time', return_value=now):
+                link.observed_at = observed
+                link.status('up')
+                data = self.read()
+                self.assertEqual(data['state'], expected)
+                self.assertEqual(data['expires_at'], observed+30 if expected=='up' else now)
+        # Wall-clock jumps cannot create or prolong a monotonic lease.
+        link.observed_at = 100
+        for wall in (-1000, 999999999999):
+            with patch.object(clat, 'boot_time', return_value=131), patch.object(clat.time, 'time', return_value=wall):
+                link.status('up')
+                self.assertEqual(self.read()['state'], 'unavailable')
+
+    def test_dead_child_with_live_controller_never_gets_up_heartbeat(self):
+        from unittest.mock import patch
+        link = self.make_link()
+        link.process.poll.return_value = 1
+        link.status('up')
+        self.assertEqual(self.read()['state'], 'unavailable')
+        signature = ('2001:db8::1', '', ())
+        controller = clat.Controller(); controller.links['wan1'] = (signature, link)
+        with patch.object(link, 'stop', return_value=False) as stop, patch.object(link, 'repair_routes') as repair:
+            controller.sync({})
+        stop.assert_called_once(); repair.assert_not_called()
+
+    def test_reused_index_new_activation_and_invocation_have_distinct_tokens(self):
+        from unittest.mock import patch
+        one = self.make_link(); one.status('up'); old = self.read()
+        with patch.object(clat, 'INVOCATION_ID', 'b'*32):
+            two = self.make_link(); two.status('up'); new = self.read()
+        self.assertEqual(new['ifindex'], old['ifindex'])
+        self.assertNotEqual(new['generation'], old['generation'])
+        self.assertNotEqual(new['invocation_id'], old['invocation_id'])
+        self.assertEqual(new['boot_id'], clat.BOOT_ID)
+        self.assertEqual(new['tun_ifindex'], 4)
+        self.assertEqual(new['schema_version'], 2)
+        # Reusing the same name/index with a new NM activation withdraws first.
+        controller = clat.Controller()
+        controller.links['wan1'] = (('a','b',(),'old-activation'), one)
+        def refuse():
+            one.stopping = True
+            return False
+        with patch.object(one, 'stop', side_effect=refuse) as stop, patch.object(one, 'repair_routes') as repair, patch.object(clat, 'Link') as create:
+            controller.sync({'wan1': ('a','b',(),'new-activation')})
+        stop.assert_called_once(); create.assert_not_called(); repair.assert_not_called()
+
+    def test_delayed_grant_collection_cannot_renew_the_lease(self):
+        from unittest.mock import patch
+        link = self.make_link()
+        link.refreshed = clat.time.monotonic()
+        signature = ('2001:db8::1', '', ())
+        controller = clat.Controller(); controller.links['wan1'] = (signature, link)
+        with patch.object(clat, 'boot_time', return_value=200), patch.object(link, 'repair_routes'):
+            controller.sync({'wan1': signature}, observed_at=100)
+        self.assertEqual(self.read()['state'], 'unavailable')
+        self.assertEqual(self.read()['expires_at'], 200)
+
+    def test_changed_kernel_ifindex_with_unchanged_grant_withdraws(self):
+        from unittest.mock import patch
+        link = self.make_link()
+        signature = ('2001:db8::1', '', ())
+        controller = clat.Controller(); controller.links['wan1'] = (signature, link)
+        def refuse():
+            link.stopping = True
+            return False
+        with patch.object(clat.socket, 'if_nametoindex', return_value=9), patch.object(link, 'stop', side_effect=refuse) as stop, patch.object(link, 'repair_routes') as repair:
+            controller.sync({'wan1': signature})
+        stop.assert_called_once(); repair.assert_not_called()
+
+    def test_pending_old_name_blocks_new_name_with_reused_index(self):
+        from unittest.mock import patch
+        link = self.make_link(); link.stopping = True
+        controller = clat.Controller(); controller.links['wan1'] = (('old',), link)
+        replacement = self.make_link()
+        with patch.object(link, 'stop', return_value=False), patch.object(clat, 'Link', return_value=replacement), patch.object(replacement, 'start') as start:
+            controller.sync({'wan2': ('2001:db8::1', '', ())})
+        start.assert_not_called()
+
+    def test_setup_attempt_rotates_generation_even_on_same_object(self):
+        from unittest.mock import patch
+        link = self.make_link()
+        first = link.generation
+        with patch.object(clat, 'discover', side_effect=ValueError('no DNS64')):
+            link.start()
+            second = link.generation
+            link.start()
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(second, link.generation)
+
+    def test_forwarding_restore_failure_stays_error_until_settled(self):
+        from unittest.mock import patch
+        link = self.make_link(); link.status('up')
+        with patch.object(clat, 'restore_forwarding', side_effect=OSError('sysctl refused')):
+            self.assertFalse(clat.cleanup())
+            self.assertEqual(self.read()['state'], 'error')
+        with patch.object(clat, 'restore_forwarding'):
+            self.assertTrue(clat.cleanup())
+        self.assertEqual(self.read()['state'], 'down')
+
+    def test_snapshot_is_atomic_and_failed_replace_keeps_old_snapshot(self):
+        from unittest.mock import patch
+        link = self.make_link(); link.status('up'); old = (clat.RUN/'3.json').read_text()
+        def replace(temp, target):
+            self.assertEqual((clat.RUN/'3.json').read_text(), old)
+            self.assertEqual(json.loads(temp.read_text())['state'], 'unavailable')
+            raise OSError('rename failed')
+        with patch.object(pathlib.Path, 'replace', replace):
+            self.assertFalse(link.stop())
+        self.assertEqual((clat.RUN/'3.json').read_text(), old)
+        self.assertTrue(link.stopping)
 
 if __name__ == '__main__': unittest.main()

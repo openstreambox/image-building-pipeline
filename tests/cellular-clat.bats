@@ -13,5 +13,6 @@
   grep -q 'enable_service ceralive-clat.service' "$root/mkosi/customize/postinst.d/networking.sh"
   grep -q 'CapabilityBoundingSet=.*CAP_KILL' "$root/mkosi/runtime/ceralive-clat.service"
   grep -q 'NoNewPrivileges=yes' "$root/mkosi/runtime/ceralive-clat.service"
+  grep -qx 'RuntimeDirectoryPreserve=yes' "$root/mkosi/runtime/ceralive-clat.service"
   grep -q 'ExecStopPost=.*--cleanup' "$root/mkosi/runtime/ceralive-clat.service"
 }
