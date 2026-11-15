@@ -33,7 +33,7 @@ with tempfile.TemporaryDirectory() as tmp:
         page = (out / 'index.html').read_text()
         assert "can't start safely" in page
         if reason == 'media-too-small':
-            assert '16 GB' in item['fix'] and '8589934592' in item['detail']
+            assert '16 GB' in item['fix'] and '15000000000' in item['detail']
         terminal = root / 'tty'
         console = a.Console(directory=root / 'console', terminal=str(terminal),
                             run=lambda *args: False, foreground=lambda: '1')

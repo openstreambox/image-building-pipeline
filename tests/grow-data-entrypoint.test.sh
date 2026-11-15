@@ -10,7 +10,7 @@ cat >"$work/harness" <<'HARNESS'
 set -euo pipefail
 source mkosi/runtime/ceralive-grow-data.sh
 scenario=$1
-prefix=""; slot=a; fixture_root_bytes=3221225472
+prefix=""; slot=a; fixture_root_bytes=4294967296
 case "$scenario" in bench-*) prefix=x ;; esac
 case "$scenario" in *-b) slot=b ;; esac
 root_node="/dev/mockdisk0p2"; [[ "$slot" != b ]] || root_node="/dev/mockdisk0p3"
@@ -23,7 +23,7 @@ grow_data_is_block_device() {
 }
 inventory() {
   case "$*" in
-    '-bdnro SIZE /dev/mockdisk0') if [[ $scenario == too-small ]]; then echo 8000000000; else echo 20000000000; fi ;;
+    '-bdnro SIZE /dev/mockdisk0') if [[ $scenario == too-small ]]; then echo 14999999999; else echo 20000000000; fi ;;
     '-bdnro SIZE /dev/mockdisk0p'[23]) echo "$fixture_root_bytes" ;;
     '-dnro RO /dev/mockdisk0') if [[ $scenario == readonly ]]; then echo 1; else echo 0; fi ;;
     '-dnro PARTLABEL /dev/mockdisk0p'[23])

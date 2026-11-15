@@ -191,8 +191,8 @@ and compare saved configuration; do not infer hardware success from host mocks.
 
 [Español (Latinoamérica)](unsafe-storage.es-419.md).
 
-On the current ROCK image, the minimum is 8 GiB measured (8,589,934,592
-bytes); a retail 8 GB card is too small. The pre-growth check refuses smaller
+On the current ROCK image, the minimum is a 16 GB card. The measured floor is
+15,000,000,000 bytes, below the measured size of genuine 16 GB cards. The pre-growth check refuses smaller
 or read-only media before repartitioning. Failure of that oneshot blocks the
 data mount, its filesystem check, automatic filesystem growth and dependent
 persistence migration. Migration also requires successful online filesystem
