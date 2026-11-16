@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 """Image-owned, per-cellular-link CLAT. NetworkManager remains link owner."""
+import hashlib
 import ipaddress as ip
 import json
 import os
@@ -104,6 +105,13 @@ def service_ipv4(index):
         raise ValueError('interface index exceeds CLAT allocation')
     block, host = divmod(index - 1, 255)
     return str(ip.IPv4Address(int(ip.IPv4Address('10.254.0.0')) + block * 256 + host + 1))
+
+
+def service_ipv6(index, source):
+    # The private mapping is unique per uplink source: after a renumber, old
+    # conntrack entries (SNAT to the old source) cannot match the new tuples.
+    digest = int.from_bytes(hashlib.sha256(ip.IPv6Address(source).packed).digest()[:6], 'big')
+    return str(ip.IPv6Address((0xfd4600040004 << 80) | (digest << 32) | index))
 
 
 def embed(prefix, address):
@@ -272,7 +280,7 @@ class Link:
         self.tun = f'clat{self.index}'
         self.table = str(46000 + self.index)
         self.priority = str(10000 + self.index)
-        self.v6 = f'fd46:4:4::{self.index:x}'
+        self.v6 = service_ipv6(self.index, source)
         self.nft = f'clat_{self.index}'
         self.process = None
         self.undo = []

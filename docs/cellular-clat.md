@@ -50,7 +50,7 @@ extends its lease: availability expires after 30 seconds, even if translation
 still works. Readers must tolerate a safe, temporary withdrawal under load.
 
 Each link gets `clat<ifindex>`, an IPv4 /32 in reserved service space
-`10.254.0.0/19`, and a private IPv6 mapping in `fd46:4:4::/112`.
+`10.254.0.0/19`, and a private IPv6 mapping in `fd46:4:4::/48`.
 The space is 32 blocks of 255 addresses: block `(ifindex - 1) / 255`, host
 `(ifindex - 1) % 255 + 1`, so no address ends in `.0` (consumers reject it).
 Ifindex 1-255 keep `10.254.0.<ifindex>`; 256 gets `10.254.1.1` and 512 gets
@@ -59,7 +59,13 @@ subnet fails closed. Indexes above 8160 fail closed.
 Tayga translates IPv4 into the discovered prefix. IPv6 SNAT uses the actual
 uplink address, allowing raw-IP /128 grants without assuming an extra routed
 IPv6 address or SLAAC /64. Reply conntrack restores the private mapping and
-routes it to that link's TUN. Each translator drops to nobody:nogroup after
+routes it to that link's TUN. The mapping is `fd46:4:4:<48 bits of
+SHA-256(uplink source)>::<ifindex>`: an existing SNAT binding is reused only
+while the uplink address is unchanged. After a modem renumbers on the same
+ifindex, packets of an unchanged IPv4 socket (same ports) get a new private
+IPv6 source, so they create new conntrack entries with SNAT to the new address
+instead of inheriting the old binding. Old entries expire on their own; other
+uplinks' connections are never touched. Each translator drops to nobody:nogroup after
 opening its TUN. The controller retains only network administration/raw socket
 and identity-drop capabilities plus CAP_KILL (to signal its tracked child
 after that child drops UID), with systemd filesystem/device restrictions.

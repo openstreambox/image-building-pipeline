@@ -367,6 +367,42 @@ class MinimumMtu(Isolated):
         self.assertFalse(host.processes)
 
 
+class ActivationIsolation(Isolated):
+    def test_renumbered_source_gets_a_fresh_private_mapping(self):
+        import ipaddress
+        old = clat.Link('wan1', '2001:db8::1', '', ())
+        same = clat.Link('wan1', '2001:db8::1', '', ())
+        new = clat.Link('wan1', '2001:db8::2', '', ())
+        self.assertEqual(old.v6, same.v6)
+        self.assertNotEqual(old.v6, new.v6)
+        for link in (old, new):
+            address = ipaddress.IPv6Address(link.v6)
+            self.assertIn(address, ipaddress.IPv6Network('fd46:4:4::/48'))
+            self.assertEqual(int(address) & 0xffffffff, 3)
+        self.assertEqual(old.v4, new.v4)
+
+    def test_renumber_through_controller_uses_the_new_mapping_everywhere(self):
+        host = FakeHost(forwarding='1')
+        controller = clat.Controller()
+        with host.patched():
+            controller.sync({'wan1': ('2001:db8::1', '', ('2001:db8::53',))})
+            old = controller.links['wan1'][1]
+            start = len(host.calls)
+            controller.sync({'wan1': ('2001:db8::2', '', ('2001:db8::53',))})
+            new = controller.links['wan1'][1]
+        self.assertIsNot(old, new)
+        self.assertNotEqual(old.v6, new.v6)
+        later = host.calls[start:]
+        self.assertIn(['ip', '-6', 'rule', 'del', 'priority', old.priority, 'from', old.v6, 'lookup', old.table],
+                      [args for args, _ in later])
+        self.assertIn(['ip', '-6', 'rule', 'add', 'priority', new.priority, 'from', new.v6, 'lookup', new.table],
+                      [args for args, _ in later])
+        ruleset = next(data for args, data in later if args[:2] == ['nft', '-f'] and 'snat ip6' in data)
+        self.assertIn(f'ip6 saddr {new.v6} snat ip6 to 2001:db8::2', ruleset)
+        self.assertNotIn(old.v6, ruleset)
+        self.assertIn(f'map {new.v4} {new.v6}', (clat.RUN/'3.conf').read_text())
+
+
 def consumer_accepts(address):
     # Mirrors the CeraUI snapshot parser's service-space rule.
     a, b, c, d = map(int, address.split('.'))
