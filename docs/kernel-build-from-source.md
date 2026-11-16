@@ -52,7 +52,7 @@ annotated tag `rock5bplus-wwan-cold-start-v1`. It extends the previous merged
 `bc7e44fa35d3eded23567dd48e65f6dc799f4b34` with 0052, the ROCK 5B+
 B-key cold-start sequence. The [previous merged series](https://github.com/CERALIVE/rk3588-kernel-patches/pull/28)
 keeps the Rock Type-C connector sink-first and the Orange connector source-first.
-Candidate kernel package revision 9 includes
+Candidate kernel package revision 10 includes
 explicit rfkill requirements. [Host checks and pending hardware
 qualification](rock5bplus-internal-modem.md) describe this candidate's limits.
 
@@ -472,8 +472,9 @@ The kernel epoch comes from the pinned kernel commit's **committer** time in
 the verified clone, before patches are applied, for image and kernel-only
 builds alike. It does not use image-repository HEAD or an ambient epoch override.
 Debian packaging timestamps, including its changelog, use that same pinned epoch.
-The fork candidate source pin is `7.2.0-ceralive9`, adding the B-key cold-start
-sequence and explicit rfkill requirements to revision 8, which added nftables reject for
+The fork candidate source pin is `7.2.0-ceralive10`, adding the B-key cold-start
+sequence and explicit rfkill requirements to revision 9 (the ramoops reservation) on
+top of revision 8, which added nftables reject for
 NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
 the kernel-patches PR #28 pin; revisions 1 to 4 must never be
 reissued with changed bytes.
@@ -884,8 +885,9 @@ non-Image payload (fatal), and a re-run (idempotent).
 
 Kernels and images are built locally on the owner's workstation. These gates
 consume artifacts; they do not authorize publication or add a kernel workflow.
-The fork candidate source pin is `7.2.0-ceralive9`, adding the B-key cold-start
-sequence and explicit rfkill requirements to revision 8, which added nftables reject for
+The fork candidate source pin is `7.2.0-ceralive10`, adding the B-key cold-start
+sequence and explicit rfkill requirements to revision 9 (the ramoops reservation) on
+top of revision 8, which added nftables reject for
 NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
 the kernel-patches PR #28 pin; publication remains owner-gated.
 

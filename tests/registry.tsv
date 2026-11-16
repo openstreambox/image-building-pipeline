@@ -58,7 +58,7 @@ tests/kernel-version-monotonic.test.sh	shell	integration	default-shell	offline D
 tests/candidate-os-version.test.sh	shell	integration	default-shell	publish guard: candidate baked OS version must equal the requested version
 tests/os-version-month.test.sh	shell	integration	default-shell	publish guard: a new OS version must be in the current UTC month
 tests/kernel-producer-identity.test.sh	shell	integration	default-shell	stack-frozen kernel producer digests and exclusion of release orchestration from identity
-tests/fixtures/kernel-producer.sha256	fixture	support	not-executed	stack 9b89e6f plus revision-5 nftables-reject fragment/required-list digests, including the coverage function
+tests/fixtures/kernel-producer.sha256	fixture	support	not-executed	Reviewed kernel producer digests including ramoops injection and fingerprint coverage
 tests/kernel-release-command.test.sh	shell	integration	default-shell	local kernel candidates, existing gates, immutable bundles and side-effect-free publication refusal
 tests/kernel-release-environment.test.sh	shell	integration	default-shell	exact command contract result parity with and without inherited workflow and runner context
 tests/kernel-release-workflow.test.sh	shell	integration	default-shell	owner-approved VM workflow provenance, immutable Release and bench-bound authorization/dispatch sequences
@@ -151,6 +151,7 @@ tests/kernel-artifact-cache.test.sh	shell	unit	default-shell	content-keyed kerne
 tests/immutable-r2-publication.test.sh	shell	integration	default-shell	create-only immutable publication with exact-byte recovery
 tests/recovery-script-contract.test.sh	shell	unit	default-shell	recovery.scr loads boot artifacts directly from p2 or p3
 tests/production-ci-scope-contract.test.sh	shell	unit	default-shell	production CI scope stays disjoint from bench-only knobs
+tests/workflow-security-contract.test.sh	shell	unit	default-shell	fork-safe workflow triggers, runners, permissions, credentials and immutable third-party actions
 tests/orchestrate-build-lock.test.sh	shell	integration	default-shell	per-board flock serialises staging, different boards stay parallel
 tests/boot-script-sanitize.test.sh	shell	unit	default-shell	the A/B selector against absent setexpr and an undefined loadaddr
 tests/deb-lib.test.sh	shell	unit	default-shell	the one Debian control reader/identity asserter/extractor
@@ -239,6 +240,8 @@ tests/bundle-layout-inspect.test.sh	shell	unit	default-shell	Board-specific full
 tests/grow-data-loop-257.test.sh	shell	integration	opt-in	Privileged target257 loop growth preserves nonzero loader gap and fixed partition bytes
 tests/data-readiness.test.sh	shell	unit	default-shell	ROCK data growth readiness and health refusal
 tests/rock-ota.test.sh	shell	unit	default-shell	Signed update geometry and measured-media policy
+tests/bounded-apt.test.sh	shell	unit	default-shell	Bounded APT metadata rendering and real APT configuration
+tests/bounded-apt-runtime.test.sh	shell	integration	opt-in	Real APT transaction and size-limited volatile index mount
 tests/attention.test.sh	shell	unit	default-shell	Shared attention producers, output activation, expiry and safety
 tests/attention-console.bats	bats	unit	default-bats	Dedicated diagnostic VT startup persistence and login/font hand-back
 tests/attention-console.test.py	tool	unit	invoked-by-suite	Fake VT state machine driven by attention-console.bats
@@ -247,5 +250,11 @@ tests/unsafe-storage.test.sh	shell	unit	default-shell	Terminal unsafe storage me
 tests/host-test-harness.test.sh	shell	unit	default-shell	checks scratch forwarding across the privilege boundary and failure propagation
 tests/ext4-population.test.sh	shell	unit	default-shell	x86 native and container formatter tool floor, explicit epoch and filesystem identity
 tests/real-rauc-fixture-lib.sh	helper	support	invoked-by-suite	Shared real RAUC slot geometry and isolated service device lookup
-
+tests/reset-evidence.bats	bats	unit	default-bats	Reset evidence persistence and RK3588 reserved memory
+tests/fixtures/tmpfiles-clock.c	fixture	support	not-executed	Test-only realtime jump for tmpfiles retention regression; compiled with cc by reset-evidence.bats
+tests/checked-shutdown.bats	bats	unit	default-bats	planned power actions honor shutdown inhibitors
+tests/real-logind-contract.sh	shell	privileged	opt-in	CERALIVE_LOGIND_TEST_CONTAINER names an exclusive disposable systemd 257 container
+tests/fixtures/logind/input-ioctl.c	fixture	support	not-executed	synthetic evdev ioctl boundary for real logind
+tests/fixtures/logind/mock-logind.sh	fixture	support	not-executed	private sysfs and FIFO input fixture
+tests/fixtures/logind/key.py	fixture	support	not-executed	short and long synthetic power-key events
 tests/rock5bplus-internal-modem.bats	bats	unit	default-bats	Internal B-key patch, radio default, position identity and power-control boundary

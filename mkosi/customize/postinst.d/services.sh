@@ -160,9 +160,11 @@ configure_services() {
   setup_fan_curve
   setup_fan_kickstart
   setup_led_status
+  setup_reset_evidence
   setup_cpu_governor
   setup_hdmirx_edid
   setup_pipewire_system_mode
+  setup_power_policy
   setup_rauc_activation
   setup_slot_sync
   setup_boot_script_sync
@@ -179,6 +181,15 @@ setup_dpkg_recovery() {
   install -D -m 0755 "${src}/ceralive-dpkg-recover.sh" "${helper_dir}/ceralive-dpkg-recover"
   install -D -m 0644 "${src}/ceralive-dpkg-recover.service" "${unit_dir}/ceralive-dpkg-recover.service"
   enable_service ceralive-dpkg-recover.service
+}
+
+# Power-key safety and the optional maintenance entrypoint apply without RAUC.
+setup_power_policy() {
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "$src" && -f "$src/60-ceralive-power-key.conf" && -f "$src/ceralive-power.sh" ]] \
+    || die 'power policy source missing'
+  install -D -m 0644 "$src/60-ceralive-power-key.conf" "${CERALIVE_LOGIND_CONF_DIR:-/etc/systemd/logind.conf.d}/60-ceralive-power-key.conf"
+  install -D -m 0755 "$src/ceralive-power.sh" "${CERALIVE_POWER_HELPER_DIR:-/usr/libexec/ceralive}/ceralive-power"
 }
 
 # The unit is installed on both architectures from one source; x86's GRUB ESP
@@ -601,4 +612,16 @@ setup_button_ingress() {
   # nginx would compete for 443. Keep its installed config for rollback only.
   mask_service nginx.service
   enable_service ceralive-button-ingress.service
+}
+
+# Stock pstore owns archiving and acknowledgement in every rootfs slot.
+setup_reset_evidence() {
+  local src="${CERALIVE_RUNTIME_SRC:-}" dest="${PSTORE_DESTROOT:-}"
+  [[ -n "$src" && -f "$src/ceralive-pstore-rotate.sh" ]] || die "pstore runtime source not found"
+  install -D -m 0755 "${src}/ceralive-pstore-rotate.sh" "${dest}/usr/lib/ceralive/ceralive-pstore-rotate"
+  install -D -m 0644 "${src}/ceralive-pstore.conf" "${dest}/etc/systemd/pstore.conf.d/60-ceralive.conf"
+  install -D -m 0644 "${src}/ceralive-pstore.service.conf" "${dest}/etc/systemd/system/systemd-pstore.service.d/60-ceralive.conf"
+  install -D -m 0644 "${src}/ceralive-pstore.tmpfiles.conf" "${dest}/etc/tmpfiles.d/ceralive-pstore.conf"
+  install -D -m 0644 "${src}/ceralive-pstore-tmpfiles.service.conf" "${dest}/etc/systemd/system/systemd-tmpfiles-setup.service.d/60-ceralive-pstore.conf"
+  enable_service systemd-pstore.service
 }

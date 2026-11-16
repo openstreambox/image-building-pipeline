@@ -328,7 +328,7 @@ variants:
       # base spelled its own three components. A "7.2-ceralive-rk3588" spelling
       # looks right, matches the tag, and would fail build-kernel.sh's own
       # `kernelrelease != KERNEL_RELEASE` assertion before one object compiles.
-      # Revision 9 adds 0052 and explicit rfkill configuration.
+      # Revision 10 adds 0052 and explicit rfkill configuration to revision 9.
       # package_version uses KERNELVERSION + -ceralive<revision>; revision 8
       # re-tags revision 7's kernel (nftables reject for NetworkManager shared mode and
       # Rock 5B+ sink-first Type-C through the PR #28 patch pin) on a master that carries
@@ -337,7 +337,11 @@ variants:
       # never published to APT; revision 7's release run failed in the Avahi contract.
       local_version: -ceralive-rk3588
       kernel_release: 7.2.0-ceralive-rk3588
-      package_version: 7.2.0-ceralive9
+      # Revision 9 adds the Rock board ramoops DT reservation at kernel build time.
+      # Revision 10 combines revision 9's ramoops
+      # reservation with 0052 and the explicit rfkill configuration; neither
+      # revision-9 byte set is reissued under this version.
+      package_version: 7.2.0-ceralive10
 
       # PLATFORM-LAYER INSTALL MAPPING. bindeb-pkg puts arm64 in-tree DTBs under
       # /usr/lib/linux-image-<KERNELRELEASE>/<soc-vendor>/; the U-Boot boot script
@@ -396,6 +400,6 @@ variants:
       # It carries the same `.0` for the same reason edge does.
       local_version: -ceralive-rk3588-test
       kernel_release: 7.2.0-ceralive-rk3588-test
-      package_version: 7.2.0-ceralive9+test1
+      package_version: 7.2.0-ceralive10+test1
 
       dtb_deb_dir: /usr/lib/linux-image-7.2.0-ceralive-rk3588-test/rockchip
