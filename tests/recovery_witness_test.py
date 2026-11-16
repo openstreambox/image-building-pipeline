@@ -3,9 +3,12 @@ from concurrent.futures import ProcessPoolExecutor
 import importlib.util
 import json
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "mkosi/runtime"))
 
 SPEC = importlib.util.spec_from_file_location(
     "recovery", Path(__file__).resolve().parents[1] / "mkosi/runtime/recovery_witness.py")
@@ -246,6 +249,7 @@ class RecoveryTest(unittest.TestCase):
         before = self.store.path.read_bytes()
         program = """
 import importlib.util, os, sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
 spec = importlib.util.spec_from_file_location('recovery', sys.argv[1])
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)

@@ -233,3 +233,6 @@ tests/lib/require-disposable-guest.sh	helper	support	invoked-by-suite	Mandatory 
 tests/lib/require-ephemeral-host.sh	helper	support	invoked-by-suite	Real RAUC guard: marked disposable guest or GitHub-hosted ephemeral runner VM
 tests/management-confirm.test.sh	shell	unit	default-shell	management-path commit-confirm host transaction
 tests/management_confirm_test.py	helper	support	invoked-by-suite	management transaction assertions
+tests/management_owner_test.py	helper	support	invoked-by-suite	management configuration owner assertions
+tests/release-preservation.test.sh	shell	unit	default-shell	previous release update, selector and mirror host contracts
+tests/release_preservation_test.py	helper	support	invoked-by-suite	preservation clock, crash and concurrency assertions
