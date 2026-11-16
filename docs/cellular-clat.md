@@ -106,7 +106,7 @@ is masked; the image installs no replacement translator build.
 root-writable directory. Readers never write it or control the service.
 
 ```json
-{"schema_version":2,"interface":"wwan0","ifindex":3,"tun":"clat3","tun_ifindex":7,"prefix":"64:ff9b::/96","ipv4":"10.254.0.3","state":"up","last_error":null,"boot_id":"e35d2950-56b9-4324-858a-c577b756106b","invocation_id":"5f31d8d55f3141faa50e248d73538aae","generation":"375be5e8cd6d4179909196f2d42ae78ca","updated_at":1794614400,"observed_at":120.0,"expires_at":150.0}
+{"schema_version":2,"interface":"wwan0","ifindex":3,"tun":"clat3","tun_ifindex":7,"prefix":"64:ff9b::/96","ipv4":"10.254.0.3","state":"up","last_error":null,"boot_id":"e35d2950-56b9-4324-858a-c577b756106b","invocation_id":"5f31d8d55f3141faa50e248d73538aae","generation":"375be5e8cd6d4179909196f2d42ae78c","updated_at":1794614400,"observed_at":120.0,"expires_at":150.0}
 ```
 
 All 15 fields are required:
