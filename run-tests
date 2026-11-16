@@ -115,8 +115,15 @@ fi
 
 "${DEV_PKI_GENERATOR}"
 
+# Keep shell failures fatal, but collect them so Bats still reports its results.
+shell_status=0
 for suite in "${SHELL_SUITES[@]}"; do
-  "${suite}"
+  if "${suite}"; then
+    :
+  else
+    echo "ERROR: shell suite failed: ${suite}" >&2
+    shell_status=1
+  fi
 done
 
 # --- Decide on parallelism -------------------------------------------------
@@ -149,6 +156,7 @@ fi
 
 echo "== CeraLive v2 unit suites (bats $(bats --version | awk '{print $2}')) — ${mode} =="
 bats ${bats_args[@]+"${bats_args[@]}"} "${SUITES[@]}"
+[[ "$shell_status" -eq 0 ]] || exit "$shell_status"
 
 case "${CERALIVE_RUN_REAL_AVAHI_CONTRACT:-skip}" in
   required)

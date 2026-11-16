@@ -18,6 +18,10 @@ grep -Eq '^PyYAML==[0-9]+\.[0-9]+\.[0-9]+$' "${PIPELINE_DIR}/ci/requirements-ci.
 grep -Eq '^FROM debian:trixie-[0-9]{8}-slim@sha256:[0-9a-f]{64}$' "${PIPELINE_DIR}/ci/Dockerfile"
 reject_pattern 'no x86 disk artifact present.*skip' "${REPO}/.github/workflows/v2-ci.yml"
 reject_pattern 'if ! ./ci/check-size-regression.sh' "${REPO}/.github/workflows/v2-ci.yml"
+command -v rg >/dev/null 2>&1 || {
+  printf 'production CI/scope contract requires ripgrep (rg) on PATH\n' >&2
+  exit 127
+}
 if rg -n 'REPO_ROOT/\.\./CeraUI|PIPELINE_DIR/\.\./\.\.|DEV_SYNC_HERE}/\.\./\.\./\.\./\.\.' \
     "${PIPELINE_DIR}"/tests/{manifest-schema,package-contract,postinst-wiring,mkosi-image-contract,runtime-services,variant-contract}.bats \
     "${PIPELINE_DIR}/tests/manifest-helpers.bash" "${PIPELINE_DIR}/tests/realhw-suite.sh" \
