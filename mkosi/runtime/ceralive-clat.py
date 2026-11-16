@@ -314,9 +314,13 @@ def remove_guard():
 def ipv6_sharing(bus=None):
     """True while NetworkManager runs an IPv6 shared connection (it then owns
     global forwarding), False when it does not, None when unknown."""
+    private = None
     try:
         import dbus
-        bus = bus or dbus.SystemBus()
+        if bus is None:
+            # Never create the shared connection here: main() needs it
+            # attached to its main loop.
+            bus = private = dbus.SystemBus(private=True)
         if not bus.name_has_owner(NM):
             return False
         def get(path, interface, name):
@@ -333,6 +337,9 @@ def ipv6_sharing(bus=None):
     except Exception as error:
         print(f'CLAT forwarding owner query failed: {error}', file=sys.stderr, flush=True)
         return None
+    finally:
+        if private is not None:
+            private.close()
 
 
 def acquire_forwarding():
