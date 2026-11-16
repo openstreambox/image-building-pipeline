@@ -2,6 +2,7 @@
 """Keep image-owned runtime free of unreviewed modem rail control."""
 import pathlib
 import re
+import subprocess
 import sys
 
 # The image installs uhubctl for manual external-USB maintenance, but no runtime
@@ -22,8 +23,18 @@ command = re.compile(
 # this file only.
 REVIEWED = {('boot.scr.cmd', '  if gpio clear B26; then setenv cera_slot_power "held"; fi')}
 
+def candidates(root):
+    """Tracked files when root is in a Git work tree (a built tree also holds root-owned
+    mkosi output and caches that are not image sources); every file otherwise."""
+    listing = subprocess.run(['git', '-C', str(root), 'ls-files', '-z', '--', '.'],
+                             capture_output=True, check=False)
+    if listing.returncode == 0:
+        return [root / name for name in listing.stdout.decode().split('\0') if name]
+    return [path for path in root.rglob('*') if path.is_file()]
+
+
 violations = []
-for path in pathlib.Path(sys.argv[1]).rglob('*'):
+for path in candidates(pathlib.Path(sys.argv[1])):
     if not path.is_file():
         continue
     data = path.read_bytes()
