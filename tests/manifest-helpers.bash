@@ -161,6 +161,10 @@ SH
   cat >"$bin/systemctl" <<'SH'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >>"$HOSTNAME_CALLS"
+if [[ "$*" = 'show --property=ActiveState --value ceralive-healthcheck.service' ]]; then
+  printf '%s\n' "${HOSTNAME_HEALTH_ACTIVE_STATE:-active}"
+  exit 0
+fi
 [[ "${HOSTNAME_SYSTEMCTL_SCENARIO:-normal}" != fail ]]
 SH
   cat >"$bin/ip" <<'SH'

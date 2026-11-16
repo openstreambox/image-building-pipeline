@@ -464,3 +464,28 @@ If the cert is missing, run the firstboot service manually:
 systemctl start ceralive-tls-firstboot.service
 systemctl restart nginx.service
 ```
+
+### Hostname retries and boot health
+
+Hostname allocation allows six starts per two-minute window, with ten seconds
+between automatic retries. This tolerates short Avahi/D-Bus startup faults while
+bounding persistent failures, without a ten-minute identity outage. After a
+start limit, the reconciliation timer should request another attempt once the
+window expires; timer recovery still needs device verification. Operators can
+retry immediately after fixing the cause with:
+
+```sh
+systemctl reset-failed ceralive-hostname.service
+systemctl start ceralive-hostname.service
+```
+
+Identity refresh restarts TLS-firstboot. The nginx Requires/After drop-in refreshes
+an already-running nginx and orders its initial start after certificate setup;
+identity refresh never explicitly starts a masked, missing or stopped nginx.
+
+Reconciliation restarts an activating boot healthcheck after refreshing the app,
+giving it a fresh assessment deadline. Completed checks are only started, so
+completed boot confirmation is not restarted. Slot-sync wants and follows
+mark-good and checks that it is active before starting; a later stop/restart
+does not interrupt an admitted mirror. Its script also refuses a missing or
+stale current-boot/build/package health receipt before copying anything.
