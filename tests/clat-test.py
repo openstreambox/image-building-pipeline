@@ -101,6 +101,9 @@ class Isolated(unittest.TestCase):
             patcher.start(); self.addCleanup(patcher.stop)
         patcher = patch.object(clat.socket, 'if_nametoindex', return_value=3)
         patcher.start(); self.addCleanup(patcher.stop)
+        # Never ask the host's own NetworkManager.
+        patcher = patch.object(clat, 'ipv6_sharing', return_value=False)
+        self.sharing = patcher.start(); self.addCleanup(patcher.stop)
 
 class Admission(Isolated):
     def test_dual_stack_needs_no_clat(self):
@@ -401,6 +404,150 @@ class ActivationIsolation(Isolated):
         self.assertIn(f'ip6 saddr {new.v6} snat ip6 to 2001:db8::2', ruleset)
         self.assertNotIn(old.v6, ruleset)
         self.assertIn(f'map {new.v4} {new.v6}', (clat.RUN/'3.conf').read_text())
+
+
+GRANT = {'wan1': ('2001:db8::1', '', ('2001:db8::53',))}
+
+
+def is_guard(args, data):
+    return args[:2] == ['nft', '-f'] and f'create table inet {clat.GUARD}' in (data or '')
+
+
+class ForwardingGuard(Isolated):
+    def test_guard_is_installed_before_forwarding_is_enabled(self):
+        record = clat.RUN/'forwarding'
+        def check(args, data):
+            if is_guard(args, data):
+                self.assertEqual(record.read_text(), '0')
+        host = FakeHost(fail=check)
+        with host.patched():
+            clat.Controller().sync(GRANT, sharing=False)
+        self.assertLess(host.index(is_guard), host.index(lambda a, d: a == ['set_forwarding', '1']))
+        self.assertIn(clat.GUARD, host.tables)
+        self.assertEqual(json.loads((clat.RUN/'3.json').read_text())['state'], 'up')
+
+    def test_startup_interrupted_at_either_step_recovers_guarded(self):
+        for step in ('guard', 'forwarding'):
+            with self.subTest(step=step):
+                for leftover in clat.RUN.iterdir():
+                    leftover.unlink()
+                def crash(args, data):
+                    if (step == 'guard' and is_guard(args, data)) or (step == 'forwarding' and args == ['set_forwarding', '1']):
+                        return SystemExit('crash during startup')
+                host = FakeHost(fail=crash)
+                with host.patched(), self.assertRaises(SystemExit):
+                    clat.Link('wan1', *GRANT['wan1']).start()
+                self.assertTrue((clat.RUN/'forwarding').exists())
+                self.assertEqual(host.forwarding, '0')
+                host.fail = None
+                with host.patched():
+                    self.assertTrue(clat.cleanup())
+                self.assertEqual(host.forwarding, '0')
+                self.assertNotIn(clat.GUARD, host.tables)
+                self.assertFalse((clat.RUN/'forwarding').exists())
+
+    def test_failed_later_inverse_keeps_guard_until_forwarding_is_restored(self):
+        import subprocess
+        host = FakeHost()
+        controller = clat.Controller()
+        with host.patched():
+            controller.sync(GRANT, sharing=False)
+            host.fail = lambda args, data: subprocess.TimeoutExpired(args, 10) if args[2:4] == ['route', 'flush'] and args[1] == '-4' else None
+            controller.sync({}, sharing=False)
+            # The link's own table is gone; global forwarding stays guarded.
+            self.assertNotIn('clat_3', host.tables)
+            self.assertIn(clat.GUARD, host.tables)
+            self.assertEqual(host.forwarding, '1')
+            self.assertNotIn(['set_forwarding', '0'], host.commands())
+            self.assertTrue((clat.RUN/'forwarding').exists())
+            host.fail = None
+            controller.sync({}, sharing=False)
+        self.assertFalse(controller.links)
+        self.assertEqual(host.forwarding, '0')
+        self.assertNotIn(clat.GUARD, host.tables)
+        self.assertLess(host.index(lambda a, d: a == ['set_forwarding', '0']),
+                        host.index(lambda a, d: a == ['nft', 'delete', 'table', 'inet', clat.GUARD]))
+
+    def test_foreign_guard_table_is_refused_and_kept(self):
+        host = FakeHost()
+        host.tables.add(clat.GUARD)
+        with host.patched():
+            link = clat.Link('wan1', *GRANT['wan1'])
+            link.start()
+        self.assertEqual(json.loads((clat.RUN/'3.json').read_text())['state'], 'error')
+        self.assertFalse(link.undo)
+        self.assertIn(clat.GUARD, host.tables)
+        self.assertEqual(host.forwarding, '0')
+        self.assertFalse((clat.RUN/'forwarding').exists())
+
+
+class ForwardingOwners(Isolated):
+    def test_existing_owner_is_neither_recorded_nor_guarded(self):
+        host = FakeHost(forwarding='1')
+        controller = clat.Controller()
+        with host.patched():
+            controller.sync(GRANT, sharing=False)
+            controller.sync({}, sharing=False)
+        self.assertNotIn(clat.GUARD, [args[4] for args in host.commands() if args[:3] == ['nft', 'create', 'table']])
+        self.assertFalse(any(is_guard(a, d) for a, d in host.calls))
+        self.assertEqual(host.forwarding, '1')
+        self.assertFalse(any(a[0] == 'set_forwarding' for a in host.commands()))
+
+    def test_sharing_started_after_clat_takes_over_forwarding(self):
+        host = FakeHost()
+        controller = clat.Controller()
+        with host.patched():
+            controller.sync(GRANT, sharing=False)
+            self.assertIn(clat.GUARD, host.tables)
+            controller.sync(GRANT, sharing=True)
+            # The new owner's forwarding is no longer filtered...
+            self.assertNotIn(clat.GUARD, host.tables)
+            self.assertFalse((clat.RUN/'forwarding').exists())
+            # ...and stopping CLAT, with or without sharing, never writes 0.
+            controller.sync({}, sharing=True)
+            controller.sync({}, sharing=False)
+        self.assertFalse(controller.links)
+        self.assertEqual(host.forwarding, '1')
+        self.assertNotIn(['set_forwarding', '0'], host.commands())
+
+    def test_unknown_owner_keeps_forwarding_guarded(self):
+        host = FakeHost()
+        controller = clat.Controller()
+        self.sharing.return_value = None
+        with host.patched():
+            controller.sync(GRANT, sharing=False)
+            controller.sync({}, sharing=None)
+            self.assertNotIn(['set_forwarding', '0'], host.commands())
+            self.assertIn(clat.GUARD, host.tables)
+            self.assertEqual(json.loads((clat.RUN/'3.json').read_text())['state'], 'error')
+            controller.sync({}, sharing=False)
+        self.assertEqual(host.forwarding, '0')
+        self.assertNotIn(clat.GUARD, host.tables)
+        self.assertEqual(json.loads((clat.RUN/'3.json').read_text())['state'], 'down')
+
+    def test_owner_appearing_during_restore_gets_forwarding_back(self):
+        host = FakeHost()
+        controller = clat.Controller()
+        self.sharing.return_value = True
+        with host.patched():
+            controller.sync(GRANT, sharing=False)
+            controller.sync({}, sharing=False)
+        self.assertEqual(host.forwarding, '1')
+        self.assertEqual([a[1] for a in host.commands() if a[0] == 'set_forwarding'], ['1', '0', '1'])
+        self.assertNotIn(clat.GUARD, host.tables)
+        self.assertFalse((clat.RUN/'forwarding').exists())
+
+    def test_cleanup_entrypoint_asks_networkmanager(self):
+        # ExecStopPost after a crash: no controller state, NM sharing active.
+        host = FakeHost()
+        with host.patched():
+            clat.Link('wan1', *GRANT['wan1']).start()
+            self.sharing.return_value = True
+            self.assertTrue(clat.cleanup())
+        self.sharing.assert_called_with()
+        self.assertEqual(host.forwarding, '1')
+        self.assertNotIn(['set_forwarding', '0'], host.commands())
+        self.assertNotIn(clat.GUARD, host.tables)
 
 
 def consumer_accepts(address):

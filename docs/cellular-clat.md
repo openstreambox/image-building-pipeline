@@ -78,9 +78,9 @@ NAT44 on each TUN supports forwarded IPv4 clients. Existing hotspot ownership,
 IPv4 forwarding, firewall and client admission remain with NetworkManager and
 the sharing service. This service owns its `inet clat_<index>` NAT/filter table.
 Its IPv6 forward filter permits only the mapped source toward the discovered
-prefix and established replies on that translator. If IPv6 forwarding was
-previously disabled, unrelated IPv6 forwarding is dropped while CLAT is active;
-existing IPv4 hotspot admission remains with its owner. The shared IPv4/IPv6
+prefix and established replies on that translator. Unrelated IPv6 forwarding
+is covered by the forwarding guard below; existing IPv4 hotspot admission
+remains with its owner. The shared IPv4/IPv6
 TUN keeps the uplink MTU so full-size incoming IPv6 packets fit. Both IPv4
 default routes through it use plain `mtu` at uplink MTU minus 20 bytes for
 translation overhead. The IPv6 minimum link MTU of 1280 therefore gives an
@@ -96,7 +96,28 @@ to the IPv4 route MTU.
 It never flushes another owner's rules or tables.
 
 IPv6 forwarding is needed for translation. The controller enables the global
-switch while preserving devices' forwarding values. It does not change
+switch while preserving devices' forwarding values. When the switch was off,
+it first records the old value (fsynced `forwarding` file in the runtime
+directory), then installs the `inet clat_guard` table, which drops every
+forwarded IPv6 packet that neither enters nor leaves a `clat*` TUN, and only
+then enables forwarding. The guard has its own lifetime, separate from the
+per-link tables: it stays through link teardown, failed or pending inverses
+and a crash at any startup step, and is removed only after forwarding is back
+at the recorded value, or when another owner takes forwarding over. A switch
+that was already on belongs to another owner: CLAT records nothing, adds no
+guard and never changes it back.
+
+NetworkManager's IPv6 shared mode (`ipv6.method shared`) is such an owner. It
+sets the global switch when sharing starts and never resets it. Each
+reconciliation asks NetworkManager for activating or activated connections
+with that method. Once one exists, CLAT hands forwarding over: it removes the
+guard and forgets the recorded value, so it never writes 0 over the newer
+owner's 1, even after sharing stops again (forwarding then stays on, as it
+would without CLAT). Before restoring 0 the last withdrawal asks again; when
+the answer is unknown (D-Bus failure) it keeps forwarding guarded and the
+status `error` until a later retry can tell. An owner that appears during the
+write gets its 1 back. Other software that enables IPv6 forwarding while CLAT
+holds a recorded value is not detected; use NetworkManager sharing. It does not change
 `accept_ra` or per-interface forwarding on NM-managed links: NetworkManager
 continues processing router advertisements in userspace. Owned
 routes/rules/firewall/TUNs are removed on withdrawal. A root-only runtime cleanup

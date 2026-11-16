@@ -204,10 +204,11 @@ class Controller:
     def __init__(self):
         self.links = {}
 
-    def sync(self, wanted, observed_at=None):
+    def sync(self, wanted, observed_at=None, sharing=None):
+        """sharing: whether NetworkManager runs IPv6 sharing (None: unknown)."""
         observed_at = boot_time() if observed_at is None else observed_at
         # Retry orphaned inverses even if their NM grant never returns.
-        cleanup(exclude={link.index for _, link in self.links.values()})
+        cleanup(exclude={link.index for _, link in self.links.values()}, sharing=sharing)
         for interface, (signature, link) in list(self.links.items()):
             try:
                 same_index = socket.if_nametoindex(interface) == link.index
@@ -257,15 +258,130 @@ class Controller:
                     finally:
                         link.refreshed = time.monotonic()
                 link.status('up')
+        if sharing:
+            try:
+                hand_over_forwarding()
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                print(f'CLAT forwarding handover failed: {error}', file=sys.stderr, flush=True)
         if not self.links:
-            cleanup()
+            cleanup(sharing=sharing)
 
 
-def restore_forwarding():
-    state = RUN / 'forwarding'
-    if state.exists():
-        set_forwarding(state.read_text().strip())
-        state.unlink()
+GUARD = 'clat_guard'
+NM = 'org.freedesktop.NetworkManager'
+
+
+def durable_text(path, text):
+    temp = path.with_suffix('.tmp')
+    with temp.open('w') as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temp.replace(path)
+    fd = os.open(path.parent, os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def guard_present():
+    tables = json.loads(command('nft', '-j', 'list', 'tables')).get('nftables', [])
+    return any(t.get('table', {}).get('family') == 'inet' and t['table'].get('name') == GUARD
+               for t in tables)
+
+
+def install_guard():
+    # Global IPv6 forwarding that CLAT enabled may carry only translator
+    # traffic; per-link tables narrow that further.
+    if guard_present():
+        return
+    command('nft', '-f', '-', data=f"""create table inet {GUARD}
+add chain inet {GUARD} forward {{ type filter hook forward priority -1; }}
+add rule inet {GUARD} forward meta nfproto ipv6 iifname != "clat*" oifname != "clat*" drop
+""")
+
+
+def remove_guard():
+    try:
+        command('nft', 'delete', 'table', 'inet', GUARD)
+    except subprocess.CalledProcessError:
+        if guard_present():
+            raise
+
+
+def ipv6_sharing(bus=None):
+    """True while NetworkManager runs an IPv6 shared connection (it then owns
+    global forwarding), False when it does not, None when unknown."""
+    try:
+        import dbus
+        bus = bus or dbus.SystemBus()
+        if not bus.name_has_owner(NM):
+            return False
+        def get(path, interface, name):
+            return dbus.Interface(bus.get_object(NM, path), 'org.freedesktop.DBus.Properties').Get(
+                interface, name, timeout=5)
+        for active in get('/org/freedesktop/NetworkManager', NM, 'ActiveConnections'):
+            if int(get(active, NM + '.Connection.Active', 'State')) not in (1, 2):
+                continue
+            path = get(active, NM + '.Connection.Active', 'Connection')
+            settings = dbus.Interface(bus.get_object(NM, path), NM + '.Settings.Connection').GetSettings(timeout=5)
+            if str(settings.get('ipv6', {}).get('method', '')) == 'shared':
+                return True
+        return False
+    except Exception as error:
+        print(f'CLAT forwarding owner query failed: {error}', file=sys.stderr, flush=True)
+        return None
+
+
+def acquire_forwarding():
+    """Enable global IPv6 forwarding for translation, guarded from the start.
+
+    The record (previous value) is written first and the guard is installed
+    before forwarding changes; both stay until restore or handover."""
+    record = RUN / 'forwarding'
+    if not record.exists():
+        current = command('sysctl', '-n', 'net.ipv6.conf.all.forwarding').strip()
+        if current == '1':
+            return  # Another owner already forwards; never record or guard it.
+        if guard_present():
+            raise ValueError('CLAT forwarding guard table already owned')
+        durable_text(record, current)
+    install_guard()
+    if command('sysctl', '-n', 'net.ipv6.conf.all.forwarding').strip() != '1':
+        set_forwarding('1')
+
+
+def hand_over_forwarding():
+    # NetworkManager shared mode now needs forwarding and never resets it:
+    # forget the old value so CLAT never writes 0 over it, then unguard.
+    record = RUN / 'forwarding'
+    if record.exists():
+        remove_guard()
+        record.unlink()
+
+
+def restore_forwarding(sharing=None):
+    record = RUN / 'forwarding'
+    if not record.exists():
+        return
+    if sharing is None:
+        sharing = ipv6_sharing()
+    if sharing is None:
+        raise OSError('cannot tell whether another owner needs IPv6 forwarding')
+    if sharing:
+        hand_over_forwarding()
+        return
+    set_forwarding(record.read_text().strip())
+    if ipv6_sharing() is True:
+        # An owner appeared during the write: give its forwarding back.
+        set_forwarding('1')
+        hand_over_forwarding()
+        return
+    # Forwarding is off again before the guard goes.
+    remove_guard()
+    record.unlink()
 
 
 class Link:
@@ -285,7 +401,6 @@ class Link:
         self.process = None
         self.undo = []
         self.prefix = None
-        self.forwarding = None
         self.failures = 0
         self.generation = uuid.uuid4().hex
         self.stopping = False
@@ -374,12 +489,7 @@ class Link:
                 raise ValueError('CLAT firewall table already owned')
             if not self.status('starting'):
                 return
-            self.forwarding = command('sysctl', '-n', 'net.ipv6.conf.all.forwarding').strip()
-            if self.forwarding != '1':
-                global_state = RUN / 'forwarding'
-                if not global_state.exists():
-                    global_state.write_text(self.forwarding)
-                set_forwarding('1')
+            acquire_forwarding()
             cfg = RUN / f'{self.index}.conf'
             cfg.write_text(f'tun-device {self.tun}\nipv4-addr 192.0.0.2\nipv6-addr fd46:4:ffff::{self.index:x}\nprefix {self.prefix}\nmap {self.v4} {self.v6}\n')
             self.add([TAYGA, '-c', str(cfg), '--mktun'], ['ip', 'link', 'del', self.tun])
@@ -423,8 +533,6 @@ add rule inet {self.nft} forward iifname "{self.interface}" oifname "{self.tun}"
 add rule inet {self.nft} forward meta nfproto ipv6 iifname "{self.tun}" drop
 add rule inet {self.nft} forward meta nfproto ipv6 oifname "{self.tun}" drop
 ''')
-            if (RUN / 'forwarding').exists() and (RUN / 'forwarding').read_text().strip() == '0':
-                command('nft', '-f', '-', data=f'add rule inet {self.nft} forward meta nfproto ipv6 iifname != "clat*" oifname != "clat*" drop\n')
             self.process = subprocess.Popen([TAYGA, '-c', str(cfg), '-n', '-u', 'nobody', '-g', 'nogroup'])
             time.sleep(.1)
             if self.process.poll() is not None:
@@ -501,7 +609,8 @@ def main():
         except Exception:
             # Manager loss invalidates every previous grant; no stale translation.
             wanted = {}
-        return retry(lambda: controller.sync(wanted, observed_at=observed_at))
+        sharing = ipv6_sharing(bus)
+        return retry(lambda: controller.sync(wanted, observed_at=observed_at, sharing=sharing))
     # D-Bus changes trigger reconciliation; periodic retry also recovers DNS/startup failures.
     pending = [False]
     def changed(*args, **kwargs):
@@ -522,11 +631,12 @@ def main():
     try:
         loop.run()
     finally:
-        controller.sync({})
-        cleanup(exclude={link.index for _, link in controller.links.values()})
+        sharing = ipv6_sharing(bus)
+        controller.sync({}, sharing=sharing)
+        cleanup(exclude={link.index for _, link in controller.links.values()}, sharing=sharing)
 
 
-def cleanup(exclude=()):
+def cleanup(exclude=(), sharing=None):
     failed = False
     # Invalidate *all* old snapshots before the first destructive command.
     snapshots = {}
@@ -558,8 +668,8 @@ def cleanup(exclude=()):
             pending.add(path.stem)
     if not list(RUN.glob('*.cleanup')) and not exclude:
         try:
-            restore_forwarding()
-        except (OSError, subprocess.SubprocessError) as error:
+            restore_forwarding(sharing)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
             print(f'CLAT forwarding restore failed: {error}', file=sys.stderr, flush=True)
             failed = True
     for index, data in snapshots.items():
