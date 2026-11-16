@@ -117,12 +117,25 @@ would without CLAT). Before restoring 0 the last withdrawal asks again; when
 the answer is unknown (D-Bus failure) it keeps forwarding guarded and the
 status `error` until a later retry can tell. An owner that appears during the
 write gets its 1 back. Other software that enables IPv6 forwarding while CLAT
-holds a recorded value is not detected; use NetworkManager sharing. It does not change
-`accept_ra` or per-interface forwarding on NM-managed links: NetworkManager
-continues processing router advertisements in userspace. Owned
+holds a recorded value is not detected; use NetworkManager sharing.
+
+The controller does not change `accept_ra` or per-interface forwarding on
+NM-managed links: NetworkManager continues processing router advertisements
+in userspace. Owned
 routes/rules/firewall/TUNs are removed on withdrawal. A root-only runtime cleanup
 journal, written before each resource creation, and
-ExecStopPost handle service failure/restart. The previous global forwarding
+ExecStopPost handle service failure/restart.
+
+Stopping is controller-first. The unit uses `KillMode=mixed`, so `systemctl
+stop` or `restart` sends SIGTERM only to the controller; tayga keeps running
+until the controller has published `unavailable` and terminates it itself. If
+the controller is busy (discovery, D-Bus, routes), it finishes that step
+first. After SIGTERM every command has a shared 20 s budget; whatever is left
+stays in the journal. If invalidation cannot be written, the controller leaves
+its translators running and exits nonzero; only then does systemd kill the
+rest of the group, and consumers already see the unit deactivating.
+`TimeoutStopSec=45` bounds the whole stop, and ExecStopPost and the next start
+replay what is left. The previous global forwarding
 switch is restored only when no translators or pending resource inverses remain.
 The runtime directory survives a clean stop as well as a restart, so a failed
 ExecStopPost returns nonzero without losing its recovery intent. Journals are
@@ -213,9 +226,16 @@ complete mode additionally checks SRTLA. Missing dependencies fail the enabled
 gate.
 
 `tests/clat-netns.py` needs root, iproute2, nftables, tayga, Python with
-dnspython, dbus-python and PyGObject, and real
-`srtla_send` / `srtla_rec` binaries. Run it only inside fresh PID, mount and
-network namespaces, with a shell as PID 1. Set `CLAT_TEST_TAYGA`,
+dnspython, dbus-python and PyGObject, systemd as the host's init (251 or
+newer) and real `srtla_send` / `srtla_rec` binaries. Run it only inside fresh
+PID and mount namespaces and a named network namespace, with a shell as
+PID 1, as `run-tests` does (`ip netns exec`, with `CLAT_TEST_NETNS` set to
+`/run/netns/<name>`). The installed-unit part copies the unit file unchanged
+to `/run/systemd/system` with a drop-in that only adds that network namespace,
+an `ExtensionDirectories=` overlay carrying the controller (and tayga or
+dnspython when the host lacks them) and the private D-Bus address; it refuses
+to run if a `ceralive-clat` unit or `/run/ceralive/clat` already exists and
+removes everything afterwards. Do not run two contracts at once. Set `CLAT_TEST_TAYGA`,
 `CLAT_TEST_SENDER` and `CLAT_TEST_RECEIVER` to installed test binary paths.
 It uses synthetic veths and a local DNS64/NAT64 peer with no external uplink.
 It checks two simultaneously active translators, source-bound IPv4 transport,
@@ -232,4 +252,17 @@ and the scoped IPv6 filter with forwarding initially disabled or already
 enabled by another owner. Tayga runs in foreground mode without debug output.
 The real service lifecycle runs with the unit's restricted capability set and
 no-new-privileges.
+It also checks that the forwarding guard exists before forwarding at both
+startup steps a crash can interrupt and survives a failed later inverse,
+with real unrelated IPv6 packets; that NetworkManager IPv6 sharing started
+after CLAT takes forwarding over and keeps it after CLAT stops, and the
+reverse order; that fixed-port UDP from the box and a hotspot client keeps
+working after the uplink renumbers on the same ifindex; and an IPv6 1280 link
+(IPv4 1260): DF UDP and TCP without fragments or PTB, the box refusing and
+the hotspot learning 1260 by ICMP for one byte more, and fragmented delivery
+without DF. Through the installed unit, stop and restart are checked to
+withdraw availability before any translator loses its TUN, while the
+controller is held in a slow reconciliation, and a stop whose invalidation
+cannot be written keeps its translator until the controller has exited,
+leaves forwarding guarded, and recovers on the next start.
 This proves packet forwarding, not encrypted SRT/video or carrier hardware.
