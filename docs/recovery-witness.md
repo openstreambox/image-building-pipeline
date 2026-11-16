@@ -284,25 +284,17 @@ removes the projection. Never authorize from status.
 
 ## Previous-release observations and update-path obligations
 
-`release` persists across boots and healthy re-arm. Its fields are software digests
-`new_release`/`previous_release`, trusted activation timestamp `activated_at`,
-nullable `full_healthy_stream`, latest trusted timestamp `trusted_now`, and
-`minimum_retention_seconds=604800`. Unknown fields remain null. The trusted update
-owner records these through `Store.release`; this is evidence storage only.
-`release_retirement_allowed` is always false: this layer implements no release
-retention, slot copying, deletion, selection, or wall-clock eligibility logic.
+`release` persists across boots and healthy re-arm. Its observation fields remain
+nullable software digests, activation/wall timestamps and a complete-stream
+verdict. `Store.release` stores observations only and never grants deletion.
 
-The update path must provide authenticated exact release identities, preserve the
-previous release and its boot artifacts/selector entry, record activation once,
-and supply a complete real healthy stream verdict bound to that new release.
-Two health snapshots or budget re-arm are not a full healthy stream. It must
-supply trusted elapsed calendar time across boots (NTP jumps alone cannot prove
-seven days), retain the prior release until **both** one full healthy stream and
-seven days since activation are proven, and prevent slot-sync/mirror from erasing
-it sooner. Replacing an activation resets its release-specific evidence. Unknown
-or failed evidence must retain the previous release. The update owner must
-serialize and bind these observations to the matching activation; this generic
-recording API does not enforce release lifecycle or authorize retirement.
+Schema 7 adds the [previous-release preservation host owners](previous-release-preservation.md).
+They bind activation, real complete-stream attestation and conservative
+boot-clock-plus-wall-clock elapsed time to one retained release, before update,
+selector or mirror callbacks. Status and `rollback_status()` report each unmet
+requirement and the latest refusal. `release_retirement_allowed` remains false:
+status is advisory, and an immediate owner call with fresh evidence is required.
+These are inert contracts on the closed reference stack, not installed protection.
 
 ## Enabling work still required
 
@@ -315,7 +307,8 @@ recording API does not enforce release lifecycle or authorize retirement.
 - Wire rescue-required to media suppression and persistent UI/LED announcements,
   keeping management/update repair/log export available without claiming rescue
   activation until that mechanism is implemented and measured.
-- Implement previous-release retention in selector/update/mirror owners.
+- Wire preservation into every actual selector/update/mirror writer; the
+  inert host owners alone do not enforce retention on an image.
 - [Management-path commit-confirm](management-commit-confirm.md) now has an inert
   host contract; timer/network integration and D7 remain unqualified. Reset
   triggers, missing-root timeouts and remote

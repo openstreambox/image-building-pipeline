@@ -12,7 +12,7 @@ import re
 import tempfile
 import time
 
-VERSION = 6
+VERSION = 7
 MAX_WITNESSES = 64
 MAX_REJECTED = 4
 MAX_BYTES = 4 * 1024 * 1024
@@ -103,6 +103,7 @@ class Store:
                 "charges_without_credit": 0,
                 "pruned_boots": 0, "max_health_gap": self.max_health_gap,
                 "rescue": {"required": False, "entries": 0, "entered_boot": None},
+                "retention": None,
                 "release": {"new_release": None, "previous_release": None,
                             "activated_at": None, "full_healthy_stream": None,
                             "trusted_now": None, "minimum_retention_seconds": 604800}}
@@ -134,6 +135,8 @@ class Store:
         if rescue["entered_boot"] is not None:
             boot_id(rescue["entered_boot"])
         self.validate_release(record["release"])
+        from release_preservation import validate
+        validate(record["retention"])
         for key, witness in record["boots"].items():
             boot_id(key)
             if set(witness) != {"state_source", "budget_at_start", "previous_boot", "slot", "counters", "bootloader", "reset_cause", "detectors", "console_tail", "health", "intent", "granted", "granted_at", "counted_without_credit", "last_uptime", "healthy_since", "budget_remaining"}:
@@ -328,7 +331,8 @@ class Store:
         else:
             state, marker = "rollback-not-armed", "ROLLBACK_NOT_ARMED"
             announcement = "Rollback not armed: verify counter persistence, pinned bootloader and live watchdog; updates and trials refused."
-        return {"version": VERSION, "boot_id": record["current_boot"], "remaining": remaining,
+        from release_preservation import status
+        return {**status(record), "version": VERSION, "boot_id": record["current_boot"], "remaining": remaining,
                 "reset_budget_available": remaining > 0 and not rescue,
                 # Media stops only on a known latch; an unknown one (null) keeps
                 # streaming with resets and trials denied.
