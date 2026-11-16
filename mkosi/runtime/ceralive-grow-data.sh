@@ -1,6 +1,8 @@
 #!/bin/bash
 # systemd 257 matches repart definitions by type and order, not Label.
 set -euo pipefail
+# shellcheck source=mkosi/runtime/ceralive-data-capacity-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ceralive-data-capacity-lib.sh"
 
 # Input: lsblk --bytes --raw --paths --output TYPE,PARTLABEL,PARTTYPE,SIZE,PARTN,START (arbitrary order).
 # Validate the entire known layout before permitting any disk mutation. Generate
@@ -24,7 +26,7 @@ grow_data_definitions() {
     case "$label" in
       "${prefix}boot") expected_type="$boot"; [[ "$bytes" == 268435456 ]] || return 1 ;;
       "${prefix}rootfs_a"|"${prefix}rootfs_b")
-        [[ "$bytes" == 3221225472 ]] || return 1 ;;
+        [[ "$bytes" == 4294967296 ]] || return 1 ;;
       "$data_label") ;;
       *) return 1 ;;
     esac
@@ -58,8 +60,8 @@ grow_data_main() {
   grow_data_is_block_device "$disk" || return 1
   # Refuse before repart can write GPT or touch an already failing card.
   root_bytes=$(lsblk -bdnro SIZE "$root")
-  [[ "$root_bytes" == 3221225472 ]] || return 1
-  minimum=8589934592
+  [[ "$root_bytes" == 4294967296 ]] || return 1
+  minimum=$CERALIVE_MIN_MEDIA_BYTES
   media=$(lsblk -bdnro SIZE "$disk")
   [[ "$media" =~ ^[1-9][0-9]{0,14}$ ]] || return 1
   (( media >= minimum )) || { echo 'Refusing to grow data: card too small' >&2; return 78; }

@@ -1320,7 +1320,7 @@ EOF
       bash -c 'source "$1/lib/common.sh"; source "$1/lib/disk/slot-image.sh"; make_slot_image "$2" "$3"' \
       _ "$PIPELINE_DIR" "$tree" "$BATS_TEST_TMPDIR/$i/rootfs.ext4"
     [ "$status" -eq 0 ]
-    [ "$(stat -c '%s' "$BATS_TEST_TMPDIR/$i/rootfs.ext4")" -eq 3221225472 ]
+    [ "$(stat -c '%s' "$BATS_TEST_TMPDIR/$i/rootfs.ext4")" -eq 4294967296 ]
     [ "$(debugfs -R 'cat /etc/hostname' "$BATS_TEST_TMPDIR/$i/rootfs.ext4" 2>/dev/null)" = ceralive ]
     run debugfs -R 'stat /etc/hostname' "$BATS_TEST_TMPDIR/$i/rootfs.ext4"
     [ "$status" -eq 0 ]

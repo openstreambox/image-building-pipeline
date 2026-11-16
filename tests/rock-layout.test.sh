@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source lib/shared/layout.sh
-[[ "$(BOARD_ID=rock-5b-plus ceralive_rootfs_mb)" == 3072 ]]
+[[ "$(BOARD_ID=rock-5b-plus ceralive_rootfs_mb)" == 4096 ]]
 [[ "$(BOARD_ID=orange-pi-5-plus ceralive_rootfs_mb)" == 4096 ]]
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -28,10 +28,10 @@ for n in 1 2 3 4; do
 done
 grow_data_definitions "$work/defs" data <"$work/table"
 start=$(part_field "$work/disk" 4 'First sector')
-# Grow the actual GPT at the physical minimum before retaining the 8 GiB case.
+# Grow the actual GPT at the physical minimum before growing to larger media.
 truncate -s "$CERALIVE_MIN_MEDIA_BYTES" "$work/disk"
 systemd-repart --offline=yes --definitions="$work/defs" --empty=refuse --dry-run=no --discard=no "$work/disk"
-minimum_data_bytes=$(( (8192 - 16 - 256 - 2 * 3072 - 1) * 1024 * 1024 ))
+minimum_data_bytes=$(( (CERALIVE_MIN_MEDIA_BYTES / 1048576 - 16 - 256 - 2 * 4096 - 1) * 1024 * 1024 ))
 [[ "$(part_field "$work/disk" 4 'Partition size')" -ge "$((minimum_data_bytes / 512))" ]]
 # Real ext4 metadata/reservations after growing a factory-size filesystem at
 # that conservative floor must leave 1 GiB even after budgeting 256 MiB payload.
@@ -47,7 +47,7 @@ read -r fs_blocks fs_block_size < <(awk -F: '$1=="Block count" {b=$2} $1=="Block
 available=$(sed -n 's/.*field=bavail free=\([0-9]*\).*/\1/p' <<<"$reserve")
 (( available - 256 * 1024 * 1024 >= CERALIVE_DATA_MIN_AVAILABLE_BYTES ))
 printf 'minimum media data partition floor=%s; grown ext4 available=%s; factory payload budget=268435456\n' "$minimum_data_bytes" "$available"
-truncate -s 8192M "$work/disk"
+truncate -s 32G "$work/disk"
 systemd-repart --offline=yes --definitions="$work/defs" --empty=refuse --dry-run=no "$work/disk"
 for n in 1 2 3; do sgdisk -i "$n" "$work/disk" >"$work/after$n"; cmp "$work/before$n" "$work/after$n"; done
 [[ "$(part_field "$work/disk" 4 'First sector')" == "$start" ]]

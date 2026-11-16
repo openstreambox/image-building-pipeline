@@ -113,7 +113,7 @@ def data_condition(receipt=Path('/run/ceralive-data-status')):
     if reason not in messages:
         reason = 'data-unusable'
     sizes = [v if re.fullmatch(r'[0-9]{1,20}', v) else 'unknown' for v in (media, partition, filesystem, available)]
-    detail = 'Reason: {}. Media bytes: {}; data partition bytes: {}; filesystem bytes: {}; available bytes: {}. Current image minimum media: 8589934592 bytes (8 GiB). A card sold as 8 GB holds a little under 8 GB, which is normal; minimum available: 1073741824 bytes.'.format(reason, *sizes)
+    detail = 'Reason: {}. Media bytes: {}; data partition bytes: {}; filesystem bytes: {}; available bytes: {}. Current image minimum media: 15000000000 bytes. A card sold as 16 GB holds a little under 16 GB, which is normal and passes; minimum available: 1073741824 bytes.'.format(reason, *sizes)
     publish('data-readiness', 'fatal', line, detail, fix)
 
 

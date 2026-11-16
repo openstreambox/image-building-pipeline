@@ -3,7 +3,8 @@
 [English](attention.md#storage-cannot-start-safely-fork-topic).
 
 Tema del fork, pendiente de validación física. La imagen ROCK actual necesita
-8 GiB medidos (8,589,934,592 bytes). Una tarjeta vendida como 8 GB no alcanza.
+una tarjeta de 16 GB o más. El mínimo medido es 15,000,000,000 bytes, por
+debajo del tamaño medido de las tarjetas de 16 GB genuinas.
 Antes de modificar las particiones, se rechaza una tarjeta demasiado pequeña
 o de solo lectura. Si falla ese paso, no se monta ni se amplía `/data`, no se ejecuta su comprobación con reparación automática
 y no se migra la configuración. El arranque continúa con el diagnóstico independiente.

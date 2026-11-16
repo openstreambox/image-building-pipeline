@@ -22,8 +22,8 @@ cat >"$work/bin/lsblk" <<'SH'
 #!/bin/bash
 case "$*" in
   '-dnro RO /dev/test') echo "${CARD_RO:-0}" ;;
-  '-bdnro SIZE /dev/test') echo "${MEDIA_BYTES:-8589934592}" ;;
-  '-bdnro SIZE /dev/test2') echo "${ROOT_BYTES:-3221225472}" ;;
+  '-bdnro SIZE /dev/test') echo "${MEDIA_BYTES:-15000000000}" ;;
+  '-bdnro SIZE /dev/test2') echo "${ROOT_BYTES:-4294967296}" ;;
   '-bdnro SIZE /dev/test4') echo 1835008000 ;;
    '-dnro PKNAME /dev/test2') echo test ;;
   '-dnro PKNAME /dev/test4') echo "${DATA_PARENT:-test}" ;;
@@ -84,12 +84,12 @@ sed '/^if \[\[ "${1:-}" == --partlabel-guard \]\]; then/,$d' mkosi/runtime/ceral
 echo 'data readiness failure/pending/success and health refusal pass'
 
 # Image-length media used to pass preflash but could never stage an update.
-for media in 8000000000 8589934591; do
+for media in 8000000000 14999999999; do
   if timeout 2s env MEDIA_BYTES="$media" bash "$helper" >"$work/capacity-error" 2>&1; then exit 1; else status=$?; fi
   [[ "$status" == 78 ]]
   grep -q 'no automatic retry or reboot' "$work/capacity-error"
 done
-MEDIA_BYTES=8589934592 bash "$helper"
+MEDIA_BYTES=15000000000 bash "$helper"
 if LOW_FREE=1 bash "$helper"; then exit 1; else [[ "$?" == 78 ]]; fi
 
 # Repeated operator boots cannot refresh attempts or mark the undersized slot
@@ -146,8 +146,10 @@ done
 bash "$helper"
 [[ ! -e $CERALIVE_DATA_STATUS_FILE ]]
 
-# Larger slots use the separate measured 8 GiB policy.
-ROOT_BYTES=3221225472 MEDIA_BYTES=8589934592 bash "$helper"
-for media in 8000000000 8589934591; do
-  if ROOT_BYTES=3221225472 MEDIA_BYTES=$media bash "$helper"; then exit 1; else [[ $? == 78 ]]; fi
+# Retail 16 GB policy: the floor and published 16 GB card sizes pass.
+for media in 15000000000 15480000000 15931539456; do
+  ROOT_BYTES=4294967296 MEDIA_BYTES=$media bash "$helper"
+done
+for media in 8000000000 14999999999; do
+  if ROOT_BYTES=4294967296 MEDIA_BYTES=$media bash "$helper"; then exit 1; else [[ $? == 78 ]]; fi
 done
