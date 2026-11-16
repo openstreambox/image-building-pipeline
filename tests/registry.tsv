@@ -257,3 +257,4 @@ tests/real-logind-contract.sh	shell	privileged	opt-in	CERALIVE_LOGIND_TEST_CONTA
 tests/fixtures/logind/input-ioctl.c	fixture	support	not-executed	synthetic evdev ioctl boundary for real logind
 tests/fixtures/logind/mock-logind.sh	fixture	support	not-executed	private sysfs and FIFO input fixture
 tests/fixtures/logind/key.py	fixture	support	not-executed	short and long synthetic power-key events
+tests/run-tests-failure.test.sh	shell	unit	default-shell	Bats runs after shell failures and both statuses remain fatal
