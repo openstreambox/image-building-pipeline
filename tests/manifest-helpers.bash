@@ -161,8 +161,8 @@ SH
   cat >"$bin/systemctl" <<'SH'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >>"$HOSTNAME_CALLS"
-if [[ "$*" = 'show --property=LoadState --value nginx.service' ]]; then
-  printf '%s\n' "${HOSTNAME_NGINX_LOAD_STATE:-loaded}"
+if [[ "$*" = 'show --property=ActiveState --value ceralive-healthcheck.service' ]]; then
+  printf '%s\n' "${HOSTNAME_HEALTH_ACTIVE_STATE:-active}"
   exit 0
 fi
 [[ "${HOSTNAME_SYSTEMCTL_SCENARIO:-normal}" != fail ]]

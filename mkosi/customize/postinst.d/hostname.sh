@@ -375,12 +375,16 @@ local_identity_matches() {
 
 restart_identity_consumers() {
     "$SYSTEMCTL_BIN" --no-block restart "${CONSUMER_UNITS[@]}" || return 1
-    # Masked/absent nginx is intentional on images with another web front door.
-    if [[ "$("$SYSTEMCTL_BIN" show --property=LoadState --value nginx.service)" = loaded ]]; then
-        "$SYSTEMCTL_BIN" --no-block restart nginx.service || return 1
+    # nginx follows TLS through its Requires=/After= drop-in when running.
+    # Never explicitly start a masked, absent or deliberately stopped front end.
+    # Re-assess an in-flight boot check after the app restart; starting it would
+    # merge into the old job and retain its nearly exhausted assessment deadline.
+    local health_action=start
+    if [[ "$("$SYSTEMCTL_BIN" show --property=ActiveState --value ceralive-healthcheck.service)" = activating ]]; then
+        health_action=restart
     fi
-    # These are boot-scoped checks, not identity consumers to restart.
-    "$SYSTEMCTL_BIN" --no-block start ceralive-healthcheck.service ceralive-mark-good.service
+    "$SYSTEMCTL_BIN" --no-block "$health_action" ceralive-healthcheck.service || return 1
+    "$SYSTEMCTL_BIN" --no-block start ceralive-mark-good.service
 }
 
 clear_restart_pending() {
@@ -501,9 +505,10 @@ After=systemd-machine-id-commit.service ceralive-migrate-data.service NetworkMan
 Before=ceralive-tls-firstboot.service ceralive.service
 Wants=NetworkManager.service avahi-daemon.service
 ConditionPathExists=/etc/machine-id
-# Allow transient claim failures, but stop rapid retries on persistent errors.
-StartLimitIntervalSec=600
-StartLimitBurst=3
+# Six attempts per two minutes tolerate daemon startup faults without a long
+# identity outage; ten-second spacing bounds rapid failures to six per window.
+StartLimitIntervalSec=120
+StartLimitBurst=6
 
 [Service]
 Type=oneshot
@@ -513,12 +518,11 @@ RuntimeDirectoryMode=0700
 ExecStart=/usr/local/sbin/ceralive-set-hostname
 ExecStartPost=/usr/bin/systemctl --no-block start ceralive.service
 ExecStartPost=/usr/bin/systemctl --no-block restart ceralive-tls-firstboot.service ceralive-hawkbit-provision.service
-ExecStartPost=/bin/sh -c 'if [ "$(/usr/bin/systemctl show --property=LoadState --value nginx.service)" = loaded ]; then /usr/bin/systemctl --no-block restart nginx.service; fi'
 ExecStartPost=/usr/bin/systemctl --no-block start ceralive-healthcheck.service
 ExecStartPost=/usr/bin/systemctl --no-block start ceralive-mark-good.service
 TimeoutStartSec=150
 Restart=on-failure
-RestartSec=5
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -556,8 +560,8 @@ EOF
   # Wants=, not Requires=: a failed unique-hostname claim must NOT take the
   # product down. ceralive.service still boots on the baked default hostname
   # (degraded-but-functional), After= keeps the claim ordered first when it can
-  # run, and ceralive-hostname.service's own Restart=on-failure + the reconcile
-  # timer keep retrying — ExecStartPost then restarts consumers once it succeeds.
+  # run. Automatic retries are bounded to six per two-minute window; the
+  # reconcile timer can request another attempt once that limit expires.
   cat >/etc/systemd/system/ceralive.service.d/05-hostname-identity.conf <<'EOF'
 [Unit]
 Wants=ceralive-hostname.service

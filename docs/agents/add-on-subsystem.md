@@ -338,7 +338,9 @@ state — reproduced live: same-name set → exit 1, different-name → exit 0).
   `ceralive-tls-firstboot.service`, and `ceralive-hawkbit-provision.service`. A failed
   claim no longer cascades; the device boots on the baked default hostname
   (degraded-but-functional), `After=` keeps ordering, the unit's own
-  `Restart=on-failure` + the 30s reconcile timer keep retrying, and `ExecStartPost`
+  `Restart=on-failure` is limited to six starts per two minutes (ten-second
+  spacing); the 30s reconcile timer can request a new attempt after that window.
+  `ExecStartPost`
   restarts consumers once a claim succeeds. Only `ceralive-hostname-reconcile.service`
   keeps a hard `Requires=` (its failure is harmless — the timer refires). This
   supersedes the "every `Requires=` consumer cascades" description above.

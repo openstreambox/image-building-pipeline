@@ -3124,47 +3124,68 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   [ "$output" -eq 1 ]
 }
 
-@test "hostname: masked or absent nginx is skipped at boot and reconciliation" {
-  local state root command
-  command="$(extract_hostname_unit | sed -n "s|^ExecStartPost=/bin/sh -c '\(.*\)'$|\1|p")"
-  [ -n "$command" ]
-  for state in loaded masked not-found; do
-    root="$BATS_TEST_TMPDIR/nginx-$state"
+@test "hostname: TLS owns nginx refresh without unconditional nginx jobs" {
+  local unit root payload
+  unit="$(extract_hostname_unit)"
+  run ! grep -E '^ExecStartPost=.*nginx\.service' <<<"$unit"
+  grep -Fxq 'Requires=ceralive-tls-firstboot.service' "$PIPELINE_DIR/mkosi/runtime/ceralive-tls-nginx.dropin.conf"
+  grep -Fxq 'After=ceralive-tls-firstboot.service' "$PIPELINE_DIR/mkosi/runtime/ceralive-tls-nginx.dropin.conf"
+  grep -Fq '"${src}/ceralive-tls-nginx.dropin.conf" /etc/systemd/system/nginx.service.d/10-ceralive-tls.conf' "$PIPELINE_DIR/mkosi/customize/postinst.d/tls-ssh.sh"
+  root="$BATS_TEST_TMPDIR/no-direct-nginx"
+  make_hostname_fixture "$root"
+  # Run the actual boot commands. An explicit nginx job is forbidden regardless
+  # of whether nginx is loaded, masked, missing, or deliberately stopped.
+  while IFS= read -r payload; do
+    run bash -c "${payload//\/usr\/bin\/systemctl/$root\/bin\/systemctl}"
+    [ "$status" -eq 0 ]
+  done < <(sed -n 's/^ExecStartPost=//p' <<<"$unit")
+  run ! grep -Fq 'nginx.service' "$root/calls"
+  run ! grep -E '^ExecStartPost=.*restart .*ceralive-(healthcheck|mark-good)\.service' <<<"$unit"
+}
+
+@test "hostname: reconciliation restarts only an activating health assessment" {
+  local state root
+  for state in activating active failed inactive; do
+    root="$BATS_TEST_TMPDIR/health-$state"
     make_hostname_fixture "$root"
-    # Execute the actual systemd shell payload with the fixture systemctl.
-    run env HOSTNAME_CALLS="$root/calls" HOSTNAME_NGINX_LOAD_STATE="$state" \
-      bash -c "${command//\/usr\/bin\/systemctl/$root\/bin\/systemctl}"
-    [ "$status" -eq 0 ]
-    if [[ "$state" = loaded ]]; then
-      grep -Fxq 'systemctl --no-block restart nginx.service' "$root/calls"
-    else
-      run ! grep -Fq 'restart nginx.service' "$root/calls"
-    fi
-    run run_hostname_script "$root"
-    [ "$status" -eq 0 ]
-    : >"$root/calls"
-    # Exercise the actual installed reconciliation function with service stubs.
-    run env HOSTNAME_CALLS="$root/calls" HOSTNAME_NGINX_LOAD_STATE="$state" \
+    run env HOSTNAME_CALLS="$root/calls" HOSTNAME_HEALTH_ACTIVE_STATE="$state" \
       bash -c 'SYSTEMCTL_BIN="$1"; eval "$3"; eval "$2"; restart_identity_consumers' \
       bash "$root/bin/systemctl" "$(sed -n '/^restart_identity_consumers() {/,/^}/p' "$root/ceralive-set-hostname")" "$(sed -n '/^CONSUMER_UNITS=(/,/^)/p' "$root/ceralive-set-hostname")"
     [ "$status" -eq 0 ]
-    if [[ "$state" = loaded ]]; then
-      grep -Fxq 'systemctl --no-block restart nginx.service' "$root/calls"
+    [ "$(head -n 1 "$root/calls")" = 'systemctl --no-block restart ceralive-tls-firstboot.service ceralive.service ceralive-hawkbit-provision.service' ]
+    if [[ "$state" = activating ]]; then
+      grep -Fxq 'systemctl --no-block restart ceralive-healthcheck.service' "$root/calls"
     else
-      run ! grep -Fq 'restart nginx.service' "$root/calls"
+      grep -Fxq 'systemctl --no-block start ceralive-healthcheck.service' "$root/calls"
+      run ! grep -Fq 'restart ceralive-healthcheck.service' "$root/calls"
     fi
-    run ! grep -E 'restart .*ceralive-(healthcheck|mark-good)\.service' "$root/calls"
+    grep -Fxq 'systemctl --no-block start ceralive-mark-good.service' "$root/calls"
+    run ! grep -Fq 'nginx.service' "$root/calls"
+    run ! grep -Fq 'restart ceralive-mark-good.service' "$root/calls"
   done
 }
 
 @test "hostname: retry budget and boot health dependency isolation" {
   local unit
   unit="$(extract_hostname_unit)"
-  [[ "$unit" == *'StartLimitIntervalSec=600'* ]]
-  [[ "$unit" == *'StartLimitBurst=3'* ]]
-  [[ "$unit" == *'RestartSec=5'* ]]
-  run ! grep -E '^ExecStartPost=.*restart .*ceralive-(healthcheck|mark-good)\.service' <<<"$unit"
+  [[ "$unit" == *'StartLimitIntervalSec=120'* ]]
+  [[ "$unit" == *'StartLimitBurst=6'* ]]
+  [[ "$unit" == *'RestartSec=10'* ]]
   grep -Fxq 'Wants=ceralive-mark-good.service' "$PIPELINE_DIR/mkosi/runtime/ceralive-slot-sync.service"
   grep -Fxq 'After=ceralive-mark-good.service' "$PIPELINE_DIR/mkosi/runtime/ceralive-slot-sync.service"
-  run ! grep -E '^(Requires|BindsTo|PartOf)=' "$PIPELINE_DIR/mkosi/runtime/ceralive-slot-sync.service"
+  run ! grep -E '^(Requires|Requisite|BindsTo|PartOf)=' "$PIPELINE_DIR/mkosi/runtime/ceralive-slot-sync.service"
+}
+
+@test "slot-sync: admission checks active mark-good without stop coupling" {
+  local root payload state
+  root="$BATS_TEST_TMPDIR/admission"
+  mkdir -p "$root"
+  payload="$(sed -n 's|^ExecCondition=/usr/bin/systemctl ||p' "$PIPELINE_DIR/mkosi/runtime/ceralive-slot-sync.service")"
+  [ "$payload" = 'is-active --quiet ceralive-mark-good.service' ]
+  printf '#!/bin/sh\nexit "$MARK_GOOD_STATUS"\n' >"$root/systemctl"
+  chmod +x "$root/systemctl"
+  for state in 0 3; do
+    run env MARK_GOOD_STATUS="$state" bash -c '"$1" $2' bash "$root/systemctl" "$payload"
+    [ "$status" -eq "$state" ]
+  done
 }

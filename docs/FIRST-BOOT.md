@@ -467,12 +467,25 @@ systemctl restart nginx.service
 
 ### Hostname retries and boot health
 
-Hostname allocation attempts run at most three times per ten-minute window. The
-reconciliation timer can try again after that window if publication still needs
-repair. Identity refresh restarts nginx only when its unit is loaded; masked or
-missing nginx is expected when a different service fronts the web UI.
+Hostname allocation allows six starts per two-minute window, with ten seconds
+between automatic retries. This tolerates short Avahi/D-Bus startup faults while
+bounding persistent failures, without a ten-minute identity outage. After a
+start limit, the reconciliation timer should request another attempt once the
+window expires; timer recovery still needs device verification. Operators can
+retry immediately after fixing the cause with:
 
-Identity changes start the boot healthcheck and mark-good units without
-restarting completed checks. Slot-sync wants and follows mark-good, but does not
-stop when that unit stops or restarts. Its script still refuses a missing or
+```sh
+systemctl reset-failed ceralive-hostname.service
+systemctl start ceralive-hostname.service
+```
+
+Identity refresh restarts TLS-firstboot. The nginx Requires/After drop-in refreshes
+an already-running nginx and orders its initial start after certificate setup;
+identity refresh never explicitly starts a masked, missing or stopped nginx.
+
+Reconciliation restarts an activating boot healthcheck after refreshing the app,
+giving it a fresh assessment deadline. Completed checks are only started, so
+completed boot confirmation is not restarted. Slot-sync wants and follows
+mark-good and checks that it is active before starting; a later stop/restart
+does not interrupt an admitted mirror. Its script also refuses a missing or
 stale current-boot/build/package health receipt before copying anything.

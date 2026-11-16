@@ -478,10 +478,12 @@ replay_hostname_retry() {
 #!/bin/bash
 case "$*" in
   'is-active --quiet '*) exec "$TEST_HEALTH_SYSTEMCTL" "$@" ;;
+  '--no-block restart ceralive-healthcheck.service'|'--no-block start ceralive-healthcheck.service')
+    printf '%s\n' "$*" >>"$TEST_CALLS"
+    bash "$TEST_HEALTH_SCRIPT" ;;
   '--no-block restart '*) exit 0 ;;
-  'show --property=LoadState --value nginx.service') echo loaded ;;
-  '--no-block start ceralive-healthcheck.service ceralive-mark-good.service')
-    bash "$TEST_HEALTH_SCRIPT" && bash "$TEST_HEALTH_SCRIPT" --mark-good ;;
+  'show --property=ActiveState --value ceralive-healthcheck.service')
+    echo "${HOSTNAME_HEALTH_ACTIVE_STATE:-failed}" ;;
   '--no-block start ceralive-mark-good.service') bash "$TEST_HEALTH_SCRIPT" --mark-good ;;
   *) exit 90 ;;
 esac
@@ -528,4 +530,11 @@ SH
   [ "$status" -ne 0 ]
   run grep -q mark-good "$TEST_CALLS"
   [ "$status" -eq 1 ]
+}
+
+@test "hostname reconciliation restarts an activating assessment after app refresh" {
+  HOSTNAME_HEALTH_ACTIVE_STATE=activating run replay_hostname_retry
+  [ "$status" -eq 0 ]
+  grep -Fxq -- '--no-block restart ceralive-healthcheck.service' "$TEST_CALLS"
+  grep -Fxq 'mark-good B' "$TEST_CALLS"
 }
