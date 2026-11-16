@@ -17,6 +17,8 @@ TAYGA = '/usr/sbin/tayga'
 BOOT_ID = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
 INVOCATION_ID = os.environ.get('INVOCATION_ID') or uuid.uuid4().hex
 MAX_AGE = 30
+# 32 IPv4 /24 blocks of 10.254.0.0/19, each without its .0 address.
+MAX_INDEX = 32 * 255
 
 
 def boot_time():
@@ -93,6 +95,15 @@ def replay(path):
 def command(*args, check=True, data=None):
     return subprocess.run(args, input=data, text=True, capture_output=True,
                           check=check, timeout=10).stdout
+
+
+def service_ipv4(index):
+    # Consumers reject a .0 last octet, so every block skips it; indexes 1-255
+    # keep their original 10.254.0.<index> address.
+    if not 1 <= index <= MAX_INDEX:
+        raise ValueError('interface index exceeds CLAT allocation')
+    block, host = divmod(index - 1, 255)
+    return str(ip.IPv4Address(int(ip.IPv4Address('10.254.0.0')) + block * 256 + host + 1))
 
 
 def embed(prefix, address):
@@ -257,12 +268,10 @@ class Link:
         gateway = str(ip.IPv6Address(gateway)) if gateway else ''
         self.interface, self.source, self.gateway, self.resolvers = interface, source, gateway, resolvers
         self.index = socket.if_nametoindex(interface)
-        if self.index > 8191:
-            raise ValueError('interface index exceeds CLAT allocation')
+        self.v4 = service_ipv4(self.index)
         self.tun = f'clat{self.index}'
         self.table = str(46000 + self.index)
         self.priority = str(10000 + self.index)
-        self.v4 = str(ip.IPv4Address(int(ip.IPv4Address('10.254.0.0')) + self.index))
         self.v6 = f'fd46:4:4::{self.index:x}'
         self.nft = f'clat_{self.index}'
         self.process = None

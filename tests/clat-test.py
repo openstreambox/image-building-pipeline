@@ -272,6 +272,36 @@ class Recovery(Isolated):
             self.assertEqual(link.undo, [undo])
             self.assertTrue((clat.RUN/'3.cleanup').exists())
 
+def consumer_accepts(address):
+    # Mirrors the CeraUI snapshot parser's service-space rule.
+    a, b, c, d = map(int, address.split('.'))
+    return a == 10 and b == 254 and c < 32 and d != 0
+
+
+class ServiceAddress(Isolated):
+    def test_producer_snapshots_at_block_edges_are_consumer_valid(self):
+        from unittest.mock import patch
+        expected = {1: '10.254.0.1', 3: '10.254.0.3', 254: '10.254.0.254', 255: '10.254.0.255',
+                    256: '10.254.1.1', 257: '10.254.1.2', 510: '10.254.1.255',
+                    511: '10.254.2.1', 512: '10.254.2.2', 8160: '10.254.31.255'}
+        for index, address in expected.items():
+            with self.subTest(index=index), patch.object(clat.socket, 'if_nametoindex', return_value=index):
+                clat.Link('wan1', '2001:db8::1', '', ()).status('starting')
+                snapshot = json.loads((clat.RUN/f'{index}.json').read_text())
+                self.assertEqual(snapshot['ipv4'], address)
+                self.assertTrue(consumer_accepts(snapshot['ipv4']))
+
+    def test_allocation_is_unique_and_bounded(self):
+        from unittest.mock import patch
+        addresses = [clat.service_ipv4(index) for index in range(1, clat.MAX_INDEX + 1)]
+        self.assertEqual(len(set(addresses)), len(addresses))
+        self.assertTrue(all(consumer_accepts(address) for address in addresses))
+        for index in (0, clat.MAX_INDEX + 1):
+            with self.subTest(index=index), patch.object(clat.socket, 'if_nametoindex', return_value=index):
+                with self.assertRaises(ValueError):
+                    clat.Link('wan1', '2001:db8::1', '', ())
+
+
 class LifecycleV2(Isolated):
     def make_link(self):
         from unittest.mock import Mock

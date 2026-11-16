@@ -51,8 +51,11 @@ still works. Readers must tolerate a safe, temporary withdrawal under load.
 
 Each link gets `clat<ifindex>`, an IPv4 /32 in reserved service space
 `10.254.0.0/19`, and a private IPv6 mapping in `fd46:4:4::/112`.
-Reserve these ranges for this service; overlap with a local IPv4 subnet fails
-closed. Indexes above 8191 fail closed.
+The space is 32 blocks of 255 addresses: block `(ifindex - 1) / 255`, host
+`(ifindex - 1) % 255 + 1`, so no address ends in `.0` (consumers reject it).
+Ifindex 1-255 keep `10.254.0.<ifindex>`; 256 gets `10.254.1.1` and 512 gets
+`10.254.2.2`. Reserve these ranges for this service; overlap with a local IPv4
+subnet fails closed. Indexes above 8160 fail closed.
 Tayga translates IPv4 into the discovered prefix. IPv6 SNAT uses the actual
 uplink address, allowing raw-IP /128 grants without assuming an extra routed
 IPv6 address or SLAAC /64. Reply conntrack restores the private mapping and
