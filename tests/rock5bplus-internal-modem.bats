@@ -7,12 +7,15 @@ setup() {
   export MODEM_MODPROBE_DIR="$BATS_TEST_TMPDIR/modprobe"
 }
 
-@test "internal modem: production and test variants carry the immutable cold-start patch series" {
+@test "internal modem: production and test variants use the base patch series without 0052" {
+  # 0052's FULL_CARD_POWER_OFF# off-on delay was refuted on hardware; the slot power
+  # order comes from the boot script. Revision 11 = revision 9 + rfkill configuration.
   for variant in edge edge-test; do
     run bash "$PIPELINE_DIR/lib/resolve.sh" rock-5b-plus --variant "$variant"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='c65b7ddc5fee14abc0f9de54a104fb5f8db087f2'"* ]]
-    [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/openstreambox/rk3588-kernel-patches.git'"* ]]
+    [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='bc7e44fa35d3eded23567dd48e65f6dc799f4b34'"* ]]
+    [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-kernel-patches.git'"* ]]
+    [[ "$output" == *"KERNEL_SOURCE_PACKAGE_VERSION='7.2.0-ceralive11"* ]]
     [[ "$output" == *"MODEM_PORTS_SLOTS_INTERNAL_4G='platform-fc800000.usb-usb-0:1.4'"* ]]
   done
 }
@@ -143,8 +146,83 @@ PYTEST
   done
 }
 
-@test "internal modem: real pinned series applies and the compiled board DTB carries 0052" {
-  [[ -n "${CERALIVE_WWAN_KERNEL_TREE:-}" && -n "${CERALIVE_WWAN_PATCHES_TREE:-}" ]] || skip 'set CERALIVE_WWAN_KERNEL_TREE and CERALIVE_WWAN_PATCHES_TREE after applying the pinned series'
-  run python3 "$PIPELINE_DIR/ci/check-internal-modem-dtb.py" "$CERALIVE_WWAN_KERNEL_TREE" "$CERALIVE_WWAN_PATCHES_TREE"
+@test "internal modem: a built board DTB keeps the base B-key sequence without the 0052 delay" {
+  [[ -n "${CERALIVE_WWAN_DTB:-}" ]] || skip 'set CERALIVE_WWAN_DTB to a built rk3588-rock-5b-plus.dtb'
+  run python3 "$PIPELINE_DIR/ci/check-internal-modem-dtb.py" "$CERALIVE_WWAN_DTB"
   [ "$status" -eq 0 ]
+}
+
+install_release() {
+  env CERALIVE_INSTALL_ROOT="$BATS_TEST_TMPDIR/root" CERALIVE_RUNTIME_SRC="$PIPELINE_DIR/mkosi/runtime" "$@" \
+    bash -c 'source "$1/mkosi/customize/postinst-lib.sh"; setup_internal_modem_fastboot_release' _ "$PIPELINE_DIR"
+}
+
+@test "fastboot release: rule matches 81d6 by ID_PATH on add only and starts the one-shot unit" {
+  run install_release BOARD_ID=rock-5b-plus CERALIVE_MODEM_PORTS_STATUS=verified CERALIVE_MODEM_PORTS_SLOTS='internal_4g=platform-fc800000.usb-usb-0:1.4'
+  [ "$status" -eq 0 ]
+  rule="$MODEM_SLOT_RULES_DIR/79-ceralive-slot-dell-fastboot-release.rules"
+  grep -Fxq 'ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="413c", ATTR{idProduct}=="81d6", IMPORT{builtin}="path_id"' "$rule"
+  grep -Fxq 'ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="413c", ATTR{idProduct}=="81d6", ENV{ID_PATH}=="platform-fc800000.usb-usb-0:1.4", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ceralive-slot-dell-fastboot-release@%k.service"' "$rule"
+  # The bus number is not fixed: no kernel-name, bus or devpath match; nothing but add.
+  run bash -c "grep -Ev '^#' '$rule' | grep -E 'KERNEL|busnum|DEVPATH|ACTION==\"(change|bind|remove)'"
+  [ "$status" -eq 1 ]
+  # Nothing in the rule touches the port before the release command.
+  run grep -E 'authorized|RUN|remove|unbind' "$rule"
+  [ "$status" -eq 1 ]
+  grep -Fxq 'CERALIVE_SLOT_ID_PATH=platform-fc800000.usb-usb-0:1.4' "$BATS_TEST_TMPDIR/root/etc/ceralive/slot-dell-fastboot-release.env"
+  [ -x "$BATS_TEST_TMPDIR/root/usr/libexec/ceralive/ceralive-slot-dell-fastboot-release" ]
+  unit="$BATS_TEST_TMPDIR/root/etc/systemd/system/ceralive-slot-dell-fastboot-release@.service"
+  grep -Fxq 'Type=oneshot' "$unit"
+  grep -Fxq 'ExecStart=/usr/libexec/ceralive/ceralive-slot-dell-fastboot-release %i' "$unit"
+  grep -Fxq 'EnvironmentFile=/etc/ceralive/slot-dell-fastboot-release.env' "$unit"
+  run grep -E '^(Restart|RemainAfterExit)=' "$unit"
+  [ "$status" -eq 1 ]
+}
+
+@test "fastboot release: no rule on other boards or without a verified internal_4g position" {
+  local args
+  for args in "BOARD_ID=orange-pi-5-plus CERALIVE_MODEM_PORTS_STATUS=verified CERALIVE_MODEM_PORTS_SLOTS=internal_4g=platform-x:1.4" \
+              "BOARD_ID=rock-5b-plus CERALIVE_MODEM_PORTS_STATUS=unverified CERALIVE_MODEM_PORTS_SLOTS=internal_4g=platform-x:1.4" \
+              "BOARD_ID=rock-5b-plus CERALIVE_MODEM_PORTS_STATUS=verified CERALIVE_MODEM_PORTS_SLOTS=modem0=platform-x:1.1"; do
+    mkdir -p "$MODEM_SLOT_RULES_DIR" "$BATS_TEST_TMPDIR/root/etc/ceralive"
+    : >"$MODEM_SLOT_RULES_DIR/79-ceralive-slot-dell-fastboot-release.rules"
+    : >"$BATS_TEST_TMPDIR/root/etc/ceralive/slot-dell-fastboot-release.env"
+    # shellcheck disable=SC2086
+    run install_release $args
+    [ "$status" -eq 0 ]
+    [ ! -e "$MODEM_SLOT_RULES_DIR/79-ceralive-slot-dell-fastboot-release.rules" ]
+    [ ! -e "$BATS_TEST_TMPDIR/root/etc/ceralive/slot-dell-fastboot-release.env" ]
+  done
+}
+
+@test "fastboot release: sends one continue per boot, only to the slot position, and logs it" {
+  run python3 "$PIPELINE_DIR/tests/slot-dell-fastboot-release.test.py"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"all cases pass"* ]]
+}
+
+@test "fastboot release: both runtime installers install it" {
+  for entry in mkosi/customize/udev.sh mkosi/mkosi.images/runtime/mkosi.postinst.chroot; do
+    grep -Eq '^ *setup_internal_modem_fastboot_release( |$)' "$PIPELINE_DIR/$entry"
+  done
+}
+
+@test "power guard: the boot-script slot hold is the only gpio command, and nothing de-authorizes or resets USB" {
+  run python3 "$PIPELINE_DIR/ci/check-internal-modem-power.py" "$PIPELINE_DIR/mkosi"
+  [ "$status" -eq 0 ]
+  local command
+  for command in 'gpio clear B26' 'if gpio set B26; then true; fi' 'gpio toggle C1' \
+                 'echo 0 > /sys/bus/usb/devices/3-1.4/authorized' 'fcntl.ioctl(fd, USBDEVFS_RESET)' 'ioctl($fh, 0x5514, 0)'; do
+    mkdir -p "$BATS_TEST_TMPDIR/unsafe/platform"
+    printf '%s\n' "$command" >"$BATS_TEST_TMPDIR/unsafe/platform/boot.scr.cmd"
+    run python3 "$PIPELINE_DIR/ci/check-internal-modem-power.py" "$BATS_TEST_TMPDIR/unsafe"
+    [ "$status" -ne 0 ]
+  done
+  # The reviewed line is accepted only in the boot script itself.
+  printf '%s\n' '  if gpio clear B26; then setenv cera_slot_power "held"; fi' >"$BATS_TEST_TMPDIR/unsafe/platform/boot.scr.cmd"
+  run python3 "$PIPELINE_DIR/ci/check-internal-modem-power.py" "$BATS_TEST_TMPDIR/unsafe"
+  [ "$status" -eq 0 ]
+  mv "$BATS_TEST_TMPDIR/unsafe/platform/boot.scr.cmd" "$BATS_TEST_TMPDIR/unsafe/platform/other.cmd"
+  run python3 "$PIPELINE_DIR/ci/check-internal-modem-power.py" "$BATS_TEST_TMPDIR/unsafe"
+  [ "$status" -ne 0 ]
 }

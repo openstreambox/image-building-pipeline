@@ -62,3 +62,7 @@ image	/etc/udev/rules.d/78-mm-ceralive-slot-uid.rules
 
 # Board-specific WWAN rfkill default, not a packaged modem access rule.
 image	/etc/udev/rules.d/99-zz-ceralive-internal-wwan.rules
+
+# ROCK 5B+ B-key Dell fastboot safety net, generated for the verified internal_4g
+# position only (hardware.sh::setup_internal_modem_fastboot_release).
+image	/etc/udev/rules.d/79-ceralive-slot-dell-fastboot-release.rules

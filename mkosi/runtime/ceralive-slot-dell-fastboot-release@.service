@@ -1,0 +1,14 @@
+[Unit]
+Description=Release the B-key slot Dell %i from its fastboot bootloader (safety net)
+Documentation=file:///usr/libexec/ceralive/ceralive-slot-dell-fastboot-release
+# Started only by 79-ceralive-slot-dell-fastboot-release.rules, on the add event of
+# 413c:81d6 at the verified B-key position. Normally never: the boot script holds
+# the slot unpowered until Linux has released RESET#.
+DefaultDependencies=no
+After=systemd-udevd.service
+ConditionPathExists=/etc/ceralive/slot-dell-fastboot-release.env
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/ceralive/slot-dell-fastboot-release.env
+ExecStart=/usr/libexec/ceralive/ceralive-slot-dell-fastboot-release %i

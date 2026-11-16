@@ -964,6 +964,7 @@ main() {
   setup_hardware_access
   generate_modem_slot_uid_rules
   setup_internal_modem_rfkill
+  setup_internal_modem_fastboot_release
   apply_board_quirks           # board-manifest-gated quirk rows, APPENDED to the rules file setup_hardware_access just truncated (CERALIVE_BOARD_QUIRKS)
   apply_streaming_optimizations
   configure_networking

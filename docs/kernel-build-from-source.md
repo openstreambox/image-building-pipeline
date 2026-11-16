@@ -43,18 +43,18 @@ Two overlays exist, and both build from pinned source:
 
 ## 1. The variant model
 
-### Current candidate — B-key cold start, sink-first Type-C, island v2026.9.5
+### Current pin — Rock sink-first Type-C, island v2026.9.5
 
 `manifests/families/rk3588.yaml` pins `patches_commit`
-`c65b7ddc5fee14abc0f9de54a104fb5f8db087f2` in the fork's retained
-annotated tag `rock5bplus-wwan-cold-start-v1`. It extends the previous merged
-32-patch series at
-`bc7e44fa35d3eded23567dd48e65f6dc799f4b34` with 0052, the ROCK 5B+
-B-key cold-start sequence. The [previous merged series](https://github.com/CERALIVE/rk3588-kernel-patches/pull/28)
-keeps the Rock Type-C connector sink-first and the Orange connector source-first.
-Candidate kernel package revision 10 includes
-explicit rfkill requirements. [Host checks and pending hardware
-qualification](rock5bplus-internal-modem.md) describe this candidate's limits.
+`bc7e44fa35d3eded23567dd48e65f6dc799f4b34`, the merged
+[kernel-patches PR #28](https://github.com/CERALIVE/rk3588-kernel-patches/pull/28).
+Its 32-entry series retires patch 0029's Rock 5B+ Try.SRC preference, leaving
+that connector's default at sink while the Orange Pi 5 Plus stays source.
+Fork candidate package revision 11 adds explicit rfkill requirements to it. A
+candidate B-key patch (0052, a FULL_CARD_POWER_OFF# off-on delay, revision 10)
+was refuted on hardware and is not in the series; the ROCK 5B+ slot power order
+lives in the boot script ([internal modem guide](rock5bplus-internal-modem.md)).
+Resolved-config and DTB-only proof do not qualify a kernel build or board boot.
 
 ### Previous pin — island v2026.9.5
 
@@ -472,11 +472,11 @@ The kernel epoch comes from the pinned kernel commit's **committer** time in
 the verified clone, before patches are applied, for image and kernel-only
 builds alike. It does not use image-repository HEAD or an ambient epoch override.
 Debian packaging timestamps, including its changelog, use that same pinned epoch.
-The fork candidate source pin is `7.2.0-ceralive10`, adding the B-key cold-start
-sequence and explicit rfkill requirements to revision 9 (the ramoops reservation) on
-top of revision 8, which added nftables reject for
+The fork candidate source pin is `7.2.0-ceralive11`, adding explicit rfkill
+requirements to revision 9 (the ramoops reservation) on top of revision 8, which added nftables reject for
 NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
-the kernel-patches PR #28 pin; revisions 1 to 4 must never be
+the kernel-patches PR #28 pin; revision 10 was an unpublished candidate and is retired;
+revisions 1 to 4 must never be
 reissued with changed bytes.
 The family fingerprint excludes DTB paths and local container image IDs, but
 includes Dockerfile bytes, base digest, sorted package/version/architecture
@@ -885,9 +885,8 @@ non-Image payload (fatal), and a re-run (idempotent).
 
 Kernels and images are built locally on the owner's workstation. These gates
 consume artifacts; they do not authorize publication or add a kernel workflow.
-The fork candidate source pin is `7.2.0-ceralive10`, adding the B-key cold-start
-sequence and explicit rfkill requirements to revision 9 (the ramoops reservation) on
-top of revision 8, which added nftables reject for
+The fork candidate source pin is `7.2.0-ceralive11`, adding explicit rfkill
+requirements to revision 9 (the ramoops reservation) on top of revision 8, which added nftables reject for
 NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
 the kernel-patches PR #28 pin; publication remains owner-gated.
 

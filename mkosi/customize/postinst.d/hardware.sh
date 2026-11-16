@@ -504,3 +504,50 @@ ACTION=="add", SUBSYSTEM=="rfkill", ATTR{name}=="rfkill-m2-wwan", RUN+="/usr/bin
 ACTION=="add", SUBSYSTEM=="rfkill", ATTR{name}=="rfkill-m2-wwan", ATTR{soft}="0"
 EOF
 }
+
+# Boot-time safety net for the ROCK 5B+ B-key Dell DW5821e: if it ever appears in its
+# bootloader's fastboot mode (413c:81d6) at the verified B-key position, send it one
+# fastboot `continue` (mkosi/runtime/ceralive-slot-dell-fastboot-release.py). The
+# boot script's slot power hold should make this unnecessary; it logs when it fires.
+# Matched by ID_PATH (the bus number is not fixed), on add only, and never preceded by
+# a port de-authorization or reset. Fail-closed: other boards, or no verified
+# internal_4g position, get no rule and no environment file.
+setup_internal_modem_fastboot_release() {
+  local root="${CERALIVE_INSTALL_ROOT:-}"
+  local rules_dir="${MODEM_SLOT_RULES_DIR:-${root}/etc/udev/rules.d}"
+  local rule="${rules_dir}/79-ceralive-slot-dell-fastboot-release.rules"
+  local config="${root}/etc/ceralive/slot-dell-fastboot-release.env"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  local artifact pair id_path=""
+
+  for artifact in ceralive-slot-dell-fastboot-release.py ceralive-slot-dell-fastboot-release@.service; do
+    [[ -n "${src}" && -f "${src}/${artifact}" ]] \
+      || die "slot Dell fastboot release source not found: ${src}/${artifact} (is \$SRCDIR/runtime mounted?)"
+  done
+
+  if [[ "${BOARD_ID:-unknown}" == rock-5b-plus && "${CERALIVE_MODEM_PORTS_STATUS:-unverified}" == verified ]]; then
+    for pair in ${CERALIVE_MODEM_PORTS_SLOTS:-}; do
+      [[ "${pair%%=*}" == internal_4g ]] && id_path="${pair#*=}"
+    done
+  fi
+  if [[ -z "${id_path}" ]]; then
+    rm -f "${rule}" "${config}"
+    log "slot Dell fastboot release: no verified ROCK 5B+ internal_4g position, no rule"
+    return 0
+  fi
+  [[ "${id_path}" =~ ^[A-Za-z0-9._:-]+$ ]] || die "unsafe internal_4g ID_PATH '${id_path}'"
+
+  install -D -m 0755 "${src}/ceralive-slot-dell-fastboot-release.py" \
+    "${root}/usr/libexec/ceralive/ceralive-slot-dell-fastboot-release"
+  install -D -m 0644 "${src}/ceralive-slot-dell-fastboot-release@.service" \
+    "${root}/etc/systemd/system/ceralive-slot-dell-fastboot-release@.service"
+  mkdir -p "${rules_dir}" "$(dirname "${config}")"
+  printf 'CERALIVE_SLOT_ID_PATH=%s\n' "${id_path}" >"${config}"
+  cat >"${rule}" <<RULE
+# CeraLive generated: release the B-key slot Dell from fastboot, once per boot — DO NOT EDIT.
+# USB-device add events do not necessarily carry ID_PATH yet; the bus number is not fixed.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="413c", ATTR{idProduct}=="81d6", IMPORT{builtin}="path_id"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="413c", ATTR{idProduct}=="81d6", ENV{ID_PATH}=="${id_path}", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ceralive-slot-dell-fastboot-release@%k.service"
+RULE
+  log "slot Dell fastboot release: rule for 413c:81d6 at ${id_path}"
+}

@@ -25,6 +25,9 @@ source "${CERALIVE_COMMON_SH:-"$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]
 
 # shellcheck source=postinst-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/postinst-lib.sh"
+# The fastboot release payload is installed from mkosi/runtime/, as services.sh does.
+CERALIVE_RUNTIME_SRC="${CERALIVE_RUNTIME_SRC:-$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")/../runtime" 2>/dev/null && pwd)}"
+export CERALIVE_RUNTIME_SRC
 
 setup_hardware_access() {
   log_info "installing udev hardware-access rules (99-ceralive-hardware.rules)"
@@ -126,3 +129,4 @@ EOF
 setup_hardware_access "$@"
 generate_modem_slot_uid_rules "$@"
 setup_internal_modem_rfkill
+setup_internal_modem_fastboot_release

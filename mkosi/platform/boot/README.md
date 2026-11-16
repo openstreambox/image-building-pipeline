@@ -72,6 +72,9 @@ device, so `ceralive-boot-state` writes it defensively:
 
 1. U-Boot runs `boot.scr` (compiled from `boot.scr.cmd`).
 2. It imports `cera_board.env` (console, fdtfile) and `boot_state.txt`.
+   On `board_id=rock-5b-plus` it then switches the M.2 B-key slot's 3.3 V off until
+   Linux restores it, so the slot's modem powers up with RESET# released
+   ([internal modem guide](../../../docs/rock5bplus-internal-modem.md)).
 3. It rejects unreadable, unknown, duplicate, non-numeric, or out-of-budget state;
    only an accessible missing file receives factory-safe `A B` / `3,3` defaults.
 4. It picks the first slot in `BOOT_ORDER` with `*_LEFT > 0` (the primary),

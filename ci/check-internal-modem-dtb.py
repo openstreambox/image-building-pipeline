@@ -1,48 +1,50 @@
 #!/usr/bin/env python3
-"""Compile the board DTB from the exact applied candidate, without a kernel build."""
-import importlib.util
-import pathlib
-import os
+"""Check a compiled ROCK 5B+ board DTB for the B-key slot contract.
+
+The slot power order now comes from the boot script (EKEY_EN held low until Linux),
+so the kernel DT must keep the base sequence: the RESET# hog releases reset at GPIO
+bank probe, the 3.3 V supplies are always-on and handed over enabled, and the
+retired 0052 off-on delay on FULL_CARD_POWER_OFF# (pin 6) is absent. W_DISABLE1#
+stays owned by rfkill-gpio.
+
+Usage: check-internal-modem-dtb.py <rk3588-rock-5b-plus.dtb>
+"""
+import re
 import subprocess
 import sys
-import tempfile
-import yaml
 
-root = pathlib.Path(__file__).resolve().parent.parent
-kernel, patches = map(pathlib.Path, sys.argv[1:])
-source = yaml.safe_load((root / 'manifests/families/rk3588.yaml').read_text())['variants']['edge']['kernel_source']
 
-def git(tree, *args):
-    return subprocess.check_output(['git', '-C', str(tree), *args], text=True).strip()
+def nodes(dts):
+    """Yield (name, body) for every node at any depth that has no child nodes."""
+    for match in re.finditer(r'([\w@,.-]+) \{\n((?:\t[^\n{}]*\n)*?)\t*\};', dts):
+        yield match.group(1), match.group(2)
 
-assert git(patches, 'rev-parse', 'HEAD') == source['patches_commit'], 'patch checkout differs from manifest'
-series = [line for line in (patches / source['patches_series']).read_text().splitlines() if line and not line.startswith('#')]
-assert any(line.startswith('0052-') for line in series), '0052 missing from active series'
-# A fresh base plus every git-am commit, with no extra commits or dirty files.
-assert git(kernel, 'rev-parse', f'HEAD~{len(series)}') == source['commit'], 'applied tree has a different base or series length'
-assert not git(kernel, 'status', '--porcelain', '--untracked-files=no'), 'kernel tree is modified'
-# Reapply each original mail patch to its parent in a disposable index and
-# compare the resulting tree. Unlike patch-id, this tolerates changed diff
-# context widths while proving the exact result of every applied payload.
-with tempfile.TemporaryDirectory() as directory:
-    env = dict(os.environ, GIT_INDEX_FILE=str(pathlib.Path(directory) / 'index'))
-    for index, filename in enumerate(reversed(series)):
-        commit = f'HEAD~{index}'
-        def indexed(*args):
-            return subprocess.check_output(['git', '-C', str(kernel), *args], env=env).strip()
-        indexed('read-tree', commit + '^')
-        indexed('apply', '--cached', '--whitespace=nowarn', str((patches / 'patches' / filename).resolve()))
-        assert indexed('write-tree').decode() == git(kernel, 'rev-parse', commit + '^{tree}'), f'applied patch differs: {filename}'
 
-spec = importlib.util.spec_from_file_location('cold_start', patches / 'tests/test_rock5bplus_wwan_cold_start.py')
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-module.check_tree(kernel)
-with tempfile.TemporaryDirectory() as directory:
-    dtb = module.compile_dtb(kernel, pathlib.Path(directory))
-    assert module.cells(dtb, '/rfkill-wwan', 'shutdown-gpios')[1:] == [6, 0], 'W_DISABLE1# polarity or pin changed'
-    assert subprocess.check_output(['fdtget', str(dtb), '/rfkill-wwan', 'label'], text=True).strip() == 'rfkill-m2-wwan'
-    assert 'default-blocked' not in module.props(dtb, '/rfkill-wwan')
-# The GPIO consumer writes !blocked. With GPIO_ACTIVE_HIGH, unblocked is high.
-assert 'gpiod_set_value_cansleep(rfkill->shutdown_gpio, !blocked);' in (kernel / 'net/rfkill/rfkill-gpio.c').read_text()
-print(f'{len(series)} exact patches; compiled cold-start and rfkill GPIO contracts pass')
+def find(dts, predicate, what):
+    found = [body for name, body in nodes(dts) if predicate(name, body)]
+    assert len(found) == 1, f'expected one {what}, found {len(found)}'
+    return found[0]
+
+
+def main(path):
+    dts = subprocess.check_output(['dtc', '-q', '-I', 'dtb', '-O', 'dts', path], text=True)
+    wwan = find(dts, lambda n, b: 'regulator-name = "vcc3v3_wwan_pwr";' in b, 'vcc3v3_wwan_pwr regulator')
+    assert 'off-on-delay-us' not in wwan, 'vcc3v3_wwan_pwr carries the retired 0052 off-on delay'
+    assert 'regulator-always-on;' in wwan and 'regulator-boot-on;' in wwan, \
+        'vcc3v3_wwan_pwr must stay always-on and boot-on (no FULL_CARD_POWER_OFF# toggle at probe)'
+    rail = find(dts, lambda n, b: 'regulator-name = "vcc3v3_4g";' in b, 'vcc3v3_4g regulator')
+    assert 'regulator-always-on;' in rail, 'vcc3v3_4g must come back on in Linux after the boot-script hold'
+    assert re.search(r'gpios = <0x[0-9a-f]+ 0x1a 0x00>;', rail), 'vcc3v3_4g is no longer EKEY_EN (GPIO1_D2)'
+    reset = find(dts, lambda n, b: 'line-name = "M.2 B-key RESET#";' in b, 'RESET# hog')
+    assert 'gpio-hog;' in reset and 'gpios = <0x0b 0x01>;' in reset and 'output-low;' in reset, \
+        'RESET# hog must drive GPIO2_B3 active-low output-low (reset released) at bank probe'
+    rfkill = find(dts, lambda n, b: 'label = "rfkill-m2-wwan";' in b, 'rfkill-m2-wwan node')
+    assert 'compatible = "rfkill-gpio";' in rfkill and 'default-blocked' not in rfkill
+    assert re.search(r'shutdown-gpios = <0x[0-9a-f]+ 0x06 0x00>;', rfkill), 'W_DISABLE1# pin or polarity changed'
+    print('board DTB: base B-key sequence, no 0052 delay, RESET# hog and rfkill-gpio present')
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        sys.exit(__doc__)
+    main(sys.argv[1])
