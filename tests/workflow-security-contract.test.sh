@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-HOSTED = {"ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04"}
+HOSTED = {"ubuntu-latest", "ubuntu-26.04", "ubuntu-24.04", "ubuntu-22.04"}
 RUNNER_FILES = {
     "kernel-release.yml", "publish-release.yml", "real-build-audit.yml",
     "release-candidate-build.yml", "runner-admission-probe.yml",
@@ -216,6 +216,23 @@ if not errors and not os.environ.get("WORKFLOWS_DIR"):
     )
     script = str(Path(sys.argv[2]).resolve())
     with tempfile.TemporaryDirectory(prefix="workflow-secrets-") as scratch:
+        for runner, accepted in (("ubuntu-26.04", True), ("ubuntu-99.04", False),
+                                 ("self-hosted", False)):
+            probe = Path(scratch, "runner.yml")
+            probe.write_text(
+                "on: pull_request\npermissions: {contents: read}\njobs:\n"
+                f"  probe:\n    runs-on: {runner}\n    steps: []\n"
+            )
+            check = subprocess.run(
+                ["bash", script], env={**os.environ, "WORKFLOWS_DIR": scratch},
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if check.returncode != (0 if accepted else 1):
+                fail(f"runner regression {runner}", 2,
+                     f"unexpected exit {check.returncode}: {check.stderr}")
+            else:
+                print(f"runner regression {runner}: exit {check.returncode}")
+            probe.unlink()
         for name, expression in cases:
             Path(scratch, "secrets.yml").write_text(
                 "on: pull_request\npermissions: {contents: read}\njobs:\n"
