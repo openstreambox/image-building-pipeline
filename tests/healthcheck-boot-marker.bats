@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
 
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -427,7 +428,12 @@ assess_boot() {
   grep -Fxq 'ExecStart=/usr/local/bin/ceralive-healthcheck.sh --mark-good' "$confirm"
   local consumer
   for consumer in ceralive-slot-sync ceralive-boot-script-sync; do
-    grep -Fxq 'Requires=ceralive-mark-good.service' "$ROOT/mkosi/runtime/$consumer.service"
+    if [[ "$consumer" = ceralive-slot-sync ]]; then
+      grep -Fxq 'Wants=ceralive-mark-good.service' "$ROOT/mkosi/runtime/$consumer.service"
+      run ! grep -q '^Requires=ceralive-mark-good.service' "$ROOT/mkosi/runtime/$consumer.service"
+    else
+      grep -Fxq 'Requires=ceralive-mark-good.service' "$ROOT/mkosi/runtime/$consumer.service"
+    fi
     grep -Fxq 'After=ceralive-mark-good.service' "$ROOT/mkosi/runtime/$consumer.service"
   done
   grep -Fq 'enable_service ceralive-mark-good.service' "$ROOT/mkosi/customize/postinst.d/services.sh"
@@ -472,14 +478,19 @@ replay_hostname_retry() {
 #!/bin/bash
 case "$*" in
   'is-active --quiet '*) exec "$TEST_HEALTH_SYSTEMCTL" "$@" ;;
-  '--no-block restart '*) bash "$TEST_HEALTH_SCRIPT" ;;
+  '--no-block restart ceralive-healthcheck.service'|'--no-block start ceralive-healthcheck.service')
+    printf '%s\n' "$*" >>"$TEST_CALLS"
+    bash "$TEST_HEALTH_SCRIPT" ;;
+  '--no-block restart '*) exit 0 ;;
+  'show --property=ActiveState --value ceralive-healthcheck.service')
+    echo "${HOSTNAME_HEALTH_ACTIVE_STATE:-failed}" ;;
   '--no-block start ceralive-mark-good.service') bash "$TEST_HEALTH_SCRIPT" --mark-good ;;
   *) exit 90 ;;
 esac
 SH
   chmod +x "$ctl"
   eval "$(sed -n '/^restart_identity_consumers() {/,/^}/p' "$ROOT/mkosi/customize/postinst.d/hostname.sh")"
-  local -a CONSUMER_UNITS=(ceralive-healthcheck.service)
+  eval "$(sed -n '/^CONSUMER_UNITS=(/,/^)/p' "$ROOT/mkosi/customize/postinst.d/hostname.sh")"
   SYSTEMCTL_BIN="$ctl" restart_identity_consumers
 }
 
@@ -519,4 +530,11 @@ SH
   [ "$status" -ne 0 ]
   run grep -q mark-good "$TEST_CALLS"
   [ "$status" -eq 1 ]
+}
+
+@test "hostname reconciliation restarts an activating assessment after app refresh" {
+  HOSTNAME_HEALTH_ACTIVE_STATE=activating run replay_hostname_retry
+  [ "$status" -eq 0 ]
+  grep -Fxq -- '--no-block restart ceralive-healthcheck.service' "$TEST_CALLS"
+  grep -Fxq 'mark-good B' "$TEST_CALLS"
 }

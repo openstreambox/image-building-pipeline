@@ -7,12 +7,16 @@ Documentation=file:///usr/share/doc/ceralive/partition-contract.md
 # agent) via `systemctl start --no-block ceralive-slot-sync.service`, after the
 # booted slot's OWN healthy-state.json has already survived a reboot and a
 # streaming healthcheck. There is nothing here for `preset-all` to resurrect.
-Requires=ceralive-mark-good.service
+# The script requires a current boot/build/dpkg health receipt before copying.
+# A later health-unit restart must not interrupt a verified mirror in progress.
+Wants=ceralive-mark-good.service
 After=ceralive-mark-good.service
 RequiresMountsFor=/data
 
 [Service]
 Type=oneshot
+# Preserve admission on the latest successful assessment without stop coupling.
+ExecCondition=/usr/bin/systemctl is-active --quiet ceralive-mark-good.service
 ExecStart=/usr/libexec/ceralive/ceralive-slot-sync run
 # This is a full rsync -H of a whole rootfs slot: real I/O and CPU cost that
 # must never contend with the encode/bond media path or an operator's UI while
