@@ -63,6 +63,24 @@ plan, verify physical identity again before effects, and cover root contents,
 boot artifacts and selector entries. Same-UID writers are inside this trust
 boundary; filesystem permissions are not a sandbox against them.
 
+## Current health is a separate gate
+
+Earned qualification is history: the new release once streamed and ran for a
+week. It says nothing about whether that release is still healthy now. Under the
+shared lock, every retirement owner, the retry of an interrupted retirement, and
+any update that would replace a still-retained previous release also require the
+current boot's witness verdict to be `healthy`. A `failed` verdict refuses with
+`Previous release retained: current boot health is failed.`; `unknown` (including
+a fresh boot that has not reported yet) refuses with `Previous release retained:
+current boot health is unknown.` Neither erases the earned stream or elapsed time,
+so a later healthy verdict admits the same owner again. Status lists the health
+reason while an activation is unretired, so `release_retention_eligible` is false.
+An update while no previous release is retained (first update after provisioning,
+or after retirement) does not apply this gate: there is no tracked fallback to
+lose. The production mirror's own boot-health identity checks (the healthy-state
+record bound to boot id, package state and build) stay required when adapters are
+integrated; this witness verdict adds to them and replaces none of them.
+
 ## Time rule
 
 The clock is sampled privately, never supplied by an API caller. Activation
@@ -126,9 +144,17 @@ RAUC/systemd integration as the production basis, rather than reviving this
 closed reference stack. Rescue stays latched; preserve the SD/rescue-card floor;
 never auto-write a bootloader.
 
-Host process-death tests cover before/after fsync and rename, concurrent producers,
-interrupted install/retirement, clock jumps and stale/missing evidence. They are
-not SD power-loss qualification. Still required on sacrificial media: power cuts
+Host process-death tests kill a forked owner before and after each fsync and
+rename of the ledger and status writes, and inside the installer. The child's
+callback leaves a pipe receipt with the durable steps it saw complete, so the
+parent sees effects in the dead process too: any effect must follow the ledger's
+file fsync, rename and directory fsync, and run against the matching pending or
+retirement intent. Moving the installer ahead of that commit, or between the
+rename and the directory fsync, fails these tests. Other tests cover concurrent
+producers, interrupted install/retirement, failed or unknown current health for
+every owner and the next update, clock jumps and stale/missing evidence. They
+observe the order of system calls in one process, not what reached the medium,
+and are not SD power-loss qualification. Still required on sacrificial media: power cuts
 around each durable boundary; successful fallback with the exact previous root,
 boot files and selector entry; blocked mirror/second update before qualification;
 a real full-stream positive control; repeated reboots and clock corrections;

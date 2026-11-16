@@ -7,6 +7,10 @@ import recovery_witness as witness
 
 WEEK = 604800
 OWNERS = {'update', 'selector', 'mirror'}
+# Current health is a separate gate from the historical stream/time qualification.
+# Neither substitutes for the other, and a later bad verdict never erases the record.
+HEALTH_FAILED = 'Previous release retained: current boot health is failed.'
+HEALTH_UNKNOWN = 'Previous release retained: current boot health is unknown.'
 
 
 def _walltime():
@@ -78,6 +82,15 @@ def validate(r):
             raise ValueError('retirement without qualification')
 
 
+def current_health(record):
+    """Refusal for the current boot's witness verdict, or None when healthy."""
+    current = record['boots'].get(record['current_boot']) if record['current_boot'] else None
+    health = current['health'] if current else None
+    if health == 'healthy':
+        return None
+    return HEALTH_FAILED if health == 'failed' else HEALTH_UNKNOWN
+
+
 def reasons(record):
     r = record.get('retention')
     if record['source'] != 'valid' or r is None:
@@ -96,7 +109,9 @@ def reasons(record):
             result.append('Previous release retained: seven-day wall-clock floor not proven.')
         if r['effect'] is not None:
             result.append('Previous release retained: interrupted retirement requires the same owner to retry.')
-    if r['refusal']:
+        if current_health(record):
+            result.append(current_health(record))
+    if r['refusal'] and r['refusal'] not in result:
         result.append(r['refusal'])
     return result
 
@@ -212,8 +227,12 @@ class Owners:
                 return self._refuse(record, 'Previous release retained: recovery is not available for an update.')
             if r['phase'] == 'pending' or r['effect'] is not None:
                 return self._refuse(record, 'Previous release retained: interrupted operation needs reconciliation.')
-            if (r['phase'] != 'idle' and not r['retired']
-                    and not self._eligible(r, walltime())):
+            replaces_fallback = r['phase'] != 'idle' and not r['retired']
+            # Replacing the retained fallback needs a healthy running release now,
+            # not one that merely qualified earlier: it becomes the only fallback.
+            if replaces_fallback and current_health(record):
+                return self._refuse(record, current_health(record))
+            if replaces_fallback and not self._eligible(r, walltime()):
                 return self._refuse(record, 'Previous release retained: update would replace an unqualified previous release.')
             try:
                 digest(p.get('target_release'))
@@ -304,6 +323,10 @@ class Owners:
             why = self._armed(boot, pinned_bootloader, p)
             if why:
                 return self._refuse(record, why[0])
+            # Historical qualification is kept, but a failed or unknown current
+            # verdict refuses every owner, including the retry of an interrupted one.
+            if current_health(record):
+                return self._refuse(record, current_health(record))
             if (not self._eligible(r, walltime()) or
                     r['effect'] is not None and r['effect'] != owner):
                 return self._refuse(record, 'Previous release retained: retirement requirements not met.')

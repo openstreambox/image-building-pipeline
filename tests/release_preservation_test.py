@@ -3,6 +3,7 @@ import json
 import os
 import select
 import signal
+import stat
 from pathlib import Path
 import sys
 import tempfile
@@ -21,18 +22,22 @@ WEEK = 604800
 
 class PreservationTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        self.store = witness.Store(self.root, limit=3, healthy_seconds=1)
-        self.owner = retention.Owners(self.store)
-        self.now, self.wall, self.boot = 10, 1000000, BOOT
         self.clock = patch.object(witness, '_boottime', side_effect=lambda: self.now)
         self.clock.start()
         self.addCleanup(self.clock.stop)
         self.wallclock = patch.object(retention, '_walltime', side_effect=lambda: self.wall)
         self.wallclock.start()
         self.addCleanup(self.wallclock.stop)
+        self.fresh()
+
+    def fresh(self):
+        """A new empty ledger directory and a healthy first boot."""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.store = witness.Store(self.root, limit=3, healthy_seconds=1)
+        self.owner = retention.Owners(self.store)
+        self.now, self.wall, self.boot = 10, 1000000, BOOT
         self.store.begin(BOOT, slot='A')
         self.healthy()
         self.running, self.slot, self.target, self.target_slot = OLD, 'A', NEXT, 'B'
@@ -237,6 +242,10 @@ class PreservationTest(unittest.TestCase):
         self.owner.observe(self.boot, probe=self.proof)
         self.assertFalse(self.retire()['allowed'])
         self.advance(WEEK // 2)
+        # Fully earned, but the new boot has not reported health yet.
+        self.assertFalse(self.retire()['allowed'])
+        self.assert_visible(retention.HEALTH_UNKNOWN)
+        self.healthy()
         self.assertTrue(self.retire()['allowed'])
 
     def test_process_restart_does_not_duplicate_elapsed_time(self):
@@ -270,6 +279,74 @@ class PreservationTest(unittest.TestCase):
         self.assertEqual(r['elapsed'], 0)
         self.assertIsNone(r['activated_wall'])
         self.assertFalse(self.retire()['allowed'])
+
+    def set_health(self, verdict):
+        if verdict == 'reboot':
+            # A fresh boot of the same release has no verdict yet.
+            self.boot = '44444444-4444-4444-8444-444444444444'
+            self.now = 1
+            self.store.begin(self.boot, slot='B')
+            self.owner.observe(self.boot, probe=self.proof)
+        else:
+            self.store.health(self.boot, verdict)
+
+    def test_failed_or_unknown_current_health_blocks_every_destructive_owner(self):
+        named = {'failed': retention.HEALTH_FAILED, 'unknown': retention.HEALTH_UNKNOWN,
+                 'reboot': retention.HEALTH_UNKNOWN}
+        for verdict, reason in named.items():
+            for owner in ('update', 'selector', 'mirror', 'next-update'):
+                with self.subTest(verdict=verdict, owner=owner):
+                    self.fresh()
+                    self.qualify()
+                    self.assertTrue(self.store.rollback_status(
+                        self.boot, pinned_bootloader=PIN, probe=self.proof)['release_retention_eligible'])
+                    self.set_health(verdict)
+                    before = self.store.read()['retention']
+                    self.calls = []
+                    effects = []
+                    if owner == 'next-update':
+                        result = self.update(NEXT, apply=effects.append)
+                    else:
+                        result = self.retire(owner, apply=effects.append)
+                    self.assertFalse(result['allowed'])
+                    self.assertEqual(effects, [])
+                    self.assertIn(reason, result['reasons'])
+                    self.assert_visible(reason)
+                    self.assertFalse(self.store.rollback_status(
+                        self.boot, pinned_bootloader=PIN, probe=self.proof)['release_retention_eligible'])
+                    r = self.store.read()['retention']
+                    # Historical qualification is kept; the fallback is untouched.
+                    self.assertEqual((r['new_release'], r['previous_release'], r['previous_slot']),
+                                     (NEW, OLD, 'A'))
+                    self.assertTrue(r['full_stream'])
+                    self.assertEqual(r['elapsed'], WEEK)
+                    self.assertFalse(r['retired'])
+                    self.assertIsNone(r['effect'])
+                    self.assertEqual(r['activation'], before['activation'])
+                    # A healthy verdict again admits the same owner.
+                    self.healthy()
+                    if owner == 'next-update':
+                        self.assertTrue(self.update(NEXT, apply=effects.append)['allowed'])
+                        self.assertEqual(effects[0]['release'], NEXT)
+                    else:
+                        self.assertTrue(self.retire(owner, apply=effects.append)['allowed'])
+                        self.assertEqual((effects[0]['release'], effects[0]['slot']), (OLD, 'A'))
+                    self.assertEqual(len(effects), 1)
+
+    def test_interrupted_retirement_retry_needs_current_health(self):
+        self.qualify()
+        def failed(_):
+            raise OSError('interrupted mirror')
+        with self.assertRaises(OSError):
+            self.retire(apply=failed)
+        self.store.health(self.boot, 'failed')
+        effects = []
+        self.assertFalse(self.retire(apply=effects.append)['allowed'])
+        self.assertEqual(effects, [])
+        self.assertEqual(self.store.read()['retention']['effect'], 'mirror')
+        self.healthy()
+        self.assertTrue(self.retire(apply=effects.append)['allowed'])
+        self.assertEqual(len(effects), 1)
 
     def test_second_update_refuses_before_qualification(self):
         self.activate()
@@ -372,7 +449,14 @@ class PreservationTest(unittest.TestCase):
         r = self.store.read()
         self.assertEqual(r['retention']['elapsed'], WEEK // 2)
         self.assertEqual(r['boots'][self.boot]['health'], 'failed')
-        self.assertFalse(self.retire()['allowed'])
+        # Earn the rest of the week, so only the failed verdict blocks retirement.
+        self.advance(WEEK // 2)
+        self.assertEqual(self.store.read()['retention']['elapsed'], WEEK)
+        calls = len(self.calls)
+        self.assertEqual(self.retire()['reasons'][-1], retention.HEALTH_FAILED)
+        self.assertEqual(len(self.calls), calls)
+        self.healthy()
+        self.assertTrue(self.retire()['allowed'])
 
     def test_effect_holds_shared_lock_against_health_writer(self):
         self.provision()
@@ -442,42 +526,99 @@ class PreservationTest(unittest.TestCase):
             self.assertEqual(self.wait_child(pid), 0)
         self.assertEqual(marker.read_bytes(), b'x')
 
+    def crash_child(self, run, boundary, after=False):
+        """Fork run(effect), dying at durable step `boundary` of the child's writes.
+
+        Steps are each os.fsync/os.replace inside Store.write, counted from 1. With
+        boundary None the child dies inside the effect instead. The effect leaves
+        a pipe receipt with the durable steps it saw complete and the ledger state
+        it ran against, so an effect in the dead child is visible to the parent.
+        """
+        receipt_r, receipt_w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(receipt_r)
+                count, events = [0], []
+                fsync, replace = os.fsync, os.replace
+                def step(fn, *args):
+                    count[0] += 1
+                    if count[0] == boundary and not after:
+                        os._exit(71)
+                    value = fn(*args)
+                    if fn is fsync:
+                        kind = 'dir-fsync' if stat.S_ISDIR(os.fstat(args[0]).st_mode) else 'file-fsync'
+                        events.append([kind, os.readlink(f'/proc/self/fd/{args[0]}')])
+                    else:
+                        events.append(['replace'] + [os.path.realpath(a) for a in args])
+                    if count[0] == boundary and after:
+                        os._exit(71)
+                    return value
+                write = self.store.write
+                def interrupted(record):
+                    with patch.object(os, 'fsync', side_effect=lambda *a: step(fsync, *a)), \
+                         patch.object(os, 'replace', side_effect=lambda *a: step(replace, *a)):
+                        write(record)
+                self.store.write = interrupted
+                def effect(plan):
+                    receipt = dict(plan=plan, events=events, retention=self.store.read()['retention'])
+                    os.write(receipt_w, json.dumps(receipt).encode())
+                    if boundary is None:
+                        os._exit(71)
+                run(effect)
+                os._exit(72)
+            except BaseException:
+                os._exit(98)
+        os.close(receipt_w)
+        try:
+            self.assertEqual(self.wait_child(pid), 71 << 8)
+            raw = b''
+            while chunk := os.read(receipt_r, 65536):
+                raw += chunk
+        finally:
+            os.close(receipt_r)
+        return json.loads(raw) if raw else None
+
+    def assert_committed_before_effect(self, receipt):
+        """The ledger generation the effect saw was fsynced, renamed, dir-fsynced."""
+        ledger, root = os.path.realpath(self.store.path), os.path.realpath(self.root)
+        synced, renamed, durable = set(), False, False
+        for event in receipt['events']:
+            if event[0] == 'file-fsync':
+                synced.add(event[1])
+            elif event[0] == 'replace' and event[2] == ledger:
+                renamed, durable = event[1] in synced, False
+            elif event[0] == 'dir-fsync' and event[1] == root:
+                durable = durable or renamed
+        self.assertTrue(durable, f'effect before durable ledger commit: {receipt["events"]}')
+
     def test_crash_at_every_durable_update_boundary_keeps_prior(self):
         self.provision()
         baseline = self.store.path.read_bytes()
-        # atomic ledger and advisory status: file fsync, replace, directory fsync.
-        for boundary in range(1, 7):
-            for after in (False, True):
+        # Steps 1-3 commit the ledger (file fsync, rename, directory fsync) and
+        # 4-6 the advisory status. None kills the child inside the installer.
+        for boundary in (*range(1, 7), None):
+            for after in (False, True) if boundary else (False,):
                 with self.subTest(boundary=boundary, after=after):
                     self.store.path.write_bytes(baseline)
-                    pid = os.fork()
-                    if pid == 0:
-                        try:
-                            count = [0]
-                            original_fsync, original_replace = os.fsync, os.replace
-                            def call(fn, *args):
-                                # Skip lock-directory setup; hook only once write starts.
-                                count[0] += 1
-                                if count[0] == boundary and not after:
-                                    os._exit(71)
-                                value = fn(*args)
-                                if count[0] == boundary and after:
-                                    os._exit(71)
-                                return value
-                            original_write = self.store.write
-                            def write(record):
-                                with patch.object(os, 'fsync', side_effect=lambda *a: call(original_fsync, *a)), \
-                                     patch.object(os, 'replace', side_effect=lambda *a: call(original_replace, *a)):
-                                    original_write(record)
-                            self.store.write = write
-                            self.update()
-                            os._exit(72)
-                        except BaseException:
-                            os._exit(98)
-                    self.assertEqual(self.wait_child(pid), 71 << 8)
-                    r = self.store.read()
-                    self.assertIn(r['retention']['phase'], ('idle', 'pending'))
+                    receipt = self.crash_child(lambda effect: self.update(apply=effect),
+                                               boundary, after)
+                    r = self.store.read()['retention']
+                    if boundary is None:
+                        self.assertIsNotNone(receipt, 'installer never ran')
+                    if receipt is not None:
+                        # Any installer effect ran against a durable pending intent.
+                        self.assert_committed_before_effect(receipt)
+                        intent = receipt['retention']
+                        self.assertEqual((intent['phase'], intent['previous_release'],
+                                          intent['previous_slot']), ('pending', OLD, 'A'))
+                        self.assertEqual(intent['activation'], receipt['plan']['activation'])
+                        self.assertEqual((receipt['plan']['release'], receipt['plan']['slot']), (NEW, 'B'))
+                        self.assertEqual(r, intent)
+                    self.assertIn(r['phase'], ('idle', 'pending'))
                     self.assertFalse(self.retire()['allowed'])
+                    if r['phase'] == 'pending':
+                        self.assertFalse(self.update(NEXT)['allowed'])
                     self.assertEqual(self.calls, [])
 
     def test_process_death_during_effect_retains_prior_and_blocks_next_update(self):
@@ -497,47 +638,29 @@ class PreservationTest(unittest.TestCase):
     def test_crash_at_retirement_commit_boundaries_keeps_running_release(self):
         self.qualify()
         baseline = self.store.path.read_bytes()
+        # Steps 1-6 commit the intent and status, 7-12 the completion.
         for boundary in range(1, 13):
             for after in (False, True):
                 with self.subTest(boundary=boundary, after=after):
                     self.store.path.write_bytes(baseline)
-                    marker = self.root / 'retired-effect'
-                    marker.unlink(missing_ok=True)
-                    pid = os.fork()
-                    if pid == 0:
-                        try:
-                            count = [0]
-                            fsync, replace = os.fsync, os.replace
-                            def call(fn, *args):
-                                count[0] += 1
-                                if count[0] == boundary and not after:
-                                    os._exit(75)
-                                value = fn(*args)
-                                if count[0] == boundary and after:
-                                    os._exit(75)
-                                return value
-                            write = self.store.write
-                            def interrupted(record):
-                                with patch.object(os, 'fsync', side_effect=lambda *a: call(fsync, *a)), \
-                                     patch.object(os, 'replace', side_effect=lambda *a: call(replace, *a)):
-                                    write(record)
-                            self.store.write = interrupted
-                            def effect(plan):
-                                assert plan['release'] == OLD and plan['slot'] == 'A'
-                                marker.write_bytes(b'previous only')
-                            self.retire(apply=effect)
-                            os._exit(76)
-                        except BaseException:
-                            os._exit(98)
-                    self.assertEqual(self.wait_child(pid), 75 << 8)
+                    receipt = self.crash_child(lambda effect: self.retire(apply=effect),
+                                               boundary, after)
                     r = self.store.read()['retention']
                     self.assertEqual((r['new_release'], r['new_slot']), (NEW, 'B'))
                     self.assertEqual(r['previous_release'], OLD)
+                    if receipt is not None:
+                        self.assert_committed_before_effect(receipt)
+                        self.assertEqual(receipt['retention']['effect'], 'mirror')
+                        self.assertFalse(receipt['retention']['retired'])
+                        self.assertEqual((receipt['plan']['release'], receipt['plan']['slot']), (OLD, 'A'))
+                        self.assertTrue(r['retired'] or r['effect'] == 'mirror')
                     if r['retired']:
-                        self.assertTrue(marker.exists())
+                        self.assertIsNotNone(receipt)
                     elif r['effect']:
                         self.assertFalse(self.update(NEXT)['allowed'])
                         self.assertTrue(self.retire()['allowed'])
+                    else:
+                        self.assertIsNone(receipt)
 
     def test_stream_collector_exception_and_unknown_are_visible(self):
         self.activate()
