@@ -70,10 +70,8 @@ CONTENTION_BACKOFF_MAX="${CERALIVE_HOSTNAME_CONTENTION_BACKOFF_MAX:-4}"
 CLAIM_CONFLICT=10
 CONSUMER_UNITS=(
     ceralive-tls-firstboot.service
-    nginx.service
     ceralive.service
     ceralive-hawkbit-provision.service
-    ceralive-healthcheck.service
 )
 
 die() {
@@ -377,7 +375,12 @@ local_identity_matches() {
 
 restart_identity_consumers() {
     "$SYSTEMCTL_BIN" --no-block restart "${CONSUMER_UNITS[@]}" || return 1
-    "$SYSTEMCTL_BIN" --no-block start ceralive-mark-good.service
+    # Masked/absent nginx is intentional on images with another web front door.
+    if [[ "$("$SYSTEMCTL_BIN" show --property=LoadState --value nginx.service)" = loaded ]]; then
+        "$SYSTEMCTL_BIN" --no-block restart nginx.service || return 1
+    fi
+    # These are boot-scoped checks, not identity consumers to restart.
+    "$SYSTEMCTL_BIN" --no-block start ceralive-healthcheck.service ceralive-mark-good.service
 }
 
 clear_restart_pending() {
@@ -498,7 +501,9 @@ After=systemd-machine-id-commit.service ceralive-migrate-data.service NetworkMan
 Before=ceralive-tls-firstboot.service ceralive.service
 Wants=NetworkManager.service avahi-daemon.service
 ConditionPathExists=/etc/machine-id
-StartLimitIntervalSec=0
+# Allow transient claim failures, but stop rapid retries on persistent errors.
+StartLimitIntervalSec=600
+StartLimitBurst=3
 
 [Service]
 Type=oneshot
@@ -507,7 +512,9 @@ RuntimeDirectory=ceralive-hostname
 RuntimeDirectoryMode=0700
 ExecStart=/usr/local/sbin/ceralive-set-hostname
 ExecStartPost=/usr/bin/systemctl --no-block start ceralive.service
-ExecStartPost=/usr/bin/systemctl --no-block restart ceralive-tls-firstboot.service nginx.service ceralive-hawkbit-provision.service ceralive-healthcheck.service
+ExecStartPost=/usr/bin/systemctl --no-block restart ceralive-tls-firstboot.service ceralive-hawkbit-provision.service
+ExecStartPost=/bin/sh -c 'if [ "$(/usr/bin/systemctl show --property=LoadState --value nginx.service)" = loaded ]; then /usr/bin/systemctl --no-block restart nginx.service; fi'
+ExecStartPost=/usr/bin/systemctl --no-block start ceralive-healthcheck.service
 ExecStartPost=/usr/bin/systemctl --no-block start ceralive-mark-good.service
 TimeoutStartSec=150
 Restart=on-failure

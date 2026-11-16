@@ -464,3 +464,15 @@ If the cert is missing, run the firstboot service manually:
 systemctl start ceralive-tls-firstboot.service
 systemctl restart nginx.service
 ```
+
+### Hostname retries and boot health
+
+Hostname allocation attempts run at most three times per ten-minute window. The
+reconciliation timer can try again after that window if publication still needs
+repair. Identity refresh restarts nginx only when its unit is loaded; masked or
+missing nginx is expected when a different service fronts the web UI.
+
+Identity changes start the boot healthcheck and mark-good units without
+restarting completed checks. Slot-sync wants and follows mark-good, but does not
+stop when that unit stops or restarts. Its script still refuses a missing or
+stale current-boot/build/package health receipt before copying anything.

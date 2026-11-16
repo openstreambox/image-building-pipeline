@@ -7,7 +7,9 @@ Documentation=file:///usr/share/doc/ceralive/partition-contract.md
 # agent) via `systemctl start --no-block ceralive-slot-sync.service`, after the
 # booted slot's OWN healthy-state.json has already survived a reboot and a
 # streaming healthcheck. There is nothing here for `preset-all` to resurrect.
-Requires=ceralive-mark-good.service
+# The script requires a current boot/build/dpkg health receipt before copying.
+# A later health-unit restart must not interrupt a verified mirror in progress.
+Wants=ceralive-mark-good.service
 After=ceralive-mark-good.service
 RequiresMountsFor=/data
 

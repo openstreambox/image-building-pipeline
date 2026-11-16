@@ -273,7 +273,7 @@ load manifest-helpers
   grep -Fq 'RequiresMountsFor=/data' "$POSTINST_LIB"
   [[ "$hostname_unit" == *'ExecStartPost=/usr/bin/systemctl --no-block start ceralive.service'* ]]
   [[ "$hostname_unit" == *'ExecStartPost=/usr/bin/systemctl --no-block start ceralive-mark-good.service'* ]]
-  [[ "$hostname_unit" == *'ExecStartPost=/usr/bin/systemctl --no-block restart ceralive-tls-firstboot.service nginx.service ceralive-hawkbit-provision.service ceralive-healthcheck.service'* ]]
+  [[ "$hostname_unit" == *'ExecStartPost=/usr/bin/systemctl --no-block restart ceralive-tls-firstboot.service ceralive-hawkbit-provision.service'* ]]
   [[ "$hostname_unit" == *'RemainAfterExit=yes'* ]]
   [[ "$hostname_unit" != *'OnSuccess='* ]]
   grep -Fq 'ceralive-hostname-reconcile.service' "$POSTINST_LIB"
@@ -353,7 +353,7 @@ load manifest-helpers
   [[ "$output" == *"hostname-file=ceralive2"* ]]
   [[ "$output" == *"hosts=ceralive2"* ]]
   [[ "$output" == *"published=ceralive2"* ]]
-  [[ "$output" == *"systemctl --no-block restart ceralive-tls-firstboot.service nginx.service ceralive.service ceralive-hawkbit-provision.service ceralive-healthcheck.service"* ]]
+  [[ "$output" == *"systemctl --no-block restart ceralive-tls-firstboot.service ceralive.service ceralive-hawkbit-provision.service"* ]]
   [[ "$output" != *"system-hostname=ceralive-2"* ]]
   printf '%s\n' "$output"
 }
@@ -424,7 +424,7 @@ load manifest-helpers
   [[ "$output" == *"completed pending consumer restart for ceralive2.local"* ]]
   [[ "$output" == *"identity already aligned at ceralive2.local"* ]]
   [[ "$output" != *"avahi-set-host-name"* ]]
-  [[ "$output" == *"systemctl --no-block restart ceralive-tls-firstboot.service nginx.service ceralive.service ceralive-hawkbit-provision.service ceralive-healthcheck.service"* ]]
+  [[ "$output" == *"systemctl --no-block restart ceralive-tls-firstboot.service ceralive.service ceralive-hawkbit-provision.service"* ]]
   printf '%s\n' "$output"
 }
 
@@ -3122,4 +3122,49 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   grep -Fq 'setup_pipewire_system_mode' "$PIPELINE_DIR/ci/postinst-drift-check.sh"
   run grep -cE '^setup_pipewire_system_mode\(\) \{' "$POSTINST_LIB"
   [ "$output" -eq 1 ]
+}
+
+@test "hostname: masked or absent nginx is skipped at boot and reconciliation" {
+  local state root command
+  command="$(extract_hostname_unit | sed -n "s|^ExecStartPost=/bin/sh -c '\(.*\)'$|\1|p")"
+  [ -n "$command" ]
+  for state in loaded masked not-found; do
+    root="$BATS_TEST_TMPDIR/nginx-$state"
+    make_hostname_fixture "$root"
+    # Execute the actual systemd shell payload with the fixture systemctl.
+    run env HOSTNAME_CALLS="$root/calls" HOSTNAME_NGINX_LOAD_STATE="$state" \
+      bash -c "${command//\/usr\/bin\/systemctl/$root\/bin\/systemctl}"
+    [ "$status" -eq 0 ]
+    if [[ "$state" = loaded ]]; then
+      grep -Fxq 'systemctl --no-block restart nginx.service' "$root/calls"
+    else
+      run ! grep -Fq 'restart nginx.service' "$root/calls"
+    fi
+    run run_hostname_script "$root"
+    [ "$status" -eq 0 ]
+    : >"$root/calls"
+    # Exercise the actual installed reconciliation function with service stubs.
+    run env HOSTNAME_CALLS="$root/calls" HOSTNAME_NGINX_LOAD_STATE="$state" \
+      bash -c 'SYSTEMCTL_BIN="$1"; eval "$3"; eval "$2"; restart_identity_consumers' \
+      bash "$root/bin/systemctl" "$(sed -n '/^restart_identity_consumers() {/,/^}/p' "$root/ceralive-set-hostname")" "$(sed -n '/^CONSUMER_UNITS=(/,/^)/p' "$root/ceralive-set-hostname")"
+    [ "$status" -eq 0 ]
+    if [[ "$state" = loaded ]]; then
+      grep -Fxq 'systemctl --no-block restart nginx.service' "$root/calls"
+    else
+      run ! grep -Fq 'restart nginx.service' "$root/calls"
+    fi
+    run ! grep -E 'restart .*ceralive-(healthcheck|mark-good)\.service' "$root/calls"
+  done
+}
+
+@test "hostname: retry budget and boot health dependency isolation" {
+  local unit
+  unit="$(extract_hostname_unit)"
+  [[ "$unit" == *'StartLimitIntervalSec=600'* ]]
+  [[ "$unit" == *'StartLimitBurst=3'* ]]
+  [[ "$unit" == *'RestartSec=5'* ]]
+  run ! grep -E '^ExecStartPost=.*restart .*ceralive-(healthcheck|mark-good)\.service' <<<"$unit"
+  grep -Fxq 'Wants=ceralive-mark-good.service' "$PIPELINE_DIR/mkosi/runtime/ceralive-slot-sync.service"
+  grep -Fxq 'After=ceralive-mark-good.service' "$PIPELINE_DIR/mkosi/runtime/ceralive-slot-sync.service"
+  run ! grep -E '^(Requires|BindsTo|PartOf)=' "$PIPELINE_DIR/mkosi/runtime/ceralive-slot-sync.service"
 }
