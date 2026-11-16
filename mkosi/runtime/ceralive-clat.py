@@ -18,6 +18,10 @@ TAYGA = '/usr/sbin/tayga'
 BOOT_ID = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
 INVOCATION_ID = os.environ.get('INVOCATION_ID') or uuid.uuid4().hex
 MAX_AGE = 30
+# Seconds the controller may spend withdrawing after SIGTERM; the unit's
+# TimeoutStopSec leaves room for this plus translator termination.
+STOP_BUDGET = 20
+DEADLINE = None
 # 32 IPv4 /24 blocks of 10.254.0.0/19, each without its .0 address.
 MAX_INDEX = 32 * 255
 
@@ -94,8 +98,15 @@ def replay(path):
 
 
 def command(*args, check=True, data=None):
+    timeout = 10
+    if DEADLINE is not None:
+        # During shutdown the controller never outlives its stop budget;
+        # what is left stays journalled for ExecStopPost.
+        timeout = min(timeout, DEADLINE - time.monotonic())
+        if timeout <= 0:
+            raise subprocess.TimeoutExpired(args, 0)
     return subprocess.run(args, input=data, text=True, capture_output=True,
-                          check=check, timeout=10).stdout
+                          check=check, timeout=timeout).stdout
 
 
 def service_ipv4(index):
@@ -629,18 +640,29 @@ def main():
                 return False
             GLib.idle_add(once)
     bus.add_signal_receiver(changed, bus_name=name)
+    stopping = [False]
     def shutdown(*args):
+        # KillMode=mixed signals only this process: withdraw and stop the
+        # translators here, with every later command bounded by the budget.
+        global DEADLINE
+        if DEADLINE is None:
+            DEADLINE = time.monotonic() + STOP_BUDGET
+        stopping[0] = True
         loop.quit()
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
     GLib.timeout_add_seconds(10, reconcile)
     reconcile()
     try:
-        loop.run()
+        # A quit() before run() is lost, so check for an early stop request.
+        if not stopping[0]:
+            loop.run()
     finally:
         sharing = ipv6_sharing(bus)
         controller.sync({}, sharing=sharing)
-        cleanup(exclude={link.index for _, link in controller.links.values()}, sharing=sharing)
+        settled = cleanup(exclude={link.index for _, link in controller.links.values()}, sharing=sharing)
+    # Unsettled withdrawal fails the unit; ExecStopPost and the next start retry.
+    return settled and not controller.links
 
 
 def cleanup(exclude=(), sharing=None):
@@ -692,4 +714,4 @@ if __name__ == '__main__':
     settled = cleanup()
     if '--cleanup' in sys.argv:
         sys.exit(0 if settled else 1)
-    main()
+    sys.exit(0 if main() else 1)

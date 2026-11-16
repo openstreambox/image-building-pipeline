@@ -480,6 +480,19 @@ class ForwardingGuard(Isolated):
         self.assertEqual(host.forwarding, '0')
         self.assertFalse((clat.RUN/'forwarding').exists())
 
+    def test_shutdown_deadline_bounds_commands_and_keeps_the_journal(self):
+        from unittest.mock import patch
+        link = clat.Link('wan1', *GRANT['wan1'])
+        link.undo = [['ip', 'link', 'del', link.tun]]
+        link.save_cleanup()
+        with patch.object(clat, 'DEADLINE', clat.time.monotonic() - 1), patch.object(clat.subprocess, 'run') as run:
+            self.assertFalse(clat.cleanup())
+        run.assert_not_called()
+        self.assertEqual(json.loads((clat.RUN/'3.cleanup').read_text()), link.undo)
+        with patch.object(clat, 'DEADLINE', clat.time.monotonic() + 5), patch.object(clat.subprocess, 'run') as run:
+            clat.command('true')
+        self.assertLessEqual(run.call_args.kwargs['timeout'], 5)
+
 
 class ForwardingOwners(Isolated):
     def test_existing_owner_is_neither_recorded_nor_guarded(self):

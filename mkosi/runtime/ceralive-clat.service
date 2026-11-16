@@ -7,6 +7,11 @@ Wants=NetworkManager.service
 Type=simple
 ExecStart=/usr/lib/ceralive/ceralive-clat
 ExecStopPost=/usr/lib/ceralive/ceralive-clat --cleanup
+# Stop the controller first: it publishes unavailable, then stops its tayga
+# children itself (20 s command budget). Anything left in the group is
+# killed only after it exits or after this timeout.
+KillMode=mixed
+TimeoutStopSec=45
 RuntimeDirectoryPreserve=yes
 Restart=on-failure
 RestartSec=5

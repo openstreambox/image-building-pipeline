@@ -15,4 +15,6 @@
   grep -q 'NoNewPrivileges=yes' "$root/mkosi/runtime/ceralive-clat.service"
   grep -qx 'RuntimeDirectoryPreserve=yes' "$root/mkosi/runtime/ceralive-clat.service"
   grep -q 'ExecStopPost=.*--cleanup' "$root/mkosi/runtime/ceralive-clat.service"
+  grep -qx 'KillMode=mixed' "$root/mkosi/runtime/ceralive-clat.service"
+  grep -qx 'TimeoutStopSec=45' "$root/mkosi/runtime/ceralive-clat.service"
 }
