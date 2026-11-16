@@ -77,8 +77,9 @@ previously disabled, unrelated IPv6 forwarding is dropped while CLAT is active;
 existing IPv4 hotspot admission remains with its owner. The shared IPv4/IPv6
 TUN keeps the uplink MTU so full-size incoming IPv6 packets fit. Both IPv4
 default routes through it use plain `mtu` at uplink MTU minus 20 bytes for
-translation overhead (minimum IPv4 MTU 1280; smaller uplinks fail with a
-diagnostic). The route MTU stays unlocked so default local sockets retain DF
+translation overhead. The IPv6 minimum link MTU of 1280 therefore gives an
+IPv4 MTU of 1260 and an MSS of 1220; only an uplink below 1280 (not valid for
+IPv6) fails with a diagnostic. The route MTU stays unlocked so default local sockets retain DF
 and path-MTU discovery; locking it clears DF and makes tayga fragment ordinary
 stream-sized UDP and TCP packets into IPv6 fragments. TCP SYN and SYN-ACK MSS
 is capped at that IPv4 MTU minus 40, for hotspot forwarding in both directions

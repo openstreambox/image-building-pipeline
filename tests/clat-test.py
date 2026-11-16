@@ -24,6 +24,72 @@ class Discovery(unittest.TestCase):
     def test_short_prefix(self):
         self.assertEqual(clat.prefix_from_answers(['2001:db8:c000:aa::', '2001:db8:c000:ab::']), '2001:db8::/32')
 
+class FakeHost:
+    """Answers the controller's commands like an empty kernel and records their order."""
+    def __init__(self, mtu=1500, forwarding='0', fail=None):
+        self.calls, self.mtu, self.forwarding, self.fail = [], mtu, forwarding, fail
+        self.tables, self.processes = set(), []
+
+    def __call__(self, *args, check=True, data=None):
+        import re
+        args = list(args)
+        self.calls.append((args, data))
+        if self.fail:
+            error = self.fail(args, data)
+            if error:
+                raise error
+        if args == ['ip', '-j', 'addr']:
+            return '[]'
+        if args[:4] == ['ip', '-j', 'link', 'show']:
+            return json.dumps([{'mtu': self.mtu}])
+        if args[:2] == ['ip', '-j']:
+            return '[]'
+        if args == ['nft', '-j', 'list', 'tables']:
+            return json.dumps({'nftables': [{'table': {'family': 'inet', 'name': n}} for n in sorted(self.tables)]})
+        if args[:2] in (['nft', 'create'], ['nft', 'add']) and args[2] == 'table':
+            self.tables.add(args[4])
+        if args[:3] == ['nft', 'delete', 'table']:
+            self.tables.discard(args[4])
+        if args[:2] == ['nft', '-f'] and data:
+            self.tables.update(re.findall(r'^(?:create|add) table inet (\S+)', data, re.M))
+        if args == ['sysctl', '-n', 'net.ipv6.conf.all.forwarding']:
+            return self.forwarding
+        return ''
+
+    def set_forwarding(self, value):
+        self.calls.append((['set_forwarding', value], None))
+        if self.fail:
+            error = self.fail(['set_forwarding', value], None)
+            if error:
+                raise error
+        self.forwarding = value
+
+    def popen(self, *args, **kwargs):
+        from unittest.mock import Mock
+        process = Mock()
+        process.poll.return_value = None
+        self.processes.append(process)
+        return process
+
+    def patched(self, prefix='64:ff9b::/96'):
+        from contextlib import ExitStack
+        from unittest.mock import patch
+        stack = ExitStack()
+        stack.enter_context(patch.object(clat, 'command', side_effect=self))
+        stack.enter_context(patch.object(clat, 'set_forwarding', side_effect=self.set_forwarding))
+        stack.enter_context(patch.object(clat, 'discover', return_value=prefix))
+        stack.enter_context(patch.object(clat.subprocess, 'Popen', side_effect=self.popen))
+        stack.enter_context(patch.object(clat.socket, 'if_nameindex', return_value=[(3, 'wan1')]))
+        stack.enter_context(patch.object(clat.time, 'sleep'))
+        return stack
+
+    def index(self, predicate):
+        return next(i for i, (args, data) in enumerate(self.calls) if predicate(args, data))
+
+    def commands(self):
+        return [args for args, _ in self.calls]
+
+
 class Isolated(unittest.TestCase):
     def setUp(self):
         import tempfile
@@ -271,6 +337,35 @@ class Recovery(Isolated):
                 mutate.assert_called_once()
             self.assertEqual(link.undo, [undo])
             self.assertTrue((clat.RUN/'3.cleanup').exists())
+
+class MinimumMtu(Isolated):
+    def start(self, mtu):
+        host = FakeHost(mtu=mtu)
+        with host.patched():
+            link = clat.Link('wan1', '2001:db8::1', '', ('2001:db8::53',))
+            link.start()
+        return host, link, json.loads((clat.RUN/'3.json').read_text())
+
+    def test_ipv6_minimum_link_mtu_translates_at_1260(self):
+        host, link, snapshot = self.start(1280)
+        self.assertEqual(snapshot['state'], 'up', snapshot)
+        self.assertEqual(link.ipv4_mtu, 1260)
+        self.assertIn(['ip', 'link', 'set', link.tun, 'mtu', '1280'], host.commands())
+        routes = [args for args in host.commands() if args[:2] == ['ip', '-4'] and 'route' in args and 'add' in args]
+        self.assertEqual(len(routes), 2)
+        for route in routes:
+            self.assertEqual(route[route.index('mtu') + 1], '1260')
+        ruleset = next(data for args, data in host.calls if args[:2] == ['nft', '-f'] and 'maxseg' in data)
+        self.assertEqual(ruleset.count('tcp option maxseg size set 1220'), 3)
+        self.assertEqual(len(host.processes), 1)
+
+    def test_link_below_ipv6_minimum_fails_closed(self):
+        host, link, snapshot = self.start(1279)
+        self.assertEqual(snapshot['state'], 'error')
+        self.assertIn('1280', snapshot['last_error'])
+        self.assertFalse(link.undo)
+        self.assertFalse(host.processes)
+
 
 def consumer_accepts(address):
     # Mirrors the CeraUI snapshot parser's service-space rule.

@@ -377,9 +377,11 @@ class Link:
             self.add([TAYGA, '-c', str(cfg), '--mktun'], ['ip', 'link', 'del', self.tun])
             command('ip', 'link', 'set', self.tun, 'up')
             mtu = int(json.loads(command('ip', '-j', 'link', 'show', 'dev', self.interface))[0]['mtu'])
+            # 1280 is the IPv6 minimum link MTU; the translated IPv4 side is
+            # 20 bytes smaller (1260 at that minimum), which IPv4 permits.
+            if mtu < 1280:
+                raise ValueError('uplink MTU below the IPv6 minimum of 1280')
             self.ipv4_mtu = mtu - 20
-            if self.ipv4_mtu < 1280:
-                raise ValueError('uplink MTU too small for CLAT')
             command('ip', 'link', 'set', self.tun, 'mtu', str(mtu))
             command('ip', 'addr', 'add', self.v4 + '/32', 'dev', self.tun)
             # Loose checks are needed only on our synthetic link; do not change WAN settings.
