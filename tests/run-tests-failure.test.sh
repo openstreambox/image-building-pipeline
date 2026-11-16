@@ -22,7 +22,10 @@ printf '%s\n' \
   $'tests/fixture.sh\tfixture\tsupport\tdefault-fixture\tfixture' > "$work/tests/registry.tsv"
 run_case() {
   local expected="$1" rc=0
-  PATH="$work/bin:$PATH" BATS_JOBS=1 bash "$work/run-tests" > "$work/output" 2>&1 || rc=$?
+  # The fixture tests entrypoint status handling, not the opt-in real services.
+  PATH="$work/bin:$PATH" BATS_JOBS=1 \
+    CERALIVE_RUN_REAL_AVAHI_CONTRACT=skip CERALIVE_RUN_REAL_RAUC_CONTRACT=skip \
+    bash "$work/run-tests" > "$work/output" 2>&1 || rc=$?
   [[ "$rc" -eq "$expected" ]]
   grep -qx later-shell-ran "$work/output"
   grep -qx bats-ran "$work/output"
