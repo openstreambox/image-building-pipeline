@@ -14,13 +14,21 @@
 # represent the much larger non-power-of-two wrap blind spot of full-size images
 # or establish that a passing result preserves partition contents.
 #
-# Needs sgdisk (the default gate already does). No root, no hardware.
+# Hostile references and GPTs (with CRCs from the gzip trailer, independent of
+# the helper), path swaps during a run and short reads/writes are checked too.
+#
+# Needs sgdisk and gzip (the default gate already has both). No root, no
+# hardware. The probe refuses targets below directories that others can change,
+# so TMPDIR must not sit below a group- or world-writable directory without the
+# sticky bit.
 #
 # contract-test profile (docs/shell-profiles.md): `set -uo pipefail`, no `-e`.
 #
 # shellcheck shell=bash
 
 set -uo pipefail
+# Fixtures must have consistent permissions even under an ambient 000/077 mask.
+umask 022
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${HERE}/.." && pwd)"
@@ -31,8 +39,11 @@ PROBE="${ROOT}/mkosi/runtime/ceralive-card-probe.sh"
 MIB=1048576
 
 command -v sgdisk >/dev/null 2>&1 || { printf 'FAIL: sgdisk is required\n' >&2; exit 1; }
+command -v gzip >/dev/null 2>&1 || { printf 'FAIL: gzip is required\n' >&2; exit 1; }
 
-WORK="$(mktemp -d)"
+# The probe refuses paths with symlinks or directories others may change, so
+# the work directory is used by its resolved path.
+WORK="$(realpath -e -- "$(mktemp -d)")"
 trap 'rm -rf "${WORK}"' EXIT
 
 IMAGE="${WORK}/image.raw"
@@ -238,7 +249,7 @@ printf 'X' | dd of="${PRE}" bs=1 seek=40000 conv=notrunc status=none
 (
   # shellcheck source=mkosi/runtime/ceralive-card-probe.sh
   source "${PROBE}"
-  CARD_PROBE_TARGET="${PRE}"
+  exec {CARD_PROBE_FD}<>"${PRE}"
   card_io_size() { printf '%s\n' "${CLAIMED}"; }
   card_io_write() { printf '%s\n' "$1" >>"${WORK}/pre2.writes"; cat >/dev/null; }
   card_probe_core "${REF}" 64
@@ -256,7 +267,7 @@ fake_run "${WORK}/werr" werr "${CLAIMED}" 64 $(( 256 * MIB )); rc=$?
 (
   # shellcheck source=mkosi/runtime/ceralive-card-probe.sh
   source "${PROBE}"
-  CARD_PROBE_TARGET="${CARD}"
+  exec {CARD_PROBE_FD}<>"${CARD}"
   card_probe_core "${REF}" 65
 ) >"${WORK}/core65.out" 2>&1; rc=$?
 [[ ${rc} -eq 2 && "$(field reason "${WORK}/core65.out")" == bad-arguments ]] \
@@ -264,7 +275,7 @@ fake_run "${WORK}/werr" werr "${CLAIMED}" 64 $(( 256 * MIB )); rc=$?
 (
   # shellcheck source=mkosi/runtime/ceralive-card-probe.sh
   source "${PROBE}"
-  CARD_PROBE_TARGET="${CARD}"
+  exec {CARD_PROBE_FD}<>"${CARD}"
   card_probe_offsets() { :; }
   card_io_write() { printf '%s\n' "$1" >>"${WORK}/empty.writes"; cat >/dev/null; }
   card_probe_core "${REF}" 64
@@ -341,6 +352,304 @@ else
   ok "no block device node visible; block refusal covered by the static check below"
 fi
 grep -q '\[\[ -b "${path}" \]\]' "${PROBE}" && ok "the helper tests for block devices explicitly" || bad "no explicit block-device test"
+
+echo "== GPT test oracle"
+
+# Independent GPT tooling for the hostile cases below. CRC32 comes from the gzip
+# trailer, not from the helper, so a helper bug cannot also fix its own test data.
+le() { od --endian=little -An -t "u$3" -j "$2" -N "$3" -- "$1" | tr -d ' \n'; }
+put_le() { # file offset bytes value
+  local s='' i
+  for (( i = 0; i < $3; i++ )); do s+=$(printf '\\%03o' $(( ($4 >> (8 * i)) & 255 ))); done
+  # shellcheck disable=SC2059 # s holds only octal escapes built above
+  printf "${s}" | dd of="$1" bs=1 seek="$2" conv=notrunc status=none
+}
+crc32() { # file offset length
+  tail -c +$(( $2 + 1 )) -- "$1" | head -c "$3" | gzip -c | tail -c 8 | head -c 4 | od --endian=little -An -tu4 | tr -d ' \n'
+}
+# fix_gpt FILE [primary|backup|both]: recompute entry-array and header CRCs. The
+# backup header is found through the primary header's alternate LBA.
+fix_gpt() {
+  local f=$1 which=${2:-both} part h ent
+  for part in primary backup; do
+    [[ "${which}" == both || "${which}" == "${part}" ]] || continue
+    if [[ "${part}" == primary ]]; then h=512; else h=$(( $(le "${f}" $(( 512 + 32 )) 8) * 512 )); fi
+    ent=$(( $(le "${f}" $(( h + 72 )) 8) * 512 ))
+    put_le "${f}" $(( h + 88 )) 4 "$(crc32 "${f}" "${ent}" $(( $(le "${f}" $(( h + 80 )) 4) * $(le "${f}" $(( h + 84 )) 4) )))"
+    put_le "${f}" $(( h + 16 )) 4 0
+    put_le "${f}" $(( h + 16 )) 4 "$(crc32 "${f}" "${h}" "$(le "${f}" $(( h + 12 )) 4)")"
+  done
+}
+# Fixture GPT geometry (sgdisk on 65536 sectors): primary entries at LBA 2,
+# backup entries at LBA 65503, backup header at LBA 65535, 128 x 128-byte entries.
+P_ENT=1024
+B_ENT=$(( 65503 * 512 ))
+B_LEN=$(( 33 * 512 ))
+set_entry() { # file entry field-offset value: both entry arrays
+  put_le "$1" $(( P_ENT + $2 * 128 + $3 )) 8 "$4"
+  put_le "$1" $(( B_ENT + $2 * 128 + $3 )) 8 "$4"
+}
+
+cp --sparse=always "${IMAGE}" "${WORK}/oracle.raw"
+fix_gpt "${WORK}/oracle.raw"
+cmp -s "${IMAGE}" "${WORK}/oracle.raw" \
+  && ok "non-vacuous: the test's CRC oracle reproduces sgdisk's GPT byte for byte" \
+  || bad "the CRC oracle disagrees with sgdisk; hostile GPT cases below are meaningless"
+
+# hand_ref OUT SOURCE IMAGE_BYTES LOADER_LEN BACKUP_OFF BACKUP_LEN [extra lines]:
+# a reference written by the test, with hashes taken from SOURCE.
+hand_ref() {
+  local out=$1 src=$2
+  {
+    printf 'format=ceralive-card-probe-reference/1\nimage_bytes=%s\n' "$3"
+    printf 'region=loader 0 %s %s\n' "$4" "$(sum_range "${src}" 0 "$4")"
+    [[ "$6" != 0 ]] && printf 'region=backup-gpt %s %s %s\n' "$5" "$6" "$(sum_range "${src}" "$5" "$6")"
+    [[ -n "${7:-}" ]] && printf '%s\n' "$7"
+  } >"${out}"
+}
+# small_card SOURCE NAME: SOURCE copied onto a 96 MiB card file (no minimum).
+small_card() {
+  local card="${WORK}/$2.card"
+  cp --sparse=always "$1" "${card}"; truncate -s $(( 96 * MIB )) "${card}"
+  printf '%s' "${card}"
+}
+STD="${IMAGE_BYTES} $(( 16 * MIB )) ${B_ENT} ${B_LEN}"
+
+# shellcheck disable=SC2086 # STD is four numbers
+hand_ref "${WORK}/hand-ok.ref" "${IMAGE}" ${STD}
+OKCARD=$(small_card "${IMAGE}" hand-ok)
+run_probe "${WORK}/hand-ok" "${OKCARD}" "${WORK}/hand-ok.ref"; rc=$?
+[[ ${rc} -eq 0 ]] && ok "non-vacuous: a hand-written reference for the pristine image passes (0)" \
+  || bad "hand reference rc=${rc}: $(cat "${WORK}/hand-ok.out" "${WORK}/hand-ok.err")"
+
+echo "== hostile references are refused before any write"
+
+# expect_refused NAME CARD REF DESCRIPTION [REASON]: exit 2 with a refusal
+# reason (REASON exactly, when given), card untouched.
+expect_refused() {
+  local name=$1 card=$2 ref=$3 what=$4 want=${5:-} before reason
+  before=$(sha256sum <"${card}")
+  run_probe "${WORK}/${name}" "${card}" "${ref}"; rc=$?
+  reason=$(field reason "${WORK}/${name}.out")
+  if [[ ${rc} -eq 2 && "$(field result "${WORK}/${name}.out")" == refused \
+        && "${reason}" =~ ^(invalid-reference|invalid-gpt|reference-mismatch)$ \
+        && ( -z "${want}" || "${reason}" == "${want}" ) ]]; then
+    ok "${what}: refused (2, ${reason})"
+  else
+    bad "${what}: rc=${rc} $(tr '\n' ' ' <"${WORK}/${name}.out")"
+  fi
+  [[ "$(sha256sum <"${card}")" == "${before}" ]] && ok "${what}: card byte-identical, nothing written" \
+    || bad "${what}: the card was written"
+}
+
+# The review case: image_bytes of one sector with a matching one-sector loader
+# hash would let marks start at 1 MiB, inside the image.
+printf 'format=ceralive-card-probe-reference/1\nimage_bytes=512\nregion=loader 0 512 %s\n' \
+  "$(sum_range "${IMAGE}" 0 512)" >"${WORK}/r-tiny.ref"
+expect_refused r-tiny "$(small_card "${IMAGE}" r-tiny)" "${WORK}/r-tiny.ref" "image_bytes=512 with a matching 512-byte loader hash"
+
+# Understated length that is internally consistent: image ends at the first
+# partition, loader hash correct, a "backup-gpt" hashed just below 16 MiB.
+hand_ref "${WORK}/r-under.ref" "${IMAGE}" $(( 16 * MIB )) $(( 16 * MIB - B_LEN )) $(( 16 * MIB - B_LEN )) "${B_LEN}"
+expect_refused r-under "$(small_card "${IMAGE}" r-under)" "${WORK}/r-under.ref" "image_bytes understated to the first partition" reference-mismatch
+
+hand_ref "${WORK}/r-over.ref" "${IMAGE}" $(( IMAGE_BYTES + MIB )) $(( 16 * MIB )) "${B_ENT}" "${B_LEN}"
+expect_refused r-over "$(small_card "${IMAGE}" r-over)" "${WORK}/r-over.ref" "image_bytes larger than the GPT says"
+
+hand_ref "${WORK}/r-noback.ref" "${IMAGE}" "${IMAGE_BYTES}" $(( 16 * MIB )) 0 0
+expect_refused r-noback "$(small_card "${IMAGE}" r-noback)" "${WORK}/r-noback.ref" "a reference without the backup-gpt region"
+
+hand_ref "${WORK}/r-shortloader.ref" "${IMAGE}" "${IMAGE_BYTES}" $(( 34 * 512 )) "${B_ENT}" "${B_LEN}"
+expect_refused r-shortloader "$(small_card "${IMAGE}" r-shortloader)" "${WORK}/r-shortloader.ref" "a loader region shorter than [0, first partition)" reference-mismatch
+
+# Shape and hashes both fine, only the GPT disagrees: an image end 1 MiB past
+# the backup header (hashes from the card, which holds zeros there), and a
+# backup region that starts one sector early.
+OVCARD=$(small_card "${IMAGE}" r-overconsistent)
+hand_ref "${WORK}/r-overconsistent.ref" "${OVCARD}" $(( IMAGE_BYTES + MIB )) $(( 16 * MIB )) $(( IMAGE_BYTES + MIB - B_LEN )) "${B_LEN}"
+expect_refused r-overconsistent "${OVCARD}" "${WORK}/r-overconsistent.ref" "image_bytes past the backup GPT with matching hashes" reference-mismatch
+hand_ref "${WORK}/r-widebackup.ref" "${IMAGE}" "${IMAGE_BYTES}" $(( 16 * MIB )) $(( B_ENT - 512 )) $(( B_LEN + 512 ))
+expect_refused r-widebackup "$(small_card "${IMAGE}" r-widebackup)" "${WORK}/r-widebackup.ref" "a backup-gpt region one sector wider than the GPT's" reference-mismatch
+
+hand_ref "${WORK}/r-shortbackup.ref" "${IMAGE}" "${IMAGE_BYTES}" $(( 16 * MIB )) "${B_ENT}" $(( B_LEN - 512 ))
+expect_refused r-shortbackup "$(small_card "${IMAGE}" r-shortbackup)" "${WORK}/r-shortbackup.ref" "a backup-gpt region that leaves out the header"
+
+# shellcheck disable=SC2086
+hand_ref "${WORK}/r-dup.ref" "${IMAGE}" ${STD} "region=loader 0 $(( 16 * MIB )) $(sum_range "${IMAGE}" 0 $(( 16 * MIB )))"
+expect_refused r-dup "$(small_card "${IMAGE}" r-dup)" "${WORK}/r-dup.ref" "a duplicated loader region"
+
+# shellcheck disable=SC2086
+hand_ref "${WORK}/r-extra.ref" "${IMAGE}" ${STD} "region=rootfs $(( 24 * MIB )) ${MIB} $(sum_range "${IMAGE}" $(( 24 * MIB )) "${MIB}")"
+expect_refused r-extra "$(small_card "${IMAGE}" r-extra)" "${WORK}/r-extra.ref" "an extra region beyond loader and backup-gpt"
+
+echo "== hostile GPTs with valid CRCs are refused"
+
+# hostile_gpt NAME DESCRIPTION: mut_NAME edits a copy of the image. Checks that
+# the build side refuses it and that a probe given a matching hand reference
+# refuses before writing.
+mut_overbackup()  { set_entry "$1" 1 40 65534; fix_gpt "$1"; }           # p2 ends inside the backup GPT
+mut_overlap()     { set_entry "$1" 1 32 40000; fix_gpt "$1"; }           # p2 starts inside p1
+mut_belowusable() { set_entry "$1" 0 32 20; fix_gpt "$1"; }              # p1 starts in the primary entries
+mut_inverted()    { set_entry "$1" 1 32 60000; set_entry "$1" 1 40 50000; fix_gpt "$1"; }
+mut_lastusable()  { put_le "$1" $(( 512 + 48 )) 8 65534; put_le "$1" $(( 65535 * 512 + 48 )) 8 65534; fix_gpt "$1"; }
+mut_althuge()     { put_le "$1" $(( 512 + 32 )) 8 4611686018427387904; fix_gpt "$1" primary; }
+# The two CRC cases change both copies, so the copies still mirror each other
+# and only the CRC check can catch them.
+mut_hdrcrc()      { local o; for o in $(( 512 + 60 )) $(( 65535 * 512 + 60 )); do printf 'X' | dd of="$1" bs=1 seek="${o}" conv=notrunc status=none; done; fix_gpt "$1" backup; }
+mut_entcrc()      { local o; for o in $(( P_ENT + 60 )) $(( B_ENT + 60 )); do printf 'X' | dd of="$1" bs=1 seek="${o}" conv=notrunc status=none; done; }
+mut_mirror()      { printf 'X' | dd of="$1" bs=1 seek=$(( B_ENT + 60 )) conv=notrunc status=none; fix_gpt "$1" backup; }
+# Keep the mirrored entry-CRC fields unchanged. Recomputing the backup entry
+# CRC would let the header-mirror check catch this and leave byte comparison untested.
+mut_bkarrayonly() {
+  local h=$(( 65535 * 512 ))
+  printf 'X' | dd of="$1" bs=1 seek=$(( B_ENT + 60 )) conv=notrunc status=none
+  put_le "$1" $(( h + 16 )) 4 0
+  put_le "$1" $(( h + 16 )) 4 "$(crc32 "$1" "${h}" "$(le "$1" $(( h + 12 )) 4)")"
+}
+mut_bkself()      { put_le "$1" $(( 65535 * 512 + 24 )) 8 7; fix_gpt "$1" backup; }  # backup header names another LBA as its own
+mut_bksize()      { put_le "$1" $(( 512 + 80 )) 4 64; put_le "$1" $(( 65535 * 512 + 80 )) 4 64; fix_gpt "$1"; } # 64 entries: array no longer ends at the backup header
+hostile_gpt() {
+  local name=$1 what=$2 img="${WORK}/g-$1.raw" card
+  cp --sparse=always "${IMAGE}" "${img}"
+  "mut_${name}" "${img}"
+  cmp -s "${IMAGE}" "${img}" && { bad "${what}: mutation changed nothing"; return; }
+  bash "${PROBE}" reference "${img}" >"${WORK}/g-${name}.ref.out" 2>&1; rc=$?
+  [[ ${rc} -eq 2 ]] && ok "${what}: the build side refuses the image (2)" || bad "${what}: reference rc=${rc}: $(cat "${WORK}/g-${name}.ref.out")"
+  # shellcheck disable=SC2086
+  hand_ref "${WORK}/g-${name}.ref" "${img}" ${STD}
+  card=$(small_card "${img}" "g-${name}")
+  expect_refused "g-${name}" "${card}" "${WORK}/g-${name}.ref" "${what} (probe)" invalid-gpt
+}
+hostile_gpt overbackup  "a partition that ends inside the backup GPT"
+hostile_gpt overlap     "overlapping partitions"
+hostile_gpt belowusable "a partition below the first usable LBA"
+hostile_gpt inverted    "a partition whose end is before its start"
+hostile_gpt lastusable  "a last usable LBA inside the backup entry array"
+hostile_gpt althuge     "an alternate LBA of 2^62 (offset overflow)"
+hostile_gpt hdrcrc      "a primary header with a bad CRC"
+hostile_gpt entcrc      "a primary entry array with a bad CRC"
+hostile_gpt mirror      "a backup entry array that differs from the primary"
+hostile_gpt bkarrayonly "backup-only corruption with matching stored entry CRCs"
+hostile_gpt bkself      "a backup header that does not name its own LBA"
+hostile_gpt bksize      "an entry array that does not end at the backup header"
+
+echo "== one validated descriptor for all target I/O"
+
+# wrap_fn NAME: keep the current definition as orig_NAME.
+wrap_fn() { eval "orig_$(declare -f "$1")"; }
+
+# Path swapped to a symlink after the first mark write: later writes must still
+# go to the validated file, never to what the path now names.
+SW="${WORK}/swap"; mkdir -p "${SW}"
+SWCARD=$(small_card "${IMAGE}" swap-run); mv "${SWCARD}" "${SW}/card"
+truncate -s $(( 96 * MIB )) "${SW}/victim"; victim_before=$(sha256sum <"${SW}/victim")
+(
+  # shellcheck source=mkosi/runtime/ceralive-card-probe.sh
+  source "${PROBE}"
+  wrap_fn card_io_write
+  card_io_write() {
+    orig_card_io_write "$@"; local rc=$?
+    if [[ ! -e "${SW}/swapped" ]]; then
+      : >"${SW}/swapped"; mv "${SW}/card" "${SW}/card.orig"; ln -s "${SW}/victim" "${SW}/card"
+    fi
+    return "${rc}"
+  }
+  card_probe_main probe "${SW}/card" "${WORK}/hand-ok.ref"
+) >"${WORK}/swap.out" 2>"${WORK}/swap.err"; rc=$?
+[[ -e "${SW}/swapped" ]] && ok "non-vacuous: the path was swapped during the run" || bad "the swap hook never ran: $(cat "${WORK}/swap.out" "${WORK}/swap.err")"
+[[ "$(sha256sum <"${SW}/victim")" == "${victim_before}" ]] \
+  && ok "a path swapped to a symlink mid-run receives no write" || bad "writes were redirected to the swapped-in file"
+[[ ${rc} -eq 2 && "$(field reason "${WORK}/swap.out")" == target-changed ]] \
+  && ok "the run still reports the swap as refused target-changed (2)" || bad "swap rc=${rc}: $(cat "${WORK}/swap.out")"
+marks_in_orig=$(grep -ac 'CERALIVE-CARD-PROBE v1 run=' "${SW}/card.orig" 2>/dev/null)
+[[ "${marks_in_orig}" -gt 0 ]] && ok "every mark went to the file that was validated" || bad "no marks in the validated file"
+
+# Path swapped between validation and open: nothing may be opened for writing
+# through the new path.
+SV="${WORK}/swapval"; mkdir -p "${SV}"
+SVCARD=$(small_card "${IMAGE}" swap-val); mv "${SVCARD}" "${SV}/card"; card_before=$(sha256sum <"${SV}/card")
+truncate -s $(( 96 * MIB )) "${SV}/victim"; victim_before=$(sha256sum <"${SV}/victim")
+(
+  # shellcheck source=mkosi/runtime/ceralive-card-probe.sh
+  source "${PROBE}"
+  wrap_fn card_probe_validate_target
+  card_probe_validate_target() {
+    orig_card_probe_validate_target "$@" || return
+    mv "${SV}/card" "${SV}/card.orig"; ln -s "${SV}/victim" "${SV}/card"
+  }
+  card_probe_main probe "${SV}/card" "${WORK}/hand-ok.ref"
+) >"${WORK}/swapval.out" 2>"${WORK}/swapval.err"; rc=$?
+[[ ${rc} -eq 2 && "$(field result "${WORK}/swapval.out")" == refused ]] \
+  && ok "a swap between validation and open is refused (2)" || bad "swapval rc=${rc}: $(cat "${WORK}/swapval.out")"
+[[ "$(sha256sum <"${SV}/victim")" == "${victim_before}" && "$(sha256sum <"${SV}/card.orig")" == "${card_before}" ]] \
+  && ok "neither the swapped-in nor the original file was written" || bad "a file was written after a swap before open"
+
+# Symlinked directories and directories others may change are refused.
+mkdir -p "${WORK}/real-dir"; LCARD=$(small_card "${IMAGE}" linkdir); mv "${LCARD}" "${WORK}/real-dir/card"
+ln -s "${WORK}/real-dir" "${WORK}/link-dir"
+run_probe "${WORK}/linkdir" "${WORK}/link-dir/card" "${WORK}/hand-ok.ref"; rc=$?
+[[ ${rc} -eq 2 && "$(field reason "${WORK}/linkdir.out")" == unsupported-target ]] \
+  && ok "a target reached through a symlinked directory is refused (2)" || bad "linkdir rc=${rc}: $(cat "${WORK}/linkdir.out")"
+mkdir -p "${WORK}/open-dir"; chmod 0777 "${WORK}/open-dir"
+OCARD=$(small_card "${IMAGE}" opendir); mv "${OCARD}" "${WORK}/open-dir/card"
+run_probe "${WORK}/opendir" "${WORK}/open-dir/card" "${WORK}/hand-ok.ref"; rc=$?
+[[ ${rc} -eq 2 && "$(field reason "${WORK}/opendir.out")" == unsupported-target ]] \
+  && ok "a target in a directory others can write (no sticky bit) is refused (2)" || bad "opendir rc=${rc}: $(cat "${WORK}/opendir.out")"
+chmod 1777 "${WORK}/open-dir"
+run_probe "${WORK}/stickydir" "${WORK}/open-dir/card" "${WORK}/hand-ok.ref"; rc=$?
+[[ ${rc} -eq 0 ]] && ok "the same target in a sticky shared directory is accepted (0)" || bad "stickydir rc=${rc}: $(cat "${WORK}/stickydir.out" "${WORK}/stickydir.err")"
+chmod 0700 "${WORK}/open-dir"
+
+# Static: the storage functions never name the target path.
+(
+  # shellcheck source=mkosi/runtime/ceralive-card-probe.sh
+  source "${PROBE}"
+  for f in card_io_size card_io_read card_io_write card_io_flush; do
+    declare -f "${f}" | grep -q 'card_probe_fd_path' && printf '%s uses-fd\n' "${f}"
+    declare -f "${f}" | grep -q 'CARD_PROBE_TARGET' && printf '%s uses-path\n' "${f}"
+  done
+  declare -f card_probe_fd_path 2>/dev/null | grep -q '/proc/self/fd/%s.*CARD_PROBE_FD' && echo accessor-fd
+) >"${WORK}/io-fns"
+[[ $(grep -c ' uses-fd$' "${WORK}/io-fns") -eq 4 ]] && ! grep -q ' uses-path$' "${WORK}/io-fns" && grep -qx accessor-fd "${WORK}/io-fns" \
+  && ok "card_io_* use only the open descriptor (/proc/self/fd), never the target path" || bad "card_io_* descriptor use: $(tr '\n' ' ' <"${WORK}/io-fns")"
+
+echo "== full-block reads and writes"
+
+# A target that shrinks after the marks are written: the last mark reads short.
+# That is an I/O error, never a fake-card verdict.
+SHCARD=$(small_card "${IMAGE}" shrink)
+(
+  # shellcheck source=mkosi/runtime/ceralive-card-probe.sh
+  source "${PROBE}"
+  wrap_fn card_io_flush
+  card_io_flush() { orig_card_io_flush || return; truncate -s $(( 96 * MIB - MIB / 2 )) "${SHCARD}"; }
+  card_probe_main probe "${SHCARD}" "${WORK}/hand-ok.ref"
+) >"${WORK}/shrink.out" 2>"${WORK}/shrink.err"; rc=$?
+[[ ${rc} -eq 3 && "$(field reason "${WORK}/shrink.out")" == mark-read \
+   && "$(field io_error_offset "${WORK}/shrink.out")" == $(( 95 * MIB )) ]] \
+  && ok "a short read at the end of a shrunken target is io-error (3) at that offset" || bad "shrink rc=${rc}: $(cat "${WORK}/shrink.out")"
+
+# Reads from a source that delivers less than a block per read() still return
+# the whole length (pipes stand in for a device returning short reads).
+(
+  # shellcheck source=mkosi/runtime/ceralive-card-probe.sh
+  source "${PROBE}"
+  exec {p}< <(for _ in $(seq 64); do head -c 16384 /dev/zero; sleep 0.002; done)
+  CARD_PROBE_FD=${p}
+  card_io_read 0 "${MIB}" | wc -c
+) >"${WORK}/slow.out" 2>"${WORK}/slow.err"
+[[ "$(tr -d ' \n' <"${WORK}/slow.out")" == "${MIB}" ]] \
+  && ok "card_io_read assembles full blocks from short reads" || bad "slow source read $(cat "${WORK}/slow.out") bytes"
+(
+  # shellcheck source=mkosi/runtime/ceralive-card-probe.sh
+  source "${PROBE}"
+  truncate -s $(( 2 * MIB + 4096 )) "${WORK}/eof.bin"
+  exec {CARD_PROBE_FD}<>"${WORK}/eof.bin"
+  card_io_read "${MIB}" $(( 2 * MIB )) >/dev/null && echo read-ok || echo read-failed
+  head -c 4096 /dev/zero | card_io_write 0 "${MIB}" && echo write-ok || echo write-failed
+) >"${WORK}/eof.out" 2>/dev/null
+grep -qx read-failed "${WORK}/eof.out" && ok "a read that reaches end of file early fails" || bad "short read at EOF: $(cat "${WORK}/eof.out")"
+grep -qx write-failed "${WORK}/eof.out" && ok "a write with a short mark fails" || bad "short write: $(cat "${WORK}/eof.out")"
 
 echo "== pattern"
 
