@@ -11,8 +11,9 @@
 #     before booti, nothing sets the line again, and the kernel learns the outcome;
 #   * a failing gpio command still boots, reporting `failed`;
 #   * any other board (or no board file) never touches a GPIO;
-#   * the compiled boot.scr that ceralive-boot-script-sync ships to the field, and
-#     the boot partition's copy, both carry the hold.
+#   * the boot partition of a freshly flashed card carries the hold, and the compiled
+#     boot.scr that ceralive-boot-script-sync ships to the field does NOT (nothing boots
+#     boot.scr.prev if a replaced selector fails), yet still boots the board.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,17 +81,24 @@ for board in orange-pi-5-plus __none__; do
     || bad "${board}: $(tr '\n' ';' <<<"${trace}")"
 done
 
-echo "== compiled boot.scr (field sync payload and boot partition)"
+echo "== compiled boot.scr: flashed cards get the hold, the field-sync payload does not"
 if command -v mkimage >/dev/null 2>&1; then
   BOARD_ENV=(SERIAL_CONSOLE=ttyS2:1500000 DTB_NAME=rk3588-rock-5b-plus.dtb
     BOARD_ID=rock-5b-plus COMPATIBLE_STRING=ceralive-rock-5b-plus SINGLE_SLOT_FALLBACK=false)
   env "${BOARD_ENV[@]}" bash "${INSTALL_BOOT}" boot-payload "${WORK}/payload" >/dev/null 2>&1
   env "${BOARD_ENV[@]}" bash "${INSTALL_BOOT}" boot-partition "${WORK}/partition" >/dev/null 2>&1
-  for scr in "${WORK}/payload/boot.scr" "${WORK}/partition/boot.scr"; do
-    grep -aq 'if gpio clear B26; then setenv cera_slot_power "held"; fi' "${scr}" 2>/dev/null \
-      && ok "${scr#"${WORK}/"} carries the slot power hold" \
-      || bad "${scr#"${WORK}/"} lacks the slot power hold"
-  done
+  grep -aq 'if gpio clear B26; then setenv cera_slot_power "held"; fi' "${WORK}/partition/boot.scr" 2>/dev/null \
+    && ok "the boot partition's boot.scr carries the slot power hold" \
+    || bad "the boot partition's boot.scr lacks the slot power hold"
+  { [[ -s "${WORK}/payload/boot.scr" ]] && ! grep -aq 'gpio\|cera_slot_power' "${WORK}/payload/boot.scr"; } \
+    && ok "the payload for ceralive-boot-script-sync has no gpio command (no field delivery of the hold)" \
+    || bad "the field-sync payload carries the slot power hold"
+  # The field selector must still be a working selector on the ROCK 5B+.
+  tail -c +73 "${WORK}/payload/boot.scr" >"${WORK}/field.cmd"
+  trace="$(BOOT_SCRIPT="${WORK}/field.cmd"; run_case field rock-5b-plus 0)"
+  { grep -q '^booti root=PARTLABEL=rootfs_a ' <<<"${trace}" && ! grep -q '^gpio ' <<<"${trace}"; } \
+    && ok "the field selector boots slot A on the ROCK 5B+ without touching a GPIO" \
+    || bad "field selector trace: $(tr '\n' ';' <<<"${trace}")"
 else
   ok "mkimage not installed: compiled-script check skipped (CI installs it)"
 fi

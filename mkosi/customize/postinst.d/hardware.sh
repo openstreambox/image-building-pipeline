@@ -509,8 +509,8 @@ EOF
 # bootloader's fastboot mode (413c:81d6) at the verified B-key position, send it one
 # fastboot `continue` (mkosi/runtime/ceralive-slot-dell-fastboot-release.py). The
 # boot script's slot power hold should make this unnecessary; it logs when it fires.
-# Matched by ID_PATH (the bus number is not fixed), on add only, and never preceded by
-# a port de-authorization or reset. Fail-closed: other boards, or no verified
+# Matched by ID_PATH (the bus number is not fixed), on the add event of the card's
+# fastboot interface only, and never preceded by a port de-authorization or reset. Fail-closed: other boards, or no verified
 # internal_4g position, get no rule and no environment file.
 setup_internal_modem_fastboot_release() {
   local root="${CERALIVE_INSTALL_ROOT:-}"
@@ -545,9 +545,11 @@ setup_internal_modem_fastboot_release() {
   printf 'CERALIVE_SLOT_ID_PATH=%s\n' "${id_path}" >"${config}"
   cat >"${rule}" <<RULE
 # CeraLive generated: release the B-key slot Dell from fastboot, once per boot — DO NOT EDIT.
-# USB-device add events do not necessarily carry ID_PATH yet; the bus number is not fixed.
-ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="413c", ATTR{idProduct}=="81d6", IMPORT{builtin}="path_id"
-ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="413c", ATTR{idProduct}=="81d6", ENV{ID_PATH}=="${id_path}", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ceralive-slot-dell-fastboot-release@%k.service"
+# Matches the card's fastboot INTERFACE, not the USB device: the kernel announces the
+# device before it is configured, when it has no interface yet. The bus number is not
+# fixed, so the position is the interface's ID_PATH (the slot's ID_PATH plus :1.0).
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTRS{idVendor}=="413c", ATTRS{idProduct}=="81d6", IMPORT{builtin}="path_id"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTRS{idVendor}=="413c", ATTRS{idProduct}=="81d6", ATTR{bInterfaceClass}=="ff", ATTR{bInterfaceSubClass}=="42", ATTR{bInterfaceProtocol}=="03", ENV{ID_PATH}=="${id_path}:1.0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ceralive-slot-dell-fastboot-release@%k.service"
 RULE
   log "slot Dell fastboot release: rule for 413c:81d6 at ${id_path}"
 }

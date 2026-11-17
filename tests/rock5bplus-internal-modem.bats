@@ -157,12 +157,15 @@ install_release() {
     bash -c 'source "$1/mkosi/customize/postinst-lib.sh"; setup_internal_modem_fastboot_release' _ "$PIPELINE_DIR"
 }
 
-@test "fastboot release: rule matches 81d6 by ID_PATH on add only and starts the one-shot unit" {
+@test "fastboot release: rule matches the fastboot interface by ID_PATH on add only and starts the one-shot unit" {
   run install_release BOARD_ID=rock-5b-plus CERALIVE_MODEM_PORTS_STATUS=verified CERALIVE_MODEM_PORTS_SLOTS='internal_4g=platform-fc800000.usb-usb-0:1.4'
   [ "$status" -eq 0 ]
   rule="$MODEM_SLOT_RULES_DIR/79-ceralive-slot-dell-fastboot-release.rules"
-  grep -Fxq 'ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="413c", ATTR{idProduct}=="81d6", IMPORT{builtin}="path_id"' "$rule"
-  grep -Fxq 'ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="413c", ATTR{idProduct}=="81d6", ENV{ID_PATH}=="platform-fc800000.usb-usb-0:1.4", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ceralive-slot-dell-fastboot-release@%k.service"' "$rule"
+  grep -Fxq 'ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTRS{idVendor}=="413c", ATTRS{idProduct}=="81d6", IMPORT{builtin}="path_id"' "$rule"
+  grep -Fxq 'ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTRS{idVendor}=="413c", ATTRS{idProduct}=="81d6", ATTR{bInterfaceClass}=="ff", ATTR{bInterfaceSubClass}=="42", ATTR{bInterfaceProtocol}=="03", ENV{ID_PATH}=="platform-fc800000.usb-usb-0:1.4:1.0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ceralive-slot-dell-fastboot-release@%k.service"' "$rule"
+  # The device itself is announced before it is configured: never trigger on it.
+  run grep -F 'usb_device' "$rule"
+  [ "$status" -eq 1 ]
   # The bus number is not fixed: no kernel-name, bus or devpath match; nothing but add.
   run bash -c "grep -Ev '^#' '$rule' | grep -E 'KERNEL|busnum|DEVPATH|ACTION==\"(change|bind|remove)'"
   [ "$status" -eq 1 ]
@@ -195,9 +198,12 @@ install_release() {
   done
 }
 
-@test "fastboot release: sends one continue per boot, only to the slot position, and logs it" {
-  run python3 "$PIPELINE_DIR/tests/slot-dell-fastboot-release.test.py"
+@test "fastboot release: one continue per boot after the interface exists, USB errors are failures" {
+  run install_release BOARD_ID=rock-5b-plus CERALIVE_MODEM_PORTS_STATUS=verified CERALIVE_MODEM_PORTS_SLOTS='internal_4g=platform-fc800000.usb-usb-0:1.4'
   [ "$status" -eq 0 ]
+  run python3 "$PIPELINE_DIR/tests/slot-dell-fastboot-release.test.py" "$MODEM_SLOT_RULES_DIR/79-ceralive-slot-dell-fastboot-release.rules"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"event order: device add before its interface exists"* ]]
   [[ "$output" == *"all cases pass"* ]]
 }
 

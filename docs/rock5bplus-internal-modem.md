@@ -42,11 +42,19 @@ released. The kernel command line gets `cera_slot_power=held`, or `failed` if th
 
 - The script line is the only reviewed GPIO command in the image;
   `ci/check-internal-modem-power.py` rejects any other.
-- Boards in the field get it through `ceralive-boot-script-sync`, which replaces
-  `/boot/boot.scr` with the shipped copy after a health-confirmed boot. That is
-  why the check keys on `board_id` in the script and not on a new
-  `cera_board.env` value: that file is written only when a card is flashed. The
-  first boot after a RAUC update still runs the previous boot.scr; fix 2 covers it.
+- **Freshly flashed cards only.** The hold sits in `flashed-images-only` regions of
+  the selector. `install-boot.sh boot-payload` strips those regions from the copy
+  shipped in the rootfs for `ceralive-boot-script-sync` (the *field selector*), so a
+  board updated over RAUC keeps a selector without the hold and relies on fix 2 on
+  every boot. Reason: the sync keeps `boot.scr.prev`, but nothing boots it when a
+  replaced selector fails, so a change in boot behaviour does not go to the field
+  until a tested fallback exists. The payload also carries `boot.scr.keep`, the body
+  hash of the flashed selector; the sync leaves a `boot.scr` with that body in place,
+  so it never downgrades a flashed card. Limit: after a later image changes the
+  selector again, an updated flashed card gets that image's field selector and falls
+  back to fix 2.
+- The check keys on `board_id` in the script, the one board specific it reads from
+  `cera_board.env`.
 - The onboard Wi-Fi shares EKEY_EN and is unpowered for the same few seconds before
   Linux. It came up normally on every measured boot.
 - RESET# sits at 1.8 V on an unpowered card for about 0.23 s; the vendor kernel's
@@ -60,19 +68,26 @@ power the slot at all and the script line could go.
 
 ## Fix 2: the boot-time fastboot release (safety net)
 
-If the card appears as `81d6` at the B-key position anyway, the image sends it one
-fastboot `continue`. It should never run; when it does, it logs at warning level.
+If the card appears as `81d6` at the B-key position, the image sends it one fastboot
+`continue`. On a freshly flashed card it should never run and logs a warning if it
+does. On a board updated over RAUC (no hold in its boot script) it runs on every boot
+and logs a notice.
 
-- `79-ceralive-slot-dell-fastboot-release.rules` matches the **add** event of
-  `413c:81d6` by `ID_PATH` (`platform-fc800000.usb-usb-0:1.4`, from the board's
-  verified `modem_ports.slots.internal_4g`). The USB bus number is not fixed
-  (`3-1.4` on most boots, another number on one), so there is no kernel-name match.
-  It starts `ceralive-slot-dell-fastboot-release@<kernel name>.service`.
-- `/usr/libexec/ceralive/ceralive-slot-dell-fastboot-release` re-checks the device
-  (`413c:81d6`, the expected `ID_PATH`, exactly one unbound `ff/42/03` interface),
-  creates `/run/ceralive/slot-dell-fastboot-release` and only then sends `continue`
-  over usbfs. At most one command per boot; never `reboot`; never a de-authorize,
-  unbind or reset; no flash, erase or download command exists in it.
+- `79-ceralive-slot-dell-fastboot-release.rules` matches the **add** event of the
+  card's fastboot **interface** (`ff/42/03` of `413c:81d6`) by `ID_PATH`
+  (`platform-fc800000.usb-usb-0:1.4:1.0`, from the board's verified
+  `modem_ports.slots.internal_4g`). Not the USB device's event: the kernel announces
+  the device before it configures it, when it has no interface yet. The USB bus number
+  is not fixed (`3-1.4` on most boots, `2-1.4` on one), so there is no kernel-name
+  match. It starts `ceralive-slot-dell-fastboot-release@<interface name>.service`.
+- `/usr/libexec/ceralive/ceralive-slot-dell-fastboot-release` re-checks the parent
+  device (`413c:81d6`, the expected `ID_PATH`, exactly one unbound `ff/42/03`
+  interface), creates `/run/ceralive/slot-dell-fastboot-release` and only then sends
+  `continue` over usbfs. At most one command per boot; never `reboot`; never a
+  de-authorize, unbind or reset; no flash, erase or download command exists in it.
+- Success is an `OKAY` reply or a confirmed disconnect (`ENODEV`). A timeout, stall
+  or other USB error is logged as an error, written to the marker, and fails the unit;
+  it is not retried in that boot.
 - To keep the card in fastboot for a deliberate firmware update, create
   `/etc/ceralive/keep-slot-dell-fastboot`.
 - Other boards, or a board without a verified `internal_4g` position, get no rule
@@ -143,15 +158,17 @@ that needs separate owner approval; no command for it is sent by this image.
 
 ## Checks
 
-Host: `tests/boot-script-slot-power.test.sh` (the selector's order, both compiled
-copies) and `tests/rock5bplus-internal-modem.bats` (kernel pin, rfkill, position
+Host: `tests/boot-script-slot-power.test.sh` (the selector's order; hold in the boot
+partition's copy, none in the field copy), `tests/boot-script-sync.test.sh` (field
+selector, `boot.scr.keep`) and `tests/rock5bplus-internal-modem.bats` (kernel pin, rfkill, position
 rules, the release rule/unit and `tests/slot-dell-fastboot-release.test.py`, the
 power guard; set `CERALIVE_WWAN_DTB` to check a built DTB).
 
-Hardware, per image: five cold boots, at least ten seconds unpowered each: all
-`81d7`, `cera_slot_power=held`, the release unit silent, one ModemManager object
-with Device `internal 4G`, SIM read and registered. Also one boot that runs the
-previous boot.scr (the first boot after a RAUC update from an image without the
-hold): the release unit fires once, logs it, and the card registers.
+Hardware, per image, on a freshly flashed card: five cold boots, at least ten seconds
+unpowered each: all `81d7`, `cera_slot_power=held`, the release unit silent, the sync
+logging that it kept the flashed selector, one ModemManager object with Device
+`internal 4G`, SIM read and registered. And on a card updated over RAUC from an image
+without the hold: the boot script stays as it was, the release unit fires once per
+boot, logs it, and the card registers.
 
 English and Spanish (es-419) external user guidance is a release follow-up.

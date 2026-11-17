@@ -72,8 +72,9 @@ device, so `ceralive-boot-state` writes it defensively:
 
 1. U-Boot runs `boot.scr` (compiled from `boot.scr.cmd`).
 2. It imports `cera_board.env` (console, fdtfile) and `boot_state.txt`.
-   On `board_id=rock-5b-plus` it then switches the M.2 B-key slot's 3.3 V off until
-   Linux restores it, so the slot's modem powers up with RESET# released
+   On `board_id=rock-5b-plus` a freshly flashed card's selector then switches the M.2
+   B-key slot's 3.3 V off until Linux restores it, so the slot's modem powers up with
+   RESET# released. The copy shipped for the field sync leaves this out
    ([internal modem guide](../../../docs/rock5bplus-internal-modem.md)).
 3. It rejects unreadable, unknown, duplicate, non-numeric, or out-of-budget state;
    only an accessible missing file receives factory-safe `A B` / `3,3` defaults.
@@ -154,7 +155,8 @@ the known-good path and the board boots `root=PARTLABEL=` directly.
 
 `boot.scr` lives on p1 and is written at disk assembly; a bundle contains only a rootfs
 image. So the build also ships the compiled script inside the rootfs
-(`install-boot.sh boot-payload <dir>` → `/usr/lib/ceralive/boot/boot.scr` + `.sha256`,
+(`install-boot.sh boot-payload <dir>` → `/usr/lib/ceralive/boot/boot.scr` + `.sha256` +
+`.keep`; this is the field selector, without the `flashed-images-only` regions,
 injected into every slot image and the bundle by `lib/disk/slot-image.sh`). After a
 health-confirmed boot, `ceralive-boot-script-sync.service` replaces `/boot/boot.scr` when
 its body (everything after the 64-byte uImage header, which carries a build time) differs

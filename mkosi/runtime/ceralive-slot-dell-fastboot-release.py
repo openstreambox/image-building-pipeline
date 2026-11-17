@@ -4,21 +4,26 @@
 WHY: a DW5821e that gets slot power while its RESET# is still low starts in its
 bootloader's fastboot mode (USB 413c:81d6, one ff/42/03 interface) and stays there:
 no modem, no ModemManager object. The boot script holds the slot unpowered until
-Linux has released RESET#, so this should never run. If a boot path skips that hold,
-or the hold ever stops working, this sends the waiting bootloader one fastboot
+Linux has released RESET#, so on a freshly flashed card this should never run. If a boot path skips that hold,
+or the hold ever stops working, or the card's boot script has no hold (a board updated
+in the field keeps its old boot script), this sends the waiting bootloader one fastboot
 `continue`, after which the card starts its modem firmware (413c:81d7, about 9 s).
 Measured on a ROCK 5B+: 7 of 7 `continue` runs (1 manual, 1 warm, 5 cold) gave one
 clean ModemManager object each; the one `reboot` run left two objects, so this never
 falls back to `reboot`.
 
-TRIGGER: a udev rule on the add event of 413c:81d6 at the board's verified B-key
-position (matched by ID_PATH, because the USB bus number is not fixed) starts
-ceralive-slot-dell-fastboot-release@<kernel name>.service, which runs this with that
-kernel name.
+TRIGGER: a udev rule on the add event of the card's fastboot INTERFACE (ff/42/03 of
+413c:81d6) at the board's verified B-key position (matched by ID_PATH, because the USB
+bus number is not fixed) starts ceralive-slot-dell-fastboot-release@<interface kernel
+name>.service, which runs this with that name (3-1.4:1.0). The interface, not the USB
+device: the kernel announces the device before it has configured it, when it has no
+interfaces yet. This checks the parent device (3-1.4) again itself.
 
 RULES:
   * at most ONE fastboot command per boot (a marker under /run, created before the
     command is sent, so a crash mid-send also counts);
+  * success is only an OKAY reply or a confirmed disconnect (ENODEV: the bootloader left
+    the bus). A timeout, stall or other USB error is a failure, recorded in the marker;
   * it re-checks the device first: 413c:81d6, the expected ID_PATH, and exactly one
     unbound ff/42/03 interface; anything else is left alone;
   * it never de-authorizes, unbinds or resets the port: after the host de-configured
@@ -26,7 +31,8 @@ RULES:
   * the inhibit file /etc/ceralive/keep-slot-dell-fastboot leaves the card in
     fastboot (for a deliberate firmware update);
   * no flash, erase or download command exists in this file.
-Every run logs what it saw and did; the firing itself logs at warning level.
+Every run logs what it saw and did. The firing logs at warning level when the boot
+script reported the hold (it should not have been needed), at notice level otherwise.
 
 Test seams (production uses every default):
   CERALIVE_SLOT_DELL_SYSFS     USB device directory (default /sys/bus/usb/devices)
@@ -40,6 +46,7 @@ Test seams (production uses every default):
 """
 
 import ctypes
+import errno
 import fcntl
 import os
 import re
@@ -77,6 +84,10 @@ def log(level, message):
     print(f'<{level}>{TAG}: uptime {uptime} s: {message}', flush=True)
 
 
+def describe(error):
+    return f'{errno.errorcode.get(error.errno, error.errno)} ({error.strerror})'
+
+
 class UsbFs:
     """One claimed interface on a usbfs node; bulk transfers only."""
 
@@ -98,12 +109,14 @@ class UsbFs:
         try:
             self.bulk(EP_OUT, text, 1000)
         except OSError as error:
-            return f'WRITEFAIL {error.strerror}'
+            return f'WRITEFAIL {describe(error)}'
         for _ in range(8):
             try:
                 reply = self.bulk(EP_IN, b'\0' * 64, 2000)
-            except OSError:
-                return 'GONE'  # the bootloader left USB to start the firmware
+            except OSError as error:
+                if error.errno == errno.ENODEV:
+                    return 'GONE'  # confirmed disconnect: the bootloader left USB
+                return f'READFAIL {describe(error)}'  # timeout, stall, I/O error: unknown outcome
             if reply.startswith(b'INFO'):
                 continue
             return reply.decode('ascii', errors='replace') or 'EMPTY'
@@ -133,14 +146,15 @@ def id_path(sysdev):
 
 def slot_power_report():
     match = re.search(r'(?:^|\s)cera_slot_power=(\S+)', read(env('CERALIVE_SLOT_DELL_CMDLINE', '/proc/cmdline')))
-    return match.group(1) if match else 'not reported by the boot script'
+    return match.group(1) if match else None
 
 
 def main(argv, transport=UsbFs):
-    if len(argv) != 2 or not re.fullmatch(r'\d+-[\d.]+', argv[1]):
-        log(3, f'usage: {TAG} <usb kernel name>, got {argv[1:]!r}')
+    match = re.fullmatch(r'(\d+-[\d.]+)(:\d+\.\d+)?', argv[1]) if len(argv) == 2 else None
+    if not match:
+        log(3, f'usage: {TAG} <usb interface or device kernel name>, got {argv[1:]!r}')
         return 2
-    name = argv[1]
+    name = match.group(1)  # the parent USB device of the triggering interface
     expected = os.environ.get('CERALIVE_SLOT_ID_PATH', '')
     if not expected:
         log(6, 'no verified B-key slot ID_PATH configured: nothing to do')
@@ -155,7 +169,9 @@ def main(argv, transport=UsbFs):
         return 0
     interfaces = sorted(entry for entry in os.listdir(sysdev) if entry.startswith(f'{name}:'))
     if len(interfaces) != 1:
-        log(6, f'{name} has {len(interfaces)} interfaces, not the single fastboot one: not touching it')
+        # No marker is spent: with none yet, the interface's own add event runs this again.
+        log(4 if not interfaces else 6,
+            f'{name} has {len(interfaces)} interfaces, not the single fastboot one: not touching it')
         return 0
     interface = os.path.join(sysdev, interfaces[0])
     kind = tuple(read(f'{interface}/bInterface{field}') for field in ('Class', 'SubClass', 'Protocol'))
@@ -179,15 +195,22 @@ def main(argv, transport=UsbFs):
                f'its one fastboot command ({read(marker) or "result unknown"}): not retrying')
         return 0
 
-    log(4, f'FIRED: the B-key slot Dell {name} ({expected}) is waiting in its fastboot bootloader '
-           f'(413c:81d6). This should not happen; boot-time slot power hold: {power}. '
-           'Sending one fastboot "continue".')
+    if power is None:
+        # A board updated in the field keeps a boot script without the hold; this is its
+        # normal path on every boot, so it is a notice, not a warning.
+        log(5, f'FIRED: the B-key slot Dell {name} ({expected}) is waiting in its fastboot bootloader '
+               '(413c:81d6). Expected on this card: its boot script has no slot power hold. '
+               'Sending one fastboot "continue".')
+    else:
+        log(4, f'FIRED: the B-key slot Dell {name} ({expected}) is waiting in its fastboot bootloader '
+               f'(413c:81d6). This should not happen; boot-time slot power hold: {power}. '
+               'Sending one fastboot "continue".')
     try:
         device = transport(os.path.join(env('CERALIVE_SLOT_DELL_DEVROOT', '/dev/bus/usb'),
                                         '%03d' % int(read(f'{sysdev}/busnum') or 0),
                                         '%03d' % int(read(f'{sysdev}/devnum') or 0)))
     except OSError as error:
-        result = f'open/claim failed: {error.strerror or error}'
+        result = f'OPENFAIL {describe(error)}'
     else:
         try:
             result = device.command(COMMAND)
@@ -198,7 +221,8 @@ def main(argv, transport=UsbFs):
     if result.startswith(('OKAY', 'GONE')):
         log(5, f'fastboot continue -> {result[:24]}; the card now starts its modem firmware (413c:81d7 expected in about 9 s)')
         return 0
-    log(3, f'fastboot continue -> {result[:40]}; the card stays in fastboot until the next boot')
+    log(3, f'fastboot continue -> {result[:60]}; not confirmed, the card may still be in fastboot. '
+           'No retry this boot.')
     return 1
 
 

@@ -167,11 +167,13 @@ device(base, '3-1.4')
 rc, log = run(base, '3-1.4', expected='')
 check(rc == 0 and not opened, 'acted without a configured position')
 
-# 9. The boot script did not report the hold: the log says so.
+# 9. A boot script without the hold (a field-updated board): expected, a notice.
 base = case('no power report')
 device(base, '3-1.4')
 rc, log = run(base, '3-1.4', power='')
-check('not reported by the boot script' in log, 'missing power report not logged')
+check('<5>' in log and 'FIRED' in log and 'has no slot power hold' in log and '<4>' not in log,
+      'firing without a reported hold is not a plain notice')
+check(sent == [('/dev/bus/usb/003/002', b'continue')], f'commands {sent}')
 
 # 10. Static: the shipped command is continue only; no de-authorize, unbind or reset.
 source = SCRIPT.read_text()
@@ -179,6 +181,140 @@ check(release.COMMAND == b'continue', 'command is not continue')
 code = source.split('"""', 2)[2]  # skip the module docstring, which explains why not reboot
 for forbidden in ("b'reboot'", 'authorized', 'unbind', 'USBDEVFS_RESET', '0x5514', 'flash', 'erase'):
     check(forbidden not in code, f'release code mentions {forbidden}')
+
+# 11. Event order. The kernel announces the USB device before it configures it (no
+# interface yet), then the interface. Replay that through the GENERATED rule: the
+# device event must start nothing, the interface event must release the card once, and
+# later events must not send a second command.
+import re  # noqa: E402
+
+
+def wants(rules, event):
+    """Minimal udev matcher for the generated rule: == matches, ATTRS walks to the parent."""
+    units = []
+    env = dict(event['env'])
+    for line in rules.splitlines():
+        if not line or line.startswith('#'):
+            continue
+        fields = re.findall(r'([A-Z_]+(?:\{[^}]+\})?)(==|\+=|=)"([^"]*)"', line)
+        assert fields, line
+        matched = True
+        for key, op, value in fields:
+            if op != '==':
+                continue
+            if key == 'ACTION':
+                actual = event['action']
+            elif key == 'SUBSYSTEM':
+                actual = 'usb'
+            elif key.startswith('ENV{'):
+                actual = env.get(key[4:-1])
+            elif key.startswith('ATTR{'):
+                actual = event['attr'].get(key[5:-1])
+            elif key.startswith('ATTRS{'):
+                actual = event['attr'].get(key[6:-1], event['parent'].get(key[6:-1]))
+            else:
+                raise AssertionError(f'unsupported match key {key}')
+            matched = matched and actual is not None and re.fullmatch('|'.join(map(re.escape, value.split('|'))), actual)
+        if not matched:
+            continue
+        for key, op, value in fields:
+            if key == 'IMPORT{builtin}' and value == 'path_id':
+                env['ID_PATH'] = event['id_path']
+            elif key == 'ENV{SYSTEMD_WANTS}':
+                units.append(value.replace('%k', event['kernel']))
+    return units
+
+
+rule_file = sys.argv[1] if len(sys.argv) > 1 else None
+if rule_file:
+    rules = pathlib.Path(rule_file).read_text()
+    base = case('event order: device add before its interface exists')
+    sysdev = device(base, '3-1.4', interfaces=())
+    parent = {'idVendor': '413c', 'idProduct': '81d6'}
+    device_add = {'action': 'add', 'kernel': '3-1.4', 'env': {'DEVTYPE': 'usb_device'}, 'attr': parent, 'parent': {},
+                  'id_path': SLOT}
+    interface_add = {'action': 'add', 'kernel': '3-1.4:1.0', 'env': {'DEVTYPE': 'usb_interface'},
+                     'attr': {'bInterfaceClass': 'ff', 'bInterfaceSubClass': '42', 'bInterfaceProtocol': '03'},
+                     'parent': parent, 'id_path': SLOT + ':1.0'}
+    started = wants(rules, device_add)
+    check(started == [], f'the unconfigured device event started {started}')
+    # Even if something ran the helper now, it must not spend the per-boot marker.
+    rc, log = run(base, '3-1.4')
+    check(rc == 0 and not opened and not (base / 'run').exists(), 'helper spent the marker with zero interfaces')
+    # Configuration completes: the interface appears and is announced.
+    interface = sysdev / '3-1.4:1.0'
+    interface.mkdir()
+    for key, value in (('Class', 'ff'), ('SubClass', '42'), ('Protocol', '03')):
+        (interface / f'bInterface{key}').write_text(value + '\n')
+    started = wants(rules, interface_add)
+    check(started == ['ceralive-slot-dell-fastboot-release@3-1.4:1.0.service'], f'interface add started {started}')
+    for unit in started:
+        rc, log = run(base, unit.split('@', 1)[1].removesuffix('.service'))
+        check(rc == 0, f'exit {rc}')
+    check(sent == [('/dev/bus/usb/003/002', b'continue')], f'commands after the interface event: {sent}')
+    for later in (dict(interface_add, action='bind'), dict(device_add, action='bind'), dict(interface_add, action='change')):
+        check(wants(rules, later) == [], f'{later["action"]} of {later["kernel"]} starts the unit')
+    # The card re-appearing as 81d6 in the same boot: the unit may start, no second command.
+    for unit in wants(rules, interface_add):
+        run(base, unit.split('@', 1)[1].removesuffix('.service'))
+    check(len(sent) == 1, f'a second command was sent: {sent}')
+    # Same interface class elsewhere, or another interface of a Dell at the slot: no start.
+    check(wants(rules, dict(interface_add, id_path='platform-fc880000.usb-usb-0:1:1.0')) == [], 'external port matched')
+    check(wants(rules, dict(interface_add, attr={'bInterfaceClass': 'ff', 'bInterfaceSubClass': 'ff',
+                                                 'bInterfaceProtocol': 'ff'})) == [], 'non-fastboot interface matched')
+    check(wants(rules, dict(interface_add, parent={'idVendor': '413c', 'idProduct': '81d7'})) == [], '81d7 matched')
+else:
+    print('  (no generated rule file given: event-order case skipped)')
+
+# 12. The REAL UsbFs.command against injected bulk outcomes: only an OKAY reply or a
+# confirmed disconnect (ENODEV) is success; a timeout, stall or I/O error is a failure
+# that reaches the marker and the exit status, with no second command.
+import errno  # noqa: E402
+
+
+def real_usb(outcomes):
+    """The shipped UsbFs with only bulk() replaced; outcomes are bytes or errno values."""
+    calls = []
+
+    class Injected(release.UsbFs):
+        def __init__(self, node):  # no usbfs node on the test host
+            self.claimed = False
+            self.fd = os.open(os.devnull, os.O_RDONLY)
+
+        def bulk(self, endpoint, data, timeout_ms):
+            calls.append((endpoint, bytes(data) if endpoint == release.EP_OUT else None))
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, int):
+                raise OSError(outcome, os.strerror(outcome))
+            return outcome
+    return Injected, calls
+
+
+for title, outcomes, want_rc, want_text in (
+        ('OKAY reply', [b'continue', b'OKAY'], 0, 'OKAY'),
+        ('INFO then OKAY', [b'continue', b'INFOresuming', b'OKAY'], 0, 'OKAY'),
+        ('disconnect after the command', [b'continue', errno.ENODEV], 0, 'GONE'),
+        ('read timeout', [b'continue', errno.ETIMEDOUT], 1, 'READFAIL ETIMEDOUT'),
+        ('stall', [b'continue', errno.EPIPE], 1, 'READFAIL EPIPE'),
+        ('I/O error', [b'continue', errno.EIO], 1, 'READFAIL EIO'),
+        ('write timeout', [errno.ETIMEDOUT], 1, 'WRITEFAIL ETIMEDOUT'),
+        ('FAIL reply', [b'continue', b'FAILnope'], 1, 'FAILnope')):
+    base = case(f'real UsbFs: {title}')
+    device(base, '3-1.4')
+    transport, calls = real_usb(list(outcomes))
+    run(base, '3-1.4')  # prime the fixture environment (udevadm, cmdline) with the fake transport
+    marker = base / 'run/ceralive/slot-dell-fastboot-release'
+    marker.unlink()
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = release.main([str(SCRIPT), '3-1.4:1.0'], transport=transport)
+    text = out.getvalue()
+    check(rc == want_rc, f'{title}: exit {rc}, wanted {want_rc}')
+    check(want_text in marker.read_text(), f'{title}: marker says {marker.read_text()!r}')
+    check(('<3>' in text) == (want_rc != 0), f'{title}: error logging does not match the outcome')
+    check('starts its modem firmware' not in text or want_rc == 0, f'{title}: logged as a successful start')
+    check([c for c in calls if c[0] == release.EP_OUT] == [(release.EP_OUT, b'continue')],
+          f'{title}: commands written {calls}')
 
 if failures:
     sys.exit(f'{len(failures)} failure(s)')

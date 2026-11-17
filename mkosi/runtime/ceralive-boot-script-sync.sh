@@ -20,9 +20,16 @@
 # compiles of the same selector differ there. Sameness is judged on the bytes after
 # the header; a freshly flashed board therefore never rewrites its own boot.scr.
 #
+# FIELD SELECTOR: nothing boots boot.scr.prev when a replaced selector fails, so the
+# shipped copy is the FIELD selector: the build strips the selector's
+# `flashed-images-only` regions from it (install-boot.sh field_selector). A freshly
+# flashed card may carry the fuller flashed selector; its body hash is listed in
+# boot.scr.keep and such a boot.scr is left alone.
+#
 # Test seams (production uses every default):
 #   CERALIVE_BOOT_SCRIPT_SRC     shipped boot.scr (default /usr/lib/ceralive/boot/boot.scr)
 #   CERALIVE_BOOT_SCRIPT_SUMS    its checksum file (default <src>.sha256)
+#   CERALIVE_BOOT_SCRIPT_KEEP    body hashes of flashed selectors to leave in place (default <src>.keep)
 #   CERALIVE_BOOT_DIR            boot partition mount (default /boot)
 #   CERALIVE_ACTIVATION_ARMED    pending-activation marker
 #   CERALIVE_ACTIVATION_LOCK     the lock ceralive-rauc-activate holds while it arms
@@ -35,6 +42,7 @@ set -uo pipefail
 
 SRC="${CERALIVE_BOOT_SCRIPT_SRC:-/usr/lib/ceralive/boot/boot.scr}"
 SUMS="${CERALIVE_BOOT_SCRIPT_SUMS:-${SRC}.sha256}"
+KEEP="${CERALIVE_BOOT_SCRIPT_KEEP:-${SRC}.keep}"
 BOOT_DIR="${CERALIVE_BOOT_DIR:-/boot}"
 ARMED="${CERALIVE_ACTIVATION_ARMED:-/data/ceralive/update-state/activation-armed}"
 LOCK="${CERALIVE_ACTIVATION_LOCK:-/run/lock/ceralive-rauc-activate.lock}"
@@ -88,6 +96,13 @@ rm -f -- "${NEW}"
 if same_script "${SRC}" "${DST}"; then
   log "boot.scr is already current ($(sha256sum -- "${DST}" | cut -c1-12))"
   exit 0
+fi
+if [[ -r "${KEEP}" ]]; then
+  dst_body="$(tail -c "+$((HEADER_BYTES + 1))" -- "${DST}" | sha256sum | awk '{ print $1 }')"
+  if grep -qxF -- "${dst_body}" "${KEEP}"; then
+    log "boot.scr is this image's flashed selector (body ${dst_body:0:12}) — kept, not replaced by the field selector"
+    exit 0
+  fi
 fi
 
 cp -f -- "${DST}" "${PREV}" || fail "cannot keep the previous boot.scr as ${PREV}"

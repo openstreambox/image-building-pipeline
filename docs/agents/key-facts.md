@@ -3067,7 +3067,12 @@ previous file if that check fails, verifying the restore too (exit 2 = restore f
 A failing `mkimage` fails both `boot-partition` and `boot-payload`. The booted, confirmed OS decides the selector, so a
 RAUC rollback to an older image also restores that image's script. A power cut during the
 FAT rename is the residual risk; a board with a damaged `boot.scr` needs Maskrom recovery
-(`recovery.scr` is manual). Guard: `tests/boot-script-sync.test.sh`.
+(`recovery.scr` is manual). Because nothing boots `boot.scr.prev` automatically, the shipped
+copy is the FIELD selector: `boot-payload` strips the selector's `flashed-images-only`
+regions (today the ROCK 5B+ B-key slot power hold) and adds `boot.scr.keep`, the body hash
+of the flashed selector, which the sync leaves in place on a freshly flashed card. A change
+in boot behaviour goes to the field only once a boot-tested fallback exists.
+Guard: `tests/boot-script-sync.test.sh`.
 
 **The A/B selector must define its OWN scratch address — an inherited `loadaddr`
 is a per-board default, and an empty one HALTS the board with an SError** [EXISTS]
