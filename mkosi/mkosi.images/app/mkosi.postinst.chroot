@@ -335,6 +335,7 @@ main() {
   # Copyright files for installed first-party packages that ship without one
   # (pinned verbatim texts; fails on a version the notices do not cover).
   bash "${SRCDIR:?}/runtime/licence-notices/install-licence-notices.sh"
+  bash "${SRCDIR:?}/runtime/licence-notices/install-dependency-notices.sh"
   bash "${SRCDIR:?}/runtime/packages-lock-capture.sh" app ${SYSEXT_APP_PKGS} ${APPFS_APP_PKGS} ${RUNTIME_APP_PKGS}
   clean_package_download_metadata
   prune_final_image_payload
