@@ -372,6 +372,50 @@ class Derivation(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 n.check_payloads(plan, altered)
 
+    def test_runtime_synthetic_payload_is_bound_to_plan(self):
+        plan, excerpts = self.u.derive()
+        origin = next(iter(plan['inputs']))
+        record = n.package('rust-src.tar.xz', 'b' * 40, 'runtime', 'srtla', origin,
+                           {'runtime/LICENSE': THIRD}, [],
+                           'conditional runtime source candidate; static inclusion unverified', excerpts)
+        plan['packages'].append(record)
+        plan['runtime'] = {'limits': ['Source superset, no membership claim'], 'gaps': ['Missing grant remains open']}
+        result = n.render(plan, excerpts)
+        plan['payload_sha256'] = {name: sha(data) for name, data in result.items()}
+        n.check_payloads(plan, result)
+        for mutant in (result['srtla.txt'].replace(THIRD, b'', 1),
+                       result['srtla.txt'].replace(b'Missing grant remains open', b'complete'),
+                       result['srtla.txt'] + b'unplanned'):
+            changed = dict(result, **{'srtla.txt': mutant})
+            with self.assertRaises(ValueError):
+                n.check_payloads(plan, changed)
+
+    def test_runtime_scopes_and_identity_fail_closed(self):
+        for name, path, scope in (
+                ('go-source.tar.gz', 'go/src/cmd/vendor/example/LICENSE', 'build-context-only'),
+                ('go-source.tar.gz', 'go/src/net/testdata/NOTICE', 'test-context-only'),
+                ('llvm-LICENSE.TXT', 'source/llvm-LICENSE.TXT', 'build-context-only'),
+                ('rust-src.tar.xz', 'root/vendor/cc-1/LICENSE', 'build-context-only')):
+            self.assertEqual(n.runtime_scope(name, path), scope)
+        config = json.loads((BASE / 'sources.json').read_bytes())['runtime']
+        measurement = {'go': config['go_version'], 'binary_sha256': config['measured_mediamtx_sha256']}
+        for key in ('go_version', 'measured_mediamtx_sha256', 'rust_commit', 'rust_distribution'):
+            changed = copy.deepcopy(config)
+            changed[key] = 'wrong'
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'identity mismatch'):
+                n.runtime_packages(changed, None, measurement, {}, {})
+
+
+    def test_runtime_malformed_inputs(self):
+        config = json.loads((BASE / 'sources.json').read_bytes())['runtime']
+        measurement = {'go': config['go_version'], 'binary_sha256': config['measured_mediamtx_sha256']}
+        for change, error in ((lambda c: c.update(inputs=[]), 'input set incomplete'),
+                              (lambda c: c['inputs'][0].update(file='../escape'), 'unsafe runtime input')):
+            changed = copy.deepcopy(config)
+            change(changed)
+            with self.assertRaisesRegex(ValueError, error):
+                n.runtime_packages(changed, None, measurement, {}, {})
+
     def test_supplement_must_be_the_recorded_vcs_commit(self):
         files = self.u.crates[('alpha', '1.0.0')]
         files['alpha-1.0.0/.cargo_vcs_info.json'] = json.dumps({'git': {'sha1': 'c' * 40}}).encode()
@@ -458,6 +502,41 @@ class CommittedInventory(unittest.TestCase):
         self.assertIn('License notice for AWS V4', mtx)
         self.assertIn('Leonard Hecker', mtx)
         self.assertIn('9efc29b6e58cef28f6566a47aa7e142a55fead77', srtla)
+
+    def test_committed_runtime_texts_and_exclusions(self):
+        plan = json.loads((BASE / 'plan.json').read_bytes())
+        runtime = plan['runtime']
+        self.assertEqual(runtime['source_identities']['rust_distribution'], 'nightly-2026-06-12')
+        packages = [p for p in plan['packages'] if p['kind'] == 'runtime']
+        self.assertTrue(packages)
+        named = {t['source_path'] for p in packages for t in p['texts'] if t['rule'] == 'named'}
+        for suffix in ('go/LICENSE', 'rust-LICENSE-MIT', 'rust-LICENSE-APACHE',
+                       'llvm-libunwind_LICENSE.TXT', 'llvm-compiler-rt_LICENSE.TXT'):
+            self.assertTrue(any(x.endswith(suffix) for x in named), suffix)
+        self.assertTrue(any('compiler-builtins' in x for x in named))
+        self.assertTrue(any('stdarch' in x for x in named))
+        self.assertTrue(any(x['source_path'].endswith('llvm-LICENSE.TXT')
+                            and x['reason'] == 'build-context-only' for x in runtime['excluded_named_context']))
+        self.assertTrue(any('fortanix-sgx-abi' in x and 'wasip1' in x for x in runtime['gaps']))
+        for p in packages:
+            self.assertEqual(p['payload'], 'mediamtx' if p['name'].startswith('go-') else 'srtla')
+            self.assertIn('candidate', p['scope'])
+
+    def test_committed_runtime_omission_and_routing_rejected(self):
+        plan = json.loads((BASE / 'plan.json').read_bytes())
+        result = {name: (BASE / name).read_bytes() for name in ('srtla.txt', 'mediamtx.txt', 'identity.tsv')}
+        record = next(p for p in plan['packages'] if p['kind'] == 'runtime' and p['texts'])
+        changed = dict(result)
+        key = record['payload'] + '.txt'
+        # Preserve all manifests and plan, while removing a planned runtime notice.
+        marker = ('File: ' + record['texts'][0]['source_path']).encode()
+        at = changed[key].index(marker)
+        changed[key] = changed[key][:at] + changed[key][at + len(marker):]
+        with self.assertRaisesRegex(ValueError, 'planned notice missing'):
+            n.check_payloads(plan, changed)
+        record['payload'] = 'srtla' if record['payload'] == 'mediamtx' else 'mediamtx'
+        with self.assertRaisesRegex(ValueError, 'wrong payload'):
+            n.check_plan(plan)
 
     def test_identity_follows_the_image_pins(self):
         plan = json.loads((BASE / 'plan.json').read_bytes())
@@ -583,10 +662,31 @@ class Installer(unittest.TestCase):
     def test_real_payloads_verify(self):
         (self.root / 'usr/local/bin/mediamtx').unlink()
         (self.root / 'usr/share/doc/mediamtx/copyright').unlink()
-        result = self.run_install(base=BASE)
+        self.refused('runtime sender binary missing', base=BASE)
+        result = self.run_install(base=BASE, rows=['srtla\tinstalled\t4.2.0\tamd64'])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.root / 'usr/share/doc/srtla/copyright').read_bytes(),
                          self.parents['srtla'] + (BASE / 'srtla.txt').read_bytes())
+
+    def test_runtime_sender_bytes_are_checked_before_writes(self):
+        raw = b'synthetic sender binary'
+        ident = self.base / 'identity.tsv'
+        ident.write_bytes(ident.read_bytes() + f'runtime-srtla\tarm64\t/usr/bin/srtla_send\t{sha(raw)}\n'.encode())
+        payloads = {name: (self.base / name).read_bytes() for name in ('srtla.txt', 'mediamtx.txt', 'identity.tsv')}
+        (self.base / 'SHA256SUMS').write_bytes(n.sums(payloads))
+        plan = n.dump({'payload_sha256': {name: sha(data) for name, data in payloads.items()}})
+        (self.base / 'plan.json').write_bytes(plan)
+        (self.base / 'plan.sha256').write_text(sha(plan) + '\n')
+        self.refused('runtime sender binary missing')
+        binary = self.root / 'usr/bin/srtla_send'
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_bytes(b'changed sender')
+        self.refused('runtime sender binary differs')
+        binary.write_bytes(raw)
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / 'usr/share/doc/srtla/copyright').read_bytes(),
+                         self.parents['srtla'] + payloads['srtla.txt'])
 
     def test_srtla_identity_refusals(self):
         self.refused(r'srtla 4\.3\.0 \(arm64\) is installed, but the dependency notices cover only', rows=['srtla\tinstalled\t4.3.0\tarm64'])
