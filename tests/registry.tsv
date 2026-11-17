@@ -112,6 +112,8 @@ tests/uart-console-path.test.sh	shell	unit	default-shell	CI-UART bootstrap targe
 tests/uart-bootstrap-tty.test.sh	shell	unit	default-shell	tty-class-aware stty: tolerant on FIQ, fatal on a real UART
 tests/postinst-module-contract.test.sh	shell	unit	default-shell	every postinst registry function resolves from a bare source
 tests/licence-notices.test.sh	shell	unit	default-shell	copyright files for first-party packages without one, and the MediaMTX licence
+tests/boot-firmware-notices.test.sh	shell	unit	default-shell	copyright files for the pinned Armbian firmware and U-Boot packages: derivation, identity refusals, prune survival
+tests/boot-firmware-notices.test.py	tool	unit	invoked-by-suite	Synthetic sources, archives and installed trees driven by boot-firmware-notices.test.sh
 tests/systemd-ordering-cycle.test.sh	shell	unit	default-shell	zero ordering cycles plus the sysinit-phase ordering probe
 tests/ssh-firstboot-privsep.test.sh	shell	unit	default-shell	/run/sshd is created before sshd -t on an empty-/run first boot
 tests/ssh-enablement-contract.test.sh	shell	unit	default-shell	production ssh stays disabled: no SIGPIPE-racing unit probe, landed-disable assertion, first-boot preset

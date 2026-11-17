@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "about": "Reviewed inputs for tools/generate-boot-firmware-notices.py. Each package is pinned by its archive in Armbian's signed trixie index; each source by its full commit. Everything else in this directory is generated from these pins.",
+  "packages": {
+    "armbian-firmware-full": {
+      "version": "26.8.3",
+      "architecture": "all",
+      "url": "https://apt.armbian.com/pool/main/a/armbian-firmware-full/armbian-firmware-full_26.8.3_all__1-SAf50a-SMeeed-B96c8-R448a.deb",
+      "sha256": "13d10a85a1fa02a989eb2c3e9696f3c931bc9cf2b6059e435c4bd2c75ec53d19",
+      "bytes": 763716604,
+      "armbian_original_hash": "1-SAf50a-SMeeed-B96c8-R448a"
+    },
+    "linux-u-boot-rock-5b-plus-edge": {
+      "version": "26.8.3",
+      "architecture": "arm64",
+      "url": "https://apt.armbian.com/pool/main/l/linux-u-boot-rock-5b-plus-edge/linux-u-boot-rock-5b-plus-edge_26.8.3_arm64__2026.04-S88dc-P05fe-H3e7f-V2601-B5da4-R448a.deb",
+      "sha256": "0d8bbd29796824be04e32b6c3b5ce88e13f3378004bbced4598900af19e262ba",
+      "bytes": 945312,
+      "armbian_original_hash": "2026.04-S88dc-P05fe-H3e7f-V2601-B5da4-R448a"
+    }
+  },
+  "sources": {
+    "linux-firmware": {
+      "url": "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git",
+      "fetch": "https://gitlab.com/kernel-firmware/linux-firmware.git",
+      "commit": "eeed587f5b5032c39b3fb01cf8feffff46f9967c"
+    },
+    "armbian-firmware": {
+      "url": "https://github.com/armbian/firmware",
+      "fetch": "https://github.com/armbian/firmware.git",
+      "commit": "f50a2a21bcdb77a562b3976930c5c6b521a1df08"
+    },
+    "u-boot": {
+      "url": "https://source.denx.de/u-boot/u-boot.git",
+      "fetch": "https://source.denx.de/u-boot/u-boot.git",
+      "commit": "88dc2788777babfd6322fa655df549a019aa1e69",
+      "tag": "v2026.04"
+    },
+    "tf-a": {
+      "url": "https://git.trustedfirmware.org/TF-A/trusted-firmware-a.git",
+      "fetch": "https://github.com/ARM-software/arm-trusted-firmware.git",
+      "commit": "c17351450c8a513ca3f30f936e26a71db693a145",
+      "tag": "v2.13.0"
+    },
+    "armbian-rkbin": {
+      "url": "https://github.com/armbian/rkbin",
+      "fetch": "https://github.com/armbian/rkbin.git",
+      "commit": "ce50c0d1ad1d4630f5b595d317427b56fa97b7f6"
+    },
+    "rockchip-rkbin": {
+      "url": "https://github.com/rockchip-linux/rkbin",
+      "fetch": "https://github.com/rockchip-linux/rkbin.git",
+      "commit": "bb96b4f54cd41390aeee56edc55874792439d721"
+    }
+  },
+  "firmware": {
+    "package": "armbian-firmware-full",
+    "prefix": "lib/firmware/",
+    "upstream": "linux-firmware",
+    "overlay": "armbian-firmware",
+    "whence": "WHENCE",
+    "licence_dirs": ["LICENSES/", ""],
+    "licence_names_without_file": {
+      "BSD-3-Clause": "The qcom/yamato_* Licence field names BSD-3-Clause beside LICENSE.qcom_yamato; that named file is reproduced. linux-firmware has no file called BSD-3-Clause."
+    },
+    "overlay_readme": "README.md",
+    "recipe": "Armbian builds this package by installing linux-firmware with its own \"make install\" and then extracting a \"git archive\" of armbian/firmware over the result, so armbian/firmware wins where both have a file."
+  },
+  "uboot": {
+    "package": "linux-u-boot-rock-5b-plus-edge",
+    "loader": "usr/lib/linux-u-boot-edge-rock-5b-plus/u-boot-rockchip.bin",
+    "spi_loader": "usr/lib/linux-u-boot-edge-rock-5b-plus/u-boot-rockchip-spi.bin",
+    "metadata": "usr/lib/linux-u-boot-edge-rock-5b-plus/u-boot-metadata.sh",
+    "licence_summary": "usr/lib/u-boot/LICENSE",
+    "board": "rock-5b-plus",
+    "u_boot_banner": "U-Boot 2026.04_armbian-2026.04-S88dc",
+    "tpl": {
+      "rkns_image": 0,
+      "bytes": 76480,
+      "source": "armbian-rkbin",
+      "path": "rk35/rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.20_20250926.bin",
+      "repository_notice": "LICENSE.TXT",
+      "compare_source": "rockchip-rkbin",
+      "compare_path": "bin/rk35/rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.20.bin",
+      "compare_notice": "LICENSE"
+    },
+    "u_boot_licence_dir": "Licenses/",
+    "bl31": {
+      "source": "tf-a",
+      "version_string": "v2.13.0(release):armbian",
+      "texts": [
+        "docs/license.rst",
+        "license.rst",
+        "lib/compiler-rt/LICENSE.TXT",
+        "licenses/LICENSE.MIT",
+        "licenses/LICENSE-APACHE-2.0.txt"
+      ]
+    },
+    "armbian_patch_dirs": ["patch/u-boot/v2026.04", "patch/atf/atf-rockchip64/v2.13"]
+  }
+}

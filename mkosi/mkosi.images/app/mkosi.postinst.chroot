@@ -337,6 +337,9 @@ main() {
   bash "${SRCDIR:?}/runtime/licence-notices/install-licence-notices.sh"
   bash "${SRCDIR:?}/runtime/packages-lock-capture.sh" app ${SYSEXT_APP_PKGS} ${APPFS_APP_PKGS} ${RUNTIME_APP_PKGS}
   clean_package_download_metadata
+  # Copyright files for the pinned Armbian firmware and U-Boot packages (verbatim
+  # source texts and a per-file source map; fails on any identity drift).
+  bash "${SRCDIR:?}/runtime/licence-notices/install-boot-firmware-notices.sh"
   prune_final_image_payload
   remove_chroot_service_policy
 
