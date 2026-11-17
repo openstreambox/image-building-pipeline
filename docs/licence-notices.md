@@ -56,3 +56,17 @@ errors. `copyright-required.txt` names the first-party application packages
 that must have a nonempty copyright after installation. `cerastream` and
 `ceralive-apt-credentials` remain explicit gaps, excluded from that check until
 public texts are supplied. This does not establish full licence closure.
+
+## Device package dependency order
+
+The current amd64 `2026.11.2-20261110T235721.31b06d5` and arm64
+`2026.11.2-20261110T235725.31b06d5` device pins predate package copyright
+notices. Measured on 17 November 2026, these are explicit logged gaps only for
+those exact versions. No licence text is invented for them; this is not release
+licence closure. All other required packages and later device versions still
+fail if their copyright file is missing or empty.
+
+Land CeraUI #125, build and review its integration package, then advance the
+image's device pin to that actual package and remove the two legacy exceptions.
+Do not advance the pin to an unbuilt topic head. The coverage list continues to
+require `ceralive-device`, including after this dependency is satisfied.

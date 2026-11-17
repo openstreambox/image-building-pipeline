@@ -97,11 +97,23 @@ for pkg in "${packages[@]}"; do
   log "wrote /usr/share/doc/${pkg}/copyright"
 done
 
-# Scope follows the first-party application package list. Two packages without
+# Scope follows the first-party application package list. Packages without
 # public texts are explicit outstanding gaps, documented beside this script.
 while read -r pkg; do
   [[ -z "${pkg}" || "${pkg}" == \#* ]] && continue
-  [[ -n "$(installed_version "${pkg}")" ]] || continue
+  version="$(installed_version "${pkg}")"
+  [[ -n "${version}" ]] || continue
+  # Measured 2026-11-17: these two architecture pins predate package notices.
+  # Keep coverage mandatory for every later version. Remove these cases when
+  # the pin advances to a built, reviewed package containing its copyright.
+  if [[ ! -s "${DESTROOT}/usr/share/doc/${pkg}/copyright" ]]; then
+    case "${pkg}=${version}" in
+      ceralive-device=2026.11.2-20261110T235721.31b06d5|ceralive-device=2026.11.2-20261110T235725.31b06d5)
+        log "known copyright gap: ${pkg} ${version}; requires a notice-bearing package before release closure"
+        continue
+        ;;
+    esac
+  fi
   [[ -s "${DESTROOT}/usr/share/doc/${pkg}/copyright" ]] \
     || die "installed first-party package lacks copyright: ${pkg}"
 done < "${LICENCE_NOTICES_COVERAGE:-${HERE}/copyright-required.txt}"

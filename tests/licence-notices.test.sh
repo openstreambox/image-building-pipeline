@@ -152,6 +152,9 @@ for pkg in srtla libsrt1.5-ceralive gstreamer1.0-libuvcsrc; do
 done
 grep -Fq 'Mozilla Public License Version 2.0' "${WORK}/real/root/usr/share/doc/libsrt1.5-ceralive/copyright" || fail 'libsrt text'
 grep -Fq 'The Board of Trustees of the University of Illinois' "${WORK}/real/root/usr/share/doc/libsrt1.5-ceralive/copyright" || fail 'inherited UDT notice'
+for year in 2009 2010 2011 2016; do
+  grep -Fq "Copyright (c) 2001 - ${year}, The Board of Trustees of the University of Illinois." "${WORK}/real/root/usr/share/doc/libsrt1.5-ceralive/copyright" || fail "missing UIUC ${year} variant"
+done
 grep -Fq 'Aladdin Enterprises' "${WORK}/real/root/usr/share/doc/libsrt1.5-ceralive/copyright" || fail 'MD5 notice'
 grep -Fq 'MIT License' "${WORK}/real/root/usr/share/doc/srtla/copyright" || fail 'srtla text'
 uvc="${WORK}/real/root/usr/share/doc/gstreamer1.0-libuvcsrc/copyright"
@@ -164,6 +167,28 @@ sed -E '/^#/d; /^$/d; s/\[[^]]*\]//; s/=.*//' "${pins}" | grep -Ev '^(cerastream
 sed '/^#/d; /^$/d' "$(dirname "${TABLE}")/copyright-required.txt" | sort -u > "${WORK}/actual-coverage"
 cmp "${WORK}/expected-coverage" "${WORK}/actual-coverage" || fail 'first-party coverage scope drift'
 ok 'committed table matches the deb pins and its texts, and writes srtla, libsrt and libuvcsrc copyright files'
+
+# The measured legacy device pins are gaps, never a wildcard exemption.
+for version in 2026.11.2-20261110T235721.31b06d5 2026.11.2-20261110T235725.31b06d5; do
+  rm -rf "${WORK}/legacy"
+  make_case legacy
+  printf 'ceralive-device %s\n' "${version}" >> "${WORK}/legacy/installed"
+  run_case legacy || { cat "${WORK}/legacy/log" >&2; fail 'current device pin must remain installable'; }
+  grep -Fq "known copyright gap: ceralive-device ${version}" "${WORK}/legacy/log" || fail 'gap must be visible'
+  [[ ! -e "${WORK}/legacy/root/usr/share/doc/ceralive-device/copyright" ]] || fail 'no invented device notice'
+done
+ok 'both measured current device pins remain explicit gaps'
+make_case future
+printf 'ceralive-device 2026.11.4-new\n' >> "${WORK}/future/installed"
+expect_failure future 'installed first-party package lacks copyright: ceralive-device' 'future device without copyright fails closed'
+rm -rf "${WORK}/future/root/usr/share/doc/alpha" "${WORK}/future/root/usr/share/doc/beta"
+mkdir -p "${WORK}/future/root/usr/share/doc/ceralive-device"
+printf 'package notice\n' > "${WORK}/future/root/usr/share/doc/ceralive-device/copyright"
+run_case future || fail 'future package copyright must satisfy coverage'
+ok 'future device version requires its own copyright'
+make_case othergap
+printf 'modemmanager 1.0\n' >> "${WORK}/othergap/installed"
+expect_failure othergap 'installed first-party package lacks copyright: modemmanager' 'unrelated package coverage remains mandatory'
 
 # --- Part C -----------------------------------------------------------------
 # Real setup_rtmp_gateway from the module set, against a tiny local tarball.
