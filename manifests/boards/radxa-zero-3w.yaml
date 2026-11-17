@@ -31,9 +31,11 @@ modem_ports:
 app_backend: sysext
 
 description: >-
-  Radxa ZERO 3W (RK3566). microSD plus an optional eMMC, no Ethernet.
-  USB-C 1 is USB 2.0 OTG and the only 5 V power inlet. USB-C 2 is a USB 3
-  host and is not a power inlet. Onboard Wi-Fi/Bluetooth is an SDIO module
-  (vendor trees split AIC8800DS2 and AP6212); mainline enables the SDIO and
-  UART pins and does not name the chip. No M.2 modem slot. Not a streaming
-  appliance until a pinned U-Boot blob and a ZERO 3W kernel are reviewed.
+  Radxa ZERO 3W (RK3566), the 1 GB units with no eMMC and no GPIO header.
+  Boot is microSD only. USB-C 1 is USB 2.0 OTG and the only 5 V power inlet,
+  and it is also the console: the UART is on the unsoldered header, so the
+  bring-up image needs a USB gadget and must not request USB host on that
+  port. USB-C 2 is a USB 3 host and is not a power inlet. Reported radio is
+  Wi-Fi 6 / Bluetooth 5.4 (not the RK3588 RTL8852BE); mainline does not
+  bind it. No M.2 modem slot. Not a streaming appliance until a pinned
+  U-Boot blob and a ZERO 3W kernel are reviewed.
