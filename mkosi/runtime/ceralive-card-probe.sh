@@ -33,15 +33,20 @@
 # mark overwrites an earlier one and the loader-area hash changes. Evenly spread
 # marks alone can each land somewhere distinct and all read back fine.
 #
-# It never writes below the first MiB boundary at or after the end of the image,
-# never writes past the reported size and writes at most
+# Requested offsets never fall below the first MiB boundary at or after the
+# reference image end or past the reported size. A wrapping target can redirect
+# those writes into the image, including the loader and running rootfs. It writes at most
 # (64 + number of power-of-two offsets) MiB. It runs no speed test and makes no
 # whole-card check; a full check (f3, H2testw) remains a separate, offline step.
 #
-# KNOWN LIMIT: a card that wraps at a size that is not a power of two can place
-# a wrapped mark inside the image area outside the hashed regions. That mark
-# reads back fine and the probe can pass. Do not present a pass as proof that a
-# card is genuine.
+# KNOWN LIMIT: most non-power-of-two wrap sizes can evade this sampling when
+# the image is large relative to the real capacity. Marks may overwrite boot
+# or rootfs contents outside the hashed regions and still produce exit 0 pass.
+# The small host fixture does not represent that blind spot. A pass proves only
+# the sampled marks and regions matched, never genuine capacity or image safety.
+# The reference is trusted, including image_bytes and its region list. I/O also
+# reopens the target path; a mid-run replacement can receive writes before the
+# final identity check refuses it. Both require hardening before any caller.
 #
 # USAGE
 #

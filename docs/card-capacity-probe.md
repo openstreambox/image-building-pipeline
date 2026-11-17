@@ -81,11 +81,26 @@ does not have to call it fraud.
 
 ## Limits
 
-- **Sampling, not certification.** A card that wraps at a size that is not a
-  power of two can place a mark inside the image area outside the hashed
-  regions; that mark reads back fine and the probe can pass. A pass is not proof
-  that a card is genuine; a full offline check (f3, H2testw) remains the way to
-  certify one.
+- **A destructive false pass is possible.** Most non-power-of-two wrap sizes
+  can evade these samples for full-size images. Modelling the actual offsets
+  with a 7 GiB image found 93–97% of non-power-of-two wrap sizes passed for
+  32/64/128 GiB claims, and over 99% for 1–2 TiB claims. These are model results,
+  not rates measured across physical cards. A host reproduction with a 7 GiB
+  image, 32 GiB claim and 8000 MiB wrap returned `pass` while 57 MiB of marks
+  landed inside boot/rootfs partitions. The 32 MiB fixture hides this geometry
+  dependence. Power-of-two wraps were detected in the checked cases.
+  A pass means only that sampled marks and hashed regions match; it proves
+  neither genuine capacity nor preservation of partition contents. A full
+  offline check (f3, H2testw) remains a separate step.
+- **The reference is fully trusted.** The parser does not establish that
+  `image_bytes` matches the target GPT or require both generated regions. An
+  understated image length with a matching short loader hash can permit writes
+  inside the image and still pass. The GPT reader also lacks CRC validation and
+  complete partition-end checks.
+- **Target identity is checked too late to prevent replacement writes.** I/O
+  reopens the target by path. A replacement symlink after initial validation can
+  redirect later writes; the final device/inode check only reports the change
+  after those writes. Use disposable files in a private, stable directory.
 - **No speed test.** Card speed is a separate check.
 - **Regular files only.** Block devices are refused. On a real card the flush
   and cache-dropping step, and reading with direct I/O, still need to be
@@ -105,6 +120,13 @@ variable or option that selects another implementation.
 
 ## Before anything calls it
 
+- Validate `image_bytes` against the hashed primary GPT, require both protected
+  regions, and validate GPT CRCs and partition ends before writing.
+- Use one validated open descriptor for all I/O and refuse symlink traversal;
+  a final path identity check is insufficient.
+- Qualify full-block reads, flushing, cache behaviour and direct reads.
+- Plan destructive tests offline: wrapping writes can overwrite LBA 0 and the
+  running rootfs even when the requested offsets are after the image.
 - Measure the probe on real genuine cards and on a known fake, on the box,
   including how long it takes and what flushing and cache dropping do on
   `mmcblk`.

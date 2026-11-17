@@ -9,9 +9,10 @@
 # device refusal is checked with the storage functions replaced by tripwires, so
 # that a broken refusal would record a call instead of touching the device.
 #
-# Fixture geometry (scaled down from a real card; the probe's logic is size
-# independent): a 32 MiB GPT image whose first partition starts at 16 MiB, like
-# the RK3588 layout, and a card that claims 1 GiB.
+# Fixture geometry: a 32 MiB GPT image whose first partition starts at 16 MiB,
+# and a card that claims 1 GiB. This tests the selected cases only: it does not
+# represent the much larger non-power-of-two wrap blind spot of full-size images
+# or establish that a passing result preserves partition contents.
 #
 # Needs sgdisk (the default gate already does). No root, no hardware.
 #
