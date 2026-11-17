@@ -36,10 +36,9 @@ make_query() {
   local dir="$1"
   cat > "${dir}/dpkg-query" <<EOF
 #!/usr/bin/env bash
-pkg="\${!#}"
-line="\$(grep -E "^\${pkg} " "${dir}/installed" || true)"
-[[ -n "\${line}" ]] || exit 1
-printf 'installed %s' "\${line#* }"
+while read -r pkg ver; do
+  printf '%s installed %s\\n' "\${pkg}" "\${ver}"
+done < "${dir}/installed"
 EOF
   chmod +x "${dir}/dpkg-query"
 }
@@ -124,6 +123,14 @@ make_case mixed
 printf 'beta\t2.0+x.1\tmixed\thttps://example.invalid/m\t%s\tLICENSE\t-\t-\n' "$(printf 'e%.0s' {1..40})" >> "${WORK}/mixed/notices.tsv"
 expect_failure mixed "mixes '-' with a text" 'fails on a half-empty row'
 
+make_case queryfailed
+printf '#!/bin/sh\nexit 2\n' > "${WORK}/queryfailed/dpkg-query"
+expect_failure queryfailed 'dpkg-query failed' 'database query errors fail closed'
+
+make_case uncovered
+printf 'modemmanager 1.0\n' >> "${WORK}/uncovered/installed"
+expect_failure uncovered 'installed first-party package lacks copyright: modemmanager' 'installed first-party coverage is required'
+
 # --- Part B -----------------------------------------------------------------
 pins="${ROOT}/manifests/first-party-deb-versions.txt"
 mkdir -p "${WORK}/real/root"
@@ -144,12 +151,18 @@ for pkg in srtla libsrt1.5-ceralive gstreamer1.0-libuvcsrc; do
   [[ -s "${WORK}/real/root/usr/share/doc/${pkg}/copyright" ]] || fail "committed table writes ${pkg}"
 done
 grep -Fq 'Mozilla Public License Version 2.0' "${WORK}/real/root/usr/share/doc/libsrt1.5-ceralive/copyright" || fail 'libsrt text'
+grep -Fq 'The Board of Trustees of the University of Illinois' "${WORK}/real/root/usr/share/doc/libsrt1.5-ceralive/copyright" || fail 'inherited UDT notice'
+grep -Fq 'Aladdin Enterprises' "${WORK}/real/root/usr/share/doc/libsrt1.5-ceralive/copyright" || fail 'MD5 notice'
 grep -Fq 'MIT License' "${WORK}/real/root/usr/share/doc/srtla/copyright" || fail 'srtla text'
 uvc="${WORK}/real/root/usr/share/doc/gstreamer1.0-libuvcsrc/copyright"
 grep -Fq 'Software License Agreement (BSD License)' "${uvc}" || fail 'libuvc text'
 grep -Fq 'Source: https://github.com/CERALIVE/gstlibuvcsrc at 8fe5ba50e8c28ceeffba8a3b896b245fff53bd96' "${uvc}" \
   || fail 'plugin source recorded'
 grep -Fq 'No licence file exists in this source at this commit' "${uvc}" || fail 'plugin recorded without a licence text'
+# Coverage must move with the package scope, including future additions.
+sed -E '/^#/d; /^$/d; s/\[[^]]*\]//; s/=.*//' "${pins}" | grep -Ev '^(cerastream|ceralive-apt-credentials)$' | sort -u > "${WORK}/expected-coverage"
+sed '/^#/d; /^$/d' "$(dirname "${TABLE}")/copyright-required.txt" | sort -u > "${WORK}/actual-coverage"
+cmp "${WORK}/expected-coverage" "${WORK}/actual-coverage" || fail 'first-party coverage scope drift'
 ok 'committed table matches the deb pins and its texts, and writes srtla, libsrt and libuvcsrc copyright files'
 
 # --- Part C -----------------------------------------------------------------
@@ -187,6 +200,8 @@ grep -Fq 'Copyright (c) fixture' "${copyright}" || fail 'MediaMTX licence copied
 grep -Fq "Release tarball sha256: $(sha256sum "${mtx}/with.tar.gz" | awk '{print $1}')" "${copyright}" \
   || fail 'MediaMTX tarball hash recorded'
 [[ -x "${mtx}/dest/usr/local/bin/mediamtx" ]] || fail 'MediaMTX binary still installed'
+grep -Fq 'Source: https://example.invalid/v0.0.0/arm64.tar.gz' "${copyright}" || fail 'stable release provenance'
+if grep -Fq "${WORK}" "${copyright}"; then fail 'build host path leaked'; fi
 ok 'setup_rtmp_gateway installs the tarball LICENSE as /usr/share/doc/mediamtx/copyright'
 
 if gateway "${mtx}/without.tar.gz" "${mtx}/dest2" > "${mtx}/log2" 2>&1; then

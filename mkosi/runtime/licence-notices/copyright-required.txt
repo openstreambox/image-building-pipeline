@@ -1,0 +1,15 @@
+# Installed first-party packages requiring copyright coverage.
+ceralive-device
+ceralive-modem-support
+gstreamer1.0-libuvcsrc
+libmbim-glib4
+libmbim-proxy
+libmbim-utils
+libmm-glib0
+libqmi-glib5
+libqmi-proxy
+libqmi-utils
+libqrtr-glib0
+libsrt1.5-ceralive
+modemmanager
+srtla

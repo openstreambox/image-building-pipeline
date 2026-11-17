@@ -37,6 +37,12 @@ BASE="$(dirname -- "${TABLE}")"
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
+# Query the complete database once. Failure cannot mean "not installed".
+"${QUERY}" -W -f='${Package} ${db:Status-Status} ${Version}\n' > "${WORK}/installed" \
+  || die "dpkg-query failed; cannot establish installed package coverage"
+installed_version() {
+  awk -v pkg="$1" '$1 == pkg && $2 == "installed" {print $3}' "${WORK}/installed"
+}
 packages=()
 while IFS=$'\t' read -r pkg ver component source commit path text sha extra || [[ -n "${pkg:-}" ]]; do
   [[ -z "${pkg}" || "${pkg}" == \#* ]] && continue
@@ -52,13 +58,13 @@ while IFS=$'\t' read -r pkg ver component source commit path text sha extra || [
     [[ "${actual}" == "${sha}" ]] || die "pinned licence text changed: ${text} (expected ${sha}, got ${actual})"
   fi
 
-  installed="$("${QUERY}" -W -f='${db:Status-Status} ${Version}' "${pkg}" 2>/dev/null || true)"
-  if [[ "${installed%% *}" != "installed" ]]; then
+  installed="$(installed_version "${pkg}")"
+  if [[ -z "${installed}" ]]; then
     log "${pkg} is not installed in this image; skipped"
     continue
   fi
-  [[ "${installed#* }" == "${ver}" ]] \
-    || die "${pkg} ${installed#* } is installed, but notices.tsv pins ${ver}; refresh its rows"
+  [[ "${installed}" == "${ver}" ]] \
+    || die "${pkg} ${installed} is installed, but notices.tsv pins ${ver}; refresh its rows"
 
   if [[ ! -f "${WORK}/${pkg}" ]]; then
     packages+=("${pkg}")
@@ -90,3 +96,12 @@ for pkg in "${packages[@]}"; do
   install -D -m 0644 "${WORK}/${pkg}" "${docdir}/copyright"
   log "wrote /usr/share/doc/${pkg}/copyright"
 done
+
+# Scope follows the first-party application package list. Two packages without
+# public texts are explicit outstanding gaps, documented beside this script.
+while read -r pkg; do
+  [[ -z "${pkg}" || "${pkg}" == \#* ]] && continue
+  [[ -n "$(installed_version "${pkg}")" ]] || continue
+  [[ -s "${DESTROOT}/usr/share/doc/${pkg}/copyright" ]] \
+    || die "installed first-party package lacks copyright: ${pkg}"
+done < "${LICENCE_NOTICES_COVERAGE:-${HERE}/copyright-required.txt}"

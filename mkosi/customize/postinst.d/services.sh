@@ -549,6 +549,9 @@ setup_rtmp_gateway() {
   tmpdir="$(mktemp -d)"
   local tarball="${tmpdir}/mediamtx.tar.gz"
 
+  local url="${MEDIAMTX_URL_TEMPLATE//\{ver\}/${MEDIAMTX_VERSION}}"
+  url="${url//\{arch\}/${arch}}"
+
   # Fetch the pinned tarball (or use a local one for offline verification).
   if [[ -n "${MEDIAMTX_LOCAL_TARBALL:-}" ]]; then
     [[ -f "${MEDIAMTX_LOCAL_TARBALL}" ]] \
@@ -556,8 +559,6 @@ setup_rtmp_gateway() {
     cp "${MEDIAMTX_LOCAL_TARBALL}" "${tarball}"
   else
     command -v curl >/dev/null 2>&1 || { rm -rf "${tmpdir}"; die "curl not found — cannot fetch MediaMTX"; }
-    local url="${MEDIAMTX_URL_TEMPLATE//\{ver\}/${MEDIAMTX_VERSION}}"
-    url="${url//\{arch\}/${arch}}"
     log "fetching MediaMTX ${MEDIAMTX_VERSION} (${arch}) from ${url}"
     curl -fsSL --retry 3 --retry-all-errors -o "${tarball}" "${url}" \
       || { rm -rf "${tmpdir}"; die "MediaMTX fetch failed: ${url}"; }
@@ -579,7 +580,7 @@ setup_rtmp_gateway() {
     || { rm -rf "${tmpdir}"; die "MediaMTX tarball missing its LICENSE member"; }
   {
     printf 'MediaMTX %s, installed as /usr/local/bin/mediamtx\n\n' "${MEDIAMTX_VERSION}"
-    printf 'Source: %s\n' "${url:-${MEDIAMTX_LOCAL_TARBALL}}"
+    printf 'Source: %s\n' "${url}"
     printf 'Release tarball sha256: %s\n' "${actual}"
     printf 'File: LICENSE, copied verbatim from that tarball\n\n'
     cat "${tmpdir}/LICENSE"

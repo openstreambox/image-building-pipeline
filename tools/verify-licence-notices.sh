@@ -19,9 +19,15 @@ failures=0
 while IFS=$'\t' read -r pkg _ver component source commit path text sha _extra || [[ -n "${pkg:-}" ]]; do
   [[ -z "${pkg}" || "${pkg}" == \#* || "${text}" == "-" ]] && continue
   [[ "${source}" == https://github.com/* ]] || { echo "SKIP ${pkg}: not a GitHub source (${source})"; continue; }
-  url="https://raw.githubusercontent.com/${source#https://github.com/}/${commit}/${path}"
+  url="https://raw.githubusercontent.com/${source#https://github.com/}/${commit}/${path%%#*}"
   if ! curl -fsSL --retry 3 -o "${WORK}/text" "${url}"; then
     echo "FAIL ${pkg} (${component}): cannot fetch ${url}"; failures=$((failures + 1)); continue
+  fi
+  if [[ "${path}" == *'#'* ]]; then
+    range="${path#*#}"
+    [[ "${range}" =~ ^L([0-9]+)-L([0-9]+)$ ]] || { echo "FAIL ${pkg}: invalid source range"; exit 1; }
+    sed -n "${BASH_REMATCH[1]},${BASH_REMATCH[2]}p" "${WORK}/text" > "${WORK}/excerpt"
+    mv "${WORK}/excerpt" "${WORK}/text"
   fi
   upstream="$(sha256sum "${WORK}/text" | awk '{print $1}')"
   vendored="$(sha256sum "${BASE}/${text}" | awk '{print $1}')"

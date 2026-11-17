@@ -45,3 +45,14 @@ text from its source and compares it with the vendored copy.
   `ceralive-apt-credentials`) have no row.
 - Sysext and appfs bundles built from the same `.deb` files do not carry these
   files.
+
+The libsrt notice includes the pinned leading notice blocks from `srtcore/udt.h`, `md5.h`
+and `md5.cpp` to preserve their inherited University of Illinois BSD
+and Aladdin notices with their source line ranges. The verifier extracts these ranges and compares
+them byte for byte with the pinned copies.
+
+The installer queries the installed package database once and fails on query
+errors. `copyright-required.txt` names the first-party application packages
+that must have a nonempty copyright after installation. `cerastream` and
+`ceralive-apt-credentials` remain explicit gaps, excluded from that check until
+public texts are supplied. This does not establish full licence closure.
