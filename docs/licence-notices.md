@@ -122,6 +122,15 @@ archive fails before any output exists. Offline checks on the committed plan
 also require whole-file ranges for notice files, the payload routing, recorded
 exclusion reasons and the gap list.
 
+The default offline checks also parse every shipped text record: its source
+path, byte range and SHA256 must match the plan, and regenerating the complete
+payload from those records must reproduce all framing, scope and identity
+bytes. Updating `SHA256SUMS` alone cannot bless an omitted or truncated notice.
+The installer verifies the plan checksum and its canonical payload digest map
+before inspecting destinations; this requires only the existing shell tools.
+These checks bind the shipped data to the committed plan, not to an external
+signature. Re-deriving the plan's source coverage still requires the archives.
+
 Regenerate on the build host with Python 3.11+ (stdlib only):
 
 ```sh
@@ -163,6 +172,13 @@ A crate or Go module without a licence-named file fails the derivation unless
 `sources.json` lists it as a gap for that exact version, and a listed gap that
 is no longer missing also fails. File names that only look like licences, such
 as `check_license.sh` or `.licenserc.yaml`, do not satisfy this check.
+Every resolved gap names structured evidence: the exact origin, source path
+and whole-file digest retained for that package or its matching supplement.
+Removing that evidence makes both derivation and offline plan validation fail.
+Root and supplemental codeload URLs must agree with their repository and full
+commit, which must also match the archive's Git pax comment and root directory.
+A source-less Cargo.lock package requires a matching name/version manifest in
+the root archive; the plan records that manifest's path and digest.
 
 ### Scope and known gaps
 

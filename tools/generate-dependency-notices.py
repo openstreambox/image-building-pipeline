@@ -145,6 +145,44 @@ def pinned(expected, url):
     return verify
 
 
+def source_pin(entry):
+    name, commit = entry['name'], entry['commit']
+    check(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', name)
+          and re.fullmatch('[0-9a-f]{40}', commit), 'invalid source repository or commit')
+    url = f'https://codeload.github.com/{name}/tar.gz/{commit}'
+    check(entry['url'] == url, 'source URL differs from repository and commit: ' + name)
+
+    def verify(data):
+        pinned(entry['sha256'], url)(data)
+        with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
+            check(archive.pax_headers.get('comment') == commit,
+                  'source archive commit differs from pin: ' + name)
+            top = name.split('/')[1] + '-' + commit
+            check(all(i.name == top or i.name.startswith(top + '/') for i in archive),
+                  'source archive member outside pinned root: ' + name)
+    return verify
+
+
+def workspace_manifests(files):
+    root = tomllib.loads(root_file(files, 'Cargo.toml').decode())
+    inherited = root.get('workspace', {}).get('package', {})
+    result = {}
+    for path, data in files.items():
+        if not path.endswith('/Cargo.toml'):
+            continue
+        package = tomllib.loads(data.decode()).get('package')
+        if not package:
+            continue
+        version = package.get('version')
+        if version == {'workspace': True}:
+            version = inherited.get('version')
+        check(isinstance(version, str), 'unsupported workspace package version: ' + path)
+        key = (package['name'], version)
+        check(key not in result, 'duplicate workspace package manifest: ' + repr(key))
+        result[key] = {'source_path': path, 'source_sha256': sha(data)}
+    return result
+
+
 def inner(path, is_zip):
     # Path below the archive's top directory (a Go module zip's is "<module>@<version>/").
     parts = PurePosixPath(path).parts
@@ -313,7 +351,7 @@ def derive(sources_raw, cache):
     roots = {}
     for root in sources['roots']:
         check(root['payload'] in PAYLOADS and re.fullmatch('[0-9a-f]{40}', root['commit']), 'bad root entry')
-        files, other = load(root['url'], pinned(root['sha256'], root['url']))
+        files, other = load(root['url'], source_pin(root))
         roots[root['payload']] = (root, files)
         packages.append(package(root['name'], root['version'], 'root', root['payload'], root['url'], files, other,
                                 SCOPES['root'].format(commit=root['commit']), excerpts))
@@ -341,11 +379,15 @@ def derive(sources_raw, cache):
     srtla_root = roots['srtla'][1]
     lock = tomllib.loads(root_file(srtla_root, 'Cargo.lock').decode())
     crates = {}
+    workspace = workspace_manifests(srtla_root)
     for entry in lock['package']:
         name, version = entry['name'], entry['version']
         if 'source' not in entry:
+            check((name, version) in workspace,
+                  'Cargo workspace package missing from root archive: ' + name + ' ' + version)
             packages.append({'name': name, 'version': version, 'kind': 'workspace', 'payload': 'srtla',
-                             'scope': SCOPES['workspace'], 'origin': None, 'metadata': None, 'texts': [],
+                             'scope': SCOPES['workspace'], 'origin': None,
+                             'metadata': workspace[(name, version)], 'texts': [],
                              'excluded': []})
             continue
         check(entry['source'] == 'registry+https://github.com/rust-lang/crates.io-index', 'unsupported Cargo source')
@@ -386,10 +428,10 @@ def derive(sources_raw, cache):
             check(target in modules and target[1].endswith('-' + sup['commit'][:12]),
                   'supplement commit is not the Go pseudo-version commit')
             payload = 'mediamtx'
-        files, other = load(sup['url'], pinned(sup['sha256'], sup['url']))
+        files, other = load(sup['url'], source_pin(sup))
         packages.append(package(sup['name'], target[1], 'supplement', payload, sup['url'], files, other,
                                 SCOPES['supplement'].format(commit=sup['commit'], **{'for': '@'.join(target)}),
-                                excerpts))
+                                excerpts, {'for': list(target)}))
 
     plan = {
         'schema': 2,
@@ -420,6 +462,7 @@ def derive(sources_raw, cache):
         'packaging_ready': False,
     }
     check_plan(plan)
+    plan['payload_sha256'] = {name: sha(data) for name, data in render(plan, excerpts).items()}
     return plan, excerpts
 
 
@@ -455,6 +498,18 @@ def check_plan(plan):
     check(not listed - missing, 'listed gap no longer missing (review and remove): ' + repr(sorted(listed - missing)))
     for g in plan['gaps']:
         check(g['resolution'] and isinstance(g['unresolved'], bool), 'gap without a recorded resolution')
+        evidence = g.get('evidence', [])
+        check(g['unresolved'] or evidence, 'resolved gap lacks evidence: ' + g['name'])
+        target = (g['name'], g['version'])
+        for e in evidence:
+            owners = [p for p in plan['packages'] if p['origin'] == e['origin']
+                      and ((p['name'], p['version']) == target or
+                           (p['kind'] == 'supplement' and p['metadata'].get('for') == list(target)))]
+            check(len(owners) == 1 and any(
+                t['source_path'] == e['source_path'] and t['sha256'] == e['sha256']
+                and t['start'] == 0 and t['sha256'] == t['source_sha256']
+                and t['rule'] in ('named', 'embedded-licence') for t in owners[0]['texts']),
+                'gap evidence is not retained whole for its package: ' + g['name'])
     counts = plan['counts']
     check(counts['rust_registry_crates'] == sum(p['kind'] == 'crate' for p in plan['packages'])
           and counts['go_modules_measured'] == sum(p['scope'] == SCOPES['measured'] for p in plan['packages'])
@@ -512,6 +567,29 @@ def render(plan, excerpts):
 
 def sums(result):
     return ''.join(f'{sha(data)}  {name}\n' for name, data in sorted(result.items())).encode()
+
+
+def check_payloads(plan, result):
+    """Verify every planned text byte and all framing without an archive cache."""
+    check_plan(plan)
+    check(set(result) == {'srtla.txt', 'mediamtx.txt', 'identity.tsv'}, 'payload set differs from plan')
+    offsets, excerpts = {k: 0 for k in PAYLOADS}, {}
+    for p in plan['packages']:
+        data = result[p['payload'] + '.txt']
+        for t in p['texts']:
+            marker = (f"File: {t['source_path']}\nSource SHA256: {t['source_sha256']}\n"
+                      f"Bytes: [{t['start']},{t['end']}) SHA256: {t['sha256']}\n\n").encode()
+            start = data.find(marker, offsets[p['payload']])
+            check(start >= 0, 'planned notice missing from payload: ' + t['source_path'])
+            start += len(marker)
+            end = start + t['end'] - t['start']
+            excerpt = data[start:end]
+            check(sha(excerpt) == t['sha256'], 'payload notice bytes differ from plan: ' + t['source_path'])
+            excerpts[(p['origin'], t['source_path'], t['start'], t['end'])] = excerpt
+            offsets[p['payload']] = end + 1
+    check(render(plan, excerpts) == result, 'payload framing or identity differs from plan')
+    check(plan.get('payload_sha256') == {name: sha(data) for name, data in result.items()},
+          'payload digests differ from plan')
 
 
 def generate(base, cache):

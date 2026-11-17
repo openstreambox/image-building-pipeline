@@ -34,9 +34,10 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def targz(files):
+def targz(files, commit=None):
     out = io.BytesIO()
-    with tarfile.open(fileobj=out, mode='w:gz', format=tarfile.GNU_FORMAT) as archive:
+    with tarfile.open(fileobj=out, mode='w:gz', format=tarfile.PAX_FORMAT,
+                      pax_headers={'comment': commit} if commit else {}) as archive:
         for name, data in sorted(files.items()):
             info = tarfile.TarInfo(name)
             info.size, info.mtime = len(data), 0
@@ -114,6 +115,7 @@ class Universe:
         self.supplements = []
         self.release_binaries = {'amd64': b'amd64 binary', 'arm64': None}
         self.goarch, self.revision, self.extra_buildinfo, self.h1_override = 'arm64', MROOT, '', {}
+        self.workspace_manifest = b'[package]\nname = "srtla_send"\nversion = "4.2.0"\n'
 
     def put(self, url, data):
         (self.cache / sha(url.encode())).write_bytes(data)
@@ -137,7 +139,10 @@ class Universe:
                 ('mediamtx', 'bluenviron/mediamtx', 'v1.19.2', MROOT, 'go.sum', sums)):
             url = f'https://codeload.github.com/{name}/tar.gz/{commit}'
             top = name.split('/')[1] + '-' + commit
-            data = targz({f'{top}/{lockname}': lockdata.encode(), f'{top}/LICENSE': LICENSE})
+            files = {f'{top}/{lockname}': lockdata.encode(), f'{top}/LICENSE': LICENSE}
+            if payload == 'srtla':
+                files[f'{top}/Cargo.toml'] = self.workspace_manifest
+            data = targz(files, commit=commit)
             roots.append({'payload': payload, 'name': name, 'version': version, 'commit': commit, 'url': url,
                           'sha256': self.put(url, data), 'lock': lockname})
         releases = []
@@ -286,6 +291,87 @@ class Derivation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unlisted missing licence text'):
             self.u.derive()
 
+    def test_resolved_gap_requires_its_retained_supplement(self):
+        files = self.u.crates[('alpha', '1.0.0')]
+        for path in ('alpha-1.0.0/LICENSE-MIT', 'alpha-1.0.0/APACHE-LICENSE-2.0'):
+            files.pop(path)
+        commit = 'c' * 40
+        files['alpha-1.0.0/.cargo_vcs_info.json'] = json.dumps({'git': {'sha1': commit}}).encode()
+        url = 'https://codeload.github.com/example/alpha/tar.gz/' + commit
+        path = 'alpha-' + commit + '/LICENSE'
+        self.u.supplements = [{'for': ['alpha', '1.0.0'], 'name': 'example/alpha', 'commit': commit,
+                               'url': url, 'sha256': self.u.put(url, targz({path: LICENSE}, commit))}]
+        self.u.gaps = [{'name': 'alpha', 'version': '1.0.0', 'unresolved': False,
+                        'resolution': 'MIT text recovered from recorded source commit.',
+                        'evidence': [{'origin': url, 'source_path': path, 'sha256': sha(LICENSE)}]}]
+        plan, excerpts = self.u.derive()
+        n.check_payloads(plan, n.render(plan, excerpts))
+        swapped = url.replace('example/alpha', 'another/alpha')
+        self.u.put(swapped, (self.u.cache / sha(url.encode())).read_bytes())
+        self.u.supplements[0]['url'] = swapped
+        with self.assertRaisesRegex(ValueError, 'source URL differs'):
+            self.u.derive()
+        self.u.supplements[0]['url'] = url
+        for change in ('no-supplement', 'no-evidence', 'wrong-evidence'):
+            with self.subTest(change=change):
+                original_supplements, original_gaps = copy.deepcopy(self.u.supplements), copy.deepcopy(self.u.gaps)
+                if change == 'no-supplement':
+                    self.u.supplements = []
+                elif change == 'no-evidence':
+                    self.u.gaps[0].pop('evidence')
+                else:
+                    self.u.gaps[0]['evidence'][0]['sha256'] = '0' * 64
+                with self.assertRaisesRegex(ValueError, 'gap.*evidence'):
+                    self.u.derive()
+                self.u.supplements, self.u.gaps = original_supplements, original_gaps
+
+    def test_source_archive_origin_and_commit_are_cross_bound(self):
+        raw = json.loads(self.u.write())
+        for change, message in (('url', 'source URL differs'), ('commit', 'source archive commit differs'),
+                                ('top-member', 'source archive member outside')):
+            sources = copy.deepcopy(raw)
+            entry = sources['roots'][0]
+            if change == 'url':
+                old = entry['url']
+                entry['url'] = entry['url'].replace('CERALIVE', 'another-owner')
+                self.u.put(entry['url'], (self.u.cache / sha(old.encode())).read_bytes())
+            elif change == 'commit':
+                entry['commit'] = 'd' * 40
+                old = entry['url']
+                entry['url'] = old.replace(SROOT, entry['commit'])
+                self.u.put(entry['url'], (self.u.cache / sha(old.encode())).read_bytes())
+            else:
+                data = targz({'loose-file': LICENSE}, commit=SROOT)
+                entry['sha256'] = self.u.put(entry['url'], data)
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, message):
+                n.derive(json.dumps(sources).encode(), n.Cache(self.u.cache))
+
+    def test_workspace_lock_entry_requires_a_root_manifest(self):
+        self.u.workspace_manifest = b'[workspace]\nmembers = []\n'
+        with self.assertRaisesRegex(ValueError, 'workspace package missing from root archive'):
+            self.u.derive()
+
+    def test_offline_payload_bytes_and_framing_match_the_plan(self):
+        plan, excerpts = self.u.derive()
+        result = n.render(plan, excerpts)
+        n.check_payloads(plan, result)
+        for change in ('truncated', 'omitted', 'reordered', 'extra', 'identity'):
+            altered = dict(result)
+            if change == 'truncated':
+                altered['srtla.txt'] = altered['srtla.txt'].replace(LICENSE, b'MIT License\n', 1)
+            elif change == 'omitted':
+                altered['srtla.txt'] = altered['srtla.txt'].replace(THIRD, b'', 1)
+            elif change == 'reordered':
+                altered['srtla.txt'] = altered['srtla.txt'].replace(b'Scope: ', b'Origin: ', 1)
+            elif change == 'extra':
+                altered['mediamtx.txt'] += b'not in plan\n'
+            else:
+                altered['identity.tsv'] += b'srtla\twrong\t1\tarm64\n'
+            # Refreshing packaging checksums must not bless changed plan records.
+            self.assertNotEqual(n.sums(altered), n.sums(result))
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                n.check_payloads(plan, altered)
+
     def test_supplement_must_be_the_recorded_vcs_commit(self):
         files = self.u.crates[('alpha', '1.0.0')]
         files['alpha-1.0.0/.cargo_vcs_info.json'] = json.dumps({'git': {'sha1': 'c' * 40}}).encode()
@@ -347,6 +433,8 @@ class CommittedInventory(unittest.TestCase):
         plan = json.loads(raw)
         self.assertEqual(raw, n.dump(plan))
         n.check_plan(plan)
+        n.check_payloads(plan, {name: (BASE / name).read_bytes()
+                                for name in ('srtla.txt', 'mediamtx.txt', 'identity.tsv')})
         self.assertEqual(plan['sources_sha256'], sha((BASE / 'sources.json').read_bytes()))
         self.assertFalse(plan['packaging_ready'])
         self.assertEqual(plan['counts'], {'go_mod_only_entries': 191, 'go_modules_measured': 85,
@@ -426,6 +514,9 @@ class Installer(unittest.TestCase):
         for name, data in payloads.items():
             (self.base / name).write_bytes(data)
         (self.base / 'SHA256SUMS').write_bytes(n.sums(payloads))
+        plan = n.dump({'payload_sha256': {name: sha(data) for name, data in payloads.items()}})
+        (self.base / 'plan.json').write_bytes(plan)
+        (self.base / 'plan.sha256').write_text(sha(plan) + '\n')
         self.parents = {'srtla': b'srtla 4.2.0\n\nParent MIT notice\n',
                         'mediamtx': (b'MediaMTX v1.19.2, installed as /usr/local/bin/mediamtx\n\nSource: x\n'
                                      b'Release tarball sha256: ' + self.TAR_ARM.encode() + b'\nParent release LICENSE\n')}
@@ -508,6 +599,20 @@ class Installer(unittest.TestCase):
         self.refused("starts with 'srtla 4.1.0'")
         doc.unlink()
         self.refused('srtla/copyright is missing; install-licence-notices.sh must run first')
+
+    def test_rewritten_checksums_do_not_bless_changed_payloads(self):
+        (self.base / 'srtla.txt').write_bytes(b'cut licence\n')
+        payloads = {name: (self.base / name).read_bytes()
+                    for name in ('srtla.txt', 'mediamtx.txt', 'identity.tsv')}
+        (self.base / 'SHA256SUMS').write_bytes(n.sums(payloads))
+        self.refused('notice payloads differ from the reviewed plan')
+
+    def test_missing_or_changed_plan_refuses_before_writes(self):
+        original = (self.base / 'plan.json').read_bytes()
+        (self.base / 'plan.json').write_bytes(original + b'\n')
+        self.refused('plan.json does not match plan.sha256')
+        (self.base / 'plan.json').unlink()
+        self.refused('missing reviewed notice plan')
 
     def test_mediamtx_identity_refusals(self):
         binary = self.root / 'usr/local/bin/mediamtx'

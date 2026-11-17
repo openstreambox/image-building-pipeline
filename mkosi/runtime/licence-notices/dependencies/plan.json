@@ -14,18 +14,49 @@
   },
   "gaps": [
     {
+      "evidence": [
+        {
+          "origin": "https://static.crates.io/crates/r-efi/r-efi-5.3.0.crate",
+          "sha256": "ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7",
+          "source_path": "r-efi-5.3.0/AUTHORS"
+        },
+        {
+          "origin": "https://codeload.github.com/r-efi/r-efi/tar.gz/97b55bed1c2c91dcbf787674849f05337ff80b33",
+          "sha256": "ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7",
+          "source_path": "r-efi-97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS"
+        }
+      ],
       "name": "r-efi",
       "resolution": "The crate ships no licence-named file. Its AUTHORS file contains the verbatim MIT permission and warranty text, the Apache-2.0 and LGPL-2.1 notices and the authorship; it is retained whole. The same AUTHORS file at the commit recorded in the crate's .cargo_vcs_info.json is retained as a supplement.",
       "unresolved": false,
       "version": "5.3.0"
     },
     {
+      "evidence": [
+        {
+          "origin": "https://static.crates.io/crates/r-efi/r-efi-6.0.0.crate",
+          "sha256": "d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111",
+          "source_path": "r-efi-6.0.0/AUTHORS"
+        },
+        {
+          "origin": "https://codeload.github.com/r-efi/r-efi/tar.gz/7e1b0322d31d625f81a5656096330934f9cd835d",
+          "sha256": "d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111",
+          "source_path": "r-efi-7e1b0322d31d625f81a5656096330934f9cd835d/AUTHORS"
+        }
+      ],
       "name": "r-efi",
       "resolution": "The crate ships no licence-named file. Its AUTHORS file contains the verbatim MIT permission and warranty text, the Apache-2.0 and LGPL-2.1 notices and the authorship; it is retained whole. The same AUTHORS file at the commit recorded in the crate's .cargo_vcs_info.json is retained as a supplement.",
       "unresolved": false,
       "version": "6.0.0"
     },
     {
+      "evidence": [
+        {
+          "origin": "https://codeload.github.com/tokio-rs/valuable/tar.gz/9efc29b6e58cef28f6566a47aa7e142a55fead77",
+          "sha256": "ed60d479b8fd1f64e9cbc3de449a16a53ac1b3d1b6aeb9bf9d190a8e93061b44",
+          "source_path": "valuable-9efc29b6e58cef28f6566a47aa7e142a55fead77/LICENSE"
+        }
+      ],
       "name": "valuable",
       "resolution": "The crate declares MIT but ships no licence file. The MIT LICENSE is retained from the repository at the exact commit recorded in the crate's .cargo_vcs_info.json.",
       "unresolved": false,
@@ -4319,7 +4350,10 @@
     {
       "excluded": [],
       "kind": "workspace",
-      "metadata": null,
+      "metadata": {
+        "source_path": "srtla-send-rs-1b5febb767ac2af3a275dc7ea2926bcb882001e7/crates/network-sim/Cargo.toml",
+        "source_sha256": "1f61cc504b89f97f22e81e93877a1fab37906d44866fd50f7f500b936f400db5"
+      },
       "name": "network-sim",
       "origin": null,
       "payload": "srtla",
@@ -7242,7 +7276,10 @@
     {
       "excluded": [],
       "kind": "workspace",
-      "metadata": null,
+      "metadata": {
+        "source_path": "srtla-send-rs-1b5febb767ac2af3a275dc7ea2926bcb882001e7/crates/srtla-core/Cargo.toml",
+        "source_sha256": "c6a0bab27a996d2db432a665906dc5a2740a94704e694269e7a4aa9847d1e6b8"
+      },
       "name": "srtla-core",
       "origin": null,
       "payload": "srtla",
@@ -7253,7 +7290,10 @@
     {
       "excluded": [],
       "kind": "workspace",
-      "metadata": null,
+      "metadata": {
+        "source_path": "srtla-send-rs-1b5febb767ac2af3a275dc7ea2926bcb882001e7/crates/srtla-protocol/Cargo.toml",
+        "source_sha256": "3cca4ac8615efe27d10478e3a212eeca3bed335eb627b4a38edb0a738f808ed8"
+      },
       "name": "srtla-protocol",
       "origin": null,
       "payload": "srtla",
@@ -7264,7 +7304,10 @@
     {
       "excluded": [],
       "kind": "workspace",
-      "metadata": null,
+      "metadata": {
+        "source_path": "srtla-send-rs-1b5febb767ac2af3a275dc7ea2926bcb882001e7/Cargo.toml",
+        "source_sha256": "b98bda5172f7cb909e48048d31a17f86703636b69f2e2603525d7660a8a9c59b"
+      },
       "name": "srtla_send",
       "origin": null,
       "payload": "srtla",
@@ -77369,7 +77412,12 @@
     {
       "excluded": [],
       "kind": "supplement",
-      "metadata": null,
+      "metadata": {
+        "for": [
+          "r-efi",
+          "5.3.0"
+        ]
+      },
       "name": "r-efi/r-efi",
       "origin": "https://codeload.github.com/r-efi/r-efi/tar.gz/97b55bed1c2c91dcbf787674849f05337ff80b33",
       "payload": "srtla",
@@ -77389,7 +77437,12 @@
     {
       "excluded": [],
       "kind": "supplement",
-      "metadata": null,
+      "metadata": {
+        "for": [
+          "r-efi",
+          "6.0.0"
+        ]
+      },
       "name": "r-efi/r-efi",
       "origin": "https://codeload.github.com/r-efi/r-efi/tar.gz/7e1b0322d31d625f81a5656096330934f9cd835d",
       "payload": "srtla",
@@ -77409,7 +77462,12 @@
     {
       "excluded": [],
       "kind": "supplement",
-      "metadata": null,
+      "metadata": {
+        "for": [
+          "valuable",
+          "0.1.1"
+        ]
+      },
       "name": "tokio-rs/valuable",
       "origin": "https://codeload.github.com/tokio-rs/valuable/tar.gz/9efc29b6e58cef28f6566a47aa7e142a55fead77",
       "payload": "srtla",
@@ -77429,7 +77487,12 @@
     {
       "excluded": [],
       "kind": "supplement",
-      "metadata": null,
+      "metadata": {
+        "for": [
+          "github.com/benburkert/openpgp",
+          "v0.0.0-20160410205803-c2471f86866c"
+        ]
+      },
       "name": "benburkert/openpgp",
       "origin": "https://codeload.github.com/benburkert/openpgp/tar.gz/c2471f86866ca6ab0679b9d216cb6a84cfe90db1",
       "payload": "mediamtx",
@@ -77848,8 +77911,13 @@
     }
   ],
   "packaging_ready": false,
+  "payload_sha256": {
+    "identity.tsv": "599cfa307f6592e4667060b45cf490e16ea779e66b07fe45abc8e90ecc8935c3",
+    "mediamtx.txt": "2407c3db528ebe59402e2a88d6432a1eb8410830403415966dd511d34e482e90",
+    "srtla.txt": "20421b2e9fee3ddeaca0942cb18b17bc7836eaabaf65180f2fb0ca855c02e837"
+  },
   "schema": 2,
-  "sources_sha256": "bbd918084cd32dc2a5d440bde98efbbb1badbcbac3e6e8aba7941e4044ee32a9",
+  "sources_sha256": "119c2f4fa98a0b9d667ef3c227f63a5fdc87af34ef5d72e6258e24d2135a636d",
   "srtla_identity": {
     "architectures": [
       "amd64",

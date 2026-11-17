@@ -44,6 +44,24 @@ if ! (cd "${BASE}" && sha256sum --check --strict SHA256SUMS) > "${WORK}/sums" 2>
   die "dependency notice payloads do not match SHA256SUMS: $(grep -v ': OK$' "${WORK}/sums" | tr '\n' ' ')"
 fi
 
+# The generated plan binds payload hashes independently of SHA256SUMS. The host
+# checker also parses every text record against this plan without source archives.
+[[ -f "${BASE}/plan.json" && -f "${BASE}/plan.sha256" ]] || die "missing reviewed notice plan"
+read -r expected_plan < "${BASE}/plan.sha256"
+[[ "${expected_plan}" =~ ^[0-9a-f]{64}$ ]] || die "invalid plan.sha256"
+actual_plan="$(sha256sum "${BASE}/plan.json" | awk '{print $1}')"
+[[ "${actual_plan}" == "${expected_plan}" ]] || die "plan.json does not match plan.sha256"
+# Deliberately accept only the generator's canonical, flat digest map. A format
+# change must update this reader and its host contract rather than skip it.
+sed -n '/^  "payload_sha256": {$/,/^  },$/p' "${BASE}/plan.json" \
+  | sed -nE 's/^    "(identity.tsv|mediamtx.txt|srtla.txt)": "([0-9a-f]{64})",?$/\2  \1/p' \
+  > "${WORK}/planned-sums"
+[[ "$(awk '{print $2}' "${WORK}/planned-sums" | sort | tr '\n' ' ')" == \
+  'identity.tsv mediamtx.txt srtla.txt ' ]] || die "plan lacks exactly three payload digests"
+if ! (cd "${BASE}" && sha256sum --check --strict "${WORK}/planned-sums") > "${WORK}/plan-check" 2>&1; then
+  die "notice payloads differ from the reviewed plan"
+fi
+
 srtla_rows=() mtx_rows=()
 while IFS=$'\t' read -r kind rest || [[ -n "${kind:-}" ]]; do
   [[ -z "${kind}" || "${kind}" == \#* ]] && continue
