@@ -49,6 +49,7 @@ tests/hdmirx-edid-contract.bats	bats	unit	default-bats	HDMI-RX EDID install/enab
 tests/journal-diagnosability.bats	bats	unit	default-bats	journald retention budget, validated persistent machine-id, one-time journal-dir migration
 tests/variant-contract.bats	bats	unit	default-bats	family variants, kernel-source pins, production-baseline byte parity
 tests/bootloader-variant.bats	bats	unit	default-bats	per-variant U-Boot selection, committed blob-identity map, readback verification and unmapped-tuple refusal
+tests/radxa-zero-3w-contract.bats	bats	unit	default-bats	RK3566 ZERO 3W resolve, shared boot env, unpinned U-Boot refusal, ROCK 5B+ baseline unchanged
 tests/rk3588-ab-contract.bats	bats	integration	default-bats	real RK3588 A/B disk geometry and preflash gate, no hardware
 tests/bench-partlabels.bats	bats	unit	default-bats	opt-in bench PARTLABEL overlay and its production no-op
 tests/boot-artifacts.bats	bats	unit	default-bats	/boot completeness and raw ARM64 Image magic on both kernel paths

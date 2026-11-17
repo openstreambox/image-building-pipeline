@@ -249,7 +249,7 @@ PY
   local tree="$BATS_TEST_TMPDIR/rootfs-committed"
   mkdir -p "$tree"
   head -c 4096 /dev/zero > "$tree/a.bin"
-  for board in orange-pi-5-plus rock-5b-plus x86-minipc; do
+  for board in orange-pi-5-plus rock-5b-plus x86-minipc radxa-zero-3w; do
     run "$MEASURE_SH" "$board" "$tree"
     [ "$status" -eq 0 ]
     [[ "$output" =~ measured=[0-9]+\ budget=[0-9]+\ \(enforced\) ]]
