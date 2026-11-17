@@ -17,11 +17,13 @@
 #   1. glob removal — every non-comment, non-blank line of
 #      /usr/lib/ceralive/prune-paths.list (the on-device copy of the manifest;
 #      see that file's own header for the single-source design), `rm -rf`'d.
-#   2. doc reduction — /usr/share/doc reduced to copyright files only, the
-#      SAME rule the app layer's prune_package_docs() applies at build time
-#      (mkosi.images/app/mkosi.postinst.chroot). Kept as its own pass rather
-#      than glob-list-driven because it is a "keep this one filename, strip
-#      the rest" rule, not a glob-removal rule.
+#   2. doc reduction — /usr/share/doc reduced to its licence, notice and
+#      authorship files, by the SAME rule the app layer's prune_package_docs()
+#      applies at build time: both source doc-notice-policy.sh (installed at
+#      /usr/lib/ceralive/doc-notice-policy.sh). Kept as its own pass rather than
+#      glob-list-driven because it is a "keep these names, strip the rest" rule,
+#      not a glob-removal rule. Without a readable policy file the docs are left
+#      alone: keeping a changelog is harmless, deleting a notice is not.
 #
 # NEVER FAILS DPKG: this hook runs after dpkg has already committed the
 # transaction (Post-Invoke, not Pre-Invoke), so a prune failure here must never
@@ -38,6 +40,7 @@ set -uo pipefail
 PROG="ceralive-reprune"
 PRUNE_PATHS_FILE="${CERALIVE_PRUNE_PATHS_LIST:-/usr/lib/ceralive/prune-paths.list}"
 DOC_ROOT="${CERALIVE_DOC_ROOT:-/usr/share/doc}"
+DOC_POLICY="${CERALIVE_DOC_POLICY:-/usr/lib/ceralive/doc-notice-policy.sh}"
 
 log() { printf '%s: %s\n' "${PROG}" "$*" >&2; }
 
@@ -83,16 +86,25 @@ prune_manifest_globs() {
   shopt -u nullglob
 }
 
-prune_docs_to_copyright() {
+prune_docs_to_notices() {
   [[ -d "${DOC_ROOT}" ]] || return 0
-  find "${DOC_ROOT}" -type f ! -name copyright -delete 2>/dev/null \
-    || log "doc reduction: some entries under ${DOC_ROOT} could not be removed (non-fatal)"
-  find "${DOC_ROOT}" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+  # shellcheck source=mkosi/runtime/doc-notice-policy.sh
+  if [[ ! -r "${DOC_POLICY}" ]] || ! source "${DOC_POLICY}"; then
+    log "doc reduction skipped: cannot load ${DOC_POLICY} (docs left in place)"
+    return 0
+  fi
+  local rc=0
+  doc_notice_prune "${DOC_ROOT}" 2>/dev/null || rc=$?
+  case "${rc}" in
+    0) ;;
+    2) log "doc reduction skipped: unsafe doc root ${DOC_ROOT} (non-fatal)" ;;
+    *) log "doc reduction: some entries under ${DOC_ROOT} could not be removed (non-fatal)" ;;
+  esac
 }
 
 main() {
   prune_manifest_globs
-  prune_docs_to_copyright
+  prune_docs_to_notices
   exit 0
 }
 

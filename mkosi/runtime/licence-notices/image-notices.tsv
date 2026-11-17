@@ -1,0 +1,16 @@
+# Licence and notice texts for files the image build installs itself, outside
+# any package: the scripts, units and configuration this repository puts into
+# the rootfs, and the portal brand mark.
+#
+# Read by install-image-notices.sh, which copies each text verbatim to its
+# destination. Each text under texts/ is a verbatim copy of <path> in <source> at
+# <commit>, pinned by sha256; tools/verify-licence-notices.sh re-fetches and
+# compares them, and tests/image-notices.test.sh checks they still equal this
+# repository's own files.
+#
+# Columns (tab-separated): destination source commit path text sha256
+/usr/share/licenses/image-building-pipeline/LICENSE	https://github.com/CERALIVE/image-building-pipeline	7188c7907042bf43da997681a27201b56e962488	LICENSE	texts/image-building-pipeline-7188c790-LICENSE	88135728414b9aed647ba9f3ad99074c066585e60dee17d8acb720c587a00653
+/usr/share/licenses/image-building-pipeline/LICENSE-MIT	https://github.com/CERALIVE/image-building-pipeline	7188c7907042bf43da997681a27201b56e962488	LICENSE-MIT	texts/image-building-pipeline-7188c790-LICENSE-MIT	4a0b47f9ed7242ede1571c7ce7635678cae7976c2ce44a0eefe2a880a006dfd8
+/usr/share/licenses/image-building-pipeline/LICENSE-APACHE	https://github.com/CERALIVE/image-building-pipeline	7188c7907042bf43da997681a27201b56e962488	LICENSE-APACHE	texts/image-building-pipeline-7188c790-LICENSE-APACHE	11d39bba4aa117d68073a21639c9a83b691dbc352ecf8a5f3b5e3809f56fa93f
+/usr/share/ceralive/brand/BRAND-ASSETS-NOTICE.md	https://github.com/CERALIVE/image-building-pipeline	7188c7907042bf43da997681a27201b56e962488	BRAND-ASSETS-NOTICE.md	texts/image-building-pipeline-7188c790-BRAND-ASSETS-NOTICE.md	b56faa22d7ad5e4ace0b14f4e7734d4a99d9a8576141e24352fc7851963669b4
+/usr/share/ceralive/brand/brand-assets.lock.json	https://github.com/CERALIVE/image-building-pipeline	7188c7907042bf43da997681a27201b56e962488	brand-assets.lock.json	texts/image-building-pipeline-7188c790-brand-assets.lock.json	f62c54bb308b545d566251653dcff70755634942ce2703c6c91d86d2def14677

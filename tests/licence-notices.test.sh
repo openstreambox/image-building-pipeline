@@ -14,7 +14,7 @@
 # Part C — setup_rtmp_gateway installs the verified tarball's LICENSE as
 #          /usr/share/doc/mediamtx/copyright and refuses a tarball without one.
 # Part D — the app layer runs the script after installing the first-party .debs
-#          and before the doc prune, which keeps only files named copyright.
+#          and before the doc prune, which keeps each package's copyright file.
 #
 # shellcheck disable=SC2016
 

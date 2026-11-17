@@ -837,8 +837,18 @@ because each is a case where the obvious placement is the wrong one:
   BEFORE the maintainer scripts that register them as alternative slaves run: 13
   warnings plus one hard `update-alternatives: error`. Every layer now installs
   docs and the FINAL app layer prunes them
-  (`app/mkosi.postinst.chroot::prune_package_docs`, which keeps
-  `/usr/share/doc/*/copyright`). Do not re-add `WithDocs=no` to any layer.
+  (`app/mkosi.postinst.chroot::prune_package_docs`, which keeps every
+  `/usr/share/doc/*/copyright` and the licence, notice and authorship files
+  beside it). Do not re-add `WithDocs=no` to any layer.
+- **One doc rule for build and device.** `mkosi/runtime/doc-notice-policy.sh`
+  decides what survives the doc prune: `copyright*`, `COPYING*`, `LICENSE*`,
+  `NOTICE*`, `AUTHORS*`, `CREDITS*` and similar names, any case or compression.
+  `prune_package_docs` sources it from `$SRCDIR`; the runtime layer installs it at
+  `/usr/lib/ceralive/doc-notice-policy.sh` for `ceralive-reprune`, which leaves
+  the docs alone when it cannot load it. Do not give either consumer its own
+  `find ... ! -name copyright` rule again: it deleted NOTICE, second copyright,
+  COPYING and AUTHORS files that packages carry only there
+  (`tests/doc-notice-prune.test.sh`).
 - **`zstd` in `shared.list` is too LATE.** The runtime layer installs
   `shared.list` after the platform layer already generated the initrd, so
   initramfs-tools fell back to gzip on every build. `platform/mkosi.postinst`
@@ -3894,6 +3904,15 @@ same glob list.
 `partial/` subdir), so downloaded `.deb`s persist across reboots and future
 software updates instead of the rootfs slot's own (small, RAUC-swapped)
 `/var/cache/apt/archives`.
+The runtime layer downloads `shared.list` BEFORE it writes that file, so those
+packages land in the slot's `/var/cache/apt/archives`, and the app layer inherits
+the redirect: a bare `apt-get clean` there cleans only the `/data` path. The app
+layer's `clean_apt_archives` therefore cleans the default directory and the one
+`Dir::Cache::archives` resolves to, by name, and `assert_no_apt_archives` fails the
+build on any package left in either (top level or `partial/`). `stage_tar_emit`
+repeats the check on the emitted tar (`lib/verify-no-apt-archives.sh`). A `.deb`
+elsewhere in the tree is not judged, and the device cache setting is unchanged
+(`tests/apt-archives-shipped.test.sh`).
 
 **Third-party RK3588 MPP runtime joins the kernel-freeze hold set — gated on
 RESOLVED package membership, never a blind architecture check.**

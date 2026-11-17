@@ -56,7 +56,7 @@ ARCH=arm64 SOURCE_DATE_EPOCH=1780000000 DEBS="$stage/debs" LIB="$HERE/lib" check
   source "$LIB/fetch/userspace.sh"
   build_libv4l0_compat_deb "$DEBS"
 '
-hash_c="$(sha256sum "$stage/debs/libv4l-0_1.30.1-1+ceralive1_arm64.deb" | cut -d' ' -f1)"
+hash_c="$(sha256sum "$stage/debs/libv4l-0_1.30.1-1+ceralive2_arm64.deb" | cut -d' ' -f1)"
 cat >"$root/var/lib/dpkg/status" <<'EOF'
 Package: apt-example
 Status: install ok installed
@@ -71,7 +71,7 @@ Version: 2.0
 Package: libv4l-0
 Status: install ok installed
 Architecture: arm64
-Version: 1.30.1-1+ceralive1
+Version: 1.30.1-1+ceralive2
 
 Package: linux-image-test
 Status: hold ok installed

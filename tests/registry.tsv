@@ -112,6 +112,7 @@ tests/uart-console-path.test.sh	shell	unit	default-shell	CI-UART bootstrap targe
 tests/uart-bootstrap-tty.test.sh	shell	unit	default-shell	tty-class-aware stty: tolerant on FIQ, fatal on a real UART
 tests/postinst-module-contract.test.sh	shell	unit	default-shell	every postinst registry function resolves from a bare source
 tests/licence-notices.test.sh	shell	unit	default-shell	copyright files for first-party packages without one, and the MediaMTX licence
+tests/image-notices.test.sh	shell	unit	default-shell	this repository's licence files and the portal brand notice, installed verbatim
 tests/systemd-ordering-cycle.test.sh	shell	unit	default-shell	zero ordering cycles plus the sysinit-phase ordering probe
 tests/ssh-firstboot-privsep.test.sh	shell	unit	default-shell	/run/sshd is created before sshd -t on an empty-/run first boot
 tests/ssh-enablement-contract.test.sh	shell	unit	default-shell	production ssh stays disabled: no SIGPIPE-racing unit probe, landed-disable assertion, first-boot preset
@@ -125,6 +126,8 @@ tests/apt-preferences-baked.test.sh	shell	unit	default-shell	the origin-990 apt 
 tests/apt-first-party-origin.test.sh	shell	integration	default-shell	real offline APT rejects foreign first-party candidates when ours is absent
 tests/prune-paths-removefiles.test.sh	shell	integration	default-shell	single-source prune-paths.list generates a real mkosi RemoveFiles= merge (Todo 29)
 tests/reprune-hook.test.sh	shell	integration	default-shell	device reprune hook + apt cache writer, real glob/doc pruning, never fails dpkg (Todo 29)
+tests/doc-notice-prune.test.sh	shell	unit	default-shell	build and device doc prunes keep licence, notice and authorship files byte for byte
+tests/apt-archives-shipped.test.sh	shell	integration	default-shell	no downloaded apt packages in either archive directory or the emitted rootfs tar
 tests/apt-mtls-and-dedupe.test.sh	shell	unit	default-shell	_apt-readable client key, one Debian source, arch-qualified URI
 tests/kernel-freeze-guardrails.test.sh	shell	integration	default-shell	holds plus pin block a real apt-get -s upgrade, first-party still upgrades
 tests/edge-test-variant.test.sh	shell	unit	default-shell	edge-test sibling-variant inheritance, ordered defconfig fragments, and the release refusal for a debug kernel

@@ -786,7 +786,7 @@ PY
   [ "$(sed -n 's/^v4l-utils[[:space:]]*//p' "$shared" | head -n 1 >/dev/null; grep -n '^v4l-utils[[:space:]]' "$shared" | cut -d: -f1)" -lt "$(grep -n '^libv4l-0[[:space:]]' "$shared" | cut -d: -f1)" ]
 }
 
-@test "RK3588 multimedia config: generated libv4l-0 compat package carries exactly the t64 library symlink" {
+@test "RK3588 multimedia config: generated libv4l-0 compat package carries exactly the t64 library symlink and a copyright pointer" {
   local debs="$BATS_TEST_TMPDIR/libv4l-compat-debs"
   local root="$BATS_TEST_TMPDIR/libv4l-compat-root"
   mkdir -p "$debs" "$root"
@@ -795,19 +795,42 @@ PY
     'source "$1"; build_libv4l0_compat_deb "$2"' bash "$FETCH_DEBS" "$debs"
   [ "$status" -eq 0 ]
 
-  local deb="$debs/libv4l-0_1.30.1-1+ceralive1_arm64.deb"
+  local deb="$debs/libv4l-0_1.30.1-1+ceralive2_arm64.deb"
   [ -f "$deb" ]
   [ "$(bash -c 'source "$1"; deb_pkg_name "$2"' bash "$FETCH_DEBS" "$deb")" = "libv4l-0" ]
-  [ "$(bash -c 'source "$1"; deb_pkg_version "$2"' bash "$FETCH_DEBS" "$deb")" = "1.30.1-1+ceralive1" ]
+  [ "$(bash -c 'source "$1"; deb_pkg_version "$2"' bash "$FETCH_DEBS" "$deb")" = "1.30.1-1+ceralive2" ]
   [ "$(bash -c 'source "$1"; deb_pkg_arch "$2"' bash "$FETCH_DEBS" "$deb")" = "arm64" ]
   [ "$(bash -c 'source "$1"; deb_control_field "$2" Depends' bash "$FETCH_DEBS" "$deb")" = "libv4l-0t64" ]
 
+  # Every member of the real package, with its mode: the symlink, and the one
+  # doc file images keep. Nothing else.
+  if command -v dpkg-deb >/dev/null 2>&1; then
+    run bash -c "dpkg-deb -c '$deb' | awk '\$1 !~ /^d/ {print \$1, \$6}'"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 2 ]
+    [ "${lines[0]}" = "-rw-r--r-- ./usr/share/doc/libv4l-0/copyright" ]
+    [ "${lines[1]}" = "lrwxrwxrwx ./usr/share/libv4l-0-compat/libv4l2.so.0.0.0" ]
+    run bash -c "dpkg-deb -c '$deb' | awk '\$6 == \"./usr/share/doc/libv4l-0/\" {print \$1}'"
+    [ "$output" = "drwxr-xr-x" ]
+  fi
+
   bash -c 'source "$1"; explode_deb "$2" "$3"' bash "$FETCH_DEBS" "$deb" "$root"
-  [ "$(find "$root" -type f | wc -l)" -eq 0 ]
+  [ "$(find "$root" -type f | wc -l)" -eq 1 ]
   [ "$(find "$root" -type l | wc -l)" -eq 1 ]
   local link="$root/usr/share/libv4l-0-compat/libv4l2.so.0.0.0"
   [ -L "$link" ]
   [ "$(readlink "$link")" = "/usr/lib/aarch64-linux-gnu/libv4l2.so.0.0.0" ]
+
+  # The copyright file points at the package the symlink resolves into and the
+  # package depends on (libv4l-0t64 installs that library and its copyright).
+  # It names this exact version and grants nothing of its own.
+  local copyright="$root/usr/share/doc/libv4l-0/copyright"
+  [ -f "$copyright" ]
+  [ "$(head -n 1 "$copyright")" = "libv4l-0 1.30.1-1+ceralive2" ]
+  grep -Fxq '/usr/share/doc/libv4l-0t64/copyright, installed by libv4l-0t64.' "$copyright"
+  grep -Fq 'It contains no code of its own.' "$copyright"
+  run grep -Eiq 'permission is hereby granted|licensed under|GNU (Lesser )?General Public License' "$copyright"
+  [ "$status" -ne 0 ]
 
   grep -Fq 'work="$(mktemp -d "${debs}/.libv4l-0-compat.XXXXXX")"' \
     "$REPO_ROOT/lib/fetch/userspace.sh"

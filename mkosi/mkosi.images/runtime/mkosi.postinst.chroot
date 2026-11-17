@@ -296,6 +296,7 @@ setup_prune_reprune_and_cache() {
   chmod 0644 /usr/lib/ceralive/prune-paths.list
 
   install -D -m 0755 "${CERALIVE_RUNTIME_SRC}/ceralive-reprune.sh" /usr/libexec/ceralive/ceralive-reprune
+  install -D -m 0644 "${CERALIVE_RUNTIME_SRC}/doc-notice-policy.sh" /usr/lib/ceralive/doc-notice-policy.sh
 
   cat >/etc/apt/apt.conf.d/80ceralive-reprune <<'EOF'
 DPkg::Post-Invoke {"/usr/libexec/ceralive/ceralive-reprune";};

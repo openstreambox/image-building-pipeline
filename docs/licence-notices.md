@@ -1,8 +1,10 @@
 # Licence notices in the image
 
-The image keeps only files named `copyright` under `/usr/share/doc`: the app
-layer prunes everything else, and `ceralive-reprune` repeats that after every apt
-run. Licence texts therefore have to arrive as `/usr/share/doc/<name>/copyright`.
+Under `/usr/share/doc` the image keeps each package's licence, notice and
+authorship files (`copyright`, `copyright.*`, `COPYING*`, `LICENSE*`, `NOTICE*`,
+`AUTHORS*`, `CREDITS*` and similar names) and prunes the rest; `ceralive-reprune`
+applies the same rule (`mkosi/runtime/doc-notice-policy.sh`) after every apt run.
+Notices this build adds for a package go into `/usr/share/doc/<name>/copyright`.
 
 ## What adds them
 
@@ -13,6 +15,18 @@ run. Licence texts therefore have to arrive as `/usr/share/doc/<name>/copyright`
   `.deb` files are installed and writes `/usr/share/doc/<package>/copyright`.
 - **MediaMTX.** `setup_rtmp_gateway` copies the `LICENSE` member of the verified
   release tarball to `/usr/share/doc/mediamtx/copyright`.
+- **This repository's own runtime files and the portal brand mark.** No package
+  owns them. `image-notices.tsv` pins verbatim copies of this repository's
+  `LICENSE`, `LICENSE-MIT` and `LICENSE-APACHE` (installed under
+  `/usr/share/licenses/image-building-pipeline/` with a README naming source and
+  commit) and of `BRAND-ASSETS-NOTICE.md` and `brand-assets.lock.json` (installed
+  next to the brand mark in `/usr/share/ceralive/brand/`).
+  `install-image-notices.sh` fails when a text changed or when the installed
+  brand mark is not the one the lock records. `tests/image-notices.test.sh`
+  checks the copies still equal the files at the repository root.
+- **The generated `libv4l-0` compatibility package.** Its only content is a
+  symlink into `libv4l-0t64`, so its copyright file points at
+  `/usr/share/doc/libv4l-0t64/copyright` and adds no terms of its own.
 
 ## When it fails
 

@@ -46,7 +46,7 @@
 #      ALSO applies these same globs (reading the already-installed device copy
 #      at /usr/lib/ceralive/prune-paths.list, inherited via BaseTrees=%O/runtime)
 #      as an additional pass alongside its existing /usr/share/doc
-#      copyright-only reduction. Safe and redundant-by-design at that point —
+#      reduction to licence and notice files. Safe and redundant-by-design at that point —
 #      the runtime layer already stripped these — proving the same manifest
 #      drives every layer without duplicating the literal glob list.
 #
