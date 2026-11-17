@@ -336,6 +336,76 @@ load manifest-helpers
   printf '%s\n' "$output"
 }
 
+@test "hostname: publication-only drift reclaims the same identity without consumer jobs" {
+  local root="$BATS_TEST_TMPDIR/reconcile-publication-only"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"systemctl --no-block restart"* ]]
+
+  printf 'ceralive-2\n' >"$root/avahi/published"
+  : >"$root/calls"
+  run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"publication diverged"* ]]
+  [[ "$output" == *"reconciled and established ceralive.local"* ]]
+  [[ "$output" == *"index=1"* ]]
+  [[ "$output" == *"published=ceralive"* ]]
+  ! grep -Fq systemctl "$root/calls"
+  ! grep -Fq hostname_consumers_pending "$root/calls"
+  [ ! -e "$root/state/hostname_consumers_pending" ]
+}
+
+@test "hostname: each divergent local identity source requires one consumer restart" {
+  local root source
+  for source in system-hostname hostname hosts; do
+    root="$BATS_TEST_TMPDIR/reconcile-local-$source"
+    make_hostname_fixture "$root"
+    run run_hostname_script "$root"
+    [ "$status" -eq 0 ]
+    if [[ "$source" = hosts ]]; then
+      printf '127.0.0.1 localhost\n127.0.1.1 factory-seed\n' >"$root/hosts"
+    else
+      printf 'factory-seed\n' >"$root/$source"
+    fi
+    : >"$root/calls"
+    run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+    [ "$status" -eq 0 ]
+    [ "$(grep -Fc 'systemctl --no-block restart ceralive-tls-firstboot.service ceralive.service ceralive-hawkbit-provision.service' "$root/calls")" -eq 1 ]
+    [[ "$output" == *"system-hostname=ceralive"* ]]
+    [[ "$output" == *"hostname-file=ceralive"* ]]
+    [[ "$output" == *"hosts=ceralive"* ]]
+    [ ! -e "$root/state/hostname_consumers_pending" ]
+    : >"$root/calls"
+    run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"systemctl --no-block restart"* ]]
+  done
+}
+
+@test "hostname: publication-only reclaim retries an earlier failed consumer restart" {
+  local root="$BATS_TEST_TMPDIR/reconcile-publication-pending"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  printf 'ceralive\n' >"$root/state/hostname_consumers_pending"
+  printf 'ceralive-2\n' >"$root/avahi/published"
+  : >"$root/calls"
+  HOSTNAME_SYSTEMCTL_SCENARIO=fail run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -ne 0 ]
+  [ -e "$root/state/hostname_consumers_pending" ]
+  printf 'ceralive-2\n' >"$root/avahi/published"
+  : >"$root/calls"
+  run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [ "$(grep -Fc 'systemctl --no-block restart ceralive-tls-firstboot.service ceralive.service ceralive-hawkbit-provision.service' "$root/calls")" -eq 1 ]
+  [ ! -e "$root/state/hostname_consumers_pending" ]
+  : >"$root/calls"
+  run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"systemctl --no-block restart"* ]]
+}
+
 @test "hostname: late Avahi rename advances identity and restarts every consumer" {
   local root="$BATS_TEST_TMPDIR/reconcile-conflict"
   make_hostname_fixture "$root"
@@ -355,6 +425,12 @@ load manifest-helpers
   [[ "$output" == *"published=ceralive2"* ]]
   [[ "$output" == *"systemctl --no-block restart ceralive-tls-firstboot.service ceralive.service ceralive-hawkbit-provision.service"* ]]
   [[ "$output" != *"system-hostname=ceralive-2"* ]]
+  [ "$(grep -Fc 'systemctl --no-block restart ceralive-tls-firstboot.service ceralive.service ceralive-hawkbit-provision.service' "$root/calls")" -eq 1 ]
+  [ ! -e "$root/state/hostname_consumers_pending" ]
+  : >"$root/calls"
+  run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"systemctl --no-block restart"* ]]
   printf '%s\n' "$output"
 }
 

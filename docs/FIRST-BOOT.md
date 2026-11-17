@@ -219,8 +219,12 @@ domain exists, unavailable or malformed Avahi responses fail closed rather than
 guessing ownership. The local allocation lock is bounded to 10 seconds. The
 private setup-hotspot address is deliberately excluded because separate devices
 cannot arbitrate ownership across isolated APs; Ethernet IPv4 link-local is still
-accepted as a real shared collision domain. After reconciliation succeeds,
-systemd requeues CeraUI, TLS/nginx, hawkBit enrollment, and the boot healthcheck.
+accepted as a real shared collision domain. After reconciliation changes the
+local identity, systemd requeues CeraUI, TLS/nginx, hawkBit enrollment, and the boot healthcheck.
+If only Avahi's publication drifted, reclaiming the same name leaves consumers
+running when the runtime hostname, `/etc/hostname`, and `/etc/hosts` already
+agree. A pending consumer restart from an earlier interrupted attempt is still
+retried, even when those names match.
 
 The periodic check detects a conflict within 30 seconds after Avahi exposes it.
 Any resulting re-claim uses the same 120-second global budget and 3-second call
