@@ -385,7 +385,7 @@ def runtime_packages(config, cache, measurement, inputs, excerpts):
         raw, _ = cache.get(url, pinned(entry['sha256'], url))
         check(len(raw) == entry['size'], 'runtime input size mismatch')
         data[name] = raw
-        inputs[url] = {'sha256': sha(raw), 'bytes': len(raw), 'scope': entry['scope']}
+        inputs[url] = {**inputs.get(url, {}), 'sha256': sha(raw), 'bytes': len(raw), 'scope': entry['scope']}
     manifest = tomllib.loads(data['2026-06-12.toml'].decode())
     check(manifest['pkg']['rustc']['git_commit_hash'] == rust, 'runtime distribution commit mismatch')
     check(sha(data['2026-06-12.toml']) == data['2026-06-12.toml.sha256'].decode().split()[0],

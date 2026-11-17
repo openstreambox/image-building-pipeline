@@ -406,6 +406,31 @@ class Derivation(unittest.TestCase):
                 n.runtime_packages(changed, None, measurement, {}, {})
 
 
+    def test_runtime_retains_existing_input_metadata(self):
+        config = copy.deepcopy(json.loads((BASE / 'sources.json').read_bytes())['runtime'])
+        entry = config['inputs'][0]
+        raw = b'source'
+        entry.update(size=len(raw), sha256=sha(raw))
+        existing = {'files': 185, 'upstream_checksum': None, 'sha256': sha(raw), 'bytes': len(raw)}
+        inputs = {entry['url']: copy.deepcopy(existing)}
+
+        class FirstInputCache:
+            calls = 0
+
+            def get(self, *_args):
+                self.calls += 1
+                if self.calls > 1:
+                    raise OSError('stop after first input record')
+                return raw, None
+
+        measurement = {'go': config['go_version'], 'binary_sha256': config['measured_mediamtx_sha256']}
+        with self.assertRaisesRegex(OSError, 'stop after first input record'):
+            n.runtime_packages(config, FirstInputCache(), measurement, inputs, {})
+        for key, value in existing.items():
+            self.assertIn(key, inputs[entry['url']])
+            self.assertEqual(inputs[entry['url']][key], value)
+        self.assertEqual(inputs[entry['url']]['scope'], entry['scope'])
+
     def test_runtime_malformed_inputs(self):
         config = json.loads((BASE / 'sources.json').read_bytes())['runtime']
         measurement = {'go': config['go_version'], 'binary_sha256': config['measured_mediamtx_sha256']}
