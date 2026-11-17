@@ -40,6 +40,7 @@
 | **Shared assertions for the collecting shell harnesses** | `tests/lib/assertions.sh` — the ONE `PASS`/`FAIL` + `ok`/`bad`/`assert_eq`/`assert_contains` |
 | **Which strict-mode / logging profile a script must use** | [`docs/shell-profiles.md`](../shell-profiles.md) — build-strict / device-daemon / contract-test |
 | Contribution rules | [`CONTRIBUTING.md`](../../CONTRIBUTING.md) |
+| **Card size and fake-capacity probe (core only, NOT installed or invoked)** | `mkosi/runtime/ceralive-card-probe.sh`, contract `tests/card-capacity-probe.test.sh`; behaviour, limits and what qualification still needs: [`docs/card-capacity-probe.md`](../card-capacity-probe.md) |
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](../FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](../DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
 | **Read-only bench board inventory (kernel, RAUC slots, layout, PCI/USB, installed keyring)** | `ci/capture-board-preflight.sh --host <h> --board <b> --out <dir>` — SSH capture using only interfaces the production package set actually ships; `--self-test` drives the real payload against a fixture sysfs. See the board-preflight KEY FACT below |
