@@ -87,6 +87,19 @@ relabel_selector() {
   sed "s|setenv cera_root rootfs_|setenv cera_root $(partlabel_prefix)rootfs_|g" "$1" >"$2"
 }
 
+# field_selector <src> <dest> — the selector that may reach boards in the field through
+# ceralive-boot-script-sync: the source minus its `flashed-images-only` regions. Nothing
+# boots boot.scr.prev when a replaced selector fails, so a region that changes boot
+# behaviour ships only on freshly flashed cards until a tested fallback exists.
+field_selector() {
+  local opens closes
+  opens="$(grep -c '^# >>> flashed-images-only$' "$1" || true)"
+  closes="$(grep -c '^# <<< flashed-images-only$' "$1" || true)"
+  [[ "${opens}" == "${closes}" ]] || die "unbalanced flashed-images-only markers in $1"
+  sed '/^# >>> flashed-images-only$/,/^# <<< flashed-images-only$/d' "$1" >"$2"
+  ! grep -q 'flashed-images-only' "$2" || die "flashed-images-only marker left in the field selector"
+}
+
 # render <template> <dest> — substitute @CONSOLE@/@DTB_NAME@/@BOARD_ID@ placeholders.
 render() {
   local tmpl="$1" dest="$2" console; console="$(console_value)"
@@ -243,6 +256,15 @@ install_boot_partition() {
     recovery_src="${relabelled}/recovery.scr.cmd"
   fi
 
+  # The copy shipped in the rootfs for ceralive-boot-script-sync leaves out the
+  # `flashed-images-only` regions of the selector (see field_selector).
+  local field_dir=""
+  if [[ "${CERALIVE_SELECTOR_VARIANT:-flashed}" == "field" ]]; then
+    field_dir="$(mktemp -d)"
+    field_selector "${boot_src}" "${field_dir}/boot.scr.cmd"
+    boot_src="${field_dir}/boot.scr.cmd"
+  fi
+
   if command -v mkimage >/dev/null 2>&1; then
     log "compiling automatic and manual recovery scripts (mkimage)"
     mkimage -A arm64 -O linux -T script -C none -n "CeraLive A/B selector" \
@@ -262,24 +284,37 @@ install_boot_partition() {
   if [[ -n "${relabelled}" ]]; then
     rm -rf "${relabelled}"
   fi
+  if [[ -n "${field_dir}" ]]; then
+    rm -rf "${field_dir}"
+  fi
 
   log "boot-partition artifacts staged in ${dest}"
 }
 
-# boot-payload <dir> — compile the same boot.scr the boot partition gets and write it,
-# with its SHA-256 line, to <dir>. The image build injects <dir> into the rootfs slot
-# image so ceralive-boot-script-sync can update boards that only take RAUC bundles.
+# boot-payload <dir> — compile the boot.scr shipped in the rootfs and write it, with its
+# SHA-256 line, to <dir>. The image build injects <dir> into the rootfs slot image so
+# ceralive-boot-script-sync can update boards that only take RAUC bundles.
+#
+# This is the FIELD selector (field_selector), not the boot partition's copy. <dir> also
+# gets boot.scr.keep: the SHA-256 of the body (the bytes after the 64-byte mkimage
+# header) of the selector a freshly flashed card carries. The sync leaves a boot.scr
+# with that body in place, so it never replaces a flashed selector with the field one.
 install_boot_payload() {
-  local dest="${1:-}" stage
+  local dest="${1:-}" stage flashed
   [[ -n "${dest}" ]] || die "boot-payload: destination dir is required"
   command -v mkimage >/dev/null 2>&1 \
     || die "mkimage (u-boot-tools) not found — cannot compile the boot.scr shipped in the rootfs"
   stage="$(mktemp -d)"
-  install_boot_partition "${stage}" || { rm -rf "${stage}"; die "boot-payload: boot.scr compilation failed"; }
+  flashed="$(mktemp -d)"
+  CERALIVE_SELECTOR_VARIANT=field install_boot_partition "${stage}" \
+    && CERALIVE_SELECTOR_VARIANT=flashed install_boot_partition "${flashed}" \
+    || { rm -rf "${stage}" "${flashed}"; die "boot-payload: boot.scr compilation failed"; }
   mkdir -p "${dest}"
   install -m 0644 "${stage}/boot.scr" "${dest}/boot.scr"
   (cd "${dest}" && sha256sum boot.scr >boot.scr.sha256)
-  rm -rf "${stage}"
+  tail -c +65 "${flashed}/boot.scr" | sha256sum | awk '{ print $1 }' >"${dest}/boot.scr.keep"
+  chmod 0644 "${dest}/boot.scr.keep"
+  rm -rf "${stage}" "${flashed}"
   log "boot.scr payload staged in ${dest}"
 }
 
@@ -291,9 +326,9 @@ Usage: install-boot.sh <target> [args]
   boot-partition <dir> [--allow-uncompiled]
                                  render boot.scr + recovery.scr + cera_board.env
                                  + boot_state.txt into <dir> (the FAT partition)
-  boot-payload <dir>             compile boot.scr + SHA-256 into <dir> for the rootfs
-                                 (ceralive-boot-script-sync ships it to /boot after a
-                                 health-confirmed boot)
+  boot-payload <dir>             compile the field boot.scr + SHA-256, and the flashed
+                                 selector's body hash (boot.scr.keep), into <dir> for
+                                 the rootfs (ceralive-boot-script-sync)
 
 Board specifics come from the environment (manifest-resolved + orchestrator):
   SERIAL_CONSOLE DTB_NAME BOARD_ID SINGLE_SLOT_FALLBACK COMPATIBLE_STRING

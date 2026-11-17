@@ -51,6 +51,34 @@ setenv fdtfile ""
 if load ${devtype} ${devnum}:1 ${loadaddr} cera_board.env; then
   env import -t ${loadaddr} ${filesize}
 fi
+# >>> flashed-images-only
+
+# --- ROCK 5B+ only: hold the M.2 B-key slot unpowered until Linux has released RESET#.
+#
+# U-Boot enables the slot's 3.3 V (EKEY_EN, GPIO1_D2, U-Boot name B26) at start while
+# the card's RESET# is still low. A Dell DW5821e powered up that way stays in its
+# bootloader's fastboot mode (413c:81d6) instead of starting as a modem (413c:81d7).
+# Switching the rail off here keeps the card off through the kernel load; the kernel's
+# RESET# hog drives reset high at about 0.15 s and its always-on regulator brings the
+# rail back at about 0.37 s, so the card then powers up with reset released. Measured
+# on a ROCK 5B+: 3 of 3 cold and 2 of 2 warm boots came up 81d7, none 81d6.
+# The onboard Wi-Fi supply shares this enable and is off for the same few seconds.
+# This is a pre-Linux power order, not a recovery cycle: never toggle this rail on a
+# running board. cera_slot_power on the kernel command line reports the outcome to
+# the boot-time fastboot release (ceralive-slot-dell-fastboot-release), the safety net.
+#
+# FLASHED IMAGES ONLY. install-boot.sh removes every `flashed-images-only` region from
+# the copy shipped in the rootfs for ceralive-boot-script-sync, so a board in the field
+# keeps a selector without this block (nothing boots boot.scr.prev if a new selector
+# fails; the release unit covers those boards). board_id is the one board specific
+# read here, from cera_board.env.
+setenv cera_slot_power ""
+if test "${board_id}" = "rock-5b-plus"; then
+  setenv cera_slot_power "failed"
+  if gpio clear B26; then setenv cera_slot_power "held"; fi
+  echo "CeraLive: B-key slot power until Linux: ${cera_slot_power}"
+fi
+# <<< flashed-images-only
 
 # --- A/B boot state (defaults are safe if the file is missing/partial)
 setenv BOOT_ORDER "A B"
@@ -146,6 +174,11 @@ fi
 #     (frozen contract), so load them from the ext4 rootfs partition, not this FAT.
 echo "CeraLive: booting slot ${cera_slot} (root=PARTLABEL=${cera_root}, part ${cera_part})"
 setenv bootargs "root=PARTLABEL=${cera_root} rootwait rw console=${console} earlycon cera_slot=${cera_slot} rauc.slot=${cera_slot}"
+# >>> flashed-images-only
+if test -n "${cera_slot_power}"; then
+  setenv bootargs "${bootargs} cera_slot_power=${cera_slot_power}"
+fi
+# <<< flashed-images-only
 if test -n "${cera_transient_bootargs}"; then
   echo "CeraLive: applying volatile one-boot arguments"
   setenv bootargs "${bootargs} ${cera_transient_bootargs}"

@@ -34,15 +34,15 @@ slot_mkfs_ext4() {
   SOURCE_DATE_EPOCH="${epoch}" E2FSPROGS_FAKE_TIME="${epoch}" mkfs.ext4 "$@"
 }
 
-# inject_boot_payload <ext4-image> <payload-dir> — add the compiled boot.scr and its
-# SHA-256 line (install-boot.sh boot-payload) under /usr/lib/ceralive/boot/ of a finished
+# inject_boot_payload <ext4-image> <payload-dir> — add the compiled field boot.scr, its
+# SHA-256 line and boot.scr.keep (install-boot.sh boot-payload) under /usr/lib/ceralive/boot/ of a finished
 # slot image, for ceralive-boot-script-sync. Done on the image, not the tree: the tree is
 # mkosi output and may be root-owned or unreadable to this user.
 inject_boot_payload() {
   local img="$1" dir="$2" cmds epoch dest=/usr/lib/ceralive/boot
   require_cmd debugfs
   require_cmd e2fsck
-  [[ -f "${dir}/boot.scr" && -f "${dir}/boot.scr.sha256" ]] \
+  [[ -f "${dir}/boot.scr" && -f "${dir}/boot.scr.sha256" && -f "${dir}/boot.scr.keep" ]] \
     || { printf 'boot payload incomplete in %s\n' "${dir}" >&2; return 1; }
   epoch="$(date -u -d "@${SOURCE_DATE_EPOCH:-0}" +%Y%m%d%H%M%S)" || return 1
   cmds="$(mktemp)" || return 1
@@ -52,16 +52,17 @@ inject_boot_payload() {
     printf 'cd %s\n' "${dest}"
     printf 'write %s boot.scr\n' "${dir}/boot.scr"
     printf 'write %s boot.scr.sha256\n' "${dir}/boot.scr.sha256"
+    printf 'write %s boot.scr.keep\n' "${dir}/boot.scr.keep"
     printf 'sif %s mode 040755\nsif %s uid 0\nsif %s gid 0\n' "${dest}" "${dest}" "${dest}"
     local f
-    for f in boot.scr boot.scr.sha256; do
+    for f in boot.scr boot.scr.sha256 boot.scr.keep; do
       printf 'sif %s mode 0100644\nsif %s uid 0\nsif %s gid 0\n' "${f}" "${f}" "${f}"
     done
   } >"${cmds}"
   debugfs -w -f "${cmds}" "${img}" >/dev/null 2>&1 || { rm -f "${cmds}"; return 1; }
   rm -f "${cmds}"
   local name
-  for name in boot.scr boot.scr.sha256; do
+  for name in boot.scr boot.scr.sha256 boot.scr.keep; do
     debugfs -R "cat ${dest}/${name}" "${img}" 2>/dev/null | cmp -s - "${dir}/${name}" \
       || { printf 'boot payload %s did not read back from %s\n' "${name}" "${img}" >&2; return 1; }
   done

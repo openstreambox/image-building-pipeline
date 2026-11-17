@@ -56,6 +56,13 @@ image	/etc/udev/rules.d/99-ceralive-hardware.rules
 # the adaptive Type-C handoff is local policy, not a packaged modem asset.
 image	/etc/udev/rules.d/99-ceralive-typec-policy.rules
 # 78-mm-ceralive-slot-uid.rules is emitted ONLY for a board whose modem_ports
-# status is `verified` (mkosi/customize/udev.sh::generate_modem_slot_uid_rules);
-# every shipped board is `unverified`, so on today's images it is absent.
+# status is `verified` (mkosi/customize/postinst.d/hardware.sh::generate_modem_slot_uid_rules);
+# the ROCK 5B+ map names its B-key port; other boards default to unverified.
 image	/etc/udev/rules.d/78-mm-ceralive-slot-uid.rules
+
+# Board-specific WWAN rfkill default, not a packaged modem access rule.
+image	/etc/udev/rules.d/99-zz-ceralive-internal-wwan.rules
+
+# ROCK 5B+ B-key Dell fastboot safety net, generated for the verified internal_4g
+# position only (hardware.sh::setup_internal_modem_fastboot_release).
+image	/etc/udev/rules.d/79-ceralive-slot-dell-fastboot-release.rules

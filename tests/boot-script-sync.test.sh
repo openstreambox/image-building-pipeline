@@ -144,6 +144,25 @@ exec {lk}>&-
   && ok "while an activation holds the lock the boot partition is not touched" \
   || bad "lock-held case (rc=${rc}): $(cat "${D}/out")"
 
+# A freshly flashed card may carry the flashed selector (the field selector plus
+# flashed-images-only regions); its body hash is in boot.scr.keep and it must stay.
+fixture
+mkscr F "flashed selector body" "${D}/boot/boot.scr"
+cp "${D}/boot/boot.scr" "${D}/old.scr"
+printf 'flashed selector body\n' | sha256sum | awk '{ print $1 }' >"${D}/src/boot.scr.keep"
+run_sync; rc=$?
+{ [[ ${rc} -eq 0 ]] && cmp -s "${D}/old.scr" "${D}/boot/boot.scr" && [[ ! -e "${D}/boot/boot.scr.prev" ]] \
+  && grep -q "flashed selector" "${D}/out"; } \
+  && ok "a flashed selector listed in boot.scr.keep is left in place: no write, no backup" \
+  || bad "flashed selector case (rc=${rc}): $(cat "${D}/out")"
+
+fixture
+printf '%064d\n' 0 >"${D}/src/boot.scr.keep"
+run_sync; rc=$?
+{ [[ ${rc} -eq 0 ]] && cmp -s "${D}/src/boot.scr" "${D}/boot/boot.scr" && cmp -s "${D}/old.scr" "${D}/boot/boot.scr.prev"; } \
+  && ok "a boot.scr that is neither current nor listed in boot.scr.keep is still replaced" \
+  || bad "keep list blocked an unrelated selector (rc=${rc}): $(cat "${D}/out")"
+
 echo "== build side: install-boot.sh boot-payload"
 
 BOARD_ENV=(SERIAL_CONSOLE=ttyS2:1500000 DTB_NAME=rockchip/rk3588-rock-5b-plus.dtb
@@ -156,10 +175,28 @@ env "${BOARD_ENV[@]}" bash "${INSTALL_BOOT}" boot-payload "${PAYLOAD}" >"${WORK}
   && ok "boot-payload writes a compiled script image and a matching SHA-256 line" \
   || bad "boot-payload (rc=${rc}): $(tail -3 "${WORK}/payload.log")"
 
+# The shipped script is the FIELD selector: the boot partition's selector minus its
+# flashed-images-only regions. The partition's own body hash is in boot.scr.keep, so a
+# freshly flashed card keeps its selector; an Orange Pi build differs in nothing else.
 env "${BOARD_ENV[@]}" bash "${INSTALL_BOOT}" boot-partition "${PARTITION}" >/dev/null 2>&1
-cmp -s -i 64 "${PAYLOAD}/boot.scr" "${PARTITION}/boot.scr" \
-  && ok "the shipped script has the same body as the one the boot partition gets" \
-  || bad "payload body differs from the boot-partition boot.scr"
+SELECTOR="${ROOT}/mkosi/platform/boot/boot.scr.cmd"
+sed '/^# >>> flashed-images-only$/,/^# <<< flashed-images-only$/d' "${SELECTOR}" >"${WORK}/field.cmd"
+{ tail -c +73 "${PAYLOAD}/boot.scr" | cmp -s - "${WORK}/field.cmd" \
+  && tail -c +73 "${PARTITION}/boot.scr" | cmp -s - "${SELECTOR}" \
+  && ! grep -aq 'gpio \|flashed-images-only' "${PAYLOAD}/boot.scr"; } \
+  && ok "the shipped script is the selector without its flashed-images-only regions; the boot partition gets all of it" \
+  || bad "payload is not the field selector, or the boot partition lacks the full selector"
+[[ "$(tail -c +65 "${PARTITION}/boot.scr" | sha256sum | awk '{ print $1 }')" == "$(cat "${PAYLOAD}/boot.scr.keep" 2>/dev/null)" ]] \
+  && ok "boot.scr.keep names the body of the boot partition's selector" \
+  || bad "boot.scr.keep does not match the boot partition's selector"
+# End to end with the real artifacts: a freshly flashed boot partition is not rewritten.
+fixture
+cp "${PAYLOAD}/boot.scr" "${PAYLOAD}/boot.scr.sha256" "${PAYLOAD}/boot.scr.keep" "${D}/src/"
+cp "${PARTITION}/boot.scr" "${D}/boot/boot.scr"
+run_sync; rc=$?
+{ [[ ${rc} -eq 0 ]] && cmp -s "${PARTITION}/boot.scr" "${D}/boot/boot.scr" && [[ ! -e "${D}/boot/boot.scr.prev" ]]; } \
+  && ok "the real payload leaves the real flashed boot partition untouched" \
+  || bad "the sync rewrote a freshly flashed boot.scr (rc=${rc}): $(cat "${D}/out")"
 
 env "${BOARD_ENV[@]}" bash "${INSTALL_BOOT}" boot-payload >/dev/null 2>&1 \
   && bad "boot-payload accepted a missing destination" \
@@ -195,6 +232,7 @@ stat_out="$(debugfs -R 'stat /usr/lib/ceralive/boot/boot.scr' "${WORK}/a.ext4" 2
 { [[ ${rc} -eq 0 ]] \
   && debugfs -R 'cat /usr/lib/ceralive/boot/boot.scr' "${WORK}/a.ext4" 2>/dev/null | cmp -s - "${PAYLOAD}/boot.scr" \
   && debugfs -R 'cat /usr/lib/ceralive/boot/boot.scr.sha256' "${WORK}/a.ext4" 2>/dev/null | cmp -s - "${PAYLOAD}/boot.scr.sha256" \
+  && debugfs -R 'cat /usr/lib/ceralive/boot/boot.scr.keep' "${WORK}/a.ext4" 2>/dev/null | cmp -s - "${PAYLOAD}/boot.scr.keep" \
   && grep -q 'Mode:  0644' <<<"${stat_out}" && grep -qE 'User: +0 +Group: +0' <<<"${stat_out}" \
   && e2fsck -fn "${WORK}/a.ext4" >/dev/null 2>&1; } \
   && ok "the payload lands root-owned 0644 under /usr/lib/ceralive/boot and the filesystem stays clean" \
