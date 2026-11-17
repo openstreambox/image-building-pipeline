@@ -501,3 +501,8 @@ systemd-repart           # grow the existing data partition before /data mounts
 kbd                     # Startup failure console font loader
 console-setup-linux     # Lat15-TerminusBold32x16 bitmap console font
 python3                 # Shared attention producer and consumer
+# Image-owned per-link CLAT (stock Debian translator, no custom build).
+tayga
+python3-dbus
+python3-gi
+python3-dnspython

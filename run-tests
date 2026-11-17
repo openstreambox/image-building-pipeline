@@ -184,3 +184,27 @@ case "${CERALIVE_RUN_REAL_RAUC_CONTRACT:-skip}" in
     exit 2
     ;;
 esac
+
+
+# The namespace's shell is PID 1 and reaps the harness children. Never expose
+# physical devices; the contract creates only synthetic links and TUNs. The
+# network namespace is named so the host's systemd can run the installed unit
+# inside it (NetworkNamespacePath=); it is removed afterwards.
+case "${CERALIVE_RUN_CLAT_CONTRACT:-skip}" in
+  required|service)
+    clat_args=()
+    [[ "$CERALIVE_RUN_CLAT_CONTRACT" != service ]] || clat_args+=(--service-only)
+    clat_netns="ceralive-clat-contract-$$"
+    sudo -n ip netns add "$clat_netns"
+    clat_result=0
+    sudo -n --preserve-env=CLAT_TEST_TAYGA,CLAT_TEST_SENDER,CLAT_TEST_RECEIVER,PYTHONPATH \
+      env CLAT_TEST_NETNS="/run/netns/${clat_netns}" \
+      ip netns exec "$clat_netns" unshare --pid --fork --mount-proc bash -c \
+      '/usr/bin/python3 "$@"; result=$?; wait; exit "$result"' \
+      clat "${HERE}/tests/clat-netns.py" "${clat_args[@]}" || clat_result=$?
+    sudo -n ip netns del "$clat_netns" || clat_result=1
+    [[ "$clat_result" -eq 0 ]] || exit "$clat_result"
+    ;;
+  skip) echo "== SKIP CLAT network contract (set CERALIVE_RUN_CLAT_CONTRACT=required or service) ==" ;;
+  *) echo "ERROR: invalid CERALIVE_RUN_CLAT_CONTRACT" >&2; exit 2 ;;
+esac
