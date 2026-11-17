@@ -428,3 +428,128 @@ QUIRK_M2_SIM
 
   log "board quirks: dispatch complete — ${applied} applied"
 }
+
+# generate_modem_slot_uid_rules — fail-closed generator for per-slot ModemManager
+# UID naming. The permanent generic modem rules in setup_hardware_access (the
+# "USB Modem Devices (4G/5G)" block, dialout group-tagging by kernel node + vendor
+# ID) always ship and are NOT touched here. This function emits an ADDITIONAL
+# 78-mm-ceralive-slot-uid.rules ONLY when the board's modem_ports status is
+# `verified` and carries slot ID_PATHs — mapping each physical slot to a stable
+# ID_MM_PHYSDEV_UID so ModemManager reports a deterministic slot identity
+# regardless of ttyUSB enumeration order.
+#
+# FAIL-CLOSED (no permissive fallback): any status other than an explicit
+# `verified` — `unverified` (the shipped default), unset, or anything else —
+# emits ZERO generated slot-uid rules and removes any stale generated file, so an
+# A/B slot never keeps rules the current manifest no longer authorizes. Slot
+# verification is a hardware-gated step (docs/modem-matrix.md §7); until it is
+# done, the generic rules alone govern modem access.
+generate_modem_slot_uid_rules() {
+  local rules_dir="${MODEM_SLOT_RULES_DIR:-/etc/udev/rules.d}"
+  local rules_file="${rules_dir}/78-mm-ceralive-slot-uid.rules"
+  local status="${CERALIVE_MODEM_PORTS_STATUS:-unverified}"
+
+  if [[ "${status}" != "verified" ]]; then
+    rm -f "${rules_file}"
+    log "modem slot-uid rules: modem_ports status='${status}' (not verified) — emitting NO generated slot-uid rules (fail-closed; generic modem rules still apply)"
+    return 0
+  fi
+
+  local slots="${CERALIVE_MODEM_PORTS_SLOTS:-}"
+  [[ -n "${slots}" ]] \
+    || die "modem_ports status=verified but no slot definitions (CERALIVE_MODEM_PORTS_SLOTS empty) — refusing to emit an empty verified rule set"
+
+  mkdir -p "${rules_dir}"
+  {
+    printf '# CeraLive generated modem slot-UID rules — DO NOT EDIT.\n'
+    printf '# Emitted from board modem_ports (status: verified). One stable\n'
+    printf '# ID_MM_PHYSDEV_UID per hardware-verified physical modem slot.\n'
+    # USB-device events do not necessarily carry ID_PATH before MM probes.
+    printf 'ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", IMPORT{builtin}="path_id"\n'
+    local pair name id_path
+    for pair in ${slots}; do
+      name="${pair%%=*}"
+      id_path="${pair#*=}"
+      [[ -n "${name}" && -n "${id_path}" && "${name}" != "${id_path}" ]] \
+        || die "malformed modem slot definition '${pair}' (expected <name>=<ID_PATH>)"
+      [[ "$name" != internal_4g ]] || name="internal 4G"
+      printf 'ACTION=="add|bind", SUBSYSTEM=="usb", ENV{ID_PATH}=="%s", ENV{ID_MM_PHYSDEV_UID}="%s"\n' \
+        "${id_path}" "${name}"
+    done
+  } >"${rules_file}"
+  log "modem slot-uid rules: emitted $(basename "${rules_file}") for verified slots: ${slots}"
+}
+
+
+# Limit boot-time radio release to the board's GPIO-backed WWAN rfkill device.
+# Give this device a stable, dedicated rfkill state key and remove its saved
+# block before udev initialization completes (systemd-rfkill waits for it).
+# Change events, including a deliberate block during this boot, are untouched.
+setup_internal_modem_rfkill() {
+  local rules_dir="${MODEM_SLOT_RULES_DIR:-/etc/udev/rules.d}"
+  local config_dir="${MODEM_MODPROBE_DIR:-/etc/modprobe.d}"
+  local rule="${rules_dir}/99-zz-ceralive-internal-wwan.rules"
+  local config="${config_dir}/ceralive-internal-wwan.conf"
+  if [[ "${BOARD_ID:-unknown}" != rock-5b-plus ]]; then
+    rm -f "$rule" "$config"
+    return 0
+  fi
+  mkdir -p "$rules_dir" "$config_dir"
+  printf '%s\n' 'options rfkill default_state=1' >"$config"
+  cat >"$rule" <<'EOF'
+# W_DISABLE1# (GPIO3_A6): active-high shutdown GPIO, unblocked = physical high.
+# ID_PATH here namespaces rfkill persistence, not the modem USB position UID.
+SUBSYSTEM=="rfkill", ATTR{name}=="rfkill-m2-wwan", ENV{ID_PATH}="platform-ceralive-internal-wwan"
+ACTION=="add", SUBSYSTEM=="rfkill", ATTR{name}=="rfkill-m2-wwan", RUN+="/usr/bin/rm -f /var/lib/systemd/rfkill/platform-ceralive-internal-wwan:wwan"
+ACTION=="add", SUBSYSTEM=="rfkill", ATTR{name}=="rfkill-m2-wwan", ATTR{soft}="0"
+EOF
+}
+
+# Boot-time safety net for the ROCK 5B+ B-key Dell DW5821e: if it ever appears in its
+# bootloader's fastboot mode (413c:81d6) at the verified B-key position, send it one
+# fastboot `continue` (mkosi/runtime/ceralive-slot-dell-fastboot-release.py). The
+# boot script's slot power hold should make this unnecessary; it logs when it fires.
+# Matched by ID_PATH (the bus number is not fixed), on the add event of the card's
+# fastboot interface only, and never preceded by a port de-authorization or reset. Fail-closed: other boards, or no verified
+# internal_4g position, get no rule and no environment file.
+setup_internal_modem_fastboot_release() {
+  local root="${CERALIVE_INSTALL_ROOT:-}"
+  local rules_dir="${MODEM_SLOT_RULES_DIR:-${root}/etc/udev/rules.d}"
+  local rule="${rules_dir}/79-ceralive-slot-dell-fastboot-release.rules"
+  local config="${root}/etc/ceralive/slot-dell-fastboot-release.env"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  local artifact pair id_path=""
+
+  for artifact in ceralive-slot-dell-fastboot-release.py ceralive-slot-dell-fastboot-release@.service; do
+    [[ -n "${src}" && -f "${src}/${artifact}" ]] \
+      || die "slot Dell fastboot release source not found: ${src}/${artifact} (is \$SRCDIR/runtime mounted?)"
+  done
+
+  if [[ "${BOARD_ID:-unknown}" == rock-5b-plus && "${CERALIVE_MODEM_PORTS_STATUS:-unverified}" == verified ]]; then
+    for pair in ${CERALIVE_MODEM_PORTS_SLOTS:-}; do
+      [[ "${pair%%=*}" == internal_4g ]] && id_path="${pair#*=}"
+    done
+  fi
+  if [[ -z "${id_path}" ]]; then
+    rm -f "${rule}" "${config}"
+    log "slot Dell fastboot release: no verified ROCK 5B+ internal_4g position, no rule"
+    return 0
+  fi
+  [[ "${id_path}" =~ ^[A-Za-z0-9._:-]+$ ]] || die "unsafe internal_4g ID_PATH '${id_path}'"
+
+  install -D -m 0755 "${src}/ceralive-slot-dell-fastboot-release.py" \
+    "${root}/usr/libexec/ceralive/ceralive-slot-dell-fastboot-release"
+  install -D -m 0644 "${src}/ceralive-slot-dell-fastboot-release@.service" \
+    "${root}/etc/systemd/system/ceralive-slot-dell-fastboot-release@.service"
+  mkdir -p "${rules_dir}" "$(dirname "${config}")"
+  printf 'CERALIVE_SLOT_ID_PATH=%s\n' "${id_path}" >"${config}"
+  cat >"${rule}" <<RULE
+# CeraLive generated: release the B-key slot Dell from fastboot, once per boot — DO NOT EDIT.
+# Matches the card's fastboot INTERFACE, not the USB device: the kernel announces the
+# device before it is configured, when it has no interface yet. The bus number is not
+# fixed, so the position is the interface's ID_PATH (the slot's ID_PATH plus :1.0).
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTRS{idVendor}=="413c", ATTRS{idProduct}=="81d6", IMPORT{builtin}="path_id"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTRS{idVendor}=="413c", ATTRS{idProduct}=="81d6", ATTR{bInterfaceClass}=="ff", ATTR{bInterfaceSubClass}=="42", ATTR{bInterfaceProtocol}=="03", ENV{ID_PATH}=="${id_path}:1.0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ceralive-slot-dell-fastboot-release@%k.service"
+RULE
+  log "slot Dell fastboot release: rule for 413c:81d6 at ${id_path}"
+}

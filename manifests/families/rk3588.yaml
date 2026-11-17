@@ -301,6 +301,10 @@ variants:
       # Island v2026.9.4: artifact-bound Rock qualification passed 2026-09-15.
       # Scope/receipts: docs/kernel-build-from-source.md, RGA ownership section.
       # Changes require independent exact-head review before merge.
+      # No B-key patch on top: the fork candidate 0052 (FULL_CARD_POWER_OFF#
+      # off-on delay) was refuted on hardware and retired. The ROCK 5B+ slot
+      # power order is set by the boot script instead:
+      # docs/rock5bplus-internal-modem.md.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
       patches_commit: bc7e44fa35d3eded23567dd48e65f6dc799f4b34
       patches_series: patches/series
@@ -323,6 +327,8 @@ variants:
       # base spelled its own three components. A "7.2-ceralive-rk3588" spelling
       # looks right, matches the tag, and would fail build-kernel.sh's own
       # `kernelrelease != KERNEL_RELEASE` assertion before one object compiles.
+      # Revision 11 adds explicit rfkill configuration to revision 9. Revision 10
+      # (0052 plus rfkill) was built only as an unpublished candidate; it is retired.
       # package_version uses KERNELVERSION + -ceralive<revision>; revision 8
       # re-tags revision 7's kernel (nftables reject for NetworkManager shared mode and
       # Rock 5B+ sink-first Type-C through the PR #28 patch pin) on a master that carries
@@ -332,7 +338,10 @@ variants:
       local_version: -ceralive-rk3588
       kernel_release: 7.2.0-ceralive-rk3588
       # Revision 9 adds the Rock board ramoops DT reservation at kernel build time.
-      package_version: 7.2.0-ceralive9
+      # Revision 11 combines revision 9's ramoops reservation with the explicit
+      # rfkill configuration, without 0052; neither revision 9's nor the retired
+      # revision 10's bytes are reissued under this version.
+      package_version: 7.2.0-ceralive11
 
       # PLATFORM-LAYER INSTALL MAPPING. bindeb-pkg puts arm64 in-tree DTBs under
       # /usr/lib/linux-image-<KERNELRELEASE>/<soc-vendor>/; the U-Boot boot script
@@ -391,6 +400,6 @@ variants:
       # It carries the same `.0` for the same reason edge does.
       local_version: -ceralive-rk3588-test
       kernel_release: 7.2.0-ceralive-rk3588-test
-      package_version: 7.2.0-ceralive1+test2
+      package_version: 7.2.0-ceralive11+test1
 
       dtb_deb_dir: /usr/lib/linux-image-7.2.0-ceralive-rk3588-test/rockchip

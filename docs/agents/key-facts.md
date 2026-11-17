@@ -21,9 +21,12 @@ the shared non-cancelling `ceralive-kernel-floor` job group. Strict channel JSON
 is unchanged.
 See [kernel reuse](../kernel-build-from-source.md#released-kernel-reuse-exists)
 and [release admission](../RELEASE-PROCESS.md#signed-channel-publishing-ceraui-os-agent).
-The production source revision is `7.2.0-ceralive8`, adding nftables reject for
-NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
-the kernel-patches PR #28 pin; tag creation, the drill
+The fork candidate source revision is `7.2.0-ceralive11`, adding explicit rfkill
+requirements to revision 9 (the ramoops reservation) on top of revision 8 (nftables
+reject for NetworkManager shared mode and the Rock 5B+ sink-first Type-C default
+through the kernel-patches PR #28 pin). Revision 10 (with the refuted 0052) was an
+unpublished candidate and is retired. The ROCK 5B+ B-key slot power order is in the
+boot script; see [the internal modem guide](../rock5bplus-internal-modem.md). Tag creation, the drill
 and publication remain owner steps. Revision 4 is already on stable APT.
 
 **Kernel slot roles [PARTIAL: images on beta only; kernels on the stable APT only].** Slot marking stays scoped. The
@@ -3064,7 +3067,12 @@ previous file if that check fails, verifying the restore too (exit 2 = restore f
 A failing `mkimage` fails both `boot-partition` and `boot-payload`. The booted, confirmed OS decides the selector, so a
 RAUC rollback to an older image also restores that image's script. A power cut during the
 FAT rename is the residual risk; a board with a damaged `boot.scr` needs Maskrom recovery
-(`recovery.scr` is manual). Guard: `tests/boot-script-sync.test.sh`.
+(`recovery.scr` is manual). Because nothing boots `boot.scr.prev` automatically, the shipped
+copy is the FIELD selector: `boot-payload` strips the selector's `flashed-images-only`
+regions (today the ROCK 5B+ B-key slot power hold) and adds `boot.scr.keep`, the body hash
+of the flashed selector, which the sync leaves in place on a freshly flashed card. A change
+in boot behaviour goes to the field only once a boot-tested fallback exists.
+Guard: `tests/boot-script-sync.test.sh`.
 
 **The A/B selector must define its OWN scratch address — an inherited `loadaddr`
 is a per-board default, and an empty one HALTS the board with an SError** [EXISTS]

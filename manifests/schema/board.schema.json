@@ -88,10 +88,10 @@
           "enum": ["unverified", "verified"]
         },
         "slots": {
-          "description": "Map of physical modem-slot name (modem0, modem1, …) to the udev ID_PATH of that slot (read from `udevadm info /sys/class/net/<iface>` or the modem's USB device). Only meaningful when status is `verified`.",
+          "description": "Map of physical modem-slot name (internal_4g or modem0, modem1, …) to the udev ID_PATH of that slot (read from `udevadm info /sys/class/net/<iface>` or the modem's USB device). Only meaningful when status is `verified`.",
           "type": "object",
           "additionalProperties": { "type": "string", "minLength": 1 },
-          "propertyNames": { "pattern": "^modem[0-9]+$" }
+          "propertyNames": { "pattern": "^(modem[0-9]+|internal_4g)$" }
         }
       }
     },

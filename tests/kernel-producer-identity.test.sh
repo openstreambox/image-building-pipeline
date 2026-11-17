@@ -9,7 +9,7 @@ export ROOT WORK
 
 # Independent stack digests bind both the producer bytes and its coverage list.
 (cd "${ROOT}" && sha256sum --check tests/fixtures/kernel-producer.sha256)
-ok 'production inputs match the reviewed kernel and reset-evidence producer snapshot'
+ok 'production inputs match the reviewed kernel, reset-evidence and WWAN rfkill producer snapshot'
 
 kernel_test_repo "${WORK}/repo"
 fixture_version=7.2.0-ceralive8
