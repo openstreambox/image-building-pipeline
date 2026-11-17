@@ -223,7 +223,7 @@ sectioned_keys() {
   # Source the shipped script (main() is $0-guarded, so nothing destructive runs)
   # and drive the REAL function — a static grep would not prove the find preserves
   # copyright, and this repo has already shipped one prune that deleted too much.
-  CERALIVE_DOC_ROOT="$root" bash -c "source '$app_postinst'; prune_package_docs"
+  SRCDIR="$MKOSI_DIR" CERALIVE_DOC_ROOT="$root" bash -c "source '$app_postinst'; prune_package_docs"
 
   [ -f "$root/libfoo1/copyright" ]
   [ -f "$root/bar/copyright" ]
@@ -275,7 +275,7 @@ sectioned_keys() {
   ln -s "$root/keep" "$root/usr/share/locale"
   printf '%s/usr/share/locale/*\n%s/usr/lib/locale/locale-archive\n' "$root" "$root" >"$prune_list"
 
-  run env CERALIVE_DOC_ROOT="$root/doc" CERALIVE_PRUNE_PATHS_LIST="$prune_list" \
+  run env SRCDIR="$MKOSI_DIR" CERALIVE_DOC_ROOT="$root/doc" CERALIVE_PRUNE_PATHS_LIST="$prune_list" \
     bash -c "source '$app_postinst'; prune_package_docs"
   [ "$status" -eq 0 ]
   [ "$(<"$root/keep/messages.mo")" = 'outside sentinel' ]

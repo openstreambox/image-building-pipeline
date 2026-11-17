@@ -15,6 +15,7 @@
 # stage_tar_emit — [6/9]
 #
 # Reads from main()'s frame: board, ts, rootfs_tree.
+# Reads VERIFY_NO_APT_ARCHIVES_SH from orchestrate.sh.
 # Writes into main()'s frame: out_dir, artifact.
 # ---------------------------------------------------------------------------
 stage_tar_emit() {
@@ -23,6 +24,9 @@ stage_tar_emit() {
   mkdir -p "${out_dir}"
   artifact="${out_dir}/${ts}.rootfs.tar"
   emit_artifact "${rootfs_tree}" "${artifact}"
+  # The emitted tar is what ships: downloaded apt packages must not be in it.
+  "${VERIFY_NO_APT_ARCHIVES_SH}" "${artifact}" \
+    || die "downloaded apt packages in ${artifact} — the image would ship them"
   log_success "artifact: ${artifact} ($(du -h "${artifact}" | cut -f1)), sha256 in ${artifact}.sha256"
 }
 

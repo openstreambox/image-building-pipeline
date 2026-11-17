@@ -179,9 +179,64 @@ assert_sysext_binaries() {
   log "sysext-class binaries verified present (cerastream / srtla_send where staged)"
 }
 
+# Directories the finished rootfs could carry downloaded packages in. The runtime
+# layer installs shared.list into apt's DEFAULT archive directory and only then
+# writes /etc/apt/apt.conf.d/81ceralive-cache, which points the DEVICE's apt at
+# /data/ceralive/apt-archives/. This layer inherits that file, so a bare
+# `apt-get clean` follows the redirect and leaves every package the earlier
+# transactions downloaded in the slot. Both directories are therefore cleaned by
+# name; no other directory is, so a .deb that is deliberate payload elsewhere is
+# untouched, and the device's own cache setting is not changed.
+SHIPPED_APT_ARCHIVES="${SHIPPED_APT_ARCHIVES:-/var/cache/apt/archives}"
+
+# apt_archive_dirs — set APT_ARCHIVE_DIRS to the shipped default and the directory
+# Dir::Cache::archives resolves to under the inherited configuration, once each.
+apt_archive_dirs() {
+  local configured='' dir
+  eval "$(apt-config shell configured Dir::Cache::archives/d)"
+  APT_ARCHIVE_DIRS=()
+  for dir in "${SHIPPED_APT_ARCHIVES}" "${configured}"; do
+    dir="${dir%/}"
+    [[ -n "${dir}" ]] || continue
+    [[ "${dir}" == /* && "${dir}" != *'/../'* && "${dir}" != *'/..' ]] \
+      || die "refusing unsafe apt archive directory '${dir}'"
+    [[ " ${APT_ARCHIVE_DIRS[*]} " == *" ${dir} "* ]] && continue
+    APT_ARCHIVE_DIRS+=("${dir}")
+  done
+}
+
+# assert_no_apt_archives — fail the build if a package file is left in any archive
+# directory, at the top or in partial/, whatever its version or architecture.
+assert_no_apt_archives() {
+  local dir left
+  apt_archive_dirs
+  for dir in "${APT_ARCHIVE_DIRS[@]}"; do
+    [[ -d "${dir}" ]] || continue
+    left="$(find "${dir}" -xdev \( -type f -o -type l \) \
+      \( -name '*.deb' -o -name '*.udeb' -o -name '*.ddeb' -o -name '*.deb.*' -o -path "${dir}/partial/*" \) \
+      -print -quit)"
+    [[ -z "${left}" ]] \
+      || die "downloaded packages remain in ${dir} (${left}) — they would ship in the image"
+  done
+}
+
+# clean_apt_archives — empty every archive directory with apt's own clean, then
+# check the result.
+clean_apt_archives() {
+  local dir
+  apt_archive_dirs
+  for dir in "${APT_ARCHIVE_DIRS[@]}"; do
+    [[ ! -L "${dir}" ]] || die "apt archive directory ${dir} is a symlink; refusing to clean through it"
+    [[ -d "${dir}" ]] || continue
+    log "emptying apt archive directory ${dir}"
+    apt-get -o "Dir::Cache::archives=${dir}/" clean
+  done
+  assert_no_apt_archives
+}
+
 clean_package_download_metadata() {
   log "removing build-time apt package indexes and downloaded archives"
-  apt-get clean
+  clean_apt_archives
   rm -rf /var/lib/apt/lists/* /var/cache/apt/pkgcache.bin /var/cache/apt/srcpkgcache.bin
   mkdir -p /var/lib/apt/lists/partial /var/cache/apt/archives/partial
 }
@@ -256,8 +311,11 @@ remove_chroot_service_policy() {
 # been deleting those files first (census rows 5 and 6 — 13 warnings and one hard
 # error, and an alternatives database that disagreed with the filesystem).
 #
-# /usr/share/doc/*/copyright is KEPT, matching what mkosi's own WithDocs=no does
-# via --path-include: the licence text is a distribution obligation, not payload.
+# Licence, notice and authorship files are KEPT: every /usr/share/doc/*/copyright
+# (what mkosi's own WithDocs=no keeps via --path-include) and the NOTICE, COPYING,
+# AUTHORS, second copyright and similar files some packages carry beside it. The
+# rule lives in runtime/doc-notice-policy.sh, which the on-device apt hook
+# (ceralive-reprune) sources too, so the build and the device cannot drift.
 # Directory SYMLINKS are kept too — Debian points /usr/share/doc/<pkg> at a
 # sibling for many binary packages, and removing the link orphans that copyright.
 # CERALIVE_DOC_ROOT exists so the shipped function itself can be driven against a
@@ -288,9 +346,10 @@ safe_prune_parent() {
 prune_package_docs() {
   local docdir="${CERALIVE_DOC_ROOT:-/usr/share/doc}"
   if [[ -d "${docdir}" ]]; then
-    log "pruning ${docdir} down to copyright files (deferred from the build layers)"
-    find "${docdir}" -type f ! -name copyright -delete
-    find "${docdir}" -mindepth 1 -type d -empty -delete
+    log "pruning ${docdir} down to licence, notice and authorship files (deferred from the build layers)"
+    # shellcheck source=mkosi/runtime/doc-notice-policy.sh
+    source "${SRCDIR:?SRCDIR must name the mkosi source tree}/runtime/doc-notice-policy.sh"
+    doc_notice_prune "${docdir}" || die "could not prune ${docdir} to its notice files"
   fi
 
   # Todo 29 (update-system-overhaul): also apply the single prune-paths
@@ -332,6 +391,9 @@ main() {
   # Staging hygiene: the staging tree must NEVER ship in the final image. Stage 3
   # consumes it (local .deb install above) BEFORE removing it.
   rm -rf "${FIRST_PARTY_DIR}"
+  # Licence and notice texts for the files the build installs itself (this
+  # repository's runtime files and the portal brand mark), copied verbatim.
+  bash "${SRCDIR:?}/runtime/licence-notices/install-image-notices.sh"
   # Copyright files for installed first-party packages that ship without one
   # (pinned verbatim texts; fails on a version the notices do not cover).
   bash "${SRCDIR:?}/runtime/licence-notices/install-licence-notices.sh"
@@ -339,6 +401,8 @@ main() {
   clean_package_download_metadata
   prune_final_image_payload
   remove_chroot_service_policy
+  # Last word on the sealed tree: nothing after the clean may leave a package.
+  assert_no_apt_archives
 
   log "APPLICATION layer complete"
 }
