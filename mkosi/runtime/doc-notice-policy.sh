@@ -18,7 +18,7 @@
 # EVERYTHING ELSE under the doc root (changelogs, READMEs, examples) is removed.
 #
 # Never follows a symlink: a symlink is neither kept-by-target nor descended into,
-# and a doc root that is itself a symlink is refused, so a link can neither
+# and a doc root with a symlink in any component is refused, so a link can neither
 # preserve an unchecked document nor point the delete outside the doc root.
 # Directory symlinks (Debian's /usr/share/doc/<pkg> -> <sibling>) stay as they are.
 #
@@ -62,11 +62,22 @@ doc_notice_prune() {
     printf 'doc-notice-policy: refusing unsafe doc root: %s\n' "${1}" >&2
     return 2
   }
+  local rest="${root#/}" part current=""
+  while :; do
+    part="${rest%%/*}"
+    [[ -n "${part}" && "${part}" != . && "${part}" != .. ]] || {
+      printf 'doc-notice-policy: refusing unsafe doc root component: %s\n' "${root}" >&2
+      return 2
+    }
+    current="${current}/${part}"
+    [[ ! -L "${current}" ]] || {
+      printf 'doc-notice-policy: refusing symlinked doc root component: %s\n' "${current}" >&2
+      return 2
+    }
+    [[ "${rest}" == */* ]] || break
+    rest="${rest#*/}"
+  done
   [[ -d "${root}" ]] || return 0
-  [[ ! -L "${root}" ]] || {
-    printf 'doc-notice-policy: refusing symlinked doc root: %s\n' "${root}" >&2
-    return 2
-  }
   local list
   list="$(mktemp)" || return 1
   find "${root}" -xdev -mindepth 1 -type f -print0 >"${list}" || status=1

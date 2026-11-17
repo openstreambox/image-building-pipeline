@@ -141,6 +141,37 @@ install -D -m 0644 /dev/null "${WORK}/r5/usr/share/ceralive/brand/ceralive-mark-
 printf '<svg/>\n' >"${WORK}/r5/usr/share/ceralive/brand/ceralive-mark-small-dark.svg"
 expect_failure 'a brand mark that is not the pinned asset fails' 'is not the pinned brand asset' "${WORK}/r5"
 
+# Every existing component, including a generated output and the prefix, must
+# be checked. The external sentinel's bytes and mode must never change.
+for kind in licence-ancestor brand-ancestor readme-link prefix-link dot dotdot; do
+  r="${WORK}/unsafe-${kind}" o="${WORK}/outside-${kind}"
+  mkdir -p "${r}/usr/share/licenses/image-building-pipeline" "${o}"
+  printf 'untouched sentinel\n' >"${o}/sentinel"
+  chmod 0600 "${o}/sentinel"
+  case "${kind}" in
+    licence-ancestor)
+      rm -rf "${r}/usr/share/licenses"
+      ln -s "${o}" "${r}/usr/share/licenses" ;;
+    brand-ancestor)
+      ln -s "${o}" "${r}/usr/share/ceralive" ;;
+    readme-link)
+      ln -s "${o}/sentinel" "${r}/usr/share/licenses/image-building-pipeline/README" ;;
+    prefix-link)
+      ln -s "${r}" "${WORK}/prefix-${kind}"
+      r="${WORK}/prefix-${kind}" ;;
+    dot) r="${r}/." ;;
+    dotdot)
+      mkdir -p "${r}/entry"
+      r="${r}/entry/.." ;;
+  esac
+  expect_failure "${kind}: unsafe path is refused" 'symlink|unsafe.*path|path.*component' "${r}"
+  if [[ "$(cat "${o}/sentinel")" == 'untouched sentinel' && "$(stat -c %a "${o}/sentinel")" == 600         && "$(find "${o}" -type f | wc -l)" -eq 1 ]]; then
+    ok "${kind}: external bytes and modes are unchanged"
+  else
+    bad "${kind}: an external file was changed or created"
+  fi
+done
+
 # --- Part D: wiring ----------------------------------------------------------
 app="${REPO}/mkosi/mkosi.images/app/mkosi.postinst.chroot"
 grep -Eq '^  bash "\$\{SRCDIR:\?\}/runtime/licence-notices/install-image-notices.sh"$' "${app}" \

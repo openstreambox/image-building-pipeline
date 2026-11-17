@@ -34,6 +34,31 @@ DESTROOT="${IMAGE_NOTICES_DESTROOT:-}"
 BRAND_MARK="/usr/share/ceralive/brand/ceralive-mark-small-dark.svg"
 LICENCE_DIR="/usr/share/licenses/image-building-pipeline"
 
+# Validate the unresolved spelling: canonicalization would hide links and .. .
+# This is a check of a stable build tree, not protection against concurrent swaps.
+safe_notice_path() {
+  local path="$1" rest part current=""
+  [[ "${path}" == /* ]] || return 1
+  [[ "${path}" != / ]] || return 0
+  rest="${path#/}"
+  while :; do
+    part="${rest%%/*}"
+    [[ -n "${part}" && "${part}" != . && "${part}" != .. ]] || return 1
+    current="${current}/${part}"
+    [[ ! -L "${current}" ]] || return 1
+    [[ "${rest}" == */* ]] || break
+    [[ ! -e "${current}" || -d "${current}" ]] || return 1
+    rest="${rest#*/}"
+  done
+}
+
+# Check the prefix and generated output before the first table row can write.
+DESTROOT="${DESTROOT%/}"
+safe_notice_path "${DESTROOT:-/}" || die 'unsafe destination prefix path or component through a symlink'
+[[ ! -e "${DESTROOT:-/}" || -d "${DESTROOT:-/}" ]] || die 'destination prefix is not a directory'
+safe_notice_path "${DESTROOT}${LICENCE_DIR}/README" \
+  || die 'unsafe README path or component through a symlink'
+
 [[ -f "${TABLE}" ]] || die "notice table not found: ${TABLE}"
 BASE="$(dirname -- "${TABLE}")"
 
@@ -51,9 +76,7 @@ while IFS=$'\t' read -r dest source commit path text sha extra || [[ -n "${dest:
   [[ "${actual}" == "${sha}" ]] || die "pinned notice text changed: ${text} (expected ${sha}, got ${actual})"
 
   target="${DESTROOT}${dest}"
-  if [[ -L "${target}" || -L "$(dirname -- "${target}")" ]]; then
-    die "refusing to write ${dest} through a symlink"
-  fi
+  safe_notice_path "${target}" || die "refusing unsafe path ${dest} or component through a symlink"
   install -D -m 0644 "${BASE}/${text}" "${target}"
   log "installed ${dest} (${path} at ${commit:0:12})"
   rows=$((rows + 1))
@@ -70,6 +93,8 @@ done < "${TABLE}"
 
 if [[ -n "${licence_commit}" ]]; then
   install -d -m 0755 "${DESTROOT}${LICENCE_DIR}"
+  safe_notice_path "${DESTROOT}${LICENCE_DIR}/README" \
+    || die 'unsafe README path or component through a symlink'
   cat > "${DESTROOT}${LICENCE_DIR}/README" <<EOF
 image-building-pipeline
 
@@ -84,6 +109,7 @@ EOF
   chmod 0644 "${DESTROOT}${LICENCE_DIR}/README"
 fi
 
+safe_notice_path "${DESTROOT}${BRAND_MARK}" || die 'unsafe brand mark path or component through a symlink'
 if [[ -e "${DESTROOT}${BRAND_MARK}" ]]; then
   [[ -n "${brand_lock}" ]] || die "${BRAND_MARK} is installed but no brand-assets.lock.json row names its origin"
   expected="$(awk -v want="/$(basename -- "${BRAND_MARK}")" '

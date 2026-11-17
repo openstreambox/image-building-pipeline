@@ -84,3 +84,16 @@ Land CeraUI #125, build and review its integration package, then advance the
 image's device pin to that actual package and remove the two legacy exceptions.
 Do not advance the pin to an unbuilt topic head. The coverage list continues to
 require `ceralive-device`, including after this dependency is satisfied.
+
+### Notice destination and doc-root checks
+
+Before pruning, every component of the absolute doc root is checked. Symlinks,
+`.` and `..` components are refused before enumeration or deletion. The build
+fails on refusal; the on-device hook logs the skipped reduction and exits zero.
+Links encountered below a valid doc root are still left alone.
+
+The image notice installer checks the destination prefix, every output path and
+the generated README for symlink components. The README is checked before the
+first notice is installed and again before its write. Unsafe prefixes and dot
+components are refused. These checks assume a stable build tree; they do not
+make path-based shell I/O safe against concurrent path replacement.

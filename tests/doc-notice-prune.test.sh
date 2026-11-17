@@ -223,6 +223,39 @@ printf 'keep\n' >"${WORK}/cwd/pkg/changelog.gz"
 assert_eq 'a relative doc root is refused' 2 "$?"
 [[ -f "${WORK}/cwd/pkg/changelog.gz" ]] && ok 'a refused relative root is left untouched' || bad 'relative root pruned'
 
+# Starting-path resolution must not bypass the no-symlink traversal rule.
+for kind in linked-dot ancestor dot dotdot; do
+  victim="${WORK}/victim-${kind}"
+  mkdir -p "${victim}/pkg"
+  printf 'must survive\n' >"${victim}/pkg/README"
+  chmod 0600 "${victim}/pkg/README"
+  case "${kind}" in
+    linked-dot)
+      ln -s "${victim}" "${WORK}/root-${kind}"
+      unsafe="${WORK}/root-${kind}/." ;;
+    ancestor)
+      ln -s "${victim}" "${WORK}/root-${kind}"
+      unsafe="${WORK}/root-${kind}/pkg" ;;
+    dot) unsafe="${victim}/." ;;
+    dotdot)
+      mkdir -p "${WORK}/entry-${kind}"
+      unsafe="${WORK}/entry-${kind}/../victim-${kind}" ;;
+  esac
+  if SRCDIR="${MKOSI_DIR}" CERALIVE_DOC_ROOT="${unsafe}" CERALIVE_PRUNE_PATHS_LIST="${WORK}/absent.list"       bash -c 'source "$1"; prune_package_docs' bash "${APP_POSTINST}" >"${WORK}/unsafe.log" 2>&1; then
+    bad "${kind}: build accepted unsafe starting path"
+  else
+    ok "${kind}: build refuses unsafe starting path"
+  fi
+  out="$(CERALIVE_DOC_ROOT="${unsafe}" CERALIVE_PRUNE_PATHS_LIST="${WORK}/absent.list"     CERALIVE_DOC_POLICY="${POLICY}" "${REPRUNE}" 2>&1)"
+  assert_eq "${kind}: device refusal is fail-soft" 0 "$?"
+  assert_contains_text "${kind}: device logs refusal" "${out}" 'unsafe doc root'
+  if [[ -f "${victim}/pkg/README" && "$(cat "${victim}/pkg/README")" == 'must survive'         && "$(stat -c %a "${victim}/pkg/README")" == 600 ]]; then
+    ok "${kind}: target bytes and mode unchanged"
+  else
+    bad "${kind}: unsafe starting path pruned target"
+  fi
+done
+
 # --- Part D: a file that cannot be removed -----------------------------------
 if [[ "$(id -u)" -eq 0 ]]; then
   echo 'doc-notice-prune: running as root, unremovable-file leg skipped'
