@@ -156,7 +156,10 @@ write is an **io-error**, never a mark mismatch.
   or `O_NONBLOCK`. Between the `stat` checks and the open, only root or the
   caller can change the path (the directory checks above); if they swap in
   another kind of file, the open itself may have side effects (for example on a
-  character device) before the descriptor check refuses it. The descriptor
+  character device) before the descriptor check refuses it. A replacement owned
+  regular file may instead be accepted: the pre-validation inode is not pinned,
+  and the post-open check compares the descriptor with the path as it is then.
+  The descriptor
   approach needs Linux `/proc`; without it every I/O call fails and the probe
   stops without writing. A process of the same user can still change the file's
   contents while the probe runs.
@@ -184,6 +187,11 @@ incomplete geometry with matching hashes) and hostile GPTs with valid CRCs
 using CRCs computed independently from the gzip trailer. It swaps the target
 path during a run and between the checks and the open, and checks short reads
 and writes.
+
+One backup-only corruption case deliberately preserves the primary and backup
+headers' matching entry-CRC fields and repairs only the backup header CRC.
+The current array comparison rejects it without writes; removing that comparison
+accepts the image. No CRC collision is needed, so the comparison is not redundant.
 
 ## Before anything calls it
 

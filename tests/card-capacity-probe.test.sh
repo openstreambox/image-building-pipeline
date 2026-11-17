@@ -27,6 +27,8 @@
 # shellcheck shell=bash
 
 set -uo pipefail
+# Fixtures must have consistent permissions even under an ambient 000/077 mask.
+umask 022
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${HERE}/.." && pwd)"
@@ -496,6 +498,14 @@ mut_althuge()     { put_le "$1" $(( 512 + 32 )) 8 4611686018427387904; fix_gpt "
 mut_hdrcrc()      { local o; for o in $(( 512 + 60 )) $(( 65535 * 512 + 60 )); do printf 'X' | dd of="$1" bs=1 seek="${o}" conv=notrunc status=none; done; fix_gpt "$1" backup; }
 mut_entcrc()      { local o; for o in $(( P_ENT + 60 )) $(( B_ENT + 60 )); do printf 'X' | dd of="$1" bs=1 seek="${o}" conv=notrunc status=none; done; }
 mut_mirror()      { printf 'X' | dd of="$1" bs=1 seek=$(( B_ENT + 60 )) conv=notrunc status=none; fix_gpt "$1" backup; }
+# Keep the mirrored entry-CRC fields unchanged. Recomputing the backup entry
+# CRC would let the header-mirror check catch this and leave byte comparison untested.
+mut_bkarrayonly() {
+  local h=$(( 65535 * 512 ))
+  printf 'X' | dd of="$1" bs=1 seek=$(( B_ENT + 60 )) conv=notrunc status=none
+  put_le "$1" $(( h + 16 )) 4 0
+  put_le "$1" $(( h + 16 )) 4 "$(crc32 "$1" "${h}" "$(le "$1" $(( h + 12 )) 4)")"
+}
 mut_bkself()      { put_le "$1" $(( 65535 * 512 + 24 )) 8 7; fix_gpt "$1" backup; }  # backup header names another LBA as its own
 mut_bksize()      { put_le "$1" $(( 512 + 80 )) 4 64; put_le "$1" $(( 65535 * 512 + 80 )) 4 64; fix_gpt "$1"; } # 64 entries: array no longer ends at the backup header
 hostile_gpt() {
@@ -519,6 +529,7 @@ hostile_gpt althuge     "an alternate LBA of 2^62 (offset overflow)"
 hostile_gpt hdrcrc      "a primary header with a bad CRC"
 hostile_gpt entcrc      "a primary entry array with a bad CRC"
 hostile_gpt mirror      "a backup entry array that differs from the primary"
+hostile_gpt bkarrayonly "backup-only corruption with matching stored entry CRCs"
 hostile_gpt bkself      "a backup header that does not name its own LBA"
 hostile_gpt bksize      "an entry array that does not end at the backup header"
 
