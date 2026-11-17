@@ -42,3 +42,16 @@ bsp-provenance.json
 # output tree so finished subimages are renamed rather than copied across devices.
 .mkosi-workspace/
 .build-secrets/
+
+# Reviewed source notice inputs and their bounded host contracts.
+!/mkosi/runtime/licence-notices/dependencies/sources.json
+!/mkosi/runtime/licence-notices/dependencies/plan.json
+!/mkosi/runtime/licence-notices/dependencies/plan.sha256
+!/mkosi/runtime/licence-notices/dependencies/SHA256SUMS
+!/mkosi/runtime/licence-notices/dependencies/srtla.txt
+!/mkosi/runtime/licence-notices/dependencies/mediamtx.txt
+!/mkosi/runtime/licence-notices/dependencies/identity.tsv
+!/mkosi/runtime/licence-notices/install-dependency-notices.sh
+!/tools/generate-dependency-notices.py
+!/tests/dependency-notices.test.py
+!/tests/dependency-notices.test.sh
