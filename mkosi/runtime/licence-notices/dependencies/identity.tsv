@@ -3,5 +3,6 @@
 # mediamtx <binary path> <version> <architecture> <release tarball sha256> <binary sha256>
 srtla	srtla	4.2.0	amd64
 srtla	srtla	4.2.0	arm64
+runtime-srtla	arm64	/usr/bin/srtla_send	c1c91ed3bb25c917c783193768a82e2ec5fd3b9f1d40dd26cc29ed9b461b2ba2
 mediamtx	/usr/local/bin/mediamtx	v1.19.2	amd64	f9c601cc303ceca8fad2883917b022882672c5bc56311e92dbceb16e5f20c60c	7dd8b247dac4105fa938fbae6222ebfe6e7889cdcfba219d65ea88144153c3c0
 mediamtx	/usr/local/bin/mediamtx	v1.19.2	arm64	562f419912a8668c18216a9e8c95359ec82fbb754e4a44e2953ef62b98eec688	5bdaf5ba8bcb8e2a502f5cf96ee8baf39d11cfc257f12ebac304f4b0307c7c92

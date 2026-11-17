@@ -29,7 +29,11 @@ import zipfile
 HERE = Path(__file__).resolve().parents[1] / 'mkosi/runtime/licence-notices/dependencies'
 PAYLOADS = ('srtla', 'mediamtx')
 OFFICIAL = ('https://codeload.github.com/', 'https://static.crates.io/crates/',
-            'https://proxy.golang.org/', 'https://github.com/bluenviron/mediamtx/releases/download/')
+            'https://proxy.golang.org/', 'https://github.com/bluenviron/mediamtx/releases/download/',
+            'https://go.dev/', 'https://static.rust-lang.org/',
+            'https://api.github.com/repos/golang/go/', 'https://api.github.com/repos/rust-lang/rust/',
+            'https://raw.githubusercontent.com/rust-lang/rust/',
+            'https://raw.githubusercontent.com/llvm/llvm-project/')
 
 # Discovery. A file whose name contains any of these words anywhere (any case,
 # any extension or none), or that sits below a licences or REUSE metadata
@@ -58,6 +62,9 @@ COMMENT = re.compile(rb'^[ \t]*/\*.*?\*/|^[ \t]*<!--.*?-->'
 PARAGRAPH = re.compile(rb'(?:^[ \t]*\S[^\n]*(?:\n|$))+', re.M)
 MAX_PARAGRAPH = 65536
 EXCLUSION_RULES = {
+    'unassigned-reference-context': 'Repository-wide reference text; no runtime applicability established in this selection.',
+    'build-context-only': 'Compiler/tool source context, not assigned to the installed runtime payload.',
+    'test-context-only': 'Test or example source context; no installed membership evidence.',
     'binary': 'Content is not UTF-8 text (or contains NUL), so it cannot be reproduced in a text notice.',
     'mention-outside-comments': 'The word or sign also occurs outside comment blocks, but not in a copyright '
                                 'statement form (identifiers, tables, strings); those occurrences are not retained.',
@@ -106,7 +113,7 @@ def unpack(data, is_zip):
             entries = [(i.filename, archive.read(i)) for i in archive.infolist() if not i.is_dir()]
     else:
         entries = []
-        with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
+        with tarfile.open(fileobj=io.BytesIO(data), mode='r:*') as archive:
             for i in archive:
                 if i.isfile():
                     entries.append((i.name, archive.extractfile(i).read()))
@@ -154,7 +161,7 @@ def source_pin(entry):
 
     def verify(data):
         pinned(entry['sha256'], url)(data)
-        with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
+        with tarfile.open(fileobj=io.BytesIO(data), mode='r:*') as archive:
             check(archive.pax_headers.get('comment') == commit,
                   'source archive commit differs from pin: ' + name)
             top = name.split('/')[1] + '-' + commit
@@ -336,6 +343,102 @@ def package(name, version, kind, payload, origin, files, other, scope, excerpts,
     return record
 
 
+def runtime_scope(name, path):
+    """Conservative source scopes, never an object membership assertion."""
+    if name in ('llvm-LICENSE.TXT', 'rust-license-metadata.json', 'rust-REUSE.toml',
+                 'rust-.gitmodules', 'rust-compiler_rustc_target_src_spec_targets_aarch64_unknown_linux_gnu.rs') or '/vendor/cc-' in path or '/library/proc_macro/' in path or path.endswith('/build.rs'):
+        return 'build-context-only'
+    if name == 'go-source.tar.gz' and (
+            (not path.startswith('go/src/') and path not in ('go/LICENSE', 'go/PATENTS'))
+            or Path(path).name.startswith(('make.', 'all.', 'run.', 'clean.', 'bootstrap.', 'buildall.'))):
+        return 'build-context-only'
+    if name == 'go-source.tar.gz' and path.startswith(('go/src/cmd/', 'go/pkg/tool/', 'go/misc/', 'go/test/')):
+        return 'build-context-only'
+    if '/testdata/' in path or '/tests/' in path or '/examples/' in path or path.endswith('_test.go'):
+        return 'test-context-only'
+    if name.startswith(('rust-LICENSES_GPL-', 'rust-LICENSES_GCC-', 'rust-LICENSES_CC-', 'rust-LICENSES_OFL-')):
+        return 'unassigned-reference-context'
+    if name == 'go-source.tar.gz':
+        return 'Go shared/runtime source candidate; package/function membership unmeasured'
+    if name.startswith('llvm-') or '/compiler-builtins/' in path or '/unwind/' in path:
+        return 'conditional runtime source candidate; static inclusion unverified'
+    if name == 'rust-src.tar.xz' and any('/library/' + x + '/' in path for x in ('alloc', 'core', 'std')):
+        return 'standard-library source candidate; alloc/core/std paths measured, whole-file membership unverified'
+    return 'Rust shared/runtime source candidate; optional and other-target material included, membership unverified'
+
+
+def runtime_packages(config, cache, measurement, inputs, excerpts):
+    """Consume only pinned official public sources; retain exclusions separately."""
+    check(config['go_version'] == measurement['go'] == 'go1.26.4'
+          and config['measured_mediamtx_sha256'] == measurement['binary_sha256'], 'runtime Go identity mismatch')
+    check(config['measured_sender_arm64_sha256'] ==
+          'c1c91ed3bb25c917c783193768a82e2ec5fd3b9f1d40dd26cc29ed9b461b2ba2',
+          'runtime sender identity mismatch')
+    rust = 'b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d'
+    check(config['rust_commit'] == rust and config['rust_distribution'] == 'nightly-2026-06-12',
+          'runtime Rust identity mismatch')
+    check(len(config['inputs']) == 37, 'runtime input set incomplete')
+    data = {}
+    for entry in config['inputs']:
+        name, url = entry['file'], entry['url']
+        check(name not in data and name == Path(name).name, 'duplicate/unsafe runtime input')
+        raw, _ = cache.get(url, pinned(entry['sha256'], url))
+        check(len(raw) == entry['size'], 'runtime input size mismatch')
+        data[name] = raw
+        inputs[url] = {**inputs.get(url, {}), 'sha256': sha(raw), 'bytes': len(raw), 'scope': entry['scope']}
+    manifest = tomllib.loads(data['2026-06-12.toml'].decode())
+    check(manifest['pkg']['rustc']['git_commit_hash'] == rust, 'runtime distribution commit mismatch')
+    check(sha(data['2026-06-12.toml']) == data['2026-06-12.toml.sha256'].decode().split()[0],
+          'runtime manifest checksum mismatch')
+    check(sha(data['rust-src.tar.xz']) == manifest['pkg']['rust-src']['target']['*']['xz_hash'],
+          'runtime source distribution mismatch')
+    check(json.loads(data['go-tag.json'])['object']['sha'] == config['go_commit'] == 'a9ce111d580581fb925ae88f125c69b7d93504ea', 'runtime Go tag mismatch')
+    release = next(x for x in json.loads(data['go-releases.json']) if x['version'] == config['go_version'])
+    check(any(x['kind'] == 'source' and x['sha256'] == sha(data['go-source.tar.gz']) for x in release['files']),
+          'runtime Go release checksum mismatch')
+    tree = json.loads(data['rust-tree.json'])
+    check(tree['sha'] == rust and not tree['truncated'], 'runtime Rust tree mismatch')
+    blobs = {x['path']: x['sha'] for x in tree['tree'] if x['type'] == 'blob'}
+    for entry in config['inputs']:
+        prefix = 'https://raw.githubusercontent.com/rust-lang/rust/' + rust + '/'
+        if entry['url'].startswith(prefix):
+            raw = data[entry['file']]
+            check(hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+                  == blobs[entry['url'][len(prefix):]], 'runtime Rust blob mismatch')
+    sender, _ = unpack(data['sender-source.tar.gz'], False)
+    check(tomllib.loads(root_file(sender, 'rust-toolchain.toml').decode())['toolchain']['channel']
+          == config['rust_distribution'], 'runtime sender toolchain pin mismatch')
+    packages, context = [], []
+    for entry in config['inputs']:
+        name, url = entry['file'], entry['url']
+        if entry['scope'] == 'identity':
+            continue
+        files, other = unpack(data[name], False) if name.endswith(('.tar.gz', '.tar.xz')) else ({'source/' + name: data[name]}, [])
+        if name == 'go-source.tar.gz':
+            check(files['go/VERSION'].splitlines()[0] == config['go_version'].encode(), 'runtime Go VERSION mismatch')
+        grouped = {}
+        for path, raw in files.items():
+            scope = runtime_scope(name, path)
+            if scope in ('build-context-only', 'test-context-only', 'unassigned-reference-context'):
+                if is_named(path, False):
+                    context.append({'input': url, 'source_path': path, 'source_sha256': sha(raw), 'reason': scope})
+                continue
+            grouped.setdefault(scope, {})[path] = raw
+        for scope, selected in sorted(grouped.items()):
+            version = config['go_version'] if name.startswith('go-') else rust
+            if name.startswith('llvm-'):
+                version = url.split('/llvm-project/', 1)[1].split('/', 1)[0]
+            elif name == 'backtrace.tar.gz':
+                version = url.rsplit('/', 1)[-1]
+            p = package(name, version,
+                        'runtime', 'mediamtx' if name.startswith('go-') else 'srtla', url,
+                        selected, other, scope, excerpts)
+            packages.append(p)
+    return packages, {'source_identities': {k: config[k] for k in ('go_version', 'go_commit', 'rust_commit', 'rust_distribution')},
+                      'sender_arm64_sha256': config['measured_sender_arm64_sha256'],
+                      'excluded_named_context': context, 'gaps': config['gaps'], 'limits': config['limits']}
+
+
 def derive(sources_raw, cache):
     """Rebuild the whole inventory from sources.json and pinned archives. Returns (plan, excerpts)."""
     sources = json.loads(sources_raw)
@@ -433,6 +536,11 @@ def derive(sources_raw, cache):
                                 SCOPES['supplement'].format(commit=sup['commit'], **{'for': '@'.join(target)}),
                                 excerpts, {'for': list(target)}))
 
+    runtime = None
+    if 'runtime' in sources:
+        added, runtime = runtime_packages(sources['runtime'], cache, measurement, inputs, excerpts)
+        packages.extend(added)
+
     plan = {
         'schema': 2,
         'sources_sha256': sha(sources_raw),
@@ -455,12 +563,14 @@ def derive(sources_raw, cache):
         'limits': [
             'Cargo.lock includes optional, test and target-specific packages; no complete shipped Rust membership claim.',
             'Go buildinfo records module membership for one architecture, not individual files or functions.',
-            'Compiler and runtime notices are not covered.',
+            'Runtime source supplements, when present, do not establish complete installed membership.',
             'Sources have not been rebuilt; no source-to-binary reproducibility claim.',
             'Mechanical notice discovery is not a legal or compliance clearance.',
         ],
         'packaging_ready': False,
     }
+    if runtime is not None:
+        plan['runtime'] = runtime
     check_plan(plan)
     plan['payload_sha256'] = {name: sha(data) for name, data in render(plan, excerpts).items()}
     return plan, excerpts
@@ -472,6 +582,9 @@ def check_plan(plan):
     by_key = {(p['name'], p['version']): p for p in plan['packages'] if p['kind'] in ('crate', 'go-module')}
     for p in plan['packages']:
         expected = {'crate': 'srtla', 'workspace': 'srtla', 'go-module': 'mediamtx'}.get(p['kind'])
+        if p['kind'] == 'runtime':
+            expected = 'mediamtx' if p['name'].startswith('go-') else 'srtla'
+            check('runtime' in plan and 'candidate' in p['scope'], 'runtime scope/evidence missing')
         check(p['payload'] in PAYLOADS and (expected is None or p['payload'] == expected),
               f"package routed to the wrong payload: {p['name']} {p['version']}")
         check((p['origin'] is None) == (p['kind'] == 'workspace'), 'origin missing: ' + p['name'])
@@ -524,7 +637,7 @@ def render(plan, excerpts):
         'Retained: whole notice, licence and authorship files; comment blocks that\n'
         'mention copyright; paragraphs with copyright statements outside comments.\n'
         'Each excluded file and its reason is listed in the source inventory.\n'
-        'Compiler/runtime notices require separate exact-source verification.\n'
+        'Runtime source supplements, when present, have separate candidate scopes.\n'
     )
     headers = {
         'srtla': common + (
@@ -536,8 +649,13 @@ def render(plan, excerpts):
             f"No membership\nmeasurement for other architectures. Module metadata does not identify\n"
             'included files or functions.\n'),
     }
-    payload_of = {(p['name'], p['version']): p['payload'] for p in plan['packages']}
     buffers = {k: bytearray(v.encode()) for k, v in headers.items()}
+    if 'runtime' in plan:
+        for out in buffers.values():
+            out.extend(b'\nRUNTIME SOURCE NOTICE SUPPLEMENT (conservative source superset)\n')
+            for line in plan['runtime']['limits'] + plan['runtime']['gaps']:
+                out.extend((line + '\n').encode())
+    payload_of = {(p['name'], p['version']): p['payload'] for p in plan['packages']}
     for g in plan['gaps']:
         if g['unresolved']:
             buffers[payload_of[(g['name'], g['version'])]].extend(
@@ -556,6 +674,8 @@ def render(plan, excerpts):
     ident = plan['mediamtx_identity']
     lines = [f"srtla\t{plan['srtla_identity']['package']}\t{plan['srtla_identity']['version']}\t{a}"
              for a in plan['srtla_identity']['architectures']]
+    if 'runtime' in plan and 'sender_arm64_sha256' in plan['runtime']:
+        lines.append('runtime-srtla\tarm64\t/usr/bin/srtla_send\t' + plan['runtime']['sender_arm64_sha256'])
     lines += [f"mediamtx\t{ident['binary_path']}\t{ident['version']}\t{r['arch']}\t{r['tarball_sha256']}"
               f"\t{r['binary_sha256']}" for r in ident['releases']]
     result['identity.tsv'] = ('# Installed identities covered by these notices (generated; tab separated).\n'

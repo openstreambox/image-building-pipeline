@@ -82,12 +82,13 @@ if ! (cd "${BASE}" && sha256sum --check --strict "${WORK}/planned-sums") > "${WO
   die "notice payloads differ from the reviewed plan"
 fi
 
-srtla_rows=() mtx_rows=()
+srtla_rows=() mtx_rows=() runtime_rows=()
 while IFS=$'\t' read -r kind rest || [[ -n "${kind:-}" ]]; do
   [[ -z "${kind}" || "${kind}" == \#* ]] && continue
   case "${kind}" in
     srtla) srtla_rows+=("${rest}") ;;
     mediamtx) mtx_rows+=("${rest}") ;;
+    runtime-srtla) runtime_rows+=("${rest}") ;;
     *) die "unknown identity row '${kind}' in identity.tsv" ;;
   esac
 done < "${BASE}/identity.tsv"
@@ -118,6 +119,19 @@ if (( ${#found[@]} == 1 )); then
       first="$(head -n 1 "${file}")"
       [[ "${first}" == "${srtla_pkg} ${version}" ]] \
         || die "${file} starts with '${first}', not '${srtla_pkg} ${version}'; it is not the parent notice file these notices extend"
+      # The runtime source evidence includes one measured sender binary. Bind
+      # that architecture to its exact bytes; other architectures stay candidates.
+      for row in "${runtime_rows[@]}"; do
+        IFS=$'\t' read -r want_arch want_path want_hash extra <<< "${row}"
+        [[ "${want_arch}" == arm64 && "${want_path}" == /usr/bin/srtla_send &&
+          "${want_hash}" =~ ^[0-9a-f]{64}$ && -z "${extra:-}" ]] || die "invalid runtime sender identity"
+        if [[ "${arch}" == "${want_arch}" ]]; then
+          runtime_binary="${DEST}${want_path}"
+          [[ -f "${runtime_binary}" && ! -L "${runtime_binary}" ]] || die "runtime sender binary missing or symlinked"
+          [[ "$(sha256sum "${runtime_binary}" | awk '{print $1}')" == "${want_hash}" ]] \
+            || die "runtime sender binary differs from measured source identity"
+        fi
+      done
       packages+=("${srtla_pkg}")
       ;;
     not-installed | config-files) log "${srtla_pkg} is not installed in this image; skipped" ;;

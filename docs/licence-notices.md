@@ -191,7 +191,7 @@ is not a measured shipped feature graph. MediaMTX has 131 fetched go.sum module
 zips: 85 match the module list in the arm64 Go 1.26.4 release binary and 46
 are source-only. The module list records modules, not included files or
 functions. The amd64 release is identified by hash only; its module membership
-is not measured. Compiler and runtime notices are not covered. No rebuild or
+is not measured. Runtime source supplements below retain their own bounded scope. No rebuild or
 source-to-binary reproducibility is claimed.
 
 Licence-text gaps, pinned to versions and origins:
@@ -212,3 +212,48 @@ Licence-text gaps, pinned to versions and origins:
 
 The private-source `cerastream` gap remains separate. This topic neither changes
 package pins nor establishes release licence closure.
+
+### Pinned runtime source supplements
+
+The same generator and installer retain Go 1.26.4 and Rust
+`b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d` runtime source notice candidates.
+`sources.json.runtime` pins official inputs, identities and remaining gaps.
+Go buildinfo identifies 1.26.4 in the measured arm64 MediaMTX release; its source
+commit is `a9ce111d580581fb925ae88f125c69b7d93504ea`. Sender arm64 paths
+identify `alloc`, `core` and `std` at that Rust commit. The corresponding official
+distribution and sender toolchain pin are `nightly-2026-06-12`; June 11 is the
+compiler commit date. Other-architecture toolchains and complete linked-object
+membership are unmeasured. These are conservative source supplements alongside
+the versioned application notices, not an assignment of every source to bytes.
+
+The plan retains original paths, scopes, byte ranges and digests for shared
+terms, standard-library, compiler-builtins, backtrace, compiler-rt and libunwind
+candidates. Named notices remain whole; source excerpts follow the dependency
+rules. Optional and other-target vendor terms remain candidates. LLVM root and
+compiler/tool sources are build context. Named notices in those sources and
+test/example material are separately inventoried with hashes and exclusion
+reasons in `runtime.excluded_named_context`. Repository-wide GPL/GCC-exception, CC and font reference texts have no
+established runtime applicability here; exclusions retain their paths and hashes.
+Official mapping metadata remains separate source context, not grant text. No compiler installation is asserted.
+
+Rust `fortanix-sgx-abi` 0.6.1, `vex-sdk` 0.27.1 and `wasip1` 1.0.0 have no
+named notice files in distributed source. No SPDX declaration is replaced with
+an invented grant. Release-generated `COPYRIGHT.html` and
+`COPYRIGHT-library.html` remain unavailable; exact source COPYRIGHT and licence
+texts are retained instead. ELF compiler comments alone do not pin GCC/Clang
+runtime source identity; Debian shared-library notices remain separate. Existing
+application/dependency gaps remain open. No legal or release clearance, complete
+static membership or source-to-binary reproduction is claimed.
+
+Offline regeneration uses the command above with SHA256(URL)-named cache entries
+for both dependency and runtime inputs. `--fetch` populates missing official
+inputs but rejects changed bytes and never re-enrolls hashes. Offline payload
+checks bind runtime framing and every selected text to the same plan as the
+dependencies. The existing installer verifies payload hashes against that plan
+before appending to package copyright files ahead of pruning. Original parent
+bytes survive; duplicate writes fail. No new target interpreter, network fetch,
+compiler or target execution is needed.
+
+The runtime identity row also binds the measured arm64 sender to its exact
+binary digest before any copyright file is changed. Other architectures retain
+the explicit source-candidate scope without a measured compiler identity claim.

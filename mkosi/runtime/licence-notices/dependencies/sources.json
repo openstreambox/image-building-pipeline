@@ -145,5 +145,302 @@
       "unresolved": true,
       "resolution": "Source headers refer to a BSD LICENSE file that is absent from both the module zip and the exact commit c2471f86866ca6ab0679b9d216cb6a84cfe90db1. The headers are retained. No grant is substituted."
     }
-  ]
+  ],
+  "runtime": {
+    "measured_sender_arm64_sha256": "c1c91ed3bb25c917c783193768a82e2ec5fd3b9f1d40dd26cc29ed9b461b2ba2",
+    "gaps": [
+      "Rust fortanix-sgx-abi 0.6.1, vex-sdk 0.27.1 and wasip1 1.0.0 have no named notice files in rust-src; declarations and headers are not substituted grants. Linux membership unverified.",
+      "Release-generated Rust COPYRIGHT.html and COPYRIGHT-library.html are unavailable; exact source COPYRIGHT and metadata are retained as context.",
+      "GCC/Clang ELF comments do not establish immutable runtime source identity. Debian dynamic-library notices remain separate."
+    ],
+    "go_commit": "a9ce111d580581fb925ae88f125c69b7d93504ea",
+    "go_version": "go1.26.4",
+    "inputs": [
+      {
+        "file": "go-releases.json",
+        "scope": "identity",
+        "sha256": "dff81fa9170d1a7c6a1f38b6cec38c0e3a9e67fd0354419c123ab7c8b8f3c3eb",
+        "size": 2279774,
+        "url": "https://go.dev/dl/?mode=json&include=all"
+      },
+      {
+        "file": "go-tag.json",
+        "scope": "identity",
+        "sha256": "906c012f69fcce0774af0409d909baaf5431f09ca8614e261c543336c5a5bbc2",
+        "size": 331,
+        "url": "https://api.github.com/repos/golang/go/git/ref/tags/go1.26.4"
+      },
+      {
+        "file": "go-source.tar.gz",
+        "scope": "go-runtime-and-build-source",
+        "sha256": "4f668a32fbfc1132e6a881fb968c2f1dada631492a339211735fbb255a42602d",
+        "size": 34118246,
+        "url": "https://go.dev/dl/go1.26.4.src.tar.gz"
+      },
+      {
+        "file": "2026-06-11.toml.sha256",
+        "scope": "identity",
+        "sha256": "9cdfad4ec09b8a8522978ee77fc089228bd2d62f382348e55788d0c151a010f4",
+        "size": 92,
+        "url": "https://static.rust-lang.org/dist/2026-06-11/channel-rust-nightly.toml.sha256"
+      },
+      {
+        "file": "2026-06-11.toml",
+        "scope": "identity",
+        "sha256": "2f9f6e770671dfa9e2bb84ba8fd86e3292c158be26fc596deb59db5df5e4ff09",
+        "size": 897194,
+        "url": "https://static.rust-lang.org/dist/2026-06-11/channel-rust-nightly.toml"
+      },
+      {
+        "file": "2026-06-12.toml.sha256",
+        "scope": "identity",
+        "sha256": "a1e40eaded36298d18b40013e1f3d7ceda31e99774626f25a06135f3bda4184e",
+        "size": 92,
+        "url": "https://static.rust-lang.org/dist/2026-06-12/channel-rust-nightly.toml.sha256"
+      },
+      {
+        "file": "2026-06-12.toml",
+        "scope": "identity",
+        "sha256": "59f9df9cfb632963d6268e9189e0cf943aba920150ada57a851b499b9ec5b719",
+        "size": 897194,
+        "url": "https://static.rust-lang.org/dist/2026-06-12/channel-rust-nightly.toml"
+      },
+      {
+        "file": "rust-src.tar.xz",
+        "scope": "rust-runtime-source-candidates",
+        "sha256": "c7a996cae885d68e1799467c39a132af43f099187c3a23a199ed42db52432ad9",
+        "size": 5683752,
+        "url": "https://static.rust-lang.org/dist/2026-06-12/rust-src-nightly.tar.xz"
+      },
+      {
+        "file": "rust-tree.json",
+        "scope": "identity",
+        "sha256": "7311eecb0d5515d444f76eff40cde190d89f871b657a28fec16cfed700856479",
+        "size": 16542751,
+        "url": "https://api.github.com/repos/rust-lang/rust/git/trees/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d?recursive=1"
+      },
+      {
+        "file": "rust-commit.json",
+        "scope": "identity",
+        "sha256": "069f7411cfaa4406daebd8cc09f896a901daba39aa19ea01e75bb38fafbf6ad4",
+        "size": 4977,
+        "url": "https://api.github.com/repos/rust-lang/rust/commits/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d"
+      },
+      {
+        "file": "rust-COPYRIGHT",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "172020dbfd5b53a226dfde77616190a48dcff519b0bc0e6deb91a8450782c4af",
+        "size": 1571,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/COPYRIGHT"
+      },
+      {
+        "file": "rust-LICENSE-APACHE",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+        "size": 9723,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/LICENSE-APACHE"
+      },
+      {
+        "file": "rust-LICENSE-MIT",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1",
+        "size": 1068,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/LICENSE-MIT"
+      },
+      {
+        "file": "rust-.gitmodules",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "fbae3199e4330c38d6051f76c6db15772a60a3d296ea5cad4e2161f9471cc3f3",
+        "size": 1508,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/.gitmodules"
+      },
+      {
+        "file": "rust-library_unwind_src_lib.rs",
+        "scope": "rust-runtime-source-candidates",
+        "sha256": "aa86f20a8abe2804f93e23126af83bf171ac5fd2f08fd0822862928089cc7a9a",
+        "size": 6955,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/library/unwind/src/lib.rs"
+      },
+      {
+        "file": "rust-library_unwind_src_libunwind.rs",
+        "scope": "rust-runtime-source-candidates",
+        "sha256": "fcfdca7a8945dabd679dddaf90f0d465b17f60a8726310ecac14d80aa46aa19e",
+        "size": 13324,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/library/unwind/src/libunwind.rs"
+      },
+      {
+        "file": "rust-compiler_rustc_target_src_spec_targets_aarch64_unknown_linux_gnu.rs",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "7f6bd4b280bee873dbb899e53e7c5724807708e13dcd74edb631bc7c460b25ca",
+        "size": 1924,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/compiler/rustc_target/src/spec/targets/aarch64_unknown_linux_gnu.rs"
+      },
+      {
+        "file": "llvm-LICENSE.TXT",
+        "scope": "conditional-runtime-and-build-source",
+        "sha256": "8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee",
+        "size": 15141,
+        "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/08c84e69a84d95936296dfcab0e38b34100725d5/LICENSE.TXT"
+      },
+      {
+        "file": "llvm-libunwind_LICENSE.TXT",
+        "scope": "conditional-runtime-and-build-source",
+        "sha256": "b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d",
+        "size": 16706,
+        "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/08c84e69a84d95936296dfcab0e38b34100725d5/libunwind/LICENSE.TXT"
+      },
+      {
+        "file": "llvm-compiler-rt_LICENSE.TXT",
+        "scope": "conditional-runtime-and-build-source",
+        "sha256": "1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d",
+        "size": 16708,
+        "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/08c84e69a84d95936296dfcab0e38b34100725d5/compiler-rt/LICENSE.TXT"
+      },
+      {
+        "file": "backtrace.tar.gz",
+        "scope": "rust-runtime-source-candidates",
+        "sha256": "08a47c002544baebcabb2b0d4cb81459883875ab2ae93ff7882942a639d0276b",
+        "size": 99227,
+        "url": "https://codeload.github.com/rust-lang/backtrace-rs/tar.gz/28ec93b503bf0410745bc3d571bf3dc1caac3019"
+      },
+      {
+        "file": "rust-LICENSES_Apache-2.0.txt",
+        "git_blob": "137069b823873b8bcf42979bcf8e9371052d26a2",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+        "size": 10280,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/LICENSES/Apache-2.0.txt"
+      },
+      {
+        "file": "rust-LICENSES_BSD-2-Clause.txt",
+        "git_blob": "5f662b354cd40cd5339d5aa05d74b15405138230",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "f32fb3b417a194167cfad068223fc975ba96c5960513a10f66a3c28720aec1df",
+        "size": 1267,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/LICENSES/BSD-2-Clause.txt"
+      },
+      {
+        "file": "rust-LICENSES_CC-BY-SA-4.0.txt",
+        "git_blob": "7d4f96c54aa155a17387e64501c50b6a0469932c",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "23ee78c8bae49cf08ea2f0c84945c66b987ebe4520881fb51b3dad4fb43d07c2",
+        "size": 20137,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/LICENSES/CC-BY-SA-4.0.txt"
+      },
+      {
+        "file": "rust-LICENSES_GCC-exception-3.1.txt",
+        "git_blob": "eecede4d0707e2b8ff69c24c5c0160f00ada80e9",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "a3966c9410ef94a1efbfa9ec04e9c1994026a70623fbf0885ce36737bfba3b54",
+        "size": 3320,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/LICENSES/GCC-exception-3.1.txt"
+      },
+      {
+        "file": "rust-LICENSES_GPL-2.0-only.txt",
+        "git_blob": "492485e09b411a53771ce08b50cfc4cb1bf4edde",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "54b212ba1f97f6948fa5486239ab505dd820b02e50cbfd296b4062c8609a70af",
+        "size": 17642,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/LICENSES/GPL-2.0-only.txt"
+      },
+      {
+        "file": "rust-LICENSES_GPL-3.0-or-later.txt",
+        "git_blob": "37b6b8e91b85e34ac07f77bb6d5d9f90626f8d60",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "05315fce6c35f79b8a35454828995fa26336f235895ac64557abc028f4ffcea2",
+        "size": 34795,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/LICENSES/GPL-3.0-or-later.txt"
+      },
+      {
+        "file": "rust-LICENSES_ISC.txt",
+        "git_blob": "6f41c8c63b96e0460597a8dc1255d9c7a65482fa",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "0ff61769b238634e042ab759dddfd104a8e69d091e3600ae3410e401a6164381",
+        "size": 730,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/LICENSES/ISC.txt"
+      },
+      {
+        "file": "rust-LICENSES_LLVM-exception.txt",
+        "git_blob": "fa4b725a0ee50ef723ce5292865e54de7b0bfca4",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "e34c58338bd89d43e709e226610d8f32b3e3c47f4ad9a99a8dc1d4ac7842488e",
+        "size": 919,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/LICENSES/LLVM-exception.txt"
+      },
+      {
+        "file": "rust-LICENSES_MIT.txt",
+        "git_blob": "2071b23b0e08594ea6bc99ac71129ef992abf498",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0",
+        "size": 1078,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/LICENSES/MIT.txt"
+      },
+      {
+        "file": "rust-LICENSES_NCSA.txt",
+        "git_blob": "bb193323bf615d67c591d677636dfdcfba6ec7ff",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "39cb0234065c92b9e6cee3830cbb52b1aa289aa8fe9ba2e66730fec5cf05c630",
+        "size": 1676,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/LICENSES/NCSA.txt"
+      },
+      {
+        "file": "rust-LICENSES_OFL-1.1.txt",
+        "git_blob": "6fe84ee21ebe5d2b54dc63b53b4d5c404c083409",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "8eea8287e5876b539670cadb82e99f9a7afddec6f6730811be1daf25d2e9bcfd",
+        "size": 4016,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/LICENSES/OFL-1.1.txt"
+      },
+      {
+        "file": "rust-LICENSES_Unicode-3.0.txt",
+        "git_blob": "ee8e69b233293872fcb4d6d4930ec196b63626e7",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "f5062c9a188d81dfe66b56db4182dcf9e4b17c0d9b0d311a8e20b3a1b075c443",
+        "size": 1995,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/LICENSES/Unicode-3.0.txt"
+      },
+      {
+        "file": "rust-REUSE.toml",
+        "git_blob": "5ee913426a142f4f542bc31cc8d6e82e62ea777e",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "6d9f80349a29388841413ecb3d20473b6440768c2fdfa06d0456eb56d516daf3",
+        "size": 6219,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/REUSE.toml"
+      },
+      {
+        "file": "rust-library_Cargo.lock",
+        "git_blob": "99e9765171c4a0c0ba6e7b36f657b85fc8ccdc84",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "02120dd57c4c5fd70c81fd92472681c8de5cc2dd78258276da37bb2253666061",
+        "size": 9834,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/library/Cargo.lock"
+      },
+      {
+        "file": "rust-license-metadata.json",
+        "git_blob": "b58329b2ccc19d0071ca61e9a8a767adb96d167f",
+        "scope": "rust-shared-terms-and-build-context",
+        "sha256": "7bed295fb8d5ddc54ef9e7c795b18207d8da747513ae83fce9748e840200b40c",
+        "size": 9198,
+        "url": "https://raw.githubusercontent.com/rust-lang/rust/b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d/license-metadata.json"
+      },
+      {
+        "file": "sender-source.tar.gz",
+        "scope": "identity",
+        "sha256": "08e988c70af7e555750809add9c7ce2f53e5de3f1455a0ffa72b4bf9384a63db",
+        "size": 506770,
+        "url": "https://codeload.github.com/CERALIVE/srtla-send-rs/tar.gz/1b5febb767ac2af3a275dc7ea2926bcb882001e7"
+      }
+    ],
+    "limits": [
+      "Source notice superset, not complete binary membership, source-to-binary reproducibility or legal clearance.",
+      "Go 1.26.4 is measured from the arm64 MediaMTX buildinfo; individual packages/functions and other-architecture toolchains are unmeasured.",
+      "Sender arm64 paths identify Rust b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d alloc/core/std. June 11 is the commit date; the official distribution is nightly-2026-06-12.",
+      "Other standard-library, vendor, backtrace, compiler-builtins, compiler-rt and libunwind texts are conditional source candidates, not evidence of static inclusion.",
+      "LLVM root/compiler/tool/test notices are separately inventoried source context and are not assigned to installed runtime bytes.",
+      "Existing application and dependency missing-text gaps remain open."
+    ],
+    "measured_mediamtx_sha256": "5bdaf5ba8bcb8e2a502f5cf96ee8baf39d11cfc257f12ebac304f4b0307c7c92",
+    "rust_commit": "b30f3df3ba3c4c9de2f58f1a75dd9500b79b3f8d",
+    "rust_distribution": "nightly-2026-06-12"
+  }
 }
