@@ -1,0 +1,18 @@
+# Licence texts for first-party packages that ship without a copyright file.
+#
+# Read by postinst.d/services.sh::setup_licence_notices, which writes
+# /usr/share/doc/<package>/copyright for every installed package named here.
+# Each text under texts/ is a verbatim copy of <path> in <source> at <commit>,
+# pinned by sha256; tools/verify-licence-notices re-fetches and compares them.
+# The build fails when an installed package version differs from <version>, a
+# text is missing or changed, or the package now ships its own copyright file.
+#
+# A row whose <path>, <text> and <sha256> are "-" records a component whose
+# source has no licence file at that commit: the copyright file says so and
+# reproduces no text for it.
+#
+# Columns (tab-separated): package version component source commit path text sha256
+srtla	4.2.0	srtla_send	https://github.com/CERALIVE/srtla-send-rs	1b5febb767ac2af3a275dc7ea2926bcb882001e7	LICENSE	texts/srtla-send-rs-1b5febb7-LICENSE	6369b8e9dc0a4db030f9a6cf11d866e07fea9afa3d47a5700aa7d8c15f1aa65a
+libsrt1.5-ceralive	1.5.7+ceralive.2	libsrt	https://github.com/CERALIVE/srt	d487b13365205b6cd5da9d9b50868c323e255b7c	LICENSE	texts/srt-d487b133-LICENSE	fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85
+gstreamer1.0-libuvcsrc	2026.9.0	libuvc (the bundled libuvc.so)	https://github.com/CeraLive/libuvc	f3eda761b69acdfa6c0ffc02119b2bda172b9d46	LICENSE.txt	texts/libuvc-f3eda761-LICENSE.txt	57a7ba48475cb7f0aaddfb79ef32e742a19901908f0287b6827da336477b212e
+gstreamer1.0-libuvcsrc	2026.9.0	the GStreamer plugin	https://github.com/CERALIVE/gstlibuvcsrc	8fe5ba50e8c28ceeffba8a3b896b245fff53bd96	-	-	-
