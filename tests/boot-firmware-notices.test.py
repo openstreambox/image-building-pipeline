@@ -156,12 +156,24 @@ class Fixture:
                         'Licence: Redistributable. See LICENCE.alpha for details.\n\n' + '-' * 40 + '\n\n'
                         'Driver: beta - Beta\n\nFile: b/changed.bin\nLicence: GPL-2.0\n\n' + '-' * 40 + '\n\n'
                         'Driver: gamma\n\nFile: c/orig.bin\nLicence:\n  Redistributable.\n  See LICENCE.alpha.\n\n'
-                        + '-' * 40 + '\n\nDriver: delta\n\nFile: a/up2.bin\nLicence: Allegedly free.\n'),
+                        + '-' * 40 + '\n\nDriver: delta\n\nFile: a/up2.bin\nLicence: Allegedly free.\n\n'
+                        + '-' * 40 + '\n\nDriver: epsilon\n\nFile: f/mit.bin\n\nLicence: MIT\n\nCopyright 2009 Example\n\n'
+                        + '-' * 40 + '\n\nDriver: zeta\n\nFile: f/apache.bin\n\n'
+                        'License: Apache-2.0. See Apache-2.0 for details.\n\n'
+                        + '-' * 40 + '\n\nDriver: eta\n\nFile: f/bsd.bin\n\n'
+                        'Licence: Redistributable, BSD-3-Clause licence, See LICENCE.alpha for details\n\n'
+                        + '-' * 40 + '\n\nDriver: theta\n\nFile: f/dual.bin\nFile: f/twice.bin\n\n'
+                        'Licence: Dual GPLv2/MPL. See README.md and WHENCE\n\n'
+                        + '-' * 40 + '\n\nDriver: iota\n\nFile: f/twice.bin\n\nLicence: MIT\n'),
             'LICENSES/LICENCE.alpha': b('Alpha licence text.\nKeep this notice.\n'),
+            'LICENSES/MIT': b('MIT License fixture\n'),
+            'LICENSES/Apache-2.0': b('Apache License 2.0 fixture\n'),
             'LICENSES/GPL-2.0': b('GNU GENERAL PUBLIC LICENSE fixture\n'),
             'LICENSES/LICENCE.unused': b('unused\n'),
             'a/up.bin': b'\x00UP', 'a/same.bin': b'\x00SAME', 'a/up2.bin': b'\x00UP2',
             'b/changed.bin': b'\x00UPSTREAM-B', 'c/orig.bin': b'\x00ORIG', 'README.md': b('upstream readme\n'),
+            'f/mit.bin': b'\x00MIT', 'f/apache.bin': b'\x00APACHE', 'f/bsd.bin': b'\x00BSD', 'f/dual.bin': b'\x00DUAL',
+            'f/twice.bin': b'\x00TWICE',
         }
         self.arm_files = {
             'README.md': b('# Armbian firmware\n\nNote: Some firmware files are proprietary and distributed under '
@@ -280,7 +292,10 @@ try:
     classes = {p: r[2] for p, r in rows.items()}
     check(classes == {'README.md': 'armbian-changed', 'a/same.bin': 'upstream', 'a/up.bin': 'upstream',
                       'a/up2.bin': 'upstream', 'b/changed.bin': 'armbian-changed', 'c/orig.bin': 'upstream',
-                      'd/copy.bin': 'upstream-other-path', 'e/only.bin': 'armbian-only'}, f'classes {classes}')
+                      'd/copy.bin': 'upstream-other-path', 'e/only.bin': 'armbian-only', 'f/mit.bin': 'upstream',
+                      'f/apache.bin': 'upstream', 'f/bsd.bin': 'upstream', 'f/dual.bin': 'upstream',
+                      'f/twice.bin': 'upstream'},
+          f'classes {classes}')
     check('link.bin' not in rows, 'symlinks are not firmware files')
     check(rows['a/up.bin'][3] == 'WHENCE entry for this path; licence files: LICENSES/LICENCE.alpha', 'upstream cover')
     check(rows['a/up2.bin'][3] == 'WHENCE entry for this path; it names no licence file', 'no named licence file')
@@ -293,6 +308,15 @@ try:
     check(rows['a/same.bin'][5] == 'armbian-firmware' and rows['a/up.bin'][5] == 'linux-firmware', 'origin column')
     ok('firmware files are classified by their exact bytes, and other bytes never borrow an entry')
 
+    entry = 'WHENCE entry for this path; '
+    check(rows['f/mit.bin'][3] == entry + 'licence files: LICENSES/MIT', f'Licence: MIT {rows["f/mit.bin"][3]}')
+    check(rows['f/apache.bin'][3] == entry + 'licence files: LICENSES/Apache-2.0',
+          f'License: Apache-2.0 {rows["f/apache.bin"][3]}')
+    check(rows['f/bsd.bin'][3] == entry + 'licence files: LICENSES/LICENCE.alpha', 'reviewed name without a file')
+    check(rows['f/dual.bin'][3] == entry + 'it names no licence file', 'free text, README.md or WHENCE name no licence file')
+    check(rows['f/twice.bin'][3] == entry + 'licence files: LICENSES/MIT', 'every Licence field of a path counts')
+    ok('SPDX-named licence fields resolve to the licence files of that name; free text names none')
+
     payload = out[f'{FW}.txt']
     texts = [l.split('\t') for l in out['texts.tsv'].decode().splitlines() if not l.startswith('#')]
     for name, off, n, s, b_, src, commit, path in texts:
@@ -304,7 +328,8 @@ try:
             check(files[path] == data, f'{path} is the source bytes')
         check(commit == fix.commits[src], f'{path} commit')
     fw_paths = [t[7] for t in texts if t[0] == f'{FW}.txt']
-    check(fw_paths == ['WHENCE', 'LICENSES/GPL-2.0', 'LICENSES/LICENCE.alpha', 'README.md'], f'firmware texts {fw_paths}')
+    check(fw_paths == ['WHENCE', 'LICENSES/Apache-2.0', 'LICENSES/GPL-2.0', 'LICENSES/LICENCE.alpha', 'LICENSES/MIT',
+                       'README.md'], f'firmware texts {fw_paths}')
     check(b'Redistribution is limited to non-commercial or usage-only contexts.' in payload, 'overlay README verbatim')
     check(b'does not grant any licence' in payload and re.search(rb'\n +1  upstream-other-path\n', payload),
           'scope statement and counts')
@@ -320,7 +345,8 @@ try:
           'only the source repository licence file is reproduced for the DDR blob')
     for phrase in ('No licence text that applies to these bytes has been established',
                    'it is not established as the terms for it', 'but different bytes',
-                   f'git blob {blob(fix.tpl)}', 'None of the parts below has been rebuilt',
+                   f'git blob {blob(fix.tpl)}', 'this file does not rely on a rebuild',
+                   'its build origin is not established',
                    'patches hash 0123abcd', 'Which of those parts this build contains has not been'):
         check(phrase in ' '.join(ub_payload.split()), f'U-Boot statement: {phrase}')
     ok('the U-Boot file names each part, its exact source and the unestablished DDR terms')
@@ -366,6 +392,26 @@ try:
     fix.commits['linux-firmware'] = make_repo(fix.sources, 'linux-firmware', files)
     fix.write_inputs()
     refuses(fix, 'no licence line after it', 'refuses a WHENCE entry format it cannot read')
+
+    def whence_case(old, new, drop=()):
+        shutil.rmtree(lf)
+        files = {k: v for k, v in fix.lf_files.items() if k not in drop}
+        check(old in files['WHENCE'], f'fixture has {old!r}')
+        files['WHENCE'] = files['WHENCE'].replace(old, new)
+        fix.commits['linux-firmware'] = make_repo(fix.sources, 'linux-firmware', files)
+        fix.write_inputs()
+
+    whence_case(b'Licence: MIT\n', b'Licence: BSD-2-Clause\n')
+    refuses(fix, 'names BSD-2-Clause, which is not a file', 'refuses an SPDX name with no licence file')
+    whence_case(b'Licence: MIT\n', b'Licence: MIT\n', drop=('LICENSES/MIT',))
+    refuses(fix, 'names MIT, which is not a file', 'refuses a bare SPDX name whose file is missing')
+    whence_case(b'See Apache-2.0 for details.', b'See LICENSE.apache for details.')
+    refuses(fix, 'names LICENSE.apache, which is not a file', 'refuses a licence file name that does not exist')
+    whence_case(b'BSD-3-Clause licence, See LICENCE.alpha for details', b'BSD-3-Clause licence')
+    refuses(fix, 'BSD-3-Clause with no licence file in the same field', 'a reviewed name without a file needs a named file')
+    whence_case(b'Licence: MIT\n', b'Licence: MIT\n')
+    fix.write_inputs(lambda i: i['firmware']['licence_names_without_file'].update(ISC='unused'))
+    refuses(fix, 'licence_names_without_file lists ISC', 'refuses an unused reviewed exception')
     shutil.rmtree(lf)
     fix.commits['linux-firmware'] = make_repo(fix.sources, 'linux-firmware', fix.lf_files)
     fix.write_inputs()
@@ -390,6 +436,8 @@ try:
                             ('linux-firmware', 'LICENSES/LICENCE.mali_csffw', '2478564cb003c35727b718e93f16cf34674d4884'),
                             ('linux-firmware', 'LICENSES/LICENCE.rtlwifi_firmware.txt', 'd70921f493795acb9af2a38f405193ba7a1b28a3'),
                             ('linux-firmware', 'LICENSES/LICENSE.r8169', 'f4afd4561287f50b6c532c55e9e5b8d65e15dad3'),
+                            ('linux-firmware', 'LICENSES/MIT', '987c4a87a1e987c480891ea945c525720f6f89c2'),
+                            ('linux-firmware', 'LICENSES/Apache-2.0', '8f71f43fee3f78649d238238cbde51e6d7055c82'),
                             ('armbian-firmware', 'README.md', 'a6cb44f3c2515ff282ed14adc3b49d28bf2d251a'),
                             ('u-boot', 'Licenses/README', 'd09f0fe2cb8273dde401dc4a44a9c76288cd5eff'),
                             ('tf-a', 'docs/license.rst', 'e35b9bbc2622603e839f347d2703fc059a05a0b4'),
@@ -397,8 +445,8 @@ try:
         check(pinned.get((key, path)) == want, f'{key} {path} is blob {want}')
     check(not any(t[5] == 'rockchip-rkbin' for t in texts), 'no Rockchip licence text is presented for the DDR blob')
     fw_texts = [t for t in texts if t[0] == f'{FW}.txt']
-    check(len(fw_texts) == 131 and sum(t[7].startswith('LICENSES/') for t in fw_texts) == 129,
-          'WHENCE, 129 licence files and the overlay README')
+    check(len(fw_texts) == 133 and sum(t[7].startswith('LICENSES/') for t in fw_texts) == 131,
+          'WHENCE, 131 licence files and the overlay README')
     check(any(t[7] == 'Licenses/gpl-2.0.txt' for t in texts), 'U-Boot GPL-2.0 text included')
     rows = [l.split('\t') for l in (DATA / 'firmware-files.tsv').read_text().splitlines() if not l.startswith('#')]
     counts = {}
@@ -410,6 +458,26 @@ try:
             check(not refs and 'no licence statement established' in r[3], f'{r[0]} borrows no licence')
     check(counts == {'upstream': 4505, 'upstream-other-path': 51, 'armbian-changed': 49, 'armbian-only': 700},
           f'committed class counts {counts}')
+    # The WHENCE reproduced in the payload, read back: a row that names no licence file
+    # must come from a free-text Licence field, never from one naming MIT or Apache-2.0.
+    whence_text = next(t for t in fw_texts if t[7] == 'WHENCE')
+    whence = gen.parse_whence((DATA / f'{FW}.txt').read_bytes()[int(whence_text[1]):][:int(whence_text[2])].decode())
+    by_path = {r[0]: r for r in rows}
+    for path, want in (('radeon/R100_cp.bin', 'LICENSES/MIT'), ('r128/r128_cce.bin', 'LICENSES/MIT'),
+                       ('intel/avs/max98357a-tplg.bin', 'LICENSES/Apache-2.0'),
+                       ('qcom/yamato_pfp.fw', 'LICENSES/LICENSE.qcom_yamato')):
+        check(by_path[path][3] == f'WHENCE entry for this path; licence files: {want}', f'{path}: {by_path[path][3]}')
+    named = {x: sum(r[3].endswith(f'licence files: {x}') for r in rows) for x in ('LICENSES/MIT', 'LICENSES/Apache-2.0')}
+    check(named == {'LICENSES/MIT': 28, 'LICENSES/Apache-2.0': 15}, f'rows naming MIT and Apache-2.0: {named}')
+    no_file = [r for r in rows if r[3].endswith('it names no licence file')]
+    check(len(no_file) == 39, f'{len(no_file)} rows name no licence file')
+    free_text = ('Allegedly GPL', 'Dual GPLv2/MPL', 'GPLv2 or OpenIB.org BSD license')
+    for r in no_file:
+        entry = r[0] if r[3].startswith('WHENCE entry for this path') else r[3].split()[4].rstrip(';')
+        fields = whence[entry]['licence']
+        check(fields and all(f.startswith(free_text) for f in fields), f'{r[0]} names no file but its field is {fields}')
+        check(not any(w in ('MIT', 'Apache-2.0') or w.startswith(('LICEN', 'NOTICE', 'GPL-'))
+                      for f in fields for w in re.findall(r'[\w.+\-]+', f)), f'{r[0]} field names a licence file')
     payload = (DATA / f'{FW}.txt').read_bytes()
     check(b'Redistribution is limited to non-commercial or usage-only contexts.' in payload, 'README notice kept')
     ident = [l.split('\t') for l in (DATA / 'identity.tsv').read_text().splitlines() if not l.startswith('#')]
@@ -488,7 +556,7 @@ try:
     for p in (FW, UB):
         check(oct((root / f'usr/share/doc/{p}/copyright').stat().st_mode & 0o777) == '0o644', 'mode 0644')
     tail = fwc[len(out[f'{FW}.txt']):].decode()
-    check('Shipped in this image: 6 of 8' in tail, 'shipped count')
+    check('Shipped in this image: 11 of 13' in tail, 'shipped count')
     check('\nshipped\tupstream\ta/up.bin\tWHENCE entry for this path; licence files: LICENSES/LICENCE.alpha\n' in tail,
           'shipped row')
     check('\nremoved\tarmbian-only\te/only.bin\t' in tail and '\nremoved\tupstream\ta/up2.bin\t' in tail, 'removed rows')
@@ -589,6 +657,18 @@ try:
     (root / f'usr/share/doc/{UB}').symlink_to('../../../outside')
     refused(root, f'{UB} is a symlink', 'refuses a symlinked doc directory, writing nothing')
     check(not any((root / 'outside').iterdir()), 'nothing written outside')
+    root = build_root('doc-file')
+    shutil.rmtree(root / f'usr/share/doc/{UB}')
+    (root / f'usr/share/doc/{UB}').write_text('not a directory\n')
+    refused(root, f'/usr/share/doc/{UB} exists and is not a directory',
+            'refuses a second package whose doc path is a file, writing nothing for either package')
+    check((root / f'usr/share/doc/{UB}').read_text() == 'not a directory\n', 'blocking file untouched')
+    check(not (root / f'usr/share/doc/{FW}/copyright').exists(), 'first package left without a partial write')
+    root = build_root('doc-fifo')
+    shutil.rmtree(root / f'usr/share/doc/{UB}')
+    os.mkfifo(root / f'usr/share/doc/{UB}')
+    refused(root, f'/usr/share/doc/{UB} exists and is not a directory',
+            'refuses a second package whose doc path is a FIFO, writing nothing for either package')
     root = build_root('own-copyright')
     (root / f'usr/share/doc/{UB}/copyright').write_text('package-provided\n')
     refused(root, 'already has', 'refuses a package that ships its own copyright', keep=(UB,))

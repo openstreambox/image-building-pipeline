@@ -44,7 +44,14 @@ RULE = '=' * 78
 OUTPUTS = ('armbian-firmware-full.txt', 'linux-u-boot-rock-5b-plus-edge.txt',
            'firmware-files.tsv', 'identity.tsv', 'texts.tsv')
 NOTICE_NAME = re.compile(r'(?i)(licen[cs]e|notice|readme|whence|copying|copyright)')
-REF = re.compile(r'\b(LICEN[CS]E[\w.\-]*|GPL-[\d.]+[\w\-]*|NOTICE\.[\w.\-]+)\b')
+# A WHENCE Licence field is free text. Each word is resolved against the pinned
+# licence directories: a word that is the name of a file there names that file. A
+# word shaped like a licence file name or an SPDX identifier must resolve, or
+# generation stops; other words ("GPLv2", "Dual GPLv2/MPL") name no file.
+WORD = re.compile(r'[A-Za-z0-9][A-Za-z0-9._+\-]*')
+FILE_LIKE = re.compile(r'(?:LICEN[CS]E[\w.\-]*|NOTICE\.[\w.\-]+|GPL-[\d.]+[\w\-]*)')
+SPDX_LIKE = re.compile(r'[A-Za-z][A-Za-z0-9.]*(?:-[A-Za-z0-9.]+)*-(?:\d[\w.]*|Clause)(?:-[A-Za-z0-9.]+)*\+?')
+SPDX_BARE = frozenset({'0BSD', 'ISC', 'MIT', 'NCSA', 'Unlicense', 'X11', 'Zlib'})
 SAFE_PATH = re.compile(r'^[^\t\n\r\\]+$')
 
 
@@ -247,7 +254,7 @@ class Repo:
 # --- WHENCE -------------------------------------------------------------------
 
 def parse_whence(text):
-    """File path -> {'licence': [lines], 'refs': set()} from linux-firmware's WHENCE."""
+    """File path -> {'licence': [Licence field bodies]} from linux-firmware's WHENCE."""
     entries = {}
     for section in re.split(r'\n-{10,}\n', text):
         lines = section.split('\n')
@@ -264,9 +271,7 @@ def parse_whence(text):
                     i += 1
                     body += ' ' + lines[i].strip()
                 for path in group:
-                    entry = entries.setdefault(path, {'licence': [], 'refs': set()})
-                    entry['licence'].append(' '.join(body.split()))
-                    entry['refs'] |= set(REF.findall(body))
+                    entries.setdefault(path, {'licence': []})['licence'].append(' '.join(body.split()))
                 group = []
             i += 1
         if group:
@@ -331,6 +336,30 @@ CLASS_TEXT = {
 }
 
 
+def licence_field_files(body, tree, dirs):
+    """Return (licence files, unresolved licence-like words) of one WHENCE Licence field.
+
+    Every word is looked up in the licence directories, in order; a word that is a
+    file there names it. In the repository root only a word shaped like a licence
+    file name counts, so WHENCE or README.md never do. A word shaped like a licence
+    file name or an SPDX identifier that is no file is returned as unresolved; the
+    caller stops on it unless it is a reviewed exception. Other words name nothing,
+    so a free-form field such as "Allegedly GPLv2+" names no licence file.
+    """
+    files, unresolved = set(), []
+    for raw in WORD.findall(body):
+        word = raw.rstrip('.-')
+        if not word:
+            continue
+        path = next((d + word for d in dirs if d + word in tree and (d or FILE_LIKE.fullmatch(word))), None)
+        if path:
+            files.add(path)
+        elif (FILE_LIKE.fullmatch(word) or SPDX_LIKE.fullmatch(word) or word in SPDX_BARE) \
+                and word not in unresolved:
+            unresolved.append(word)
+    return files, unresolved
+
+
 def derive_firmware(inputs, deb, repos):
     cfg = inputs['firmware']
     upstream, overlay = repos[cfg['upstream']], repos[cfg['overlay']]
@@ -341,11 +370,23 @@ def derive_firmware(inputs, deb, repos):
     for path, oid in upstream.tree.items():
         by_blob.setdefault(oid, []).append(path)
 
-    def resolve(ref):
-        for d in cfg['licence_dirs']:
-            if d + ref in upstream.tree:
-                return d + ref
-        fail(f'WHENCE names {ref}, which is not a file at {upstream.commit}')
+    without_file = cfg.get('licence_names_without_file', {})
+    used_without_file = set()
+
+    def licence_files(path):
+        """Resolved licence files the WHENCE entry for path names, over all its Licence fields."""
+        found = set()
+        for body in whence[path]['licence']:
+            files, unresolved = licence_field_files(body, upstream.tree, cfg['licence_dirs'])
+            for word in unresolved:
+                if word not in without_file:
+                    fail(f'WHENCE names {word}, which is not a file at {upstream.commit}')
+                if not files:
+                    fail(f'WHENCE names {word} with no licence file in the same field; '
+                         'licence_names_without_file does not cover that')
+                used_without_file.add(word)
+            found |= files
+        return found
 
     rows, texts, counts = [], set(), {}
     for rel in sorted(p for p in deb['files'] if p.startswith(prefix)):
@@ -364,22 +405,22 @@ def derive_firmware(inputs, deb, repos):
         if upstream.tree.get(path) == blob:
             cls = 'upstream'
             if path in whence:
-                entry, refs = path, whence[path]['refs']
+                entry, refs = path, licence_files(path)
         elif path in upstream.tree:
             cls, upstream_blob = 'armbian-changed', upstream.tree[path]
             if path in whence:
-                entry, refs = path, whence[path]['refs']
+                entry, refs = path, licence_files(path)
         elif blob in by_blob:
             cls = 'upstream-other-path'
             others = sorted(by_blob[blob])
             named = [p for p in others if p in whence]
             entry = named[0] if named else others[0]
-            refs = whence[entry]['refs'] if named else set()
+            refs = licence_files(entry) if named else set()
             if not named:
                 entry = others[0] + ' (no WHENCE entry)'
         else:
             cls = 'armbian-only'
-        resolved = sorted(resolve(r) for r in refs)
+        resolved = sorted(refs)
         texts |= set(resolved)
         files = f'licence files: {", ".join(resolved)}' if resolved else 'it names no licence file'
         if cls == 'upstream':
@@ -401,6 +442,10 @@ def derive_firmware(inputs, deb, repos):
         rows.append((path, info['sha256'], cls, cover, blob, origin))
     if not rows:
         fail('the firmware package has no files under ' + prefix)
+    unused = sorted(set(without_file) - used_without_file)
+    if unused:
+        fail(f'licence_names_without_file lists {", ".join(unused)}, which no Licence field of this '
+             'package\'s files uses; review the list')
     notices = sorted(p[len(prefix):] for p in deb['files']
                      if p.startswith(prefix) and NOTICE_NAME.search(p.rsplit('/', 1)[-1]))
     return rows, sorted(texts), counts, whence_data, notices
@@ -544,9 +589,10 @@ def uboot_payload(inputs, facts, repos):
             'verbatim. Where no licence text could be established for a part, it says so and '
             'reproduces none for that part.')
     para(p, 'This file records origins and notices. It does not grant any licence and it is not '
-            'legal advice. None of the parts below has been rebuilt from these sources to identical '
-            'bytes; the source of each part was identified from the loader\'s structure, hashes and '
-            'version strings.')
+            'legal advice. The source of each part below was identified from the loader\'s structure, '
+            'hashes and version strings; this file does not rely on a rebuild. The DDR initialisation '
+            'part is a binary, identical to a file of the repository named below; its build origin '
+            'is not established.')
     p.line(f'Archive: {pin["url"]}')
     p.line(f'Archive sha256: {pin["sha256"]}')
     p.line(f'Package: {cfg["package"]} {pin["version"]} ({pin["architecture"]}), '

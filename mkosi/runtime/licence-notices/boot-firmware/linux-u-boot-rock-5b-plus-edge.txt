@@ -6,9 +6,10 @@ their licence texts verbatim. Where no licence text could be established for a
 part, it says so and reproduces none for that part.
 
 This file records origins and notices. It does not grant any licence and it is
-not legal advice. None of the parts below has been rebuilt from these sources
-to identical bytes; the source of each part was identified from the loader's
-structure, hashes and version strings.
+not legal advice. The source of each part below was identified from the
+loader's structure, hashes and version strings; this file does not rely on a
+rebuild. The DDR initialisation part is a binary, identical to a file of the
+repository named below; its build origin is not established.
 
 Archive: https://apt.armbian.com/pool/main/l/linux-u-boot-rock-5b-plus-edge/linux-u-boot-rock-5b-plus-edge_26.8.3_arm64__2026.04-S88dc-P05fe-H3e7f-V2601-B5da4-R448a.deb
 Archive sha256: 0d8bbd29796824be04e32b6c3b5ce88e13f3378004bbced4598900af19e262ba

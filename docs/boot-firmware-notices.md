@@ -10,13 +10,14 @@ prune keeps.
 
 These files record origins and notices. They are not legal advice, do not grant
 any licence, and do not settle whether every firmware file may be redistributed.
-They do not claim that the loader was rebuilt from source.
+They identify the source of each loader part from the loader itself and do not
+rely on a rebuild.
 
 ## What the files contain
 
 **Firmware.** The archive and its two sources at their exact commits:
 linux-firmware `eeed587f`, installed first, and armbian/firmware `f50a2a21`,
-extracted over it. Then, verbatim: `WHENCE`, the 129 licence files it names for
+extracted over it. Then, verbatim: `WHENCE`, the 131 licence files it names for
 the package's files, and the armbian/firmware `README.md` as published (its note
 that redistribution "is limited to non-commercial or usage-only contexts" is
 reproduced and not interpreted). Last, every one of the package's 5305 firmware
@@ -31,8 +32,17 @@ files, marked shipped or removed by this image, with one of four classes:
 
 A WHENCE entry that describes other bytes at the same path is never used for an
 `armbian-changed` file. Measured on a ROCK 5B+ image built from these pins, 4687 files ship:
-4167, 25, 46 and 449 per class. 82 shipped `upstream` files have a WHENCE entry
-that names no licence file.
+4167, 25, 46 and 449 per class. 39 shipped `upstream` files have a WHENCE entry
+that names no licence file; their Licence fields are free text ("Allegedly GPLv2+",
+"Dual GPLv2/MPL", "GPLv2 or OpenIB.org BSD license").
+
+A WHENCE `Licence:` field is free text. The generator resolves each of its words
+against the pinned `LICENSES/` listing (and licence-shaped names against the
+repository root), so `Licence: MIT` names `LICENSES/MIT` and `License: Apache-2.0`
+names `LICENSES/Apache-2.0`. A word shaped like a licence file name or an SPDX
+identifier that is no file stops generation, except for the reviewed names in
+`licence_names_without_file` in `inputs.json`, each of which must appear beside a
+named licence file in the same field and must still be used.
 
 **U-Boot.** The archive, the loader's sha256, and its parts:
 
@@ -80,7 +90,10 @@ differ from `SHA256SUMS`, a changed verbatim text, another version or
 architecture, an md5sums file other than the pinned archive's, a changed or
 missing required file, a package file the tables do not list, a pinned file the
 package database does not list, a symlinked file or directory, an unmerged
-`/lib`, a firmware tree with no package file, and an existing copyright file.
+`/lib`, a firmware tree with no package file, an existing copyright file, and a
+destination path with a symlink or a non-directory in it. Every destination is
+checked for both packages before the first file is written, so a refusal leaves
+neither file behind.
 Packages that are not installed are skipped. Other installed `linux-u-boot-*`
 and `armbian-firmware*` packages are logged as uncovered and get no file.
 
@@ -93,8 +106,12 @@ when present, and checks that both files survive byte for byte.
 - The applicable terms for the DDR blob, and its build origin.
 - A licence statement for the shipped `armbian-changed` and `armbian-only`
   firmware files.
-- Byte reproduction of the TPL, SPL, U-Boot and BL31, and the exact Armbian
-  build commit.
+- A build of the DDR init blob from source, and the exact Armbian build commit.
+  A separate rebuild from the pinned U-Boot and TF-A commits, with Armbian's
+  configuration and patches and the matching Debian cross compiler, reproduced
+  SPL, U-Boot proper, BL31 and both complete loaders byte for byte. It used the
+  unchanged DDR blob as a binary input, so it says nothing about that blob's
+  origin or terms. That rebuild is not part of this change.
 - The other U-Boot packages in `manifests/armbian-bsp-deb-versions.txt`
   (Orange Pi 5 Plus, and the vendor packages used by `edge-test`).
 - Which firmware the hardware loads, and the contents of a board's SPI flash.

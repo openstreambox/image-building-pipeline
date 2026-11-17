@@ -60,6 +60,9 @@
     "overlay": "armbian-firmware",
     "whence": "WHENCE",
     "licence_dirs": ["LICENSES/", ""],
+    "licence_names_without_file": {
+      "BSD-3-Clause": "The qcom/yamato_* Licence field names BSD-3-Clause beside LICENSE.qcom_yamato; that named file is reproduced. linux-firmware has no file called BSD-3-Clause."
+    },
     "overlay_readme": "README.md",
     "recipe": "Armbian builds this package by installing linux-firmware with its own \"make install\" and then extracting a \"git archive\" of armbian/firmware over the result, so armbian/firmware wins where both have a file."
   },

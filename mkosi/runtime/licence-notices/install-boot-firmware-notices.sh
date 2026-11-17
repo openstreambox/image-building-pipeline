@@ -281,10 +281,23 @@ if [[ " ${installed[*]} " == *" ${fw_pkg} "* ]]; then
 fi
 
 # --- 6. Preflight every destination, then write -----------------------------------------
+# Each existing component of a destination directory must be a real directory, for
+# every package, before the first file is written: a file or other non-directory
+# there would stop install -D after an earlier package's file was already written.
+real_dirs() { # <absolute directory below DEST>
+  local rest="${1#/}" dir="${DEST}"
+  while [[ -n "${rest}" ]]; do
+    dir+="/${rest%%/*}"
+    if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=''; fi
+    [[ ! -L "${dir}" ]] || die "${dir} is a symlink; refusing to write through it"
+    [[ ! -e "${dir}" || -d "${dir}" ]] || die "${dir} exists and is not a directory; nothing written"
+  done
+}
 for pkg in "${installed[@]}"; do
   dir="/usr/share/doc/${pkg}"
   no_symlink_dirs "${dir}/copyright"
   [[ ! -L "${DEST}${dir}" ]] || die "${DEST}${dir} is a symlink; refusing to write through it"
+  real_dirs "${dir}"
   if [[ -e "${DEST}${dir}/copyright" || -L "${DEST}${dir}/copyright" ]]; then
     die "${pkg} already has ${dir}/copyright; it now ships its own or the notices ran twice"
   fi
