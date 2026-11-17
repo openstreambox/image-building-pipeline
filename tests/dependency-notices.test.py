@@ -614,6 +614,34 @@ class Installer(unittest.TestCase):
         (self.base / 'plan.json').unlink()
         self.refused('missing reviewed notice plan')
 
+    def test_rejects_unknown_or_malformed_digest_map_entries(self):
+        original = json.loads((self.base / 'plan.json').read_bytes())
+        for change in ('extra-key', 'nested-value', 'bad-hash', 'duplicate-key', 'unclosed-map',
+                       'missing-comma', 'trailing-comma'):
+            with self.subTest(change=change):
+                for pkg, parent in self.parents.items():
+                    (self.root / 'usr/share/doc' / pkg / 'copyright').write_bytes(parent)
+                plan = copy.deepcopy(original)
+                if change == 'extra-key':
+                    plan['payload_sha256']['zz.txt'] = '0' * 64
+                elif change == 'nested-value':
+                    plan['payload_sha256']['srtla.txt'] = {'sha256': '0' * 64}
+                elif change == 'bad-hash':
+                    plan['payload_sha256']['srtla.txt'] = 'z' * 64
+                raw = n.dump(plan)
+                if change == 'duplicate-key':
+                    row = next(line for line in raw.splitlines(keepends=True) if b'"identity.tsv"' in line)
+                    raw = raw.replace(row, row + row)
+                elif change == 'unclosed-map':
+                    raw = raw.replace(b'  }', b'  ]', 1)
+                elif change == 'missing-comma':
+                    raw = raw.replace(b'",\n', b'"\n', 1)
+                elif change == 'trailing-comma':
+                    raw = raw.replace(b'"\n  }', b'",\n  }', 1)
+                (self.base / 'plan.json').write_bytes(raw)
+                (self.base / 'plan.sha256').write_text(sha(raw) + '\n')
+                self.refused('invalid payload digest map|plan lacks exactly three payload digests')
+
     def test_mediamtx_identity_refusals(self):
         binary = self.root / 'usr/local/bin/mediamtx'
         doc = self.root / 'usr/share/doc/mediamtx/copyright'

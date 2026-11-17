@@ -53,9 +53,29 @@ actual_plan="$(sha256sum "${BASE}/plan.json" | awk '{print $1}')"
 [[ "${actual_plan}" == "${expected_plan}" ]] || die "plan.json does not match plan.sha256"
 # Deliberately accept only the generator's canonical, flat digest map. A format
 # change must update this reader and its host contract rather than skip it.
-sed -n '/^  "payload_sha256": {$/,/^  },$/p' "${BASE}/plan.json" \
-  | sed -nE 's/^    "(identity.tsv|mediamtx.txt|srtla.txt)": "([0-9a-f]{64})",?$/\2  \1/p' \
-  > "${WORK}/planned-sums"
+map_count=0 map_rows=0 in_map=0
+digest_row='^    "(identity[.]tsv|mediamtx[.]txt|srtla[.]txt)": "([0-9a-f]{64})"(,?)$'
+while IFS= read -r line || [[ -n "${line}" ]]; do
+  if [[ "${line}" == '  "payload_sha256": {' ]]; then
+    (( map_count += 1 ))
+    (( map_count == 1 && ! in_map )) || die "invalid payload digest map: duplicate map"
+    in_map=1
+  elif (( in_map )); then
+    if [[ "${line}" == '  },' || "${line}" == '  }' ]]; then
+      (( map_rows == 3 )) || die "invalid payload digest map: expected three entries"
+      in_map=0
+    elif [[ "${line}" =~ ${digest_row} ]]; then
+      (( map_rows += 1 ))
+      comma=','
+      (( map_rows == 3 )) && comma=''
+      [[ "${BASH_REMATCH[3]}" == "${comma}" ]] || die "invalid payload digest map: misplaced comma"
+      printf '%s  %s\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}"
+    else
+      die "invalid payload digest map: unexpected entry"
+    fi
+  fi
+done < "${BASE}/plan.json" > "${WORK}/planned-sums"
+(( map_count == 1 && ! in_map )) || die "invalid payload digest map: missing or unclosed map"
 [[ "$(awk '{print $2}' "${WORK}/planned-sums" | sort | tr '\n' ' ')" == \
   'identity.tsv mediamtx.txt srtla.txt ' ]] || die "plan lacks exactly three payload digests"
 if ! (cd "${BASE}" && sha256sum --check --strict "${WORK}/planned-sums") > "${WORK}/plan-check" 2>&1; then
