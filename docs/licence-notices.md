@@ -74,62 +74,125 @@ require `ceralive-device`, including after this dependency is satisfied.
 ## Pinned source dependency notices
 
 The app layer runs `install-dependency-notices.sh` after the parent notice
-installer. It appends verified static payloads to the existing `srtla` 4.2.0 and
-MediaMTX v1.19.2 copyright files. Parent bytes remain intact. Both image doc
-pruning and apt repruning retain these files. Unsupported installed versions,
-changed payloads, missing parent copyright files and duplicate installation
-fail closed. The existing legacy device exceptions are unchanged.
+installer and before doc pruning. It appends static payloads to the existing
+`srtla` and MediaMTX copyright files, keeping the parent bytes intact, so image
+and apt doc pruning both retain them. It reads only checksummed files in
+`mkosi/runtime/licence-notices/dependencies/`, makes no network access and runs
+no installed binary.
 
-`mkosi/runtime/licence-notices/dependencies/plan.json` records official immutable
-archive URLs, SHA256 pins, upstream crate checksums and Go module h1 checksums,
-package versions, original file hashes, and half-open byte ranges for each
-verbatim text. `plan.sha256` pins the inventory; `SHA256SUMS` pins the installed
-payloads. No archive, binary or build-host path is needed in the repository.
+`identity.tsv` names what the payloads cover: the `srtla` dpkg version and
+architectures, and the MediaMTX binary path, version, per-architecture release
+tarball SHA256 (as recorded in the parent copyright file) and the SHA256 of the
+binary inside that tarball. The installer hashes the installed MediaMTX binary
+instead of running it. Every check runs before any file changes, and each
+refusal prints its reason. It refuses:
+
+- another `srtla` version or architecture, a dpkg state other than installed
+  or absent, several `srtla` records, or a parent copyright file that is
+  missing or was not written for that version;
+- a MediaMTX binary whose hash, release tarball, version line or path differs,
+  the binary without its parent copyright file or the reverse, a `mediamtx`
+  dpkg package, or a MediaMTX binary in another common location;
+- payloads that differ from `SHA256SUMS`, symlinked destinations, and notices
+  that were already appended.
+
+Host tests also tie `identity.tsv` to the MediaMTX recipe pins, the binary path
+installed by the runtime layer and the `srtla` pins in
+`manifests/first-party-releases.json`. Bumping either pin fails the tests until
+the notices are regenerated.
+
+### Inventory and regeneration
+
+`sources.json` is the reviewed input. It pins the two root source archives,
+both official MediaMTX release archives, four supplemental exact-commit
+archives and the version-pinned licence-text gaps. The generator derives
+everything else from those pins:
+
+- every Cargo.lock registry crate, checked against the lock checksum;
+- every go.sum module zip, checked against its Go `h1:` checksum, with the zip
+  SHA256 recorded separately;
+- the measured Go modules, read from the module list the Go linker embeds in
+  the arm64 release binary (the binary is parsed, never executed);
+- the notice selection described below.
+
+`plan.json` is that derivation, written byte for byte. Regeneration derives it
+again from the archives and fails unless it matches exactly, so an omitted,
+truncated, reordered or misrouted text, a missing exclusion record or a changed
+archive fails before any output exists. Offline checks on the committed plan
+also require whole-file ranges for notice files, the payload routing, recorded
+exclusion reasons and the gap list.
 
 Regenerate on the build host with Python 3.11+ (stdlib only):
 
 ```sh
-python3 tools/generate-dependency-notices.py --cache /path/to/source-cache --output /path/to/new-output
-# Add --fetch to download missing archives from the pinned official origins.
-diff -u mkosi/runtime/licence-notices/dependencies/SHA256SUMS /path/to/new-output/SHA256SUMS
-bash tests/dependency-notices.test.sh
+python3 tools/generate-dependency-notices.py --cache /path/to/source-cache --check
+# Add --fetch to download missing archives from their official origins first.
+CERALIVE_DEPENDENCY_NOTICE_CACHE=/path/to/source-cache bash tests/dependency-notices.test.sh
 bash tests/licence-notices.test.sh
 ```
 
-Cache filenames are SHA256(URL). Every archive is checked before use; Go zip
-SHA256 and Go sorted-file-content h1 are separate checks. The generator checks
-original file bytes and extracted notice bytes before creating any output.
-There is no enrol or automatic drift acceptance mode. Updating sources requires
-reviewing and updating the inventory and static payloads together. An unlisted
-missing-text exception fails, including a new version of a known exception.
+Cache filenames are SHA256(URL), about 280 MB in total. Without the cache
+variable, the tests use synthetic archives and the committed inventory only. To
+refresh after a pin change, update `sources.json`, run the generator with
+`--write-plan` and `--output` into new paths, review the inventory diff, then
+copy `plan.json`, `plan.sha256`, the payloads, `identity.tsv` and `SHA256SUMS`
+into the dependencies directory. There is no mode that accepts drift.
 
-The installed texts retain named licence, notice and authorship files, licence
-directories, and verbatim copyright-bearing comment blocks from the pinned
-source inventory. They omit executable source surrounding those blocks. This is
-source notice coverage, not a claim that every possible embedded notice has
-been found or a legal/compliance clearance.
+### What is retained
+
+- **Notice files, whole:** any file whose name contains licence, copying,
+  copyright, notice, authors, contributors, patent, attribution, credits,
+  unlicense, third party, legal or dep5 in any case and with any or no
+  extension, or that sits below a `LICENSES` or `.reuse` directory. Examples:
+  `THIRD-PARTY-NOTICES`, `ATTRIBUTIONS.md`, `APACHE-LICENSE-2.0`,
+  `MIT.LICENSE`, `CONTRIBUTORS`, `UNLICENSE`, `*.png.license`.
+- **Comment blocks** that mention copyright or hold licence grant, condition or
+  pointer wording, in any file type. Shebang, `#include`, `#pragma` and Rust
+  attribute lines are not part of a comment block.
+- **Whole files** with licence grant or condition wording outside comments,
+  such as a README that embeds an MIT text, so the conditions and warranty are
+  not cut off.
+- **Paragraphs** holding a copyright statement outside comments.
+
+Every remaining file that mentions copyright is listed in `plan.json` with a
+reason: binary content (not reproducible as text), mentions outside comments
+that are not a statement (identifiers, tables, strings), empty notice files,
+and links or special archive members.
+
+A crate or Go module without a licence-named file fails the derivation unless
+`sources.json` lists it as a gap for that exact version, and a listed gap that
+is no longer missing also fails. File names that only look like licences, such
+as `check_license.sh` or `.licenserc.yaml`, do not satisfy this check.
+
+### Scope and known gaps
+
+This is mechanical source notice coverage, not a claim that every possible
+notice has been found or a legal or compliance clearance.
 
 The Rust inventory has 122 registry crates and four workspace packages. The
 Cargo.lock closure includes optional, development and non-Linux packages; it
 is not a measured shipped feature graph. MediaMTX has 131 fetched go.sum module
-zips: 85 match the measured arm64 Go 1.26.4 release buildinfo and 46 are
-source-only. Buildinfo measures module metadata, not included files/functions.
-The same source release is used on amd64, but no amd64 membership measurement is
-claimed. Runtime/compiler notices remain separate pending exact verified source
-and version evidence. No rebuild or source-to-binary reproducibility is claimed.
+zips: 85 match the module list in the arm64 Go 1.26.4 release binary and 46
+are source-only. The module list records modules, not included files or
+functions. The amd64 release is identified by hash only; its module membership
+is not measured. Compiler and runtime notices are not covered. No rebuild or
+source-to-binary reproducibility is claimed.
 
-Known exceptions are pinned to versions and official archive origins:
+Licence-text gaps, pinned to versions and origins:
 
-- `r-efi` 5.3.0 and 6.0.0 retain their crate `AUTHORS` files, which contain the
-  MIT permission/warranty text, other notices and authorship. A file named
-  LICENSE is not invented. Supplemental exact commits remain recorded.
-- `valuable` 0.1.1 retains its MIT LICENSE from the exact recorded crate VCS
-  commit `9efc29b6e58cef28f6566a47aa7e142a55fead77`.
+- `r-efi` 5.3.0 and 6.0.0 ship no licence-named file. Their `AUTHORS` files
+  hold the MIT permission and warranty text, other notices and the authorship,
+  and are retained whole, also from the exact commits in the crates' VCS
+  metadata.
+- `valuable` 0.1.1 declares MIT without a licence file. The MIT `LICENSE` is
+  retained from the exact recorded commit
+  `9efc29b6e58cef28f6566a47aa7e142a55fead77`.
 - `github.com/benburkert/openpgp` at
-  `v0.0.0-20160410205803-c2471f86866c` is measured in the Go binary metadata.
-  Its headers reference a BSD LICENSE absent from both the module zip and exact
-  commit `c2471f86866ca6ab0679b9d216cb6a84cfe90db1`. Headers are retained and
-  the missing grant is stated in the payload. No substitute grant is supplied.
+  `v0.0.0-20160410205803-c2471f86866c` is in the measured module list. Its
+  headers refer to a BSD `LICENSE` absent from both the module zip and the
+  exact commit `c2471f86866ca6ab0679b9d216cb6a84cfe90db1`. The headers are
+  retained, the MediaMTX payload states the missing text, and no substitute
+  grant is supplied.
 
 The private-source `cerastream` gap remains separate. This topic neither changes
 package pins nor establishes release licence closure.

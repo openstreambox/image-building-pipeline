@@ -258,5 +258,5 @@ tests/real-logind-contract.sh	shell	privileged	opt-in	CERALIVE_LOGIND_TEST_CONTA
 tests/fixtures/logind/input-ioctl.c	fixture	support	not-executed	synthetic evdev ioctl boundary for real logind
 tests/fixtures/logind/mock-logind.sh	fixture	support	not-executed	private sysfs and FIFO input fixture
 tests/fixtures/logind/key.py	fixture	support	not-executed	short and long synthetic power-key events
-tests/dependency-notices.test.sh	shell	unit	default-shell	Pinned source notice generation and additive installation contracts
-tests/dependency-notices.test.py	tool	unit	invoked-by-suite	Synthetic archives and image roots driven by dependency-notices.test.sh
+tests/dependency-notices.test.sh	shell	unit	default-shell	Source notice derivation, omission and identity contracts
+tests/dependency-notices.test.py	tool	unit	invoked-by-suite	Synthetic archives, mutation controls and image roots driven by dependency-notices.test.sh

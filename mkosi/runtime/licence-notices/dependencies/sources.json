@@ -1,0 +1,103 @@
+{
+  "schema": 2,
+  "roots": [
+    {
+      "payload": "srtla",
+      "name": "CERALIVE/srtla-send-rs",
+      "version": "v4.2.0",
+      "commit": "1b5febb767ac2af3a275dc7ea2926bcb882001e7",
+      "url": "https://codeload.github.com/CERALIVE/srtla-send-rs/tar.gz/1b5febb767ac2af3a275dc7ea2926bcb882001e7",
+      "sha256": "08e988c70af7e555750809add9c7ce2f53e5de3f1455a0ffa72b4bf9384a63db",
+      "lock": "Cargo.lock"
+    },
+    {
+      "payload": "mediamtx",
+      "name": "bluenviron/mediamtx",
+      "version": "v1.19.2",
+      "commit": "7eb5d30075ae68a36c07c3f1231af04a0e49f804",
+      "url": "https://codeload.github.com/bluenviron/mediamtx/tar.gz/7eb5d30075ae68a36c07c3f1231af04a0e49f804",
+      "sha256": "6acdf5df900ac5488240d54f639fcd7f7a5c2f93ff1987dc89140a0ef90b4511",
+      "lock": "go.sum"
+    }
+  ],
+  "installed": {
+    "srtla": {
+      "package": "srtla",
+      "version": "4.2.0",
+      "architectures": ["amd64", "arm64"]
+    },
+    "mediamtx": {
+      "version": "v1.19.2",
+      "binary_path": "/usr/local/bin/mediamtx",
+      "releases": [
+        {
+          "arch": "amd64",
+          "url": "https://github.com/bluenviron/mediamtx/releases/download/v1.19.2/mediamtx_v1.19.2_linux_amd64.tar.gz",
+          "sha256": "f9c601cc303ceca8fad2883917b022882672c5bc56311e92dbceb16e5f20c60c"
+        },
+        {
+          "arch": "arm64",
+          "url": "https://github.com/bluenviron/mediamtx/releases/download/v1.19.2/mediamtx_v1.19.2_linux_arm64.tar.gz",
+          "sha256": "562f419912a8668c18216a9e8c95359ec82fbb754e4a44e2953ef62b98eec688",
+          "measure_go_modules": true
+        }
+      ]
+    }
+  },
+  "supplements": [
+    {
+      "for": ["r-efi", "5.3.0"],
+      "name": "r-efi/r-efi",
+      "commit": "97b55bed1c2c91dcbf787674849f05337ff80b33",
+      "url": "https://codeload.github.com/r-efi/r-efi/tar.gz/97b55bed1c2c91dcbf787674849f05337ff80b33",
+      "sha256": "e509e16b12d3ce3d5cb74167c3f72d25406e282795af8942818c70bb8cd36bec"
+    },
+    {
+      "for": ["r-efi", "6.0.0"],
+      "name": "r-efi/r-efi",
+      "commit": "7e1b0322d31d625f81a5656096330934f9cd835d",
+      "url": "https://codeload.github.com/r-efi/r-efi/tar.gz/7e1b0322d31d625f81a5656096330934f9cd835d",
+      "sha256": "c4c0ce4a68412706de70ba2b5711e0f521aee82f6e72fdc1a6e0a7a89dc017cf"
+    },
+    {
+      "for": ["valuable", "0.1.1"],
+      "name": "tokio-rs/valuable",
+      "commit": "9efc29b6e58cef28f6566a47aa7e142a55fead77",
+      "url": "https://codeload.github.com/tokio-rs/valuable/tar.gz/9efc29b6e58cef28f6566a47aa7e142a55fead77",
+      "sha256": "3414d7860b88c946b1ac6136bb2b9cc3055a16a2bd243d1caac2b23723e937e0"
+    },
+    {
+      "for": ["github.com/benburkert/openpgp", "v0.0.0-20160410205803-c2471f86866c"],
+      "name": "benburkert/openpgp",
+      "commit": "c2471f86866ca6ab0679b9d216cb6a84cfe90db1",
+      "url": "https://codeload.github.com/benburkert/openpgp/tar.gz/c2471f86866ca6ab0679b9d216cb6a84cfe90db1",
+      "sha256": "0b3950796e8837f7e4d4bb73870a85cd8d7f3768add466bf72802c7dfc78f254"
+    }
+  ],
+  "gaps": [
+    {
+      "name": "r-efi",
+      "version": "5.3.0",
+      "unresolved": false,
+      "resolution": "The crate ships no licence-named file. Its AUTHORS file contains the verbatim MIT permission and warranty text, the Apache-2.0 and LGPL-2.1 notices and the authorship; it is retained whole. The same AUTHORS file at the commit recorded in the crate's .cargo_vcs_info.json is retained as a supplement."
+    },
+    {
+      "name": "r-efi",
+      "version": "6.0.0",
+      "unresolved": false,
+      "resolution": "The crate ships no licence-named file. Its AUTHORS file contains the verbatim MIT permission and warranty text, the Apache-2.0 and LGPL-2.1 notices and the authorship; it is retained whole. The same AUTHORS file at the commit recorded in the crate's .cargo_vcs_info.json is retained as a supplement."
+    },
+    {
+      "name": "valuable",
+      "version": "0.1.1",
+      "unresolved": false,
+      "resolution": "The crate declares MIT but ships no licence file. The MIT LICENSE is retained from the repository at the exact commit recorded in the crate's .cargo_vcs_info.json."
+    },
+    {
+      "name": "github.com/benburkert/openpgp",
+      "version": "v0.0.0-20160410205803-c2471f86866c",
+      "unresolved": true,
+      "resolution": "Source headers refer to a BSD LICENSE file that is absent from both the module zip and the exact commit c2471f86866ca6ab0679b9d216cb6a84cfe90db1. The headers are retained. No grant is substituted."
+    }
+  ]
+}

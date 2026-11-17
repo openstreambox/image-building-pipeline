@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
-"""Regenerate static notice payloads from pinned official source archives (stdlib).
-Cache keys are SHA256(URL). Offline is the default; --fetch permits downloading
-missing inputs only. Nothing is extracted to disk or executed.
+"""Derive and regenerate the srtla and MediaMTX source dependency notices (stdlib).
+
+sources.json is the reviewed input: pinned root source archives, the official
+MediaMTX release archives, supplemental exact-commit archives and the named,
+version-pinned licence-text gaps. Everything else is derived from those pins:
+the Cargo.lock and go.sum closures, every crate and Go module archive (checked
+against the lock checksums), the measured Go module set (read from the release
+binary's embedded build information, never executed) and the notice selection.
+
+The derived inventory must equal the committed plan.json byte for byte, so an
+omitted, truncated, unlisted or misrouted text fails before any output exists.
+Cache files are named SHA256(URL). Offline is the default; --fetch downloads a
+missing archive from its official origin and verifies it before caching it.
+Nothing is extracted to disk or executed.
 """
 import argparse
 import base64
@@ -9,9 +20,64 @@ import hashlib
 import io
 import json
 from pathlib import Path, PurePosixPath
+import re
 import tarfile
+import tomllib
 import urllib.request
 import zipfile
+
+HERE = Path(__file__).resolve().parents[1] / 'mkosi/runtime/licence-notices/dependencies'
+PAYLOADS = ('srtla', 'mediamtx')
+OFFICIAL = ('https://codeload.github.com/', 'https://static.crates.io/crates/',
+            'https://proxy.golang.org/', 'https://github.com/bluenviron/mediamtx/releases/download/')
+
+# Discovery. A file whose name contains any of these words anywhere (any case,
+# any extension or none), or that sits below a licences or REUSE metadata
+# directory, is a notice file and is retained whole.
+NOTICE_NAME = re.compile(r'(?i)(licen[cs]|copying|copyright|notice|authors|contributors|patent'
+                         r'|attribution|credits|unlicense|third[-_. ]?party|legal|dep5)')
+NOTICE_DIR = re.compile(r'(?i)licen[cs]es?|\.reuse')
+# A retained file counts as a licence grant for the gap check only when its name
+# says so and it is not program or configuration source. This can only add gaps.
+GRANT_NAME = re.compile(r'(?i)(?:^|[^a-z])(?:licen[cs]e[sd]?|copying|unlicense)(?:[^a-z]|$)')
+NOT_GRANT_SUFFIX = {'.sh', '.go', '.rs', '.py', '.pl', '.c', '.h', '.js', '.ts', '.json',
+                    '.toml', '.yaml', '.yml', '.mod', '.sum', '.bat', '.ansi'}
+# Any mention of the word or sign. Comment blocks containing one are retained.
+MENTION = re.compile(rb'(?i)copyright|\xc2\xa9')
+# Licence grant or condition wording. Outside comments it means an embedded
+# licence text, so the whole file is retained.
+GRANT = re.compile(rb'(?i)permission is hereby granted|redistribution and use in source|the above copyright notice'
+                   rb'|provided ["\']?as is|without warrant')
+# Comment blocks holding a mention, grant wording or a licence pointer are retained.
+LICENCE_POINTER = re.compile(rb'(?i)licensed under|governed by an? [-\w]+ licen[cs]e')
+# Copyright statement forms. Outside a retained comment block, the paragraph holding one is retained.
+STATEMENT = re.compile(rb'(?i)copyright\s*:?\s*(?:\(c\)|\xc2\xa9|&copy;|[0-9]{4})|\xc2\xa9\s*[0-9]{4}'
+                       rb'|\(c\)\s*[0-9]{4}|spdx-filecopyrighttext')
+COMMENT = re.compile(rb'^[ \t]*/\*.*?\*/|^[ \t]*<!--.*?-->'
+                     rb'|(?:^[ \t]*(?://|#(?![!\[a-zA-Z])|;)[^\n]*(?:\n|$))+', re.S | re.M)
+PARAGRAPH = re.compile(rb'(?:^[ \t]*\S[^\n]*(?:\n|$))+', re.M)
+MAX_PARAGRAPH = 65536
+EXCLUSION_RULES = {
+    'binary': 'Content is not UTF-8 text (or contains NUL), so it cannot be reproduced in a text notice.',
+    'mention-outside-comments': 'The word or sign also occurs outside comment blocks, but not in a copyright '
+                                'statement form (identifiers, tables, strings); those occurrences are not retained.',
+    'non-regular-member': 'Archive member is a link or special file, not file content.',
+    'empty': 'Notice-named file is empty.',
+}
+TEXT_RULES = {
+    'named': 'Whole file: notice, licence or authorship file name, or below a licences or REUSE metadata directory.',
+    'comment': 'Comment block mentioning copyright, or holding licence grant, condition or pointer wording.',
+    'statement-paragraph': 'Paragraph holding a copyright statement outside comment blocks.',
+    'embedded-licence': 'Whole file: licence grant or condition wording outside comment blocks.',
+}
+SCOPES = {
+    'root': 'root source at {commit}',
+    'crate': 'Cargo.lock source closure; binary membership unproven',
+    'workspace': 'workspace path package covered by root archive',
+    'measured': 'measured Go buildinfo module',
+    'source-only': 'go.sum source-only entry; binary membership unproven',
+    'supplement': 'supplemental public repository at {commit}; recorded VCS commit of {for}',
+}
 
 
 def sha(data):
@@ -23,102 +89,466 @@ def check(ok, message):
         raise ValueError(message)
 
 
-def unpack(data, zip_archive=False):
-    if zip_archive:
+def dump(obj):
+    return (json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False) + '\n').encode()
+
+
+def go_h1(files):
+    # golang.org/x/mod/sumdb/dirhash.Hash1 over the module zip contents.
+    lines = ''.join(f'{sha(files[n])}  {n}\n' for n in sorted(files)).encode()
+    return 'h1:' + base64.b64encode(hashlib.sha256(lines).digest()).decode()
+
+
+def unpack(data, is_zip):
+    files, other = {}, []
+    if is_zip:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             entries = [(i.filename, archive.read(i)) for i in archive.infolist() if not i.is_dir()]
     else:
+        entries = []
         with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
-            entries = [(i.name, archive.extractfile(i).read()) for i in archive if i.isfile()]
-    files = {}
+            for i in archive:
+                if i.isfile():
+                    entries.append((i.name, archive.extractfile(i).read()))
+                elif not i.isdir() and i.type not in (tarfile.XGLTYPE, tarfile.XHDTYPE):
+                    other.append(i.name)
     for name, content in entries:
         check(not name.startswith('/') and '..' not in PurePosixPath(name).parts
-              and '\n' not in name and name not in files, 'unsafe or duplicate archive path')
+              and '\n' not in name and name not in files, 'unsafe or duplicate archive path: ' + name)
         files[name] = content
-    return files
+    return files, sorted(other)
 
 
-def verify_archive(data, url, pin):
-    check(sha(data) == pin['sha256'], 'archive SHA256 drift: ' + url)
-    files = unpack(data, url.endswith('.zip'))
-    upstream = pin['upstream_checksum']
-    if upstream and upstream.startswith('h1:'):
-        lines = ''.join(f'{sha(files[n])}  {n}\n' for n in sorted(files)).encode()
-        actual = 'h1:' + base64.b64encode(hashlib.sha256(lines).digest()).decode()
-        check(actual == upstream, 'Go module checksum drift')
-    elif upstream:
-        check(sha(data) == upstream, 'crate checksum drift')
-    return files
+class Cache:
+    def __init__(self, root, fetch=False):
+        self.root, self.fetch = Path(root), fetch
+
+    def get(self, url, verify):
+        path = self.root / sha(url.encode())
+        if path.exists():
+            data = path.read_bytes()
+        else:
+            check(self.fetch, 'archive missing from cache (use --fetch): ' + url)
+            check(url.startswith(OFFICIAL), 'not an official origin: ' + url)
+            with urllib.request.urlopen(url, timeout=120) as response:
+                data = response.read()
+        result = verify(data)
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        return data, result
 
 
-GAPS = {('r-efi', '5.3.0'), ('r-efi', '6.0.0'), ('valuable', '0.1.1'),
-        ('r-efi/r-efi', '5.3.0'), ('r-efi/r-efi', '6.0.0'),
-        ('github.com/benburkert/openpgp', 'v0.0.0-20160410205803-c2471f86866c'),
-        ('benburkert/openpgp', 'v0.0.0-20160410205803-c2471f86866c')}
+def pinned(expected, url):
+    def verify(data):
+        check(sha(data) == expected, 'archive SHA256 drift: ' + url)
+    return verify
 
 
-def render(plan, cache, fetch=False):
-    check({(g['name'], g['version']) for g in plan['gaps']} == GAPS, 'unreviewed missing text')
-    # The reviewed inventory fixes versions, origins, ranges and metadata together.
-    # Refresh it deliberately when changing any source pin; there is no enrol mode.
-    buffers = {key: bytearray((
+def inner(path, is_zip):
+    # Path below the archive's top directory (a Go module zip's is "<module>@<version>/").
+    parts = PurePosixPath(path).parts
+    if is_zip:
+        top = next((i for i, x in enumerate(parts) if '@' in x), None)
+        check(top is not None, 'module zip member outside <module>@<version>/: ' + path)
+        return PurePosixPath(*parts[top + 1:])
+    return PurePosixPath(*parts[1:])
+
+
+def is_named(path, is_zip):
+    p = inner(path, is_zip)
+    return bool(NOTICE_NAME.search(p.name)) or any(NOTICE_DIR.fullmatch(x) for x in p.parts[:-1])
+
+
+def is_grant(path, is_zip):
+    p = inner(path, is_zip)
+    return (bool(GRANT_NAME.search(p.name)) or any(NOTICE_DIR.fullmatch(x) for x in p.parts[:-1])) \
+        and p.suffix.lower() not in NOT_GRANT_SUFFIX
+
+
+def is_text(data):
+    if b'\0' in data:
+        return False
+    try:
+        data.decode('utf-8')
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def merge(spans):
+    out = []
+    for start, end in sorted(spans):
+        if out and start <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], end))
+        else:
+            out.append((start, end))
+    return out
+
+
+def classify(files, other, is_zip):
+    """Return (texts, excluded) for one archive: every candidate is one or the other."""
+    texts, excluded = [], []
+    for name in other:
+        if is_named(name, is_zip):
+            excluded.append((name, 'non-regular-member'))
+    for name in sorted(files):
+        data = files[name]
+        named = is_named(name, is_zip)
+        mentions = [m.start() for m in MENTION.finditer(data)]
+        statements = [m.start() for m in STATEMENT.finditer(data)]
+        grants = [m.start() for m in GRANT.finditer(data)]
+        if not (named or mentions or statements or grants or LICENCE_POINTER.search(data)):
+            continue
+        if data and not is_text(data):
+            excluded.append((name, 'binary'))
+            continue
+        if named:
+            if data:
+                texts.append((name, 0, len(data), 'named'))
+            else:
+                excluded.append((name, 'empty'))
+            continue
+        spans = [(m.start(), m.end()) for m in COMMENT.finditer(data)
+                 if MENTION.search(m.group()) or GRANT.search(m.group()) or LICENCE_POINTER.search(m.group())]
+        covered = lambda pos, spans=spans: any(a <= pos < e for a, e in spans)
+        if any(not covered(p) for p in grants):
+            texts.append((name, 0, len(data), 'embedded-licence'))
+            continue
+        loose = [p for p in statements if not covered(p)]
+        paragraphs = [(m.start(), m.end()) for m in PARAGRAPH.finditer(data)
+                      if any(m.start() <= p < m.end() for p in loose)]
+        for a, e in paragraphs:
+            check(e - a <= MAX_PARAGRAPH, f'statement paragraph over {MAX_PARAGRAPH} bytes needs review: {name}')
+        check(all(any(a <= p < e for a, e in paragraphs) for p in loose), 'uncovered statement: ' + name)
+        rule = {**{s: 'comment' for s in spans}, **{s: 'statement-paragraph' for s in paragraphs}}
+        for start, end in merge(spans + paragraphs):
+            kinds = {rule[s] for s in rule if start <= s[0] and s[1] <= end}
+            texts.append((name, start, end, 'statement-paragraph' if 'statement-paragraph' in kinds else 'comment'))
+        everything = merge(spans + paragraphs)
+        if any(not any(a <= p < e for a, e in everything) for p in mentions):
+            excluded.append((name, 'mention-outside-comments'))
+    return texts, excluded
+
+
+def parse_buildinfo(binary):
+    """Read the module list embedded by the Go linker (debug/buildinfo format, Go >= 1.18)."""
+    magic = b'\xff Go buildinf:'
+    pos = binary.find(magic)
+    while pos >= 0:
+        if binary[pos + 15] & 2:
+            break
+        pos = binary.find(magic, pos + 1)
+    check(pos >= 0, 'no inline Go build information in binary')
+
+    def string(offset):
+        length, shift = 0, 0
+        while True:
+            byte = binary[offset]
+            offset += 1
+            length |= (byte & 0x7f) << shift
+            shift += 7
+            if byte < 0x80:
+                break
+        return binary[offset:offset + length], offset + length
+    version, offset = string(pos + 32)
+    mod, _ = string(offset)
+    if len(mod) >= 33 and mod[-17:-16] == b'\n':
+        mod = mod[16:-16]
+    info = {'go': version.decode(), 'deps': {}, 'settings': {}}
+    for line in mod.decode().splitlines():
+        fields = line.split('\t')
+        check(fields[0] != '=>', 'module replacement in build information needs explicit handling')
+        if fields[0] == 'path':
+            info['path'] = fields[1]
+        elif fields[0] == 'mod':
+            info['main'] = fields[1:3]
+        elif fields[0] == 'dep':
+            check(len(fields) == 4 and fields[3].startswith('h1:'), 'dependency without checksum: ' + line)
+            info['deps'][(fields[1], fields[2])] = fields[3]
+        elif fields[0] == 'build':
+            key, _, value = fields[1].partition('=')
+            info['settings'][key] = value
+    return info
+
+
+def root_file(files, name):
+    found = [b for n, b in files.items() if n.count('/') == 1 and n.endswith('/' + name)]
+    check(len(found) == 1, 'missing root file ' + name)
+    return found[0]
+
+
+def go_escape(text):
+    return ''.join('!' + c.lower() if c.isupper() else c for c in text)
+
+
+def package(name, version, kind, payload, origin, files, other, scope, excerpts, metadata=None):
+    texts, excluded = classify(files, other, kind == 'go-module')
+    record = {'name': name, 'version': version, 'kind': kind, 'payload': payload, 'scope': scope,
+              'origin': origin, 'metadata': metadata, 'texts': [], 'excluded': []}
+    for path, start, end, rule in texts:
+        data = files[path]
+        excerpt = data[start:end]
+        excerpts[(origin, path, start, end)] = excerpt
+        record['texts'].append({'source_path': path, 'source_sha256': sha(data), 'start': start, 'end': end,
+                                'sha256': sha(excerpt), 'rule': rule})
+    for path, rule in excluded:
+        record['excluded'].append({'source_path': path, 'rule': rule,
+                                   'source_sha256': sha(files[path]) if path in files else None})
+    return record
+
+
+def derive(sources_raw, cache):
+    """Rebuild the whole inventory from sources.json and pinned archives. Returns (plan, excerpts)."""
+    sources = json.loads(sources_raw)
+    check(sources.get('schema') == 2, 'unsupported sources schema')
+    inputs, packages, excerpts = {}, [], {}
+
+    def load(url, verify, upstream=None, is_zip=None):
+        data, _ = cache.get(url, verify)
+        files, other = unpack(data, url.endswith('.zip') if is_zip is None else is_zip)
+        inputs[url] = {'sha256': sha(data), 'bytes': len(data), 'upstream_checksum': upstream, 'files': len(files)}
+        return files, other
+
+    roots = {}
+    for root in sources['roots']:
+        check(root['payload'] in PAYLOADS and re.fullmatch('[0-9a-f]{40}', root['commit']), 'bad root entry')
+        files, other = load(root['url'], pinned(root['sha256'], root['url']))
+        roots[root['payload']] = (root, files)
+        packages.append(package(root['name'], root['version'], 'root', root['payload'], root['url'], files, other,
+                                SCOPES['root'].format(commit=root['commit']), excerpts))
+
+    measured, measurement, identity = {}, None, []
+    mtx = sources['installed']['mediamtx']
+    for release in mtx['releases']:
+        url = release['url']
+        check(url.startswith(OFFICIAL[3]) and release['arch'] in ('amd64', 'arm64'), 'bad release entry')
+        files, _ = load(url, pinned(release['sha256'], url), is_zip=False)
+        check(set(files) >= {'mediamtx', 'LICENSE'}, 'release archive lacks mediamtx or LICENSE')
+        identity.append({'arch': release['arch'], 'tarball_sha256': release['sha256'],
+                         'binary_sha256': sha(files['mediamtx']), 'license_sha256': sha(files['LICENSE'])})
+        if release.get('measure_go_modules'):
+            check(measurement is None, 'only one measured architecture is supported')
+            info = parse_buildinfo(files['mediamtx'])
+            root = roots['mediamtx'][0]
+            check(info.get('main', [None])[0] == info.get('path') and info['main'][1] == root['version']
+                  and info['settings'].get('vcs.revision') == root['commit']
+                  and info['settings'].get('GOARCH') == release['arch'], 'measured binary identity differs from root')
+            measured = info['deps']
+            measurement = {'arch': release['arch'], 'go': info['go'], 'binary_sha256': sha(files['mediamtx']),
+                           'modules': len(measured), 'release_url': url}
+
+    srtla_root = roots['srtla'][1]
+    lock = tomllib.loads(root_file(srtla_root, 'Cargo.lock').decode())
+    crates = {}
+    for entry in lock['package']:
+        name, version = entry['name'], entry['version']
+        if 'source' not in entry:
+            packages.append({'name': name, 'version': version, 'kind': 'workspace', 'payload': 'srtla',
+                             'scope': SCOPES['workspace'], 'origin': None, 'metadata': None, 'texts': [],
+                             'excluded': []})
+            continue
+        check(entry['source'] == 'registry+https://github.com/rust-lang/crates.io-index', 'unsupported Cargo source')
+        url = f'https://static.crates.io/crates/{name}/{name}-{version}.crate'
+        files, other = load(url, pinned(entry['checksum'], url), entry['checksum'])
+        crates[(name, version)] = files
+        manifest = tomllib.loads(root_file(files, 'Cargo.toml').decode())['package']
+        meta = {k: manifest[k] for k in ('license', 'license-file', 'authors', 'repository') if k in manifest}
+        packages.append(package(name, version, 'crate', 'srtla', url, files, other, SCOPES['crate'], excerpts, meta))
+
+    sums, go_mod_only = {}, 0
+    for line in root_file(roots['mediamtx'][1], 'go.sum').decode().splitlines():
+        mod, version, digest = line.split()
+        if version.endswith('/go.mod'):
+            go_mod_only += 1
+        else:
+            sums[(mod, version)] = digest
+    for key, digest in measured.items():
+        check(sums.get(key) == digest, 'measured module differs from go.sum: ' + ' '.join(key))
+    modules = {}
+    for (mod, version), digest in sorted(sums.items()):
+        url = f'https://proxy.golang.org/{go_escape(mod)}/@v/{go_escape(version)}.zip'
+
+        def verify(data, digest=digest, url=url):
+            check(go_h1(unpack(data, True)[0]) == digest, 'Go module checksum drift: ' + url)
+        files, other = load(url, verify, digest)
+        modules[(mod, version)] = files
+        kind = 'measured' if (mod, version) in measured else 'source-only'
+        packages.append(package(mod, version, 'go-module', 'mediamtx', url, files, other, SCOPES[kind], excerpts))
+
+    for sup in sources['supplements']:
+        target = tuple(sup['for'])
+        if target in crates:
+            vcs = json.loads(root_file(crates[target], '.cargo_vcs_info.json'))
+            check(vcs['git']['sha1'] == sup['commit'], 'supplement commit is not the crate VCS commit')
+            payload = 'srtla'
+        else:
+            check(target in modules and target[1].endswith('-' + sup['commit'][:12]),
+                  'supplement commit is not the Go pseudo-version commit')
+            payload = 'mediamtx'
+        files, other = load(sup['url'], pinned(sup['sha256'], sup['url']))
+        packages.append(package(sup['name'], target[1], 'supplement', payload, sup['url'], files, other,
+                                SCOPES['supplement'].format(commit=sup['commit'], **{'for': '@'.join(target)}),
+                                excerpts))
+
+    plan = {
+        'schema': 2,
+        'sources_sha256': sha(sources_raw),
+        'note': 'Derived by tools/generate-dependency-notices.py from sources.json; do not edit by hand.',
+        'text_rules': TEXT_RULES,
+        'exclusion_rules': EXCLUSION_RULES,
+        'gaps': sources['gaps'],
+        'inputs': inputs,
+        'packages': packages,
+        'measurement': measurement,
+        'mediamtx_identity': {'version': mtx['version'], 'binary_path': mtx['binary_path'], 'releases': identity},
+        'srtla_identity': sources['installed']['srtla'],
+        'counts': {
+            'rust_registry_crates': sum(p['kind'] == 'crate' for p in packages),
+            'rust_workspace_packages': sum(p['kind'] == 'workspace' for p in packages),
+            'go_modules_measured': sum(p['scope'] == SCOPES['measured'] for p in packages),
+            'go_modules_source_only': sum(p['scope'] == SCOPES['source-only'] for p in packages),
+            'go_mod_only_entries': go_mod_only,
+        },
+        'limits': [
+            'Cargo.lock includes optional, test and target-specific packages; no complete shipped Rust membership claim.',
+            'Go buildinfo records module membership for one architecture, not individual files or functions.',
+            'Compiler and runtime notices are not covered.',
+            'Sources have not been rebuilt; no source-to-binary reproducibility claim.',
+            'Mechanical notice discovery is not a legal or compliance clearance.',
+        ],
+        'packaging_ready': False,
+    }
+    check_plan(plan)
+    return plan, excerpts
+
+
+def check_plan(plan):
+    """Invariants that hold for any correct plan, checkable without archives."""
+    check(plan.get('schema') == 2, 'unsupported plan schema')
+    by_key = {(p['name'], p['version']): p for p in plan['packages'] if p['kind'] in ('crate', 'go-module')}
+    for p in plan['packages']:
+        expected = {'crate': 'srtla', 'workspace': 'srtla', 'go-module': 'mediamtx'}.get(p['kind'])
+        check(p['payload'] in PAYLOADS and (expected is None or p['payload'] == expected),
+              f"package routed to the wrong payload: {p['name']} {p['version']}")
+        check((p['origin'] is None) == (p['kind'] == 'workspace'), 'origin missing: ' + p['name'])
+        check(p['origin'] is None or p['origin'] in plan['inputs'], 'origin not in inputs: ' + p['name'])
+        previous = ('', 0)
+        for t in p['texts']:
+            check(t['rule'] in TEXT_RULES and 0 <= t['start'] < t['end'], 'invalid text record: ' + t['source_path'])
+            check((t['source_path'], t['start']) >= previous, 'texts unordered or overlapping: ' + t['source_path'])
+            previous = (t['source_path'], t['end'])
+            if t['rule'] == 'named':
+                check(t['start'] == 0 and t['sha256'] == t['source_sha256'],
+                      'named notice file is not retained whole: ' + t['source_path'])
+        for e in p['excluded']:
+            check(e['rule'] in EXCLUSION_RULES, 'exclusion without a recorded rule: ' + e['source_path'])
+        if p['kind'] == 'supplement':
+            target = re.search(r'recorded VCS commit of (.+)$', p['scope']).group(1).rsplit('@', 1)
+            check(tuple(target) in by_key and by_key[tuple(target)]['payload'] == p['payload'],
+                  'supplement routed differently from its package: ' + p['name'])
+    missing = {(p['name'], p['version']) for p in by_key.values()
+               if not any(is_grant(t['source_path'], p['kind'] == 'go-module')
+                          for t in p['texts'] if t['rule'] == 'named')}
+    listed = {(g['name'], g['version']) for g in plan['gaps']}
+    check(not missing - listed, 'unlisted missing licence text: ' + repr(sorted(missing - listed)))
+    check(not listed - missing, 'listed gap no longer missing (review and remove): ' + repr(sorted(listed - missing)))
+    for g in plan['gaps']:
+        check(g['resolution'] and isinstance(g['unresolved'], bool), 'gap without a recorded resolution')
+    counts = plan['counts']
+    check(counts['rust_registry_crates'] == sum(p['kind'] == 'crate' for p in plan['packages'])
+          and counts['go_modules_measured'] == sum(p['scope'] == SCOPES['measured'] for p in plan['packages'])
+          and counts['go_modules_source_only'] == sum(p['scope'] == SCOPES['source-only'] for p in plan['packages'])
+          and counts['go_modules_measured'] == (plan['measurement'] or {}).get('modules', 0), 'count mismatch')
+
+
+def render(plan, excerpts):
+    c, m = plan['counts'], plan['measurement']
+    common = (
         '\nSOURCE DEPENDENCY NOTICES (source coverage, not compliance clearance)\n'
-        'Rust: complete Cargo.lock source set, NOT measured shipped membership.\n'
-        'Go: 85 matching modules measured in the arm64 Go 1.26.4 release buildinfo;\n'
-        '46 additional fetched modules are source-only. No amd64 membership measurement.\n'
-        'Module metadata does not identify included files or functions.\n'
+        'Retained: whole notice, licence and authorship files; comment blocks that\n'
+        'mention copyright; paragraphs with copyright statements outside comments.\n'
+        'Each excluded file and its reason is listed in the source inventory.\n'
         'Compiler/runtime notices require separate exact-source verification.\n'
-        'UNRESOLVED: benburkert/openpgp v0.0.0-20160410205803-c2471f86866c\n'
-        'headers refer to absent BSD LICENSE in module zip and exact commit\n'
-        'c2471f86866ca6ab0679b9d216cb6a84cfe90db1. No grant substituted.\n'
-    ).encode()) for key in ('srtla', 'mediamtx')}
-    archives = {}
-    for package in plan['packages']:
-        origin = package.get('origin')
-        if origin and origin not in archives:
-            pin = plan['inputs'][origin]
-            path = cache / sha(origin.encode())
-            if not path.exists() and fetch:
-                check(origin.startswith(('https://codeload.github.com/', 'https://static.crates.io/',
-                                         'https://proxy.golang.org/')), 'nonofficial origin')
-                with urllib.request.urlopen(origin, timeout=90) as response:
-                    data = response.read()
-                verify_archive(data, origin, pin)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
-            archives[origin] = verify_archive(path.read_bytes(), origin, pin)
-        key = 'mediamtx' if (package['name'] in ('bluenviron/mediamtx', 'benburkert/openpgp')
-                             or package['scope'] == 'measured Go buildinfo module'
-                             or package['scope'].startswith('go.sum source-only')) else 'srtla'
-        out = buffers[key]
-        out.extend(f"\n===== {package['name']} {package['version']} =====\nScope: {package['scope']}\nOrigin: {origin or 'workspace root archive'}\n".encode())
-        for text in package['texts']:
-            data = archives[origin][text['source_path']]
-            check(sha(data) == text['source_sha256'], 'source text drift')
-            start, end = text['start'], text['end']
-            check(0 <= start < end <= len(data), 'invalid text range')
-            excerpt = data[start:end]
-            check(sha(excerpt) == text['sha256'], 'notice text drift')
-            out.extend(f"File: {text['source_path']}\nSource SHA256: {text['source_sha256']}\nBytes: [{start},{end}) SHA256: {text['sha256']}\n\n".encode())
+    )
+    headers = {
+        'srtla': common + (
+            f"Rust: {c['rust_registry_crates']} registry crates and {c['rust_workspace_packages']} workspace packages,\n"
+            'the complete Cargo.lock source set, NOT measured shipped membership.\n'),
+        'mediamtx': common + (
+            f"Go: {c['go_modules_measured']} modules measured in the {m['arch']} {m['go'].removeprefix('go')} release "
+            f"build information;\n{c['go_modules_source_only']} additional fetched go.sum modules are source-only. "
+            f"No membership\nmeasurement for other architectures. Module metadata does not identify\n"
+            'included files or functions.\n'),
+    }
+    payload_of = {(p['name'], p['version']): p['payload'] for p in plan['packages']}
+    buffers = {k: bytearray(v.encode()) for k, v in headers.items()}
+    for g in plan['gaps']:
+        if g['unresolved']:
+            buffers[payload_of[(g['name'], g['version'])]].extend(
+                f"UNRESOLVED: {g['name']} {g['version']}: {g['resolution']}\n".encode())
+    for p in plan['packages']:
+        out = buffers[p['payload']]
+        out.extend(f"\n===== {p['name']} {p['version']} =====\nScope: {p['scope']}\n"
+                   f"Origin: {p['origin'] or 'workspace root archive'}\n".encode())
+        for t in p['texts']:
+            excerpt = excerpts[(p['origin'], t['source_path'], t['start'], t['end'])]
+            check(sha(excerpt) == t['sha256'], 'notice text drift')
+            out.extend(f"File: {t['source_path']}\nSource SHA256: {t['source_sha256']}\n"
+                       f"Bytes: [{t['start']},{t['end']}) SHA256: {t['sha256']}\n\n".encode())
             out.extend(excerpt + b'\n')
-    return {key + '.txt': bytes(value) for key, value in buffers.items()}
+    result = {k + '.txt': bytes(v) for k, v in buffers.items()}
+    ident = plan['mediamtx_identity']
+    lines = [f"srtla\t{plan['srtla_identity']['package']}\t{plan['srtla_identity']['version']}\t{a}"
+             for a in plan['srtla_identity']['architectures']]
+    lines += [f"mediamtx\t{ident['binary_path']}\t{ident['version']}\t{r['arch']}\t{r['tarball_sha256']}"
+              f"\t{r['binary_sha256']}" for r in ident['releases']]
+    result['identity.tsv'] = ('# Installed identities covered by these notices (generated; tab separated).\n'
+                              '# srtla <dpkg package> <version> <architecture>\n'
+                              '# mediamtx <binary path> <version> <architecture> <release tarball sha256> <binary sha256>\n'
+                              + '\n'.join(lines) + '\n').encode()
+    return result
+
+
+def sums(result):
+    return ''.join(f'{sha(data)}  {name}\n' for name, data in sorted(result.items())).encode()
+
+
+def generate(base, cache):
+    sources_raw = (base / 'sources.json').read_bytes()
+    plan, excerpts = derive(sources_raw, cache)
+    return plan, render(plan, excerpts)
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--cache', type=Path, required=True)
-    parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--fetch', action='store_true')
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--cache', type=Path, required=True, help='directory of archives named SHA256(URL)')
+    parser.add_argument('--fetch', action='store_true', help='download missing archives from official origins')
+    parser.add_argument('--base', type=Path, default=HERE, help=argparse.SUPPRESS)
+    parser.add_argument('--output', type=Path, help='new directory for the regenerated payloads')
+    parser.add_argument('--write-plan', type=Path, help='write the derived inventory here for review (new file)')
+    parser.add_argument('--check', action='store_true', help='require committed plan and payloads to match')
     args = parser.parse_args()
-    base = Path(__file__).resolve().parents[1] / 'mkosi/runtime/licence-notices/dependencies'
-    raw = (base / 'plan.json').read_bytes()
-    check(sha(raw) == (base / 'plan.sha256').read_text().strip(), 'notice inventory drift')
-    result = render(json.loads(raw), args.cache, args.fetch)
-    check(not args.output.exists(), 'output must be new')
-    args.output.mkdir(parents=True)
-    for name, data in result.items():
-        (args.output / name).write_bytes(data)
-    (args.output / 'SHA256SUMS').write_text(''.join(f'{sha(data)}  {name}\n' for name, data in sorted(result.items())))
+    plan, result = generate(args.base, Cache(args.cache, args.fetch))
+    plan_bytes = dump(plan)
+    for path in (args.output, args.write_plan):
+        check(path is None or not path.exists(), f'{path} must not exist')
+    if args.write_plan:
+        args.write_plan.write_bytes(plan_bytes)
+    if args.check:
+        check((args.base / 'plan.json').read_bytes() == plan_bytes, 'committed plan.json differs from derivation')
+        check((args.base / 'plan.sha256').read_text().strip() == sha(plan_bytes), 'plan.sha256 differs')
+        for name, data in result.items():
+            check((args.base / name).read_bytes() == data, 'committed payload differs: ' + name)
+        check((args.base / 'SHA256SUMS').read_bytes() == sums(result), 'committed SHA256SUMS differs')
+        print('committed inventory and payloads match the derivation')
+    if args.output:
+        args.output.mkdir(parents=True)
+        for name, data in result.items():
+            (args.output / name).write_bytes(data)
+        (args.output / 'plan.json').write_bytes(plan_bytes)
+        (args.output / 'plan.sha256').write_text(sha(plan_bytes) + '\n')
+        (args.output / 'SHA256SUMS').write_bytes(sums(result))
 
 
 if __name__ == '__main__':

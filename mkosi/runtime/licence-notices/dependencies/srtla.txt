@@ -1,13 +1,11 @@
 
 SOURCE DEPENDENCY NOTICES (source coverage, not compliance clearance)
-Rust: complete Cargo.lock source set, NOT measured shipped membership.
-Go: 85 matching modules measured in the arm64 Go 1.26.4 release buildinfo;
-46 additional fetched modules are source-only. No amd64 membership measurement.
-Module metadata does not identify included files or functions.
+Retained: whole notice, licence and authorship files; comment blocks that
+mention copyright; paragraphs with copyright statements outside comments.
+Each excluded file and its reason is listed in the source inventory.
 Compiler/runtime notices require separate exact-source verification.
-UNRESOLVED: benburkert/openpgp v0.0.0-20160410205803-c2471f86866c
-headers refer to absent BSD LICENSE in module zip and exact commit
-c2471f86866ca6ab0679b9d216cb6a84cfe90db1. No grant substituted.
+Rust: 122 registry crates and 4 workspace packages,
+the complete Cargo.lock source set, NOT measured shipped membership.
 
 ===== CERALIVE/srtla-send-rs v4.2.0 =====
 Scope: root source at 1b5febb767ac2af3a275dc7ea2926bcb882001e7
@@ -94,6 +92,35 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+File: aho-corasick-1.1.4/UNLICENSE
+Source SHA256: 7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c
+Bytes: [0,1211) SHA256: 7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c
+
+This is free and unencumbered software released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or
+distribute this software, either in source code form or as a compiled
+binary, for any purpose, commercial or non-commercial, and by any
+means.
+
+In jurisdictions that recognize copyright laws, the author or authors
+of this software dedicate any and all copyright interest in the
+software to the public domain. We make this dedication for the benefit
+of the public at large and to the detriment of our heirs and
+successors. We intend this dedication to be an overt act of
+relinquishment in perpetuity of all present and future rights to this
+software under copyright law.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+For more information, please refer to <http://unlicense.org/>
 
 
 ===== anstream 1.0.0 =====
@@ -3982,6 +4009,15 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+File: clap-4.6.4/src/lib.rs
+Source SHA256: 62e9208f3ae3ea15f66a36b122cd2a19774c84c29688645da5902ad018447181
+Bytes: [0,342) SHA256: 1aaf8a23326e78985f98f27d8c01be9cdb4b7159a2a775e19585c94779ccc156
+
+// Copyright ⓒ 2015-2016 Kevin B. Knapp and [`clap-rs` contributors](https://github.com/clap-rs/clap/graphs/contributors).
+// Licensed under the MIT license
+// (see LICENSE or <http://opensource.org/licenses/MIT>) All files in the project carrying such
+// notice may not be copied, modified, or distributed except according to those terms.
+
 
 ===== clap_builder 4.6.2 =====
 Scope: Cargo.lock source closure; binary membership unproven
@@ -4216,6 +4252,64 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+File: clap_builder-4.6.2/src/builder/command.rs
+Source SHA256: 10d19cc4e328c2215dd8cfe46f2871a324f67e77797aec329ef31cc8d65d0e09
+Bytes: [66397,66913) SHA256: ef14f5a0661d086cc6c9a3d294971f547a82c754e6f11c22bc54a5f1b0179926
+
+    /// Free-form help text for before auto-generated short help (`-h`).
+    ///
+    /// This is often used for header, copyright, or license information.
+    ///
+    /// If [`Command::before_long_help`] is not specified, this message will be displayed for `--help`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use clap_builder as clap;
+    /// # use clap::Command;
+    /// Command::new("myprog")
+    ///     .before_help("Some info I'd like to appear before the help info")
+    /// # ;
+    /// ```
+
+File: clap_builder-4.6.2/src/builder/command.rs
+Source SHA256: 10d19cc4e328c2215dd8cfe46f2871a324f67e77797aec329ef31cc8d65d0e09
+Bytes: [67095,67646) SHA256: 4a8fd0e545b1f5445148f3b5f9e3ee038350f276de4b5010c557d1841206ff4c
+
+    /// Free-form help text for before auto-generated long help (`--help`).
+    ///
+    /// This is often used for header, copyright, or license information.
+    ///
+    /// If not set, [`Command::before_help`] will be used for long help in addition to short help
+    /// (`-h`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use clap_builder as clap;
+    /// # use clap::Command;
+    /// Command::new("myprog")
+    ///     .before_long_help("Some verbose and long info I'd like to appear before the help info")
+    /// # ;
+    /// ```
+
+File: clap_builder-4.6.2/src/lib.rs
+Source SHA256: bd8987448be4ace2a3501375f6850261252f3485ea1c9879e137a2245359fbf5
+Bytes: [0,342) SHA256: 1aaf8a23326e78985f98f27d8c01be9cdb4b7159a2a775e19585c94779ccc156
+
+// Copyright ⓒ 2015-2016 Kevin B. Knapp and [`clap-rs` contributors](https://github.com/clap-rs/clap/graphs/contributors).
+// Licensed under the MIT license
+// (see LICENSE or <http://opensource.org/licenses/MIT>) All files in the project carrying such
+// notice may not be copied, modified, or distributed except according to those terms.
+
+File: clap_builder-4.6.2/src/output/textwrap/core.rs
+Source SHA256: 0d45b1ebe8bba3e54e8bcbfec015be626d55803a0a46aef753eb3a4be3cabab4
+Bytes: [3575,3749) SHA256: 5592d01abe5f516b9bc49fa23ffdd0be897548f9d30898d3e83d647d937f4dc0
+
+        // Emojis in the Basic Latin (ASCII) and Latin-1 Supplement
+        // blocks all have a width of 1 column. This includes
+        // characters such as '#' and '©'.
 
 File: clap_builder-4.6.2/src/parser/matches/arg_matches.rs
 Source SHA256: bff90ec6afeaa8133369277036ab7c191274fe6751ed0c78b621d9ad6addedba
@@ -7046,6 +7140,17 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
+File: find-msvc-tools-0.1.9/src/com.rs
+Source SHA256: d71a248866e04a19c62221999f7f120890cb98bc74ea7fd0b714f766d3e0dd81
+Bytes: [0,380) SHA256: 2575806bfd98a1f875507113471c92276296f165228e643cf359cdf1e079b58a
+
+// Copyright © 2017 winapi-rs developers
+// Licensed under the Apache License, Version 2.0
+// <LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+// All files in the project carrying such notice may not be copied, modified, or distributed
+// except according to those terms.
+
 File: find-msvc-tools-0.1.9/src/find_tools.rs
 Source SHA256: 4b97e6f518943d4754ac73c77bc5932025bd1b48d10ed310694ed7d7449ae256
 Bytes: [0,468) SHA256: 5a260243cb1e1b7ea941ec12c5f77b1797ce9443bc5f9ff31589f101d1cb8878
@@ -7072,6 +7177,28 @@ Bytes: [0,468) SHA256: 5a260243cb1e1b7ea941ec12c5f77b1797ce9443bc5f9ff31589f101d
 // https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
+// except according to those terms.
+
+File: find-msvc-tools-0.1.9/src/setup_config.rs
+Source SHA256: 5fee84b80d089ae4a92f10080b072ea2bb32c2edbcdc759cb9072e380404fc46
+Bytes: [0,380) SHA256: 2575806bfd98a1f875507113471c92276296f165228e643cf359cdf1e079b58a
+
+// Copyright © 2017 winapi-rs developers
+// Licensed under the Apache License, Version 2.0
+// <LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+// All files in the project carrying such notice may not be copied, modified, or distributed
+// except according to those terms.
+
+File: find-msvc-tools-0.1.9/src/winapi.rs
+Source SHA256: d486d80ebe222f3bf61bba50038cf63b258585325b29b89d149de8b5a489c2b5
+Bytes: [0,385) SHA256: bda5032d1d74d42628dfa156e5ccb3da27a407393d06e881638d28afafde6bd2
+
+// Copyright © 2015-2017 winapi-rs developers
+// Licensed under the Apache License, Version 2.0
+// <LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+// All files in the project carrying such notice may not be copied, modified, or distributed
 // except according to those terms.
 
 
@@ -10544,14 +10671,13 @@ terms of the MIT license. A copy of the license can be found in the file
 -----------------------------------------------------------------------------*/
 File: libmimalloc-sys-0.1.44/c_src/mimalloc/v2/src/prim/windows/etw.h
 Source SHA256: 4f3110ef2054c95cb275be96cb279224d3d46a728c5117bd1435425f382de778
-Bytes: [0,383) SHA256: 526efd1b462fab92a2c0997214865a44d7c8033e337a815d6496951308fc9508
+Bytes: [0,370) SHA256: 8518f1d8e449e684a584826c4f2979e5780a8dd77f672bf6865245dd712e9dce
 
 //**********************************************************************`
 //* This is an include file generated by Message Compiler.             *`
 //*                                                                    *`
 //* Copyright (c) Microsoft Corporation. All Rights Reserved.          *`
 //**********************************************************************`
-#pragma once
 
 File: libmimalloc-sys-0.1.44/c_src/mimalloc/v2/src/prim/windows/prim.c
 Source SHA256: f17d6f089eccbf52922a69d008b546ae82a7c52e94e136977c497912d02608fc
@@ -10971,14 +11097,13 @@ terms of the MIT license. A copy of the license can be found in the file
 -----------------------------------------------------------------------------*/
 File: libmimalloc-sys-0.1.44/c_src/mimalloc/v3/src/prim/windows/etw.h
 Source SHA256: 4f3110ef2054c95cb275be96cb279224d3d46a728c5117bd1435425f382de778
-Bytes: [0,383) SHA256: 526efd1b462fab92a2c0997214865a44d7c8033e337a815d6496951308fc9508
+Bytes: [0,370) SHA256: 8518f1d8e449e684a584826c4f2979e5780a8dd77f672bf6865245dd712e9dce
 
 //**********************************************************************`
 //* This is an include file generated by Message Compiler.             *`
 //*                                                                    *`
 //* Copyright (c) Microsoft Corporation. All Rights Reserved.          *`
 //**********************************************************************`
-#pragma once
 
 File: libmimalloc-sys-0.1.44/c_src/mimalloc/v3/src/prim/windows/prim.c
 Source SHA256: adced796a92f7af957e9cd352bc0bd3b1b4ed9cb4f4cb25cfa5c6bdffa154744
@@ -11022,9 +11147,8 @@ terms of the MIT license. A copy of the license can be found in the file
 -----------------------------------------------------------------------------*/
 File: libmimalloc-sys-0.1.44/src/lib.rs
 Source SHA256: bb0b9f40432cb83e021ebcacc44e607cddf14411db7be53a79f7292558696eff
-Bytes: [0,46) SHA256: 6fa4571b1d5254010edc5d34757edaeaa27777e0dbaf85e93477f26f86b56add
+Bytes: [11,46) SHA256: be1ab298e6a7e887b1645c34db3716e907b1501bdd92ef159e8c6477ba03ec2e
 
-#![no_std]
 // Copyright 2019 Octavian Oncescu
 
 
@@ -11891,6 +12015,35 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+File: memchr-2.8.3/UNLICENSE
+Source SHA256: 7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c
+Bytes: [0,1211) SHA256: 7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c
+
+This is free and unencumbered software released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or
+distribute this software, either in source code form or as a compiled
+binary, for any purpose, commercial or non-commercial, and by any
+means.
+
+In jurisdictions that recognize copyright laws, the author or authors
+of this software dedicate any and all copyright interest in the
+software to the public domain. We make this dedication for the benefit
+of the public at large and to the detriment of our heirs and
+successors. We intend this dedication to be an overt act of
+relinquishment in perpetuity of all present and future rights to this
+software under copyright law.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+For more information, please refer to <http://unlicense.org/>
 
 
 ===== mimalloc 0.1.48 =====
@@ -14343,6 +14496,19 @@ Bytes: [0,355) SHA256: 32ec20212a169b3d99f0f960475fa12732b0d5d9389d3f0c537c78f9f
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+File: proptest-1.11.0/src/file-preamble
+Source SHA256: a4a75492b40e467fa8d1bcf050e685ea4de56c3a76095d756488c554d76a4986
+Bytes: [0,325) SHA256: a4a75492b40e467fa8d1bcf050e685ea4de56c3a76095d756488c554d76a4986
+
+//-
+// Copyright 2017
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+
 File: proptest-1.11.0/src/lib.rs
 Source SHA256: d96063d97b85b9f8931caf684ffaba372eadd8c6a03f64aa1488748b3e731253
 Bytes: [0,344) SHA256: 180b4bb6e3fd32d1e8cb63a62fa03754d31a2879d42b8fb961a350128b100cdd
@@ -14460,6 +14626,12 @@ Bytes: [0,466) SHA256: 18ba75f5c70257272443db4518841bed4b1929eee3ac6a6a629d63e2d
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
+
+File: proptest-1.11.0/src/regex-contrib/crates_regex.rs
+Source SHA256: 7812e91c25a2aad48ba024bcbeb8b922ffc1cfa3113a33615885d72d8a2cae64
+Bytes: [41533,41566) SHA256: 89e88c9a1b97424b3c6a25b5ae4cabff4aaa9e38c2276f1e923ea1a0cf3e2abe
+
+// askalono-0.2.0: r"[©Ⓒⓒ]"
 
 File: proptest-1.11.0/src/result.rs
 Source SHA256: 24320652586779551b057ffac5c1aa4c0715753055c2af3d70323e1f7e5ff14a
@@ -19497,6 +19669,19 @@ Bytes: [0,338) SHA256: 565fc1ede23440acd053bcff61f7893ffc5c5bdd33019357e7d51c312
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+File: rusty-fork-0.3.1/src/file-preamble
+Source SHA256: eddc66f78504b2b50f704f99391bd504e8cb0f05f79f678af65536b466f4c378
+Bytes: [0,325) SHA256: eddc66f78504b2b50f704f99391bd504e8cb0f05f79f678af65536b466f4c378
+
+//-
+// Copyright 2018
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+
 File: rusty-fork-0.3.1/src/fork.rs
 Source SHA256: 981b1ead9fc1e272ba0488349f86e67ba0c53f307dbc18f8e4e1588ea8f6f1c5
 Bytes: [0,338) SHA256: 565fc1ede23440acd053bcff61f7893ffc5c5bdd33019357e7d51c312a639753
@@ -20655,6 +20840,20 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
+File: serde_json-1.0.151/src/lexical/mod.rs
+Source SHA256: ace2ccea2cd541f019a84b9eeb3b9ecd88daf6bccbe9edf0eac00b62704f47c4
+Bytes: [0,537) SHA256: 5822e59f88392b4a35965134c4c974e475959ebc625f140e42b1f39ba2495cc7
+
+// The code in this module is derived from the `lexical` crate by @Alexhuszagh
+// which the author condensed into this minimal subset for use in serde_json.
+// For the serde_json use case we care more about reliably round tripping all
+// possible floating point values than about parsing any arbitrarily long string
+// of digits with perfect accuracy, as the latter would take a high cost in
+// compile time and performance.
+//
+// Dual licensed as MIT and Apache 2.0 just like the rest of serde_json, but
+// copyright Alexander Huszagh.
+
 
 ===== serde_spanned 0.6.9 =====
 Scope: Cargo.lock source closure; binary membership unproven
@@ -21707,6 +21906,26 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
+File: smallvec-1.15.2/src/lib.rs
+Source SHA256: a779bc485235ccb746b680be71d57b707865341209a585b53e63a91c4bda6cae
+Bytes: [0,300) SHA256: 74daf41676c68f1f95d00a50c724cfdab22c1be406ca50129063fe8bd0b42b96
+
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+
+File: smallvec-1.15.2/src/specialization.rs
+Source SHA256: 46433586203399251cba496d67b88d34e1be3c2b591986b77463513da1c66471
+Bytes: [0,300) SHA256: 74daf41676c68f1f95d00a50c724cfdab22c1be406ca50129063fe8bd0b42b96
+
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+
 
 ===== smallvec 2.0.0-alpha.12 =====
 Scope: Cargo.lock source closure; binary membership unproven
@@ -21946,6 +22165,16 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+File: smallvec-2.0.0-alpha.12/src/lib.rs
+Source SHA256: 983263f80aa339863bba5f7fe321fbd19b8e47f54acf6d8851ba62c346625e45
+Bytes: [0,300) SHA256: 74daf41676c68f1f95d00a50c724cfdab22c1be406ca50129063fe8bd0b42b96
+
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
 
 
 ===== socket2 0.6.5 =====
@@ -24501,6 +24730,204 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+File: tracing-subscriber-0.3.23/src/fmt/time/datetime.rs
+Source SHA256: a6eeeb475e1f0b8cf90d1ef0dcb862b244cea58261485d440d51095694637213
+Bytes: [0,6760) SHA256: e4c82b854ec22d96d4c41fabde629bd2bb08624ce44531dd47eb5c9243514595
+
+// musl as a whole is licensed under the following standard MIT license:
+//
+// ----------------------------------------------------------------------
+// Copyright © 2005-2020 Rich Felker, et al.
+//
+// Permission is hereby granted, free of charge, to any person obtaining
+// a copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to
+// permit persons to whom the Software is furnished to do so, subject to
+// the following conditions:
+//
+// The above copyright notice and this permission notice shall be
+// included in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+// CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+// TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+// SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+// ----------------------------------------------------------------------
+//
+// Authors/contributors include:
+//
+// A. Wilcox
+// Ada Worcester
+// Alex Dowad
+// Alex Suykov
+// Alexander Monakov
+// Andre McCurdy
+// Andrew Kelley
+// Anthony G. Basile
+// Aric Belsito
+// Arvid Picciani
+// Bartosz Brachaczek
+// Benjamin Peterson
+// Bobby Bingham
+// Boris Brezillon
+// Brent Cook
+// Chris Spiegel
+// Clément Vasseur
+// Daniel Micay
+// Daniel Sabogal
+// Daurnimator
+// David Carlier
+// David Edelsohn
+// Denys Vlasenko
+// Dmitry Ivanov
+// Dmitry V. Levin
+// Drew DeVault
+// Emil Renner Berthing
+// Fangrui Song
+// Felix Fietkau
+// Felix Janda
+// Gianluca Anzolin
+// Hauke Mehrtens
+// He X
+// Hiltjo Posthuma
+// Isaac Dunham
+// Jaydeep Patil
+// Jens Gustedt
+// Jeremy Huntwork
+// Jo-Philipp Wich
+// Joakim Sindholt
+// John Spencer
+// Julien Ramseier
+// Justin Cormack
+// Kaarle Ritvanen
+// Khem Raj
+// Kylie McClain
+// Leah Neukirchen
+// Luca Barbato
+// Luka Perkov
+// M Farkas-Dyck (Strake)
+// Mahesh Bodapati
+// Markus Wichmann
+// Masanori Ogino
+// Michael Clark
+// Michael Forney
+// Mikhail Kremnyov
+// Natanael Copa
+// Nicholas J. Kain
+// orc
+// Pascal Cuoq
+// Patrick Oppenlander
+// Petr Hosek
+// Petr Skocik
+// Pierre Carrier
+// Reini Urban
+// Rich Felker
+// Richard Pennington
+// Ryan Fairfax
+// Samuel Holland
+// Segev Finer
+// Shiz
+// sin
+// Solar Designer
+// Stefan Kristiansson
+// Stefan O'Rear
+// Szabolcs Nagy
+// Timo Teräs
+// Trutz Behn
+// Valentin Ochs
+// Will Dietz
+// William Haddon
+// William Pitcock
+//
+// Portions of this software are derived from third-party works licensed
+// under terms compatible with the above MIT license:
+//
+// The TRE regular expression implementation (src/regex/reg* and
+// src/regex/tre*) is Copyright © 2001-2008 Ville Laurikari and licensed
+// under a 2-clause BSD license (license text in the source files). The
+// included version has been heavily modified by Rich Felker in 2012, in
+// the interests of size, simplicity, and namespace cleanliness.
+//
+// Much of the math library code (src/math/* and src/complex/*) is
+// Copyright © 1993,2004 Sun Microsystems or
+// Copyright © 2003-2011 David Schultz or
+// Copyright © 2003-2009 Steven G. Kargl or
+// Copyright © 2003-2009 Bruce D. Evans or
+// Copyright © 2008 Stephen L. Moshier or
+// Copyright © 2017-2018 Arm Limited
+// and labelled as such in comments in the individual source files. All
+// have been licensed under extremely permissive terms.
+//
+// The ARM memcpy code (src/string/arm/memcpy.S) is Copyright © 2008
+// The Android Open Source Project and is licensed under a two-clause BSD
+// license. It was taken from Bionic libc, used on Android.
+//
+// The AArch64 memcpy and memset code (src/string/aarch64/*) are
+// Copyright © 1999-2019, Arm Limited.
+//
+// The implementation of DES for crypt (src/crypt/crypt_des.c) is
+// Copyright © 1994 David Burren. It is licensed under a BSD license.
+//
+// The implementation of blowfish crypt (src/crypt/crypt_blowfish.c) was
+// originally written by Solar Designer and placed into the public
+// domain. The code also comes with a fallback permissive license for use
+// in jurisdictions that may not recognize the public domain.
+//
+// The smoothsort implementation (src/stdlib/qsort.c) is Copyright © 2011
+// Valentin Ochs and is licensed under an MIT-style license.
+//
+// The x86_64 port was written by Nicholas J. Kain and is licensed under
+// the standard MIT terms.
+//
+// The mips and microblaze ports were originally written by Richard
+// Pennington for use in the ellcc project. The original code was adapted
+// by Rich Felker for build system and code conventions during upstream
+// integration. It is licensed under the standard MIT terms.
+//
+// The mips64 port was contributed by Imagination Technologies and is
+// licensed under the standard MIT terms.
+//
+// The powerpc port was also originally written by Richard Pennington,
+// and later supplemented and integrated by John Spencer. It is licensed
+// under the standard MIT terms.
+//
+// All other files which have no copyright comments are original works
+// produced specifically for use as part of this library, written either
+// by Rich Felker, the main author of the library, or by one or more
+// contibutors listed above. Details on authorship of individual files
+// can be found in the git version control history of the project. The
+// omission of copyright and license comments in each file is in the
+// interest of source tree size.
+//
+// In addition, permission is hereby granted for all public header files
+// (include/* and arch/*/bits/*) and crt files intended to be linked into
+// applications (crt/*, ldso/dlstart.c, and arch/*/crt_arch.h) to omit
+// the copyright notice and permission notice otherwise required by the
+// license, and to use these files without any requirement of
+// attribution. These files include substantial contributions from:
+//
+// Bobby Bingham
+// John Spencer
+// Nicholas J. Kain
+// Rich Felker
+// Richard Pennington
+// Stefan Kristiansson
+// Szabolcs Nagy
+//
+// all of whom have explicitly granted such permission.
+//
+// This file previously contained text expressing a belief that most of
+// the files covered by the above exception were sufficiently trivial not
+// to be subject to copyright, resulting in confusion over whether it
+// negated the permissions granted in the license. In the spirit of
+// permissive licensing, and of not having licensing issues being an
+// obstacle to adoption, that text has been removed.
 
 
 ===== typenum 1.20.1 =====
@@ -27822,6 +28249,40 @@ DEALINGS IN THE SOFTWARE.
 ===== zerocopy 0.8.55 =====
 Scope: Cargo.lock source closure; binary membership unproven
 Origin: https://static.crates.io/crates/zerocopy/zerocopy-0.8.55.crate
+File: zerocopy-0.8.55/AGENTS.md
+Source SHA256: 24b16178226d2f96cafd03eed01113b4b0240c9e6a6cd938a155e991b4f11034
+Bytes: [0,363) SHA256: 64404f740af59299f95e50eae055069fb74bd5ae794f80acdc60412b85c413ef
+
+<!-- Copyright 2025 The Fuchsia Authors
+
+Licensed under a BSD-style license <LICENSE-BSD>, Apache License, Version 2.0
+<LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0>, or the MIT
+license <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+This file may not be copied, modified, or distributed except according to
+those terms. -->
+File: zerocopy-0.8.55/CHANGELOG.md
+Source SHA256: 876e5a74db78bdc53677ec4d489ce7b2fc87840f2dc094423cef406138082708
+Bytes: [0,363) SHA256: b4a75f5af25eb835415391455104fcdeb0b3dab81e73618682efc2aa3a71cf24
+
+<!-- Copyright 2023 The Fuchsia Authors
+
+Licensed under a BSD-style license <LICENSE-BSD>, Apache License, Version 2.0
+<LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0>, or the MIT
+license <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+This file may not be copied, modified, or distributed except according to
+those terms. -->
+File: zerocopy-0.8.55/Cargo.toml.orig
+Source SHA256: abddbce28346ed1857c0a6a09aeaa124c8038b05a63df516d8573adcdb204ce4
+Bytes: [0,368) SHA256: e3eea2ef8e1e4af1cb162f24fc48c4ab05b38ca1cbf7d706449d8b61e271d145
+
+# Copyright 2018 The Fuchsia Authors
+#
+# Licensed under a BSD-style license <LICENSE-BSD>, Apache License, Version 2.0
+# <LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0>, or the MIT
+# license <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+# This file may not be copied, modified, or distributed except according to
+# those terms.
+
 File: zerocopy-0.8.55/LICENSE-APACHE
 Source SHA256: 9d185ac6703c4b0453974c0d85e9eee43e6941009296bb1f5eb0b54e2329e9f3
 Bytes: [0,11350) SHA256: 9d185ac6703c4b0453974c0d85e9eee43e6941009296bb1f5eb0b54e2329e9f3
@@ -28089,6 +28550,98 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
+File: zerocopy-0.8.55/POLICIES.md
+Source SHA256: c1a54cb1010af32f7ce5a2501f5ef62db44521aae816a08c577f5ec06afd09ea
+Bytes: [0,363) SHA256: b4a75f5af25eb835415391455104fcdeb0b3dab81e73618682efc2aa3a71cf24
+
+<!-- Copyright 2023 The Fuchsia Authors
+
+Licensed under a BSD-style license <LICENSE-BSD>, Apache License, Version 2.0
+<LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0>, or the MIT
+license <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+This file may not be copied, modified, or distributed except according to
+those terms. -->
+File: zerocopy-0.8.55/README.md
+Source SHA256: de9d295f1a9baa9c505ca73761e3f53d55c059f77af5fb5a6d0c984579ac1845
+Bytes: [0,517) SHA256: 64f88915058f45a4396fd174e037b1aa7a25ff920bdabb22f204a3e6dda5cca7
+
+<!-- Copyright 2024 The Fuchsia Authors
+
+Licensed under a BSD-style license <LICENSE-BSD>, Apache License, Version 2.0
+<LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0>, or the MIT
+license <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+This file may not be copied, modified, or distributed except according to
+those terms.
+
+WARNING: DO NOT EDIT THIS FILE. It is generated automatically. Edits should be
+made in the doc comment on `src/lib.rs` or in `../tools/generate-readme`.
+-->
+File: zerocopy-0.8.55/agent_docs/development.md
+Source SHA256: 1968154a95185b9380e469048fd2274b107a98ffb00b3da3dbc80aa4baf86147
+Bytes: [0,363) SHA256: 64404f740af59299f95e50eae055069fb74bd5ae794f80acdc60412b85c413ef
+
+<!-- Copyright 2025 The Fuchsia Authors
+
+Licensed under a BSD-style license <LICENSE-BSD>, Apache License, Version 2.0
+<LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0>, or the MIT
+license <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+This file may not be copied, modified, or distributed except according to
+those terms. -->
+File: zerocopy-0.8.55/agent_docs/reviewing.md
+Source SHA256: 34abe5cdc3cb774cb07ea772c966ee1fd8bfd30c355d6fbca73b750ce17e6caf
+Bytes: [0,363) SHA256: 64404f740af59299f95e50eae055069fb74bd5ae794f80acdc60412b85c413ef
+
+<!-- Copyright 2025 The Fuchsia Authors
+
+Licensed under a BSD-style license <LICENSE-BSD>, Apache License, Version 2.0
+<LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0>, or the MIT
+license <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+This file may not be copied, modified, or distributed except according to
+those terms. -->
+File: zerocopy-0.8.55/agent_docs/style.md
+Source SHA256: 754a8651c4a4d443b1daccbde1b8853c0a18ca0e6ed486b440bc82276479167b
+Bytes: [0,363) SHA256: 64404f740af59299f95e50eae055069fb74bd5ae794f80acdc60412b85c413ef
+
+<!-- Copyright 2025 The Fuchsia Authors
+
+Licensed under a BSD-style license <LICENSE-BSD>, Apache License, Version 2.0
+<LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0>, or the MIT
+license <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+This file may not be copied, modified, or distributed except according to
+those terms. -->
+File: zerocopy-0.8.55/agent_docs/ui_tests.md
+Source SHA256: 487ad1762f0c45d999df352f8924e70e992bd0ea78f2ac4c3d2100734caccf7e
+Bytes: [0,363) SHA256: 64404f740af59299f95e50eae055069fb74bd5ae794f80acdc60412b85c413ef
+
+<!-- Copyright 2025 The Fuchsia Authors
+
+Licensed under a BSD-style license <LICENSE-BSD>, Apache License, Version 2.0
+<LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0>, or the MIT
+license <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+This file may not be copied, modified, or distributed except according to
+those terms. -->
+File: zerocopy-0.8.55/agent_docs/unsafe_code.md
+Source SHA256: c283df811efe9f7ff39c52ceec88c73162ce7f31bb8507891ccd46010ff4ebcd
+Bytes: [0,363) SHA256: 64404f740af59299f95e50eae055069fb74bd5ae794f80acdc60412b85c413ef
+
+<!-- Copyright 2025 The Fuchsia Authors
+
+Licensed under a BSD-style license <LICENSE-BSD>, Apache License, Version 2.0
+<LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0>, or the MIT
+license <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+This file may not be copied, modified, or distributed except according to
+those terms. -->
+File: zerocopy-0.8.55/agent_docs/validation.md
+Source SHA256: 8c0b06d018421ba9652a3d0dc33c4bdc50fd9265cabce8455c06a790a62a5fe8
+Bytes: [0,363) SHA256: 64404f740af59299f95e50eae055069fb74bd5ae794f80acdc60412b85c413ef
+
+<!-- Copyright 2025 The Fuchsia Authors
+
+Licensed under a BSD-style license <LICENSE-BSD>, Apache License, Version 2.0
+<LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0>, or the MIT
+license <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+This file may not be copied, modified, or distributed except according to
+those terms. -->
 File: zerocopy-0.8.55/build.rs
 Source SHA256: 916639a8cc523f6b7551c946706f551b24352cd50c84a2284ca313798bc77ee5
 Bytes: [0,430) SHA256: fce91ad40420ecb8a4e3116e4f3ce7c80fc647aea2a78786be424d5227f1a46e
@@ -28104,9 +28657,8 @@ Bytes: [0,430) SHA256: fce91ad40420ecb8a4e3116e4f3ce7c80fc647aea2a78786be424d522
 
 File: zerocopy-0.8.55/cargo.sh
 Source SHA256: 23b2eddb1e982dcc2228b573bb92a768e05e056e24f440d7efdf7fb1a747ac87
-Bytes: [0,390) SHA256: b305318b1fbbb7951781216030d8e7abcad22b4f271060ffba04c0dcb1786a58
+Bytes: [20,390) SHA256: 3a39e0648b814f75e7ec3f537d221e0b8d5cc4541dcb52d474968169807a0ed3
 
-#!/usr/bin/env bash
 #
 # Copyright 2024 The Fuchsia Authors
 #
@@ -28118,9 +28670,8 @@ Bytes: [0,390) SHA256: b305318b1fbbb7951781216030d8e7abcad22b4f271060ffba04c0dcb
 
 File: zerocopy-0.8.55/ci/check_all_toolchains_tested.sh
 Source SHA256: 979cece8aff80ff997bc317f9e48bb9f9a8c36486e7f23d7f1e869c75f03de85
-Bytes: [0,390) SHA256: b305318b1fbbb7951781216030d8e7abcad22b4f271060ffba04c0dcb1786a58
+Bytes: [20,390) SHA256: 3a39e0648b814f75e7ec3f537d221e0b8d5cc4541dcb52d474968169807a0ed3
 
-#!/usr/bin/env bash
 #
 # Copyright 2024 The Fuchsia Authors
 #
@@ -28132,9 +28683,8 @@ Bytes: [0,390) SHA256: b305318b1fbbb7951781216030d8e7abcad22b4f271060ffba04c0dcb
 
 File: zerocopy-0.8.55/ci/check_fmt.sh
 Source SHA256: 83e6654d1b6658c6d65c8b0beb4cbe7aaaa0cbf3cd4cc4d196d40b7c21f8d9eb
-Bytes: [0,390) SHA256: b305318b1fbbb7951781216030d8e7abcad22b4f271060ffba04c0dcb1786a58
+Bytes: [20,390) SHA256: 3a39e0648b814f75e7ec3f537d221e0b8d5cc4541dcb52d474968169807a0ed3
 
-#!/usr/bin/env bash
 #
 # Copyright 2024 The Fuchsia Authors
 #
@@ -28146,9 +28696,8 @@ Bytes: [0,390) SHA256: b305318b1fbbb7951781216030d8e7abcad22b4f271060ffba04c0dcb
 
 File: zerocopy-0.8.55/ci/check_msrv_is_minimal.sh
 Source SHA256: b6adac6e751ef1dd5927090b30bb098a64e9c9c50e047562088b889e25c2d5fc
-Bytes: [0,390) SHA256: 2378439e1bf5c7850bf36c70708717f83576405586a8e90db5f925b82390a800
+Bytes: [20,390) SHA256: e1b98b3e357a66708ff9de89e947df627556b09d5f80284dd0e6031e37eee8be
 
-#!/usr/bin/env bash
 #
 # Copyright 2025 The Fuchsia Authors
 #
@@ -28160,9 +28709,8 @@ Bytes: [0,390) SHA256: 2378439e1bf5c7850bf36c70708717f83576405586a8e90db5f925b82
 
 File: zerocopy-0.8.55/ci/check_readme.sh
 Source SHA256: c23dc51696893e171018fb1cb86b7c606a2cd3ad4800c7a44f913a1451607c5e
-Bytes: [0,390) SHA256: b305318b1fbbb7951781216030d8e7abcad22b4f271060ffba04c0dcb1786a58
+Bytes: [20,390) SHA256: 3a39e0648b814f75e7ec3f537d221e0b8d5cc4541dcb52d474968169807a0ed3
 
-#!/usr/bin/env bash
 #
 # Copyright 2024 The Fuchsia Authors
 #
@@ -28174,9 +28722,8 @@ Bytes: [0,390) SHA256: b305318b1fbbb7951781216030d8e7abcad22b4f271060ffba04c0dcb
 
 File: zerocopy-0.8.55/ci/check_stale_stderr.sh
 Source SHA256: 61a25ca45e05e684c31af4f926c15c7d7f97945f90a744038ab45816799dc6d0
-Bytes: [0,390) SHA256: 64aa46cb220cae30db13a5a9f6a3adc56589b4963ddc7062e5b8657dabcb0e58
+Bytes: [20,390) SHA256: 4cf095816e9d6df0db6bad67e4b11b2aed0fb617a8c16d6391cde22f740cbecc
 
-#!/usr/bin/env bash
 #
 # Copyright 2026 The Fuchsia Authors
 #
@@ -28188,9 +28735,8 @@ Bytes: [0,390) SHA256: 64aa46cb220cae30db13a5a9f6a3adc56589b4963ddc7062e5b8657da
 
 File: zerocopy-0.8.55/ci/check_versions.sh
 Source SHA256: c2603621c4981c1400d946cd83b2d3af0ba7db2355779b55eab89ca2c821fe0d
-Bytes: [0,390) SHA256: b305318b1fbbb7951781216030d8e7abcad22b4f271060ffba04c0dcb1786a58
+Bytes: [20,390) SHA256: 3a39e0648b814f75e7ec3f537d221e0b8d5cc4541dcb52d474968169807a0ed3
 
-#!/usr/bin/env bash
 #
 # Copyright 2024 The Fuchsia Authors
 #
@@ -28202,9 +28748,8 @@ Bytes: [0,390) SHA256: b305318b1fbbb7951781216030d8e7abcad22b4f271060ffba04c0dcb
 
 File: zerocopy-0.8.55/ci/release_crate_version.sh
 Source SHA256: e5f4b957eae4251f66a9497cc596533d767d97a841556c5c18425aa7259005eb
-Bytes: [0,390) SHA256: b305318b1fbbb7951781216030d8e7abcad22b4f271060ffba04c0dcb1786a58
+Bytes: [20,390) SHA256: 3a39e0648b814f75e7ec3f537d221e0b8d5cc4541dcb52d474968169807a0ed3
 
-#!/usr/bin/env bash
 #
 # Copyright 2024 The Fuchsia Authors
 #
@@ -28226,6 +28771,19 @@ Bytes: [0,368) SHA256: 18fba61c8218e152386ba7738a48af76403fb984ca28df7432b2f7c86
 # This file may not be copied, modified, or distributed except according to
 # those terms.
 
+File: zerocopy-0.8.55/rustdoc/style.css
+Source SHA256: 2622d8f676bd9e577d67f8fd962eca950d0c6df33b4b21b3df6ff7474fcd51ca
+Bytes: [65,425) SHA256: da9a380820f787e8b75d3c8d238c54e42f78cb5b4cf7659593a69f3c5e5d6004
+
+/*
+Copyright 2026 The Fuchsia Authors
+
+Licensed under a BSD-style license <LICENSE-BSD>, Apache License, Version 2.0
+<LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0>, or the MIT
+license <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+This file may not be copied, modified, or distributed except according to
+those terms.
+*/
 File: zerocopy-0.8.55/src/byte_slice.rs
 Source SHA256: c61c875a6e10aa06c44300337e7e270099a4a5ece7ddd4863de2cef4439087b4
 Bytes: [0,440) SHA256: 388ab80c8f3a357eaf6c89d831047392791cb8439a538dedf1a2af6f05a7c344
@@ -28696,10 +29254,28 @@ Bytes: [0,375) SHA256: 9daa4480b2108384a4f6c5b16adc6f31e4db2ff635b732ad069a9e567
 // This file may not be copied, modified, or distributed except according to
 // those terms.
 
+File: zerocopy-0.8.55/win-cargo.bat
+Source SHA256: 892ced98796378161965ed3c4260fe77f4e66650051849864936877da7420f0d
+Bytes: [0,41) SHA256: 98bb7ae38ab6ce89400fb3ed433e0b75887fde08ee03dee24a83da5646f67360
+
+@rem Copyright 2024 The Fuchsia Authors
+
 
 ===== zerocopy-derive 0.8.55 =====
 Scope: Cargo.lock source closure; binary membership unproven
 Origin: https://static.crates.io/crates/zerocopy-derive/zerocopy-derive-0.8.55.crate
+File: zerocopy-derive-0.8.55/Cargo.toml.orig
+Source SHA256: e060aa84619255eb0312460292b99ed6a279ead5b73485445f347f8622e9e29d
+Bytes: [0,368) SHA256: 163bb315a2183dcb23752a8d47da63fb3fd38a9ba9e99b1ba49a6536f8df5257
+
+# Copyright 2019 The Fuchsia Authors
+#
+# Licensed under a BSD-style license <LICENSE-BSD>, Apache License, Version 2.0
+# <LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0>, or the MIT
+# license <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your option.
+# This file may not be copied, modified, or distributed except according to
+# those terms.
+
 File: zerocopy-derive-0.8.55/LICENSE-APACHE
 Source SHA256: 9d185ac6703c4b0453974c0d85e9eee43e6941009296bb1f5eb0b54e2329e9f3
 Bytes: [0,11350) SHA256: 9d185ac6703c4b0453974c0d85e9eee43e6941009296bb1f5eb0b54e2329e9f3
@@ -29607,7 +30183,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ===== r-efi/r-efi 5.3.0 =====
-Scope: supplemental public repository at 97b55bed1c2c91dcbf787674849f05337ff80b33; crate VCS metadata / Go pseudo-version
+Scope: supplemental public repository at 97b55bed1c2c91dcbf787674849f05337ff80b33; recorded VCS commit of r-efi@5.3.0
 Origin: https://codeload.github.com/r-efi/r-efi/tar.gz/97b55bed1c2c91dcbf787674849f05337ff80b33
 File: r-efi-97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS
 Source SHA256: ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7
@@ -29690,7 +30266,7 @@ AUTHORS: (ordered alphabetically)
 
 
 ===== r-efi/r-efi 6.0.0 =====
-Scope: supplemental public repository at 7e1b0322d31d625f81a5656096330934f9cd835d; crate VCS metadata / Go pseudo-version
+Scope: supplemental public repository at 7e1b0322d31d625f81a5656096330934f9cd835d; recorded VCS commit of r-efi@6.0.0
 Origin: https://codeload.github.com/r-efi/r-efi/tar.gz/7e1b0322d31d625f81a5656096330934f9cd835d
 File: r-efi-7e1b0322d31d625f81a5656096330934f9cd835d/AUTHORS
 Source SHA256: d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111
@@ -29774,7 +30350,7 @@ AUTHORS: (ordered alphabetically)
 
 
 ===== tokio-rs/valuable 0.1.1 =====
-Scope: supplemental public repository at 9efc29b6e58cef28f6566a47aa7e142a55fead77; crate VCS metadata / Go pseudo-version
+Scope: supplemental public repository at 9efc29b6e58cef28f6566a47aa7e142a55fead77; recorded VCS commit of valuable@0.1.1
 Origin: https://codeload.github.com/tokio-rs/valuable/tar.gz/9efc29b6e58cef28f6566a47aa7e142a55fead77
 File: valuable-9efc29b6e58cef28f6566a47aa7e142a55fead77/LICENSE
 Source SHA256: ed60d479b8fd1f64e9cbc3de449a16a53ac1b3d1b6aeb9bf9d190a8e93061b44
