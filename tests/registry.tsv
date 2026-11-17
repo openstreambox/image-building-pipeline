@@ -111,6 +111,7 @@ tests/first-party-local-override.test.sh	shell	integration	default-shell	bench-o
 tests/uart-console-path.test.sh	shell	unit	default-shell	CI-UART bootstrap targets ttyFIQ0 while serial_console stays ttyS2
 tests/uart-bootstrap-tty.test.sh	shell	unit	default-shell	tty-class-aware stty: tolerant on FIQ, fatal on a real UART
 tests/postinst-module-contract.test.sh	shell	unit	default-shell	every postinst registry function resolves from a bare source
+tests/licence-notices.test.sh	shell	unit	default-shell	copyright files for first-party packages without one, and the MediaMTX licence
 tests/systemd-ordering-cycle.test.sh	shell	unit	default-shell	zero ordering cycles plus the sysinit-phase ordering probe
 tests/ssh-firstboot-privsep.test.sh	shell	unit	default-shell	/run/sshd is created before sshd -t on an empty-/run first boot
 tests/ssh-enablement-contract.test.sh	shell	unit	default-shell	production ssh stays disabled: no SIGPIPE-racing unit probe, landed-disable assertion, first-boot preset

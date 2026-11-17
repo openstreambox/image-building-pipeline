@@ -1,0 +1,25 @@
+# Licence texts for first-party packages that ship without a copyright file.
+#
+# Read by install-licence-notices.sh, which writes
+# /usr/share/doc/<package>/copyright for every installed package named here.
+# Each text under texts/ is a verbatim copy of <path> in <source> at <commit>,
+# pinned by sha256; tools/verify-licence-notices.sh re-fetches and compares them.
+# The build fails when an installed package version differs from <version>, a
+# text is missing or changed, or the package now ships its own copyright file.
+#
+# A row whose <path>, <text> and <sha256> are "-" records a component whose
+# source has no licence file at that commit: the copyright file says so and
+# reproduces no text for it.
+#
+# A #L<start>-L<end> suffix pins an inclusive source line range.
+# Columns (tab-separated): package version component source commit path text sha256
+srtla	4.2.0	srtla_send	https://github.com/CERALIVE/srtla-send-rs	1b5febb767ac2af3a275dc7ea2926bcb882001e7	LICENSE	texts/srtla-send-rs-1b5febb7-LICENSE	6369b8e9dc0a4db030f9a6cf11d866e07fea9afa3d47a5700aa7d8c15f1aa65a
+libsrt1.5-ceralive	1.5.7+ceralive.2	libsrt	https://github.com/CERALIVE/srt	d487b13365205b6cd5da9d9b50868c323e255b7c	LICENSE	texts/srt-d487b133-LICENSE	fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85
+gstreamer1.0-libuvcsrc	2026.9.0	libuvc (the bundled libuvc.so)	https://github.com/CeraLive/libuvc	f3eda761b69acdfa6c0ffc02119b2bda172b9d46	LICENSE.txt	texts/libuvc-f3eda761-LICENSE.txt	57a7ba48475cb7f0aaddfb79ef32e742a19901908f0287b6827da336477b212e
+gstreamer1.0-libuvcsrc	2026.9.0	the GStreamer plugin	https://github.com/CERALIVE/gstlibuvcsrc	8fe5ba50e8c28ceeffba8a3b896b245fff53bd96	-	-	-
+libsrt1.5-ceralive	1.5.7+ceralive.2	inherited UDT notices	https://github.com/CERALIVE/srt	d487b13365205b6cd5da9d9b50868c323e255b7c	srtcore/udt.h#L11-L44	texts/srt-d487b133-udt.h-NOTICE.txt	b84d758efac05adcead6a6db47ffba2b92baeddfd0fbf105ef8a5feaafd4d9dd
+libsrt1.5-ceralive	1.5.7+ceralive.2	MD5 header notices	https://github.com/CERALIVE/srt	d487b13365205b6cd5da9d9b50868c323e255b7c	srtcore/md5.h#L1-L23	texts/srt-d487b133-md5.h-NOTICE.txt	9b9f516c117058e06387bc9452c71299893dfc49951655054f80db6624d33d49
+libsrt1.5-ceralive	1.5.7+ceralive.2	MD5 implementation notices	https://github.com/CERALIVE/srt	d487b13365205b6cd5da9d9b50868c323e255b7c	srtcore/md5.cpp#L1-L23	texts/srt-d487b133-md5.cpp-NOTICE.txt	c0b58511a292fa0080d7b5d2bda7083524cdb3e91b5ffdb92cac9152246e1420
+libsrt1.5-ceralive	1.5.7+ceralive.2	inherited UDT year variant	https://github.com/CERALIVE/srt	d487b13365205b6cd5da9d9b50868c323e255b7c	srtcore/buffer_snd.h#L11-L44	texts/srt-d487b133-buffer_snd.h-NOTICE.txt	3331de8caa2bea7d35de440fc2b09be68d73dc011d694fce2e5130ba960d201e
+libsrt1.5-ceralive	1.5.7+ceralive.2	inherited UDT year variant	https://github.com/CERALIVE/srt	d487b13365205b6cd5da9d9b50868c323e255b7c	srtcore/api.h#L11-L44	texts/srt-d487b133-api.h-NOTICE.txt	3e68522006d34bd3c4707c55304e88b00e4feea82c96ccf364f14fb28a37ca0d
+libsrt1.5-ceralive	1.5.7+ceralive.2	inherited UDT year variant	https://github.com/CERALIVE/srt	d487b13365205b6cd5da9d9b50868c323e255b7c	srtcore/common.cpp#L11-L44	texts/srt-d487b133-common.cpp-NOTICE.txt	e8603a5d11cb40ab251e429352c00f51ab817190abdb2aa49956d41575b80f18

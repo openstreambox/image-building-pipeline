@@ -486,8 +486,10 @@ setup_cerastream_ordering() {
 # mediamtx.recipe.conf) for the TARGET architecture, verified against a per-arch
 # sha256 pin — the build FAILS CLOSED on any checksum mismatch. Stages the single
 # static binary to /usr/local/bin/mediamtx, the committed RTMP-only config to
-# /etc/mediamtx.yml, and the unit to
-# /etc/systemd/system/ceralive-rtmp-gateway.service, then enables it.
+# /etc/mediamtx.yml, the unit to
+# /etc/systemd/system/ceralive-rtmp-gateway.service, and the tarball's own LICENSE
+# to /usr/share/doc/mediamtx/copyright (the only doc file name images keep), then
+# enables the unit. A tarball without a LICENSE member fails the build.
 #
 # The relay is a SINGLE-PURPOSE LAN ingest: it accepts a publish at path
 # `publish/live` over RTMP (:1935) OR SRT (:4001) and serves that SAME path on
@@ -547,6 +549,9 @@ setup_rtmp_gateway() {
   tmpdir="$(mktemp -d)"
   local tarball="${tmpdir}/mediamtx.tar.gz"
 
+  local url="${MEDIAMTX_URL_TEMPLATE//\{ver\}/${MEDIAMTX_VERSION}}"
+  url="${url//\{arch\}/${arch}}"
+
   # Fetch the pinned tarball (or use a local one for offline verification).
   if [[ -n "${MEDIAMTX_LOCAL_TARBALL:-}" ]]; then
     [[ -f "${MEDIAMTX_LOCAL_TARBALL}" ]] \
@@ -554,8 +559,6 @@ setup_rtmp_gateway() {
     cp "${MEDIAMTX_LOCAL_TARBALL}" "${tarball}"
   else
     command -v curl >/dev/null 2>&1 || { rm -rf "${tmpdir}"; die "curl not found — cannot fetch MediaMTX"; }
-    local url="${MEDIAMTX_URL_TEMPLATE//\{ver\}/${MEDIAMTX_VERSION}}"
-    url="${url//\{arch\}/${arch}}"
     log "fetching MediaMTX ${MEDIAMTX_VERSION} (${arch}) from ${url}"
     curl -fsSL --retry 3 --retry-all-errors -o "${tarball}" "${url}" \
       || { rm -rf "${tmpdir}"; die "MediaMTX fetch failed: ${url}"; }
@@ -570,9 +573,18 @@ setup_rtmp_gateway() {
   fi
   log "MediaMTX ${MEDIAMTX_VERSION} (${arch}) sha256 verified: ${actual}"
 
-  # Extract only the static binary from the verified tarball.
+  # Extract only the static binary and its licence from the verified tarball.
   tar -xzf "${tarball}" -C "${tmpdir}" mediamtx \
     || { rm -rf "${tmpdir}"; die "MediaMTX tarball missing 'mediamtx' binary member"; }
+  tar -xzf "${tarball}" -C "${tmpdir}" LICENSE && [[ -s "${tmpdir}/LICENSE" ]] \
+    || { rm -rf "${tmpdir}"; die "MediaMTX tarball missing its LICENSE member"; }
+  {
+    printf 'MediaMTX %s, installed as /usr/local/bin/mediamtx\n\n' "${MEDIAMTX_VERSION}"
+    printf 'Source: %s\n' "${url}"
+    printf 'Release tarball sha256: %s\n' "${actual}"
+    printf 'File: LICENSE, copied verbatim from that tarball\n\n'
+    cat "${tmpdir}/LICENSE"
+  } > "${tmpdir}/copyright"
 
   # Stage binary + config + unit. install -D creates parents; DESTROOT is empty in
   # production (absolute /usr,/etc) and a tmpdir in the offline self-test.
@@ -580,6 +592,7 @@ setup_rtmp_gateway() {
   install -D -m 0755 "${tmpdir}/mediamtx" "${destroot}/usr/local/bin/mediamtx"
   install -D -m 0644 "${src}/mediamtx.yml" "${destroot}/etc/mediamtx.yml"
   install -D -m 0644 "${src}/ceralive-rtmp-gateway.service" "${destroot}/etc/systemd/system/ceralive-rtmp-gateway.service"
+  install -D -m 0644 "${tmpdir}/copyright" "${destroot}/usr/share/doc/mediamtx/copyright"
   rm -rf "${tmpdir}"
 
   enable_service ceralive-rtmp-gateway.service
