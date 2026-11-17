@@ -462,19 +462,30 @@ if [[ "$MODE" = reconcile ]]; then
         "$candidate" "$state" "$published" >&2
 fi
 
+# Consumers use the committed local identity, not Avahi's temporary alternative.
+# Snapshot before claiming: a successful claim can advance the candidate index.
+start_index=$index
+was_local=0
+local_identity_matches "$(candidate_for_index "$index")" && was_local=1
+
 deadline=$((SECONDS + MAX_WAIT))
 wait_for_avahi_ready "$deadline"
 while (( index <= MAX_INDEX )); do
     candidate="$(candidate_for_index "$index")"
     if claim_candidate "$candidate" "$deadline"; then
-        if [[ "$MODE" = reconcile ]]; then
+        restart_needed=0
+        if [[ "$MODE" = reconcile ]] && { [[ "$index" != "$start_index" || "$was_local" != 1 ]] \
+            || [ -e "$RESTART_PENDING_FILE" ]; }; then
+            restart_needed=1
             atomic_write "$RESTART_PENDING_FILE" 0600 "$candidate" \
                 || die "failed to persist identity-consumer restart marker"
         fi
         commit_identity "$index" "$candidate" || die "failed to persist hostname identity"
-        if [[ "$MODE" = reconcile ]]; then
+        if [[ "$restart_needed" = 1 ]]; then
             restart_identity_consumers || die "failed to requeue identity consumers"
             clear_restart_pending || die "failed to clear identity-consumer restart marker"
+        fi
+        if [[ "$MODE" = reconcile ]]; then
             printf 'ceralive-set-hostname: reconciled and established %s.local\n' "$candidate"
         else
             printf 'ceralive-set-hostname: established %s.local\n' "$candidate"
