@@ -5871,11 +5871,28 @@ file is `fusb302.ko`. Unbind and bind are judged by the driver link, not by the 
 exit status; an unbound device gets one `drivers_probe` and then one more bind. The gap
 between unbind and bind is `CERALIVE_TYPEC_REBIND_GAP` (1 s, not bench-validated).
 
-It runs at most once per boot (`/run/ceralive-typec/reprobe`: `attempted`, written before
-the unbind, then `recovered`, `no-partner`, `port-missing`, `skipped`, `failed-unbind` or
-`failed-bind`), never in the boot-time run, never with a partner present and never
-without confirmed back power. An empty J11 cannot be told from a stuck one in sysfs, so on
-a back-powered boot with nothing plugged in the rebind runs once and ends in an info line.
+The first rebind runs once per boot (`/run/ceralive-typec/reprobe`: `attempted`, written
+before the unbind, then `recovered`, `no-partner`, `port-missing`, `skipped`,
+`failed-unbind` or `failed-bind`), never in the boot-time run, never with a partner present
+and never without confirmed back power. An empty J11 cannot be told from a stuck one in
+sysfs, so on a back-powered boot with nothing plugged in the rebind runs once and ends in an
+info line.
+
+**Re-arm after a detach.** A hot unplug and replug of the same modem sticks the chip just
+like a cold boot (no partner, `vbus5v0_typec` off), and a second unbind/bind recovered it on
+the bench within 14 s. So once a partner has been seen after this boot's rebind (outcome
+`recovered`, `no-partner` or `port-missing`; never after `skipped` or a failed rebind) and
+then disappears, the recheck records the detach time (`detached`) and allows one more
+rebind once the port has stayed partnerless for `CERALIVE_TYPEC_REARM_SETTLE` (30 s) and
+`CERALIVE_TYPEC_REPROBE_SETTLE` has passed since the last `port_type` cycle. All the other
+guards stay the same: back power, source preference, `power_role` source, the
+`typec_fusb302` driver link, and the policy lock, which the cycles also hold. A partner
+that returns within the settle time cancels it. Re-arm rebinds are labelled `re-arm k/3`
+and capped at `CERALIVE_TYPEC_REARM_MAX` (3) per boot (`rearm` counts them); a deferral
+does not spend one. An empty port after an unplug costs one info-logged rebind and cannot
+loop, because only a partner that appears again re-arms another. Known gap: a modem
+plugged in after that rebind has already run on the empty port (a swap slower than the
+settle time) is not recovered until the next boot.
 Every decision is journaled with the `fusb302-reprobe:` tag and a syslog priority prefix,
 so `journalctl -p warning` shows failures; deferrals log once per reason. If `port0` is
 absent the Rock recheck logs that once per change and makes no connector writes until it
