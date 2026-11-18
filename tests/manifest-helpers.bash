@@ -1093,23 +1093,31 @@ typec_rock_fixture() {
 
 # typec_rock_reprobe_fixture <root> — the field state the FUSB302 rebind targets:
 # back power present, J11 source with the source preference, no partner, all
-# no-partner cycles used 30 s ago, and port0 owned by I2C device 4-0022 bound to
-# fusb302.
+# no-partner cycles used 30 s ago, and port0 owned by I2C device 4-0022. The
+# driver directory carries the kernel's driver name, typec_fusb302 (fusb302.ko
+# registers it so; modinfo shows alias i2c:typec_fusb302), not the module name.
 typec_rock_reprobe_fixture() {
   local root="$1"
+  rm -rf "$root"
   typec_rock_fixture "$root"
   rm -rf "$root/typec/port0-partner"
   printf '[source] sink\n' >"$root/typec/port0/power_role"
   printf '[host] device\n' >"$root/typec/port0/data_role"
   printf 'sink [source]\n' >"$root/typec/port0/preferred_role"
-  mkdir -p "$root/i2c/drivers/fusb302" "$root/i2c/devices/4-0022" "$root/run"
-  : >"$root/i2c/drivers/fusb302/unbind"
-  : >"$root/i2c/drivers/fusb302/bind"
-  ln -sfn "$root/i2c/drivers/fusb302" "$root/i2c/devices/4-0022/driver"
+  mkdir -p "$root/i2c/drivers/typec_fusb302" "$root/i2c/devices/4-0022" "$root/run" \
+    "$root/otg/fc000000.usb/xhci-hcd.3.auto/usb3" "$root/usb_role"
+  : >"$root/i2c/drivers/typec_fusb302/unbind"
+  : >"$root/i2c/drivers/typec_fusb302/bind"
+  : >"$root/i2c/drivers_probe"
+  printf 'device\n' >"$root/usb_role/role"
+  ln -sfn "$root/i2c/drivers/typec_fusb302" "$root/i2c/devices/4-0022/driver"
   ln -sfn "$root/i2c/devices/4-0022" "$root/typec/port0/device"
   printf '3 %s\n' "$(( $(date +%s) - 30 ))" >"$root/run/nopartner"
-  export CERALIVE_TYPEC_I2C_DRIVERS_DIR="$root/i2c/drivers"
+  export TYPEC_FAKE_I2C="$root/i2c"
+  export CERALIVE_TYPEC_ROLE_SWITCH="$root/usb_role/role"
+  export CERALIVE_TYPEC_OTG_DEV="$root/otg/fc000000.usb"
   export CERALIVE_TYPEC_MODE=recheck CERALIVE_TYPEC_POLL=0
+  export CERALIVE_TYPEC_REBIND_GAP=0 CERALIVE_TYPEC_BIND_WAIT=0
 }
 
 # Observe the actual redirected writes; emulate only the kernel's post-cycle
@@ -1142,19 +1150,47 @@ run_typec_rock() {
             builtin printf "%s\n" "$2" >"$CERALIVE_TYPEC_IIO_DIR/accepted-port-type"
           fi
           ;;
-        "${CERALIVE_TYPEC_I2C_DRIVERS_DIR:-/nonexistent}/fusb302/unbind")
+        "${TYPEC_FAKE_I2C:-/nonexistent}"/drivers/*/unbind)
+          # Fake kernel: unbinding removes the driver link and the Type-C port.
           builtin printf "unbind %s\n" "$2" >>"$CERALIVE_TYPEC_IIO_DIR/i2c-writes"
           [[ ! -e "$CERALIVE_TYPEC_IIO_DIR/reject-unbind" ]] || return 1
+          rm -f "$TYPEC_FAKE_I2C/devices/$2/driver"
+          rm -rf "$CERALIVE_TYPEC_IIO_DIR/port0.unbound"
+          mv "$CERALIVE_TYPEC_CLASS_DIR/port0" "$CERALIVE_TYPEC_IIO_DIR/port0.unbound"
+          return 0
           ;;
-        "${CERALIVE_TYPEC_I2C_DRIVERS_DIR:-/nonexistent}/fusb302/bind")
-          builtin printf "bind %s\n" "$2" >>"$CERALIVE_TYPEC_IIO_DIR/i2c-writes"
+        "${TYPEC_FAKE_I2C:-/nonexistent}"/drivers/*/bind | "${TYPEC_FAKE_I2C:-/nonexistent}"/drivers_probe)
+          # Fake kernel: a successful probe restores the link and a fresh port0
+          # (DT defaults: Try.SNK); reprobe-attaches also brings up the partner.
+          builtin printf "%s %s\n" "${target##*/}" "$2" >>"$CERALIVE_TYPEC_IIO_DIR/i2c-writes"
+          local probes
+          probes="$(grep -cE "^(bind|drivers_probe) " "$CERALIVE_TYPEC_IIO_DIR/i2c-writes")"
           if [[ -e "$CERALIVE_TYPEC_IIO_DIR/reject-bind" ]] ||
-              [[ -e "$CERALIVE_TYPEC_IIO_DIR/reject-bind-once" &&
-                 ! -e "$CERALIVE_TYPEC_IIO_DIR/bind-rejected" ]]; then
-            touch "$CERALIVE_TYPEC_IIO_DIR/bind-rejected"
+              { [[ -e "$CERALIVE_TYPEC_IIO_DIR/fail-probes" ]] &&
+                (( probes <= $(cat "$CERALIVE_TYPEC_IIO_DIR/fail-probes") )); }; then
             return 1
           fi
+          if [[ -L "$TYPEC_FAKE_I2C/devices/$2/driver" ]]; then
+            return 1  # EBUSY: already bound
+          fi
+          ln -s "$TYPEC_FAKE_I2C/drivers/typec_fusb302" "$TYPEC_FAKE_I2C/devices/$2/driver"
+          if [[ ! -e "$CERALIVE_TYPEC_IIO_DIR/port-not-back" ]]; then
+            mv "$CERALIVE_TYPEC_IIO_DIR/port0.unbound" "$CERALIVE_TYPEC_CLASS_DIR/port0"
+            builtin printf "[sink] source\n" >"$CERALIVE_TYPEC_CLASS_DIR/port0/preferred_role"
+          fi
           if [[ -e "$CERALIVE_TYPEC_IIO_DIR/reprobe-attaches" ]]; then
+            mkdir -p "$CERALIVE_TYPEC_CLASS_DIR/port0-partner"
+          fi
+          [[ ! -e "$CERALIVE_TYPEC_IIO_DIR/bind-errors-but-binds" ]] || return 1
+          return 0
+          ;;
+        "$CERALIVE_TYPEC_CLASS_DIR/port0/preferred_role")
+          # A kernel that accepts the write but keeps reporting its own value.
+          [[ ! -e "$CERALIVE_TYPEC_IIO_DIR/ignore-preferred" ]] || return 0
+          ;;
+        "$CERALIVE_TYPEC_RUN_DIR/reprobe")
+          if [[ "$2" == attempted &&
+                -e "$CERALIVE_TYPEC_IIO_DIR/partner-on-attempt" ]]; then
             mkdir -p "$CERALIVE_TYPEC_CLASS_DIR/port0-partner"
           fi
           ;;

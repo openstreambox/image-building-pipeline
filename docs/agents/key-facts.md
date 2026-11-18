@@ -5851,19 +5851,34 @@ in webcam mode); nothing in the image switches it.
 **Source port that never sees its partner (Rock 5B+, back power confirmed).** With a
 plain USB device on J11 through a C-to-A adapter, the FUSB302 can sit toggling in the
 source role with no attach interrupt at all, through every `port_type` cycle and across
-cold boots; one unbind/bind of the chip recovered it within seconds on the bench. When
-the no-partner cycles are used up, `CERALIVE_TYPEC_REPROBE_SETTLE` (20 s) have passed
-since the last one, the source preference is active, `power_role` reads `source` and
-still no partner exists, the recheck unbinds and rebinds the I2C device that owns
-`port0` (only when that device is bound to `fusb302`; no module unload, so no other
-controller is touched), then waits `CERALIVE_TYPEC_WAIT` for the partner. It runs at
-most once per boot (`/run/ceralive-typec/reprobe` records `attempted`, then
-`recovered`, `no-partner`, `skipped`, `failed-unbind` or `failed-bind`, written before
-the unbind), never in the boot-time run, never with a partner present and never
-without confirmed back power. Every decision is journaled with the `fusb302-reprobe:`
-tag; deferrals (source preference or role not yet source) log once per reason. A
-rejected bind is retried once. Guards: the "typec policy: fusb302 rebind …" cases in
-`runtime-services.bats` drive a mocked sysfs whose fake bind can create the partner.
+cold boots. A manual `modprobe -r fusb302; modprobe fusb302` recovered it within seconds
+on the bench. The policy instead unbinds and rebinds the one I2C device, which runs the
+same driver remove/probe path without touching other controllers; that automatic rebind
+is **not yet proven on hardware** and needs a bench cold boot before it is relied on.
+
+When the no-partner cycles are used up, `CERALIVE_TYPEC_REPROBE_SETTLE` (20 s) have
+passed since the last one, the source preference is active, `power_role` reads `source`,
+the OTG role switch does not already read `host`, no USB device is enumerated under
+`fc000000.usb` and there is still no partner, the recheck rebinds the I2C device behind
+`port0/device`. The driver directory comes from that device's `driver` link: the kernel
+registers the driver as `typec_fusb302` (modalias `i2c:typec_fusb302`); only the module
+file is `fusb302.ko`. Unbind and bind are judged by the driver link, not by the write's
+exit status; an unbound device gets one `drivers_probe` and then one more bind. The gap
+between unbind and bind is `CERALIVE_TYPEC_REBIND_GAP` (1 s, not bench-validated).
+
+It runs at most once per boot (`/run/ceralive-typec/reprobe`: `attempted`, written before
+the unbind, then `recovered`, `no-partner`, `port-missing`, `skipped`, `failed-unbind` or
+`failed-bind`), never in the boot-time run, never with a partner present and never
+without confirmed back power. An empty J11 cannot be told from a stuck one in sysfs, so on
+a back-powered boot with nothing plugged in the rebind runs once and ends in an info line.
+Every decision is journaled with the `fusb302-reprobe:` tag and a syslog priority prefix,
+so `journalctl -p warning` shows failures; deferrals log once per reason. If `port0` is
+absent the Rock recheck logs that once and makes no connector writes until it returns.
+Residual risk: a TCPM worker wedged in I2C could block the unbind in D state; the recheck
+unit then times out holding the lock (boot is not held), as a manual module unload would.
+Guards: the "typec policy: fusb302 rebind …" cases and their neighbours in
+`runtime-services.bats` drive a mocked sysfs whose fake kernel removes and restores the
+driver link and `port0` and can create the partner.
 
 Guards: `runtime-services.bats` §18d "typec policy: …" (10 cases) — installer +
 enablement with the legacy script/unit asserted ABSENT, the udev handoff (both

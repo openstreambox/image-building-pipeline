@@ -35,7 +35,10 @@
 #   CERALIVE_TYPEC_NOPARTNER_SPACING  seconds between those cycles (default 30)
 #   CERALIVE_TYPEC_REPROBE_SETTLE     seconds after the last cycle before the
 #                                     one FUSB302 rebind (default 20)
-#   CERALIVE_TYPEC_I2C_DRIVERS_DIR    I2C drivers (default /sys/bus/i2c/drivers)
+#   CERALIVE_TYPEC_REBIND_GAP         seconds between unbind and bind (default 1)
+#   CERALIVE_TYPEC_BIND_WAIT          seconds to wait for each driver-link change (default 3)
+#   CERALIVE_TYPEC_ROLE_SWITCH        OTG role (default /sys/class/usb_role/fc000000.usb-role-switch/role)
+#   CERALIVE_TYPEC_OTG_DEV            OTG controller (default /sys/bus/platform/devices/fc000000.usb)
 
 set -uo pipefail
 
@@ -54,7 +57,12 @@ NOPARTNER_SPACING="${CERALIVE_TYPEC_NOPARTNER_SPACING:-30}"
   || die "CERALIVE_TYPEC_NOPARTNER_MAX and _SPACING must be unsigned integers"
 REPROBE_SETTLE="${CERALIVE_TYPEC_REPROBE_SETTLE:-20}"
 [[ "${REPROBE_SETTLE}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_REPROBE_SETTLE must be an unsigned integer"
-I2C_DRIVERS_DIR="${CERALIVE_TYPEC_I2C_DRIVERS_DIR:-/sys/bus/i2c/drivers}"
+REBIND_GAP="${CERALIVE_TYPEC_REBIND_GAP:-1}"
+[[ "${REBIND_GAP}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "CERALIVE_TYPEC_REBIND_GAP must be a non-negative number"
+BIND_WAIT="${CERALIVE_TYPEC_BIND_WAIT:-3}"
+[[ "${BIND_WAIT}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_BIND_WAIT must be an unsigned integer"
+ROLE_SWITCH="${CERALIVE_TYPEC_ROLE_SWITCH:-/sys/class/usb_role/fc000000.usb-role-switch/role}"
+OTG_DEV="${CERALIVE_TYPEC_OTG_DEV:-/sys/bus/platform/devices/fc000000.usb}"
 
 PORT_DIR="${CLASS_DIR}/${PORT}"
 PARTNER_DIR="${PORT_DIR}-partner"
@@ -80,8 +88,14 @@ active_role() {
   fi
 }
 
-# Every FUSB302 rebind decision is journaled under this tag.
-reprobe_log() { log "$1: fusb302-reprobe: $2"; }
+# Every FUSB302 rebind decision is journaled under this tag, with a syslog
+# priority prefix (<3> error, <4> warning, <6> info) that journald strips and
+# applies, so `journalctl -p warning` finds the failures.
+reprobe_log() {
+  local prio=6
+  case "$1" in ERROR) prio=3 ;; WARNING) prio=4 ;; esac
+  printf '<%s>ceralive-typec-policy: %s: fusb302-reprobe: %s\n' "${prio}" "$1" "$2"
+}
 
 # reprobe_record <state> — the once-per-boot marker; false when it cannot be kept.
 reprobe_record() {
@@ -99,14 +113,44 @@ reprobe_defer() {
     || reprobe_log ERROR "cannot record the deferral"
 }
 
+# wait_bound <device dir> <want: bound|unbound> — poll the driver link, the only
+# trustworthy result: a deferred probe fails the bind write yet may bind later,
+# and a repeated write to a bound device fails with EBUSY.
+wait_bound() {
+  local deadline=$((SECONDS + BIND_WAIT))
+  while :; do
+    if [[ -L "$1/driver" ]]; then
+      [[ "$2" == bound ]] && return 0
+    else
+      [[ "$2" == unbound ]] && return 0
+    fi
+    (( SECONDS < deadline )) || return 1
+    sleep "${POLL_INTERVAL}"
+  done
+}
+
 # rock_fusb302_reprobe <last cycle epoch> <now epoch> — runs only from the Rock
-# recheck with back power present, the source preference set, no partner and
-# the no-partner cycles used up. It unbinds and rebinds the one I2C FUSB302 that
-# owns ${PORT} (the J11 data connector; the board's supply comes from the back
-# input), once per boot, then re-reads the partner. Module unload is avoided so
-# no other controller is touched.
+# recheck with back power present, no partner and the no-partner cycles used up.
+# It unbinds and rebinds the one I2C device that owns ${PORT} (the J11 data
+# connector; the board's supply comes from the back input), once per boot, then
+# re-reads the partner. The driver directory comes from the device's own driver
+# link: the kernel registers the driver as typec_fusb302 (modalias
+# i2c:typec_fusb302) although the module file is fusb302.ko. Unbinding a single
+# device avoids a module unload that would touch every FUSB302.
+#
+# On the bench only `modprobe -r fusb302; modprobe fusb302` has been shown to
+# recover the stuck chip; this rebind runs the same remove/probe path but is
+# unproven until a board boots with it. If the TCPM worker were wedged in I2C,
+# the unbind write could block in D state: the unit then times out holding the
+# lock, later runs log a lock timeout, and boot itself is not held (timer-driven).
+#
+# An empty J11 looks exactly like a stuck one (source, no partner, no CC event in
+# sysfs), so on a back-powered boot with nothing plugged in this rebind runs once
+# and ends in an info line. A working data path without a partner object (role
+# switch already host, or a device enumerated under the OTG controller) is left
+# alone.
 rock_fusb302_reprobe() {
-  local last="$1" now="$2" power dev name driver unbind bind deadline data
+  local last="$1" now="$2" power dev name driver bus deadline data
   [[ ! -e "${RUN_DIR}/reprobe" ]] || return 0
   (( now - last >= REPROBE_SETTLE )) || return 0
 
@@ -121,6 +165,14 @@ rock_fusb302_reprobe() {
     reprobe_defer "${PORT} power_role=${power}, not source"
     return 0
   fi
+  if [[ -r "${ROLE_SWITCH}" && "$(cat "${ROLE_SWITCH}")" == host ]]; then
+    reprobe_defer "USB role switch already reads host"
+    return 0
+  fi
+  if compgen -G "${OTG_DEV}/xhci-hcd.*/usb[0-9]*/[0-9]*-[0-9]*" >/dev/null; then
+    reprobe_defer "a USB device is enumerated under ${OTG_DEV##*/}"
+    return 0
+  fi
 
   dev="$(readlink -f -- "${PORT_DIR}/device" 2>/dev/null)" || dev=""
   name="${dev##*/}"
@@ -131,13 +183,15 @@ rock_fusb302_reprobe() {
     reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
     return 0
   fi
-  if [[ "${driver##*/}" != fusb302 ]]; then
-    reprobe_log INFO "skipped: ${name} is bound to '${driver##*/}', not fusb302"
-    reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
-    return 0
-  fi
-  unbind="${I2C_DRIVERS_DIR}/fusb302/unbind"
-  bind="${I2C_DRIVERS_DIR}/fusb302/bind"
+  case "${driver##*/}" in
+    typec_fusb302 | fusb302) ;;
+    *)
+      reprobe_log INFO "skipped: ${name} is bound to '${driver##*/}', not typec_fusb302"
+      reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
+      return 0
+      ;;
+  esac
+  bus="${driver%/drivers/*}"
 
   # Record before acting: a crash or kill mid-rebind must not earn another one.
   if ! reprobe_record attempted; then
@@ -149,35 +203,44 @@ rock_fusb302_reprobe() {
     reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
     return 0
   fi
-  reprobe_log INFO "${PORT} is source with no partner $((now - last))s after the last cycle: rebinding ${name}"
-  if ! printf '%s\n' "${name}" >"${unbind}"; then
-    reprobe_log ERROR "unbind of ${name} was rejected — not retrying this boot"
+  reprobe_log INFO "${PORT} is source with no partner $((now - last))s after the last cycle: rebinding ${name} from ${driver##*/}"
+  printf '%s\n' "${name}" >"${driver}/unbind" || true
+  if ! wait_bound "${dev}" unbound; then
+    reprobe_log ERROR "unbind of ${name} did not take — ${name} left bound, not retrying this boot"
     reprobe_record failed-unbind || reprobe_log ERROR "cannot record the failure"
     return 0
   fi
-  sleep "${POLL_INTERVAL}"
-  if ! printf '%s\n' "${name}" >"${bind}"; then
-    reprobe_log ERROR "bind of ${name} was rejected — retrying once"
-    sleep 1
-    if ! printf '%s\n' "${name}" >"${bind}"; then
-      reprobe_log ERROR "bind of ${name} was rejected again — ${PORT} stays without a controller until reboot"
-      reprobe_record failed-bind || reprobe_log ERROR "cannot record the failure"
-      return 0
-    fi
+  sleep "${REBIND_GAP}"
+  printf '%s\n' "${name}" >"${driver}/bind" || true
+  if ! wait_bound "${dev}" bound; then
+    reprobe_log WARNING "${name} not bound after bind — asking the bus to probe it"
+    printf '%s\n' "${name}" >"${bus}/drivers_probe" || true
+  fi
+  if ! wait_bound "${dev}" bound; then
+    sleep 2
+    printf '%s\n' "${name}" >"${driver}/bind" || true
+  fi
+  if ! wait_bound "${dev}" bound; then
+    reprobe_log ERROR "${name} is still unbound after bind, bus probe and a second bind — ${PORT} has no controller until reboot"
+    reprobe_record failed-bind || reprobe_log ERROR "cannot record the failure"
+    return 0
   fi
 
   deadline=$((SECONDS + WAIT_SECONDS))
   while [[ ! -e "${PARTNER_DIR}" ]] && (( SECONDS < deadline )); do
     sleep "${POLL_INTERVAL}"
   done
-  if [[ -e "${PARTNER_DIR}" ]]; then
+  if [[ ! -d "${PORT_DIR}" ]]; then
+    reprobe_log WARNING "${name} is bound again but ${PORT} did not come back (present: $(cd "${CLASS_DIR}" 2>/dev/null && echo port* || echo none)) — the policy only manages ${PORT}"
+    reprobe_record port-missing || reprobe_log ERROR "cannot record the result"
+  elif [[ -e "${PARTNER_DIR}" ]]; then
     power=unknown data=unknown
     [[ ! -r "${POWER_ROLE}" ]] || power="$(active_role "${POWER_ROLE}")"
     [[ ! -r "${DATA_ROLE}" ]] || data="$(active_role "${DATA_ROLE}")"
     reprobe_log INFO "partner found after rebinding ${name}: power_role=${power} data_role=${data}"
     reprobe_record recovered || reprobe_log ERROR "cannot record the result"
   else
-    reprobe_log WARNING "still no partner ${WAIT_SECONDS}s after rebinding ${name} — not retrying this boot"
+    reprobe_log INFO "no partner ${WAIT_SECONDS}s after rebinding ${name}: J11 is empty or the chip is still stuck — not retrying this boot"
     reprobe_record no-partner || reprobe_log ERROR "cannot record the result"
   fi
   return 0
@@ -220,6 +283,20 @@ rock_back_power_correction() {
   fi
   printf '%s\n' "${decision}" >"${RUN_DIR}/state" || log "ERROR: cannot record Rock back-power state"
   [[ "${decision}" == present ]] || return 0
+
+  # No port (e.g. the controller is unbound) means nothing to write; say so once
+  # per change instead of failing the preference write on every tick.
+  if [[ ! -d "${PORT_DIR}" ]]; then
+    if [[ ! -e "${RUN_DIR}/port-absent" ]]; then
+      log "INFO: ${PORT} is absent — no connector writes until it returns"
+      : >"${RUN_DIR}/port-absent" || log "ERROR: cannot record the absent ${PORT}"
+    fi
+    return 0
+  fi
+  if [[ -e "${RUN_DIR}/port-absent" ]]; then
+    rm -f "${RUN_DIR}/port-absent"
+    log "INFO: ${PORT} is present again"
+  fi
 
   # Set Try.SRC before the no-partner exit, so the next attach needs no reset.
   if [[ ! -r "${PORT_DIR}/preferred_role" ||
