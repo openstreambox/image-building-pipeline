@@ -1,0 +1,8 @@
+# CeraLive: keep Quectel RM520N modems on USB 2 (AT+QCFG="usbspeed","20").
+# Their own USB 3 link raises the receiver's noise floor; see the script's header.
+# One oneshot instance per added USB device (coldplug included), keyed by its
+# kernel name, e.g. ceralive-modem-usbspeed@5-1.4.service. The model check
+# (RM520N only; the RM530N-GL shares this ID) and every decision are in the
+# script. add-only: the module's own reset re-adds the device, which is how the
+# result gets verified.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2c7c", ATTR{idProduct}=="0801", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ceralive-modem-usbspeed@%k.service"

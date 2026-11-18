@@ -99,6 +99,39 @@ through the mkosi subimage environment, and
 the quirk emit no rows. The older `customize/quirks.sh` handler remains covered
 as a hermetic helper but is not the live image writer.
 
+### 3a. RM520N USB 2 quirk (`ceralive-modem-usbspeed`)
+
+A Quectel RM520N's own USB 3 link raises its receiver's noise floor. Measured at
+unchanged RSRP: about 5 dB of S/N on LTE B1 and on the 5G leg at strong signal,
+about 14 dB on one weak cell. The module keeps `AT+QCFG="usbspeed"` in its own
+memory, so it runs at whatever it carries in (`"312"` from the factory, 5 or
+10 Gbit/s) on any SuperSpeed port. A bonded uplink never needs more than
+480 Mbit/s.
+
+`99-ceralive-modem-usbspeed.rules` starts `ceralive-modem-usbspeed@<usb device>.service`
+for every added `2c7c:0801` device. The script
+(`mkosi/runtime/ceralive-modem-usbspeed.py`, installed as
+`/usr/local/sbin/ceralive-modem-usbspeed`):
+
+- does nothing while the link is at 480 Mbit/s or slower;
+- otherwise acts once per USB port per boot (marker in
+  `/run/ceralive/modem-usbspeed/`, written before ModemManager is asked and
+  before the reset), never while `srtla_send`, `ceracoder` or `belacoder` runs,
+  and never when `/data/ceralive/modem-usbspeed.disabled` exists;
+- accepts only ModemManager models `RM520N-GL` and `RM520N-EU` (the RM530N-GL
+  shares the USB ID and is left alone);
+- holds the modem with `mmcli --inhibit-device`, talks to an AT port that
+  ModemManager had typed `(at)` for that device and nobody holds open, reads
+  `usbspeed`, records a value other than `"20"` (journal, marker,
+  `/data/ceralive/modem-usbspeed/<digest>.json`), writes `"20"`, reads it back and
+  only then sends `AT+CFUN=1,1`; the module is back on USB about 20 s later;
+- verifies on the re-enumeration that follows and never tries a second time
+  that boot.
+
+Every decision is one journal line (`journalctl -u 'ceralive-modem-usbspeed@*'`).
+To put a unit back: create the `.disabled` file, then with ModemManager held
+send `AT+QCFG="usbspeed","<original>"` and `AT+CFUN=1,1`.
+
 ---
 
 ## 4. SRTLA modem source-routing — RETIRED

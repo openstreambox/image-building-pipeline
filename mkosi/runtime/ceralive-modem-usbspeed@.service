@@ -1,0 +1,24 @@
+[Unit]
+Description=CeraLive RM520N USB 2 quirk for USB device %i
+Documentation=file:///usr/local/sbin/ceralive-modem-usbspeed
+# Started by 99-ceralive-modem-usbspeed.rules. It asks ModemManager to hold the
+# modem, so it runs after ModemManager has started; neither is required.
+After=ModemManager.service systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ceralive-modem-usbspeed %i
+# Up to 90 s waiting for ModemManager, 15 s for its hold, a few AT commands.
+TimeoutStartSec=180
+# The per-port markers must outlive each oneshot instance for the whole boot.
+RuntimeDirectory=ceralive/modem-usbspeed
+RuntimeDirectoryPreserve=yes
+ReadWritePaths=-/data/ceralive
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX

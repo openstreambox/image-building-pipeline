@@ -66,3 +66,10 @@ image	/etc/udev/rules.d/99-zz-ceralive-internal-wwan.rules
 # ROCK 5B+ B-key Dell fastboot safety net, generated for the verified internal_4g
 # position only (hardware.sh::setup_internal_modem_fastboot_release).
 image	/etc/udev/rules.d/79-ceralive-slot-dell-fastboot-release.rules
+# 99-ceralive-modem-usbspeed.rules starts the RM520N USB 2 quirk
+# (ceralive-modem-usbspeed@.service, script in /usr/local/sbin) from
+# mkosi/customize/postinst.d/networking.sh::setup_modem_usbspeed. Image-owned
+# for now because the image release line carries the pinned companion as is;
+# it belongs in ceralive-modem-support once the companion ships it.
+image	/etc/udev/rules.d/99-ceralive-modem-usbspeed.rules
+image	/etc/systemd/system/ceralive-modem-usbspeed@.service
