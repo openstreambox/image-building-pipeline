@@ -212,8 +212,34 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
     for f in "$WORKDIR"/*.json "$WORKDIR/revision" "$WORKDIR/public"; do
         [ -e "$f" ] || [ -L "$f" ] || continue
         base="$(basename "$f")"
+        # The update preset pair is seeded below as one unit, never one file alone.
+        case "$base" in update-settings.json|update-image-channel.json) continue ;; esac
         [ -e "$DATA/ceralive/$base" ] || [ -L "$DATA/ceralive/$base" ] || cp -a "$f" "$DATA/ceralive/$base"
     done
+    # Release update preset (postinst.d/update-preset.sh): CeraUI reads the two
+    # files together, so seed them only when the image carries both and /data has
+    # neither. A box that already saved any update settings keeps all of its own
+    # choices; half a preset would mix its old auto-update flags with our channel.
+    us="update-settings.json" uc="update-image-channel.json"
+    if [ -f "$WORKDIR/$us" ] && [ -f "$WORKDIR/$uc" ] \
+       && [ ! -e "$DATA/ceralive/$us" ] && [ ! -L "$DATA/ceralive/$us" ] \
+       && [ ! -e "$DATA/ceralive/$uc" ] && [ ! -L "$DATA/ceralive/$uc" ]; then
+        log "seeding the update preset pair onto $DATA/ceralive"
+        cp -a "$WORKDIR/$us" "$DATA/ceralive/.$us.seed"
+        cp -a "$WORKDIR/$uc" "$DATA/ceralive/.$uc.seed"
+        # The sidecar first: CeraUI treats a settings file without a sidecar as a
+        # pre-sidecar install and migrates it, so it must never see that state.
+        mv -f "$DATA/ceralive/.$uc.seed" "$DATA/ceralive/$uc"
+        mv -f "$DATA/ceralive/.$us.seed" "$DATA/ceralive/$us"
+    elif [ -f "$WORKDIR/$us" ] && [ -f "$WORKDIR/$uc" ] \
+       && [ ! -e "$DATA/ceralive/$us" ] && [ ! -L "$DATA/ceralive/$us" ] \
+       && [ -f "$DATA/ceralive/$uc" ] && [ ! -L "$DATA/ceralive/$uc" ] \
+       && cmp -s "$WORKDIR/$uc" "$DATA/ceralive/$uc"; then
+        # Power was lost between the two renames above: finish the same pair.
+        log "completing an interrupted update preset seed"
+        cp -a "$WORKDIR/$us" "$DATA/ceralive/.$us.seed"
+        mv -f "$DATA/ceralive/.$us.seed" "$DATA/ceralive/$us"
+    fi
 fi
 if ! mountpoint -q /var/log; then
     cp -a /var/log/. "$DATA/log/" 2>/dev/null || true

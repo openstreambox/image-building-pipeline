@@ -452,6 +452,8 @@ run_mkosi_build() {
   # (like the apt GPG key) so the self-contained runtime postinst can write it
   # without repo access.
   RAUC_ROOT_CA_B64="$(base64 -w0 <"${RAUC_KEYRING_FILE}")"
+  # A pinned release root is re-checked on these exact bytes (lib/release-preset.sh).
+  release_preset_check_keyring_b64 "${RAUC_ROOT_CA_B64}"
   export RAUC_ROOT_CA_B64
   # Release update-channel preset (lib/release-preset.sh); empty on a normal build.
   export CERALIVE_UPDATE_PRESET_SETTINGS_B64="${CERALIVE_UPDATE_PRESET_SETTINGS_B64:-}"

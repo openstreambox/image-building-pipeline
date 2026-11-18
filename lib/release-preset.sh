@@ -13,8 +13,16 @@
 #       A directory holding update-settings.json and update-image-channel.json.
 #       Both are validated against the updater's strict schemas, then forwarded
 #       base64 (like RAUC_ROOT_CA_B64) and written to /opt/ceralive in the
-#       runtime layer. ceralive-migrate-data seeds them onto /data on first boot
-#       and never overwrites them afterwards, so they are factory defaults only.
+#       runtime layer. ceralive-migrate-data seeds them onto /data as one pair,
+#       only when /data has neither file, and never overwrites them: a box that
+#       already saved update settings keeps all of its own choices.
+#       The checks accept a strict ASCII subset of what CeraUI's reader accepts
+#       (zod + WHATWG URL), so a preset that passes here always loads on a box.
+#       Set CERALIVE_UPDATE_PRESET_CERAUI_DIR to a CeraUI checkout (with bun and
+#       its dependencies installed) to also run CeraUI's own loader on the preset.
+#
+# The orchestrator is the supported path: a standalone `mkosi build` with the
+# payload variables set by hand skips every host-side check here.
 #
 # A preset points boxes at an update channel, so it is accepted only in
 # production mode and only together with the root pin: an image can never
@@ -52,6 +60,8 @@ def load(name):
     raw = open(path, "rb").read()
     if len(raw) > 4096:
         sys.exit(f"release preset: {name} is larger than 4 KiB")
+    if not raw.startswith(b"{") or any(b > 0x7e or (b < 0x20 and b not in (0x0a,)) for b in raw):
+        sys.exit(f"release preset: {name} must be printable ASCII JSON starting with '{{'")
     def no_dupes(pairs):
         keys = [k for k, _ in pairs]
         if len(keys) != len(set(keys)):
@@ -65,14 +75,19 @@ def load(name):
         sys.exit(f"release preset: {name} must be an object")
     return value
 
+# A strict ASCII subset of what CeraUI accepts (zod z.url() + WHATWG URL + the
+# update-channel refine): lower-case https, a DNS name whose last label starts
+# with a letter (so never an IPv4 literal) and no xn-- labels, no port,
+# userinfo, query, fragment, percent-escapes or dot segments, no trailing slash.
+LABEL = r"(?!xn--)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+URL_RE = re.compile(
+    r"https://(?:" + LABEL + r"\.)+(?!xn--)[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*", re.ASCII)
+
 def channel_url(value, where):
-    if not isinstance(value, str):
-        sys.exit(f"release preset: {where} must be a string")
-    u = urlsplit(value)
-    if (u.scheme != "https" or not u.hostname or u.username or u.password
-            or u.query or u.fragment or "?" in value or "#" in value
-            or (u.path not in ("", "/") and u.path.endswith("/"))):
-        sys.exit(f"release preset: {where} must be an HTTPS base without credentials, query, fragment or trailing slash")
+    if not isinstance(value, str) or len(value) > 2048 or not URL_RE.fullmatch(value):
+        sys.exit(f"release preset: {where} must be a plain https://host[/path] base: lower-case DNS name, "
+                 "no port, credentials, query, fragment, escapes, dot segments or trailing slash")
 
 def boolean(obj, key, where):
     if key in obj and not isinstance(obj[key], bool):
@@ -95,40 +110,72 @@ allowed = {"channelUrl", "packagesAuto", "systemAuto", "schedule", "channel",
 if set(settings) - allowed:
     sys.exit(f"release preset: update-settings.json has unknown keys {sorted(set(settings) - allowed)}")
 if "channelUrl" in settings:
-    channel_url(settings["channelUrl"], "update-settings.json channelUrl")
+    # CeraUI never writes it there (the six-key file stays readable by older and
+    # official readers); the sidecar carries the URL.
+    sys.exit("release preset: put channelUrl only in update-image-channel.json, not in update-settings.json")
 for key in ("packagesAuto", "systemAuto", "allowPackagesOverCellular", "allowSystemOverCellular"):
     boolean(settings, key, "update-settings.json")
 if "channel" in settings and settings["channel"] not in ("stable", "beta"):
     sys.exit("release preset: update-settings.json channel must be stable or beta")
 if "schedule" in settings:
     s = settings["schedule"]
-    tod = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+    tod = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", re.ASCII)
     if (not isinstance(s, dict) or set(s) - {"mode", "start", "end"}
             or s.get("mode", "any-idle") not in ("any-idle", "window")
-            or any(k in s and not (isinstance(s[k], str) and tod.match(s[k])) for k in ("start", "end"))):
+            or any(k in s and not (isinstance(s[k], str) and tod.fullmatch(s[k])) for k in ("start", "end"))):
         sys.exit("release preset: update-settings.json schedule is invalid")
 # The sidecar wins on the device; disagreeing copies only confuse a reader.
-for key, side_key in (("channelUrl", "channelUrl"), ("allowSystemOverCellular", "allowSystemDownloadsOverCellular")):
-    if key in settings and settings[key] != side.get(side_key):
-        sys.exit(f"release preset: update-settings.json {key} disagrees with update-image-channel.json")
+if "allowSystemOverCellular" in settings and \
+        settings["allowSystemOverCellular"] != side.get("allowSystemDownloadsOverCellular", False):
+    sys.exit("release preset: update-settings.json allowSystemOverCellular disagrees with update-image-channel.json")
 PY
 }
 
-# Exactly one certificate, no private key, and its DER SHA-256 equals $1.
+# The keyring must be exactly one certificate in canonical PEM (byte-identical to
+# `openssl x509 -outform PEM` of itself) and its DER SHA-256 must equal $2. OpenSSL
+# and RAUC also load "TRUSTED CERTIFICATE" and "X509 CERTIFICATE" blocks, so a
+# label count is not enough; byte identity rules out any second block or junk.
 release_preset_check_keyring() {
-  local keyring="$1" expected="$2" count actual
+  local keyring="$1" expected="$2" canonical actual
   [[ "${expected}" =~ ^[0-9a-f]{64}$ ]] \
     || { release_preset_die "CERALIVE_EXPECT_RAUC_ROOT_SHA256 must be 64 lowercase hex"; return 1; }
   [[ -s "${keyring}" ]] || { release_preset_die "device keyring missing: ${keyring}"; return 1; }
   if grep -q 'PRIVATE KEY' "${keyring}"; then
     release_preset_die "device keyring contains a private key: ${keyring}"; return 1
   fi
-  count="$(grep -c -- '-----BEGIN CERTIFICATE-----' "${keyring}" || true)"
-  [[ "${count}" == 1 ]] \
-    || { release_preset_die "release keyring must hold exactly one root certificate, found ${count}"; return 1; }
+  canonical="$(openssl x509 -in "${keyring}" -outform PEM 2>/dev/null)" \
+    || { release_preset_die "device keyring is not a PEM certificate: ${keyring}"; return 1; }
+  if [[ "$(cat "${keyring}"; printf x)" != "${canonical}"$'\n'x ]]; then
+    release_preset_die "release keyring must be exactly one canonical PEM certificate and nothing else: ${keyring}"
+    return 1
+  fi
   actual="$(openssl x509 -in "${keyring}" -outform DER | sha256sum | cut -d' ' -f1)"
   [[ "${actual}" == "${expected}" ]] \
     || { release_preset_die "device keyring root ${actual} is not the expected release root ${expected}"; return 1; }
+}
+
+# Re-check the exact bytes that will be baked (orchestrate.sh calls this on
+# RAUC_ROOT_CA_B64 right after encoding it), so the pin covers the payload and
+# not only the file as it was when the build started.
+release_preset_check_keyring_b64() {
+  local b64="$1" expected="${CERALIVE_EXPECT_RAUC_ROOT_SHA256:-}" tmp rc=0
+  [[ -n "${expected}" ]] || return 0
+  tmp="$(mktemp)"
+  printf '%s' "${b64}" | base64 -d >"${tmp}" || rc=1
+  (( rc == 0 )) && { release_preset_check_keyring "${tmp}" "${expected}" || rc=1; }
+  rm -f "${tmp}"
+  return "${rc}"
+}
+
+# Optional reference check with CeraUI's own loader (bun + a CeraUI checkout).
+release_preset_ceraui_check() {
+  local dir="$1" ceraui="${CERALIVE_UPDATE_PRESET_CERAUI_DIR:-}" here
+  [[ -n "${ceraui}" ]] || return 0
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  [[ -f "${ceraui}/apps/backend/src/modules/system/update-settings.ts" ]] \
+    || { release_preset_die "CERALIVE_UPDATE_PRESET_CERAUI_DIR is not a CeraUI checkout: ${ceraui}"; return 1; }
+  (cd "${ceraui}/apps/backend" && bun run "${here}/release-preset-ceraui-check.ts" "${ceraui}" "${dir}") \
+    || { release_preset_die "CeraUI's own loader refuses this preset"; return 1; }
 }
 
 release_preset_resolve() {
@@ -149,6 +196,7 @@ release_preset_resolve() {
   fi
   if [[ -n "${dir}" ]]; then
     release_preset_validate "${dir}" || return 1
+    release_preset_ceraui_check "${dir}" || return 1
     CERALIVE_UPDATE_PRESET_SETTINGS_B64="$(base64 -w0 <"${dir}/update-settings.json")"
     CERALIVE_UPDATE_PRESET_CHANNEL_B64="$(base64 -w0 <"${dir}/update-image-channel.json")"
   fi
@@ -158,7 +206,7 @@ release_preset_resolve() {
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   case "${1:-}" in
     validate) [[ $# -eq 2 ]] || { echo 'usage: release-preset.sh validate <dir>' >&2; exit 2; }
-              release_preset_validate "$2" && echo "release preset OK: $2" ;;
+              release_preset_validate "$2" && release_preset_ceraui_check "$2" && echo "release preset OK: $2" ;;
     *) echo 'usage: release-preset.sh validate <dir>' >&2; exit 2 ;;
   esac
 fi

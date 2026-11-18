@@ -7,9 +7,11 @@
 # host and forwarded base64:
 #   CERALIVE_UPDATE_PRESET_SETTINGS_B64 -> /opt/ceralive/update-settings.json
 #   CERALIVE_UPDATE_PRESET_CHANNEL_B64  -> /opt/ceralive/update-image-channel.json
-# ceralive-migrate-data copies /opt/ceralive/*.json onto /data on first boot only
-# (never over an existing file), so these are factory defaults: a later OTA slot
-# carrying different presets does not change a box's saved choices.
+# ceralive-migrate-data seeds the two files onto /data as one pair, and only
+# when /data has neither (postinst.d/persistence.sh). It never overwrites them, so
+# they are factory defaults: a box that already saved update settings, or a later
+# OTA slot carrying a different preset, keeps the box's own choices. A box that
+# never saved update settings picks the preset up on the boot after an OTA.
 # Both empty is the normal (upstream) build and a no-op; exactly one is an error.
 #
 # CHROOT-SAFE STANDALONE: carries its own log()/die() fallbacks like every module.
@@ -41,9 +43,11 @@ setup_update_preset() {
   printf '%s' "${channel}" | base64 -d >"${dir}/update-image-channel.json.tmp" \
     || die "update preset: update-image-channel payload is not base64"
   for name in update-settings.json update-image-channel.json; do
-    grep -q '^{' "${dir}/${name}.tmp" || die "update preset: ${name} is not a JSON object"
-    # CeraUI refuses preference files that are group/world-writable or owned by
-    # another non-root user; root 0644 is what its strict reader accepts.
+    # Content was validated on the build host (lib/release-preset.sh); this only
+    # guards against an empty or truncated payload.
+    [[ -s "${dir}/${name}.tmp" ]] || die "update preset: ${name} payload is empty"
+    # root 0644: ceralive.service runs as root, cp -a in ceralive-migrate-data
+    # keeps the mode, and CeraUI's later saves keep it.
     if [[ "${EUID}" -eq 0 ]]; then chown 0:0 "${dir}/${name}.tmp"; fi
     chmod 0644 "${dir}/${name}.tmp"
     mv -f "${dir}/${name}.tmp" "${dir}/${name}"

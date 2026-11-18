@@ -8,8 +8,15 @@
 #   * a preset is refused outside production, without a root pin, with a
 #     keyring that is not exactly the pinned root, or with a file that the
 #     updater's strict schema would refuse;
+#   * the host validator rejects every case CeraUI's own reader rejects
+#     (independent-review differential cases, plus a live run against a CeraUI
+#     checkout when CERAUI_DIR is set);
+#   * the keyring pin needs exactly one canonical PEM certificate: a second root
+#     under any PEM label, or trailing bytes, fails;
 #   * an accepted preset reaches the runtime layer byte for byte and is written
-#     to /opt/ceralive as 0644 files;
+#     to /opt/ceralive as root 0644 files;
+#   * ceralive-migrate-data seeds the pair as one unit (fresh, existing settings,
+#     existing sidecar, both present, interrupted seed, image without preset);
 #   * the payloads are forwarded through orchestrate.sh and mkosi.conf, and the
 #     runtime executor calls the writer after /opt/ceralive exists.
 
@@ -81,7 +88,7 @@ resolve() { # env assignments..., then runs release_preset_resolve and prints th
   cat "$T/root.pem" "$T/other.pem" >"$T/two.pem"
   resolve CERALIVE_BUILD_MODE=production RAUC_KEYRING_FILE="$T/two.pem" CERALIVE_EXPECT_RAUC_ROOT_SHA256="$ROOT_SHA"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"exactly one root certificate, found 2"* ]]
+  [[ "$output" == *"exactly one canonical PEM certificate"* ]]
   cat "$T/root.pem" "$T/root.key" >"$T/withkey.pem"
   resolve CERALIVE_BUILD_MODE=production RAUC_KEYRING_FILE="$T/withkey.pem" CERALIVE_EXPECT_RAUC_ROOT_SHA256="$ROOT_SHA"
   [ "$status" -ne 0 ]
@@ -179,4 +186,129 @@ bad_channel() { # json for update-image-channel.json -> expect refusal
   b="$(grep -n '^  setup_update_preset' "$main" | cut -d: -f1)"
   [ -n "$a" ] && [ -n "$b" ] && [ "$b" -gt "$a" ]
   grep -Eq '^  update-preset\.sh$' "$PIPELINE_DIR/mkosi/customize/postinst-lib.sh"
+}
+
+@test "the validator rejects every preset CeraUI's own reader rejects" {
+  local name verdict accepted=0
+  while read -r name verdict; do
+    run "$LIB" validate "$T/cases/$name"
+    if [ "$verdict" = reject ] && [ "$status" -eq 0 ]; then
+      echo "accepted a preset CeraUI rejects: $name"; return 1
+    fi
+    [ "$status" -ne 0 ] || accepted=$((accepted + 1))
+  done < <(python3 "$TESTS_DIR/fixtures/release-preset-cases.py" "$T/cases")
+  # the baseline and other plain cases still pass
+  run "$LIB" validate "$T/cases/00-baseline"
+  [ "$status" -eq 0 ]
+  [ "$accepted" -ge 1 ]
+}
+
+@test "live differential: every preset the validator accepts loads in CeraUI (CERAUI_DIR)" {
+  [ -n "${CERAUI_DIR:-}" ] || skip "set CERAUI_DIR to a CeraUI checkout with bun dependencies installed"
+  local name verdict
+  while read -r name verdict; do
+    run "$LIB" validate "$T/cases/$name"
+    [ "$status" -eq 0 ] || continue
+    run env CERALIVE_UPDATE_PRESET_CERAUI_DIR="$CERAUI_DIR" "$LIB" validate "$T/cases/$name"
+    [ "$status" -eq 0 ] || { echo "CeraUI refused validator-accepted case $name: $output"; return 1; }
+  done < <(python3 "$TESTS_DIR/fixtures/release-preset-cases.py" "$T/cases")
+  run env CERALIVE_UPDATE_PRESET_CERAUI_DIR="$CERAUI_DIR" "$LIB" validate "$T/preset"
+  [ "$status" -eq 0 ]
+}
+
+@test "the keyring pin refuses a second root under any PEM label, and trailing bytes" {
+  local label
+  for label in "TRUSTED CERTIFICATE" "X509 CERTIFICATE" "CERTIFICATE"; do
+    { cat "$T/root.pem"; sed "s/CERTIFICATE-----/${label}-----/; s/-----BEGIN CERTIFICATE/-----BEGIN ${label}/; s/-----END CERTIFICATE/-----END ${label}/" "$T/other.pem" \
+      | sed "s/-----BEGIN ${label}-----/-----BEGIN ${label}-----/"; } >"$T/smuggled.pem"
+    grep -q -- "-----BEGIN ${label}-----" "$T/smuggled.pem"
+    resolve CERALIVE_BUILD_MODE=production RAUC_KEYRING_FILE="$T/smuggled.pem" CERALIVE_EXPECT_RAUC_ROOT_SHA256="$ROOT_SHA"
+    [ "$status" -ne 0 ] || { echo "accepted a second root labelled $label"; return 1; }
+  done
+  { cat "$T/root.pem"; printf 'junk\n'; } >"$T/junk.pem"
+  resolve CERALIVE_BUILD_MODE=production RAUC_KEYRING_FILE="$T/junk.pem" CERALIVE_EXPECT_RAUC_ROOT_SHA256="$ROOT_SHA"
+  [ "$status" -ne 0 ]
+  sed 's/$/\r/' "$T/root.pem" >"$T/crlf.pem"
+  resolve CERALIVE_BUILD_MODE=production RAUC_KEYRING_FILE="$T/crlf.pem" CERALIVE_EXPECT_RAUC_ROOT_SHA256="$ROOT_SHA"
+  [ "$status" -ne 0 ]
+}
+
+@test "the pin is re-checked on the encoded keyring payload" {
+  run env -i PATH="$PATH" CERALIVE_EXPECT_RAUC_ROOT_SHA256="$ROOT_SHA" bash -c \
+    'source "$1"; release_preset_check_keyring_b64 "$(base64 -w0 <"$2")"' _ "$LIB" "$T/root.pem"
+  [ "$status" -eq 0 ]
+  run env -i PATH="$PATH" CERALIVE_EXPECT_RAUC_ROOT_SHA256="$ROOT_SHA" bash -c \
+    'source "$1"; release_preset_check_keyring_b64 "$(base64 -w0 <"$2")"' _ "$LIB" "$T/other.pem"
+  [ "$status" -ne 0 ]
+  run env -i PATH="$PATH" bash -c 'source "$1"; release_preset_check_keyring_b64 "$(base64 -w0 <"$2")"' _ "$LIB" "$T/other.pem"
+  [ "$status" -eq 0 ]   # unpinned builds are unchanged
+  grep -Fq 'release_preset_check_keyring_b64 "${RAUC_ROOT_CA_B64}"' "$PIPELINE_DIR/lib/orchestrate.sh"
+}
+
+@test "the runtime writer chowns to root when it runs as root" {
+  command -v unshare >/dev/null && unshare -r true 2>/dev/null || skip "no user namespaces here"
+  S="$(base64 -w0 <"$T/preset/update-settings.json")"
+  C="$(base64 -w0 <"$T/preset/update-image-channel.json")"
+  run unshare -r env -i PATH="$PATH" CERALIVE_UPDATE_PRESET_ROOT="$T/rootns" CERALIVE_UPDATE_PRESET_SETTINGS_B64="$S" \
+    CERALIVE_UPDATE_PRESET_CHANNEL_B64="$C" bash -c 'source "$1"; setup_update_preset && stat -c "%u %a" "$2"/opt/ceralive/*.json' _ "$MODULE" "$T/rootns"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^0 644$')" -eq 2 ]
+}
+
+# Run the real ceralive-migrate-data body from persistence.sh against a fake
+# rootfs: $1 = scenario dir with opt/ceralive (image) and data/ceralive (/data).
+migrate() {
+  local d="$1"
+  mkdir -p "$d/bin" "$d/etc/ceralive" "$d/data" "$d/varlog" "$d/nm"
+  printf '#!/bin/sh\nexit 1\n' >"$d/bin/mountpoint"; chmod +x "$d/bin/mountpoint"
+  printf '#!/bin/sh\nexit 0\n' >"$d/bin/logger"; chmod +x "$d/bin/logger"
+  { echo 'set -euo pipefail'; echo "DATA=$d/data"; echo "WORKDIR=$d/opt/ceralive"; echo "NM_CONN=$d/nm"
+    awk '/cat >>\/usr\/local\/sbin\/ceralive-migrate-data <<.EOF./{on=1; next} on && /^EOF$/{exit} on' \
+      "$PIPELINE_DIR/mkosi/customize/postinst.d/persistence.sh" \
+      | sed "s#/etc/ceralive#$d/etc/ceralive#g; s#/var/log#$d/varlog#g"; } >"$d/migrate.sh"
+  grep -q 'update preset pair' "$d/migrate.sh"
+  PATH="$d/bin:$PATH" bash "$d/migrate.sh" >"$d/migrate.log" 2>&1
+}
+image() { mkdir -p "$1/opt/ceralive" "$1/data/ceralive"; cp "$T/preset/"*.json "$1/opt/ceralive/"; }
+
+@test "seeding A: a fresh card gets both preset files" {
+  image "$T/A"; migrate "$T/A"
+  cmp "$T/preset/update-settings.json" "$T/A/data/ceralive/update-settings.json"
+  cmp "$T/preset/update-image-channel.json" "$T/A/data/ceralive/update-image-channel.json"
+  [ -z "$(find "$T/A/data" -name '.*.seed')" ]
+}
+
+@test "seeding B: saved settings without a sidecar get no half preset" {
+  image "$T/B"; printf '{"systemAuto":true}' >"$T/B/data/ceralive/update-settings.json"
+  migrate "$T/B"
+  [ "$(cat "$T/B/data/ceralive/update-settings.json")" = '{"systemAuto":true}' ]
+  [ ! -e "$T/B/data/ceralive/update-image-channel.json" ]
+}
+
+@test "seeding C: a box with its own sidecar keeps it and gets no settings" {
+  image "$T/C"; printf '{"schema":1,"channel":"beta"}' >"$T/C/data/ceralive/update-image-channel.json"
+  migrate "$T/C"
+  [ "$(cat "$T/C/data/ceralive/update-image-channel.json")" = '{"schema":1,"channel":"beta"}' ]
+  [ ! -e "$T/C/data/ceralive/update-settings.json" ]
+}
+
+@test "seeding D: both files present are left alone" {
+  image "$T/D"; printf 'S' >"$T/D/data/ceralive/update-settings.json"; printf 'C' >"$T/D/data/ceralive/update-image-channel.json"
+  migrate "$T/D"
+  [ "$(cat "$T/D/data/ceralive/update-settings.json")" = S ]
+  [ "$(cat "$T/D/data/ceralive/update-image-channel.json")" = C ]
+}
+
+@test "seeding: an interrupted seed is completed on the next boot" {
+  image "$T/I"; cp "$T/preset/update-image-channel.json" "$T/I/data/ceralive/"
+  migrate "$T/I"
+  cmp "$T/preset/update-settings.json" "$T/I/data/ceralive/update-settings.json"
+  cmp "$T/preset/update-image-channel.json" "$T/I/data/ceralive/update-image-channel.json"
+}
+
+@test "seeding: an image without a preset seeds nothing and other json still seeds" {
+  mkdir -p "$T/N/opt/ceralive" "$T/N/data/ceralive"; printf '{}' >"$T/N/opt/ceralive/config.json"
+  migrate "$T/N"
+  [ -e "$T/N/data/ceralive/config.json" ]
+  [ ! -e "$T/N/data/ceralive/update-settings.json" ] && [ ! -e "$T/N/data/ceralive/update-image-channel.json" ]
 }
