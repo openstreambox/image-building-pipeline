@@ -187,14 +187,16 @@ chmod 0700 "$DATA/nm" "$DATA/nm/system-connections" "$DATA/ceralive/hawkbit-upda
 
 # Tailscale state (only on images that ship tailscaled): root-only, on /data so
 # the node identity survives A/B slot changes; bound over /var/lib/tailscale.
+# Enrollment keys stay root-only, outside tailscaled's account-owned state.
+# NON-FATAL by design: this script gates every /data bind, so a problem here may
+# cost remote access but must never stop the box's own persistence.
 if [ -x /usr/local/sbin/tailscaled ]; then
-    mkdir -p "$DATA/tailscale"
-    chmod 0700 "$DATA/tailscale"
-    # Enrollment keys stay root-only, outside tailscaled's account-owned state.
-    if [ -L "$DATA/tailscale-enroll" ]; then rm -f "$DATA/tailscale-enroll"; fi
-    mkdir -p "$DATA/tailscale-enroll"
-    chown 0:0 "$DATA/tailscale-enroll"
-    chmod 0700 "$DATA/tailscale-enroll"
+    { mkdir -p "$DATA/tailscale" && chmod 0700 "$DATA/tailscale"; } \
+        || log "WARN: could not prepare $DATA/tailscale; remote access may not work"
+    { { [ ! -L "$DATA/tailscale-enroll" ] || rm -f "$DATA/tailscale-enroll"; } \
+        && mkdir -p "$DATA/tailscale-enroll" && chown 0:0 "$DATA/tailscale-enroll" \
+        && chmod 0700 "$DATA/tailscale-enroll"; } \
+        || log "WARN: could not prepare $DATA/tailscale-enroll; remote access enrollment may not work"
 fi
 
 # Cert-rotation store (task 42): persistent intermediate/leaf certs + the staging

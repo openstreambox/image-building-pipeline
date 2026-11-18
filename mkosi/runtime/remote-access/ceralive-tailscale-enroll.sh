@@ -8,24 +8,33 @@
 # files that account can replace.
 #
 # One run at a time: every run holds ENROLL/.lock for its whole duration, and only
-# this script writes pending-*, enroll-status and joined-once.
+# this script writes pending-authkey, enroll-status, joined-once and state-ours.
 #
-# 1. Sources of a new key, both adopted under the lock (the newest wins):
-#    - /boot/osb-tailscale[-<name>].key (any case; an editor's ".txt" is fine),
-#      moved off the FAT partition at once (overwritten, then removed; an SD card
-#      may keep old flash pages, acceptable for a single-use key consumed next);
-#    - ENROLL/incoming-authkey (+ optional incoming-hostname), dropped by another
-#      writer with tmp file + rename.
-#    Adoption checks the key is one tskey-auth- key, makes it pending-authkey,
-#    takes the machine name (DNS label) and resets enroll-status to a new key.
+# Key files hold the key on the first line and an optional machine name (a DNS
+# label) on the second.
+#
+# 1. Sources of a new key, adopted under the lock (the newest wins):
+#    - /boot/osb-tailscale[-<name>].key (any case; an editor's ".txt" is fine;
+#      the name comes from the file name), moved off the FAT partition at once
+#      (overwritten, then removed; an SD card may keep old flash pages, acceptable
+#      for a single-use key consumed next);
+#    - ENROLL/incoming-authkey, dropped by another writer (tmp file + rename) and
+#      claimed here by renaming it to ENROLL/.claimed, so a later drop is never
+#      lost or mixed with it.
+#    Adoption validates the key, resets enroll-status and replaces pending-authkey
+#    with one rename. A crash at any point leaves either the old pending key or
+#    the new one, never a mix; .claimed is re-adopted and temporary files are
+#    swept by the next run.
 # 2. While a pending key exists, tailscaled is started and `tailscale up` runs
 #    with Tailscale SSH on and no DNS/route changes, then auto-update is pinned
 #    off. On success the pending key is overwritten and removed.
 # 3. Failures are bounded. A final control-plane answer (invalid, expired,
 #    revoked or already used key) ends enrollment at once. Other failures (no
 #    network yet) back off from 2 to 30 minutes and give up after MAX_ATTEMPTS.
-#    Giving up removes the key, and the Tailscale state if the box never joined,
-#    so tailscaled goes back to idle.
+#    Giving up removes the key. It also removes tailscaled.state, but only when
+#    this enrollment created it (state-ours, written before tailscaled first ran
+#    without state), the box never joined, and tailscaled reports it is not
+#    logged in. A state that existed before is never touched.
 # 4. A key that arrives while a run is busy is adopted when that attempt ends.
 #
 # Unusable inputs (several key files, not a tskey-auth- key, links, non-regular
@@ -33,10 +42,10 @@
 # files from the card). No key text is ever logged or printed.
 #
 # CONTRACT with other writers: docs/agents/key-facts.md, "Remote-access
-# enrollment contract". A writer may only create ENROLL/incoming-hostname and then
-# ENROLL/incoming-authkey (each via tmp file + rename) and start this unit. It
-# reads, never writes, enroll-status ("<pending|joined|gave-up> <attempts>
-# <next-epoch> <reason>"), pending-authkey and joined-once.
+# enrollment contract". A writer creates only ENROLL/incoming-authkey (tmp file +
+# rename) and starts this unit. It reads, never writes, enroll-status
+# ("<pending|joined|gave-up> <attempts> <next-epoch> <reason>"), pending-authkey
+# (presence only) and joined-once.
 set -euo pipefail
 
 BOOT="${CERALIVE_TS_BOOT_DIR:-/boot}"
@@ -50,10 +59,10 @@ MAX_ATTEMPTS="${CERALIVE_TS_MAX_ATTEMPTS:-100}"
 LOCK_WAIT="${CERALIVE_TS_LOCK_WAIT:-300}"
 NOW="${CERALIVE_TS_NOW:-$(date +%s)}"
 PENDING="${ENROLL}/pending-authkey"
-PENDING_NAME="${ENROLL}/pending-hostname"
 INCOMING="${ENROLL}/incoming-authkey"
-INCOMING_NAME="${ENROLL}/incoming-hostname"
+CLAIMED="${ENROLL}/.claimed"
 STATUS="${ENROLL}/enroll-status"
+OURS="${ENROLL}/state-ours"
 REJECTED_NOTE="${BOOT}/TAILSCALE-KEY-REJECTED.txt"
 KEY_RE='^tskey-auth-[A-Za-z0-9_-]{8,200}$'
 NAME_RE='^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$'
@@ -68,12 +77,20 @@ wipe() { # never follows a link: a link (or other non-regular file) is only unli
   shred -u -z -- "$1" 2>/dev/null || rm -f -- "$1"
 }
 
-# At most N bytes of a regular, non-link file, without a UTF-8 BOM or any
-# whitespace. Prints nothing for anything else.
-read_token() { # path max
+# Parse a key file into KEY and NAME: a regular, non-link file of at most 1 KiB,
+# UTF-8 BOM and whitespace stripped, line 1 the key, line 2 an optional name.
+# KEY is empty when the file is unusable; NAME is empty unless it is a DNS label.
+parse_keyfile() { # path
+  KEY="" NAME=""
   regular "$1" || return 0
-  (( $(stat -c %s -- "$1") <= $2 )) || return 0
-  LC_ALL=C sed '1s/^\xEF\xBB\xBF//' -- "$1" | LC_ALL=C tr -d ' \t\r\n'
+  (( $(stat -c %s -- "$1") <= 1024 )) || return 0
+  local lines
+  mapfile -t lines < <(LC_ALL=C sed '1s/^\xEF\xBB\xBF//' -- "$1" | LC_ALL=C tr -d ' \t\r' | grep -v '^$' || true)
+  (( ${#lines[@]} >= 1 && ${#lines[@]} <= 2 )) || return 0
+  [[ "${lines[0]}" =~ $KEY_RE ]] || return 0
+  KEY="${lines[0]}"
+  if (( ${#lines[@]} == 2 )) && [[ "${lines[1]}" =~ $NAME_RE ]]; then NAME="${lines[1]}"; fi
+  return 0
 }
 
 read_status() {
@@ -95,22 +112,40 @@ write_status() { # state attempts next reason
   mv -f -- "$tmp" "${STATUS}"
 }
 
-# Make a validated key and name the pending pair (the caller holds the lock).
-adopt() { # key name source
-  local tmp
-  wipe "${PENDING}"; rm -f -- "${PENDING_NAME}"
-  if [[ -n "$2" ]]; then
-    tmp="$(mktemp "${ENROLL}/.name.XXXXXX")"
-    printf '%s' "$2" >"$tmp"
-    mv -f -- "$tmp" "${PENDING_NAME}"
+# Start of every run (under the lock): migrate the pre-split layout, re-adopt a
+# claim a crash left behind, and remove temporary files.
+recover() {
+  local f
+  # Older builds kept joined-once in tailscaled's directory. Only its existence
+  # is used (never its content), and only to be more careful with state.
+  if [[ -e "${TS_STATE}/joined-once" && ! -e "${ENROLL}/joined-once" ]]; then
+    : >"${ENROLL}/joined-once"
   fi
+  rm -f -- "${TS_STATE}/pending-authkey" "${TS_STATE}/pending-hostname"   # rm never follows links
+  # A writer built against the earlier two-file contract may leave this behind.
+  rm -f -- "${ENROLL}/incoming-hostname" "${ENROLL}/pending-hostname"
+  if present "${CLAIMED}"; then
+    if regular "${CLAIMED}" && ! present "${INCOMING}"; then
+      mv -f -- "${CLAIMED}" "${INCOMING}"
+    else
+      wipe "${CLAIMED}"
+    fi
+  fi
+  shopt -s nullglob dotglob
+  for f in "${ENROLL}"/.pending.* "${ENROLL}"/.status.* "${ENROLL}"/.up-key.*; do wipe "$f"; done
+  shopt -u nullglob dotglob
+}
+
+# Make KEY/NAME the pending key: status first, then one rename (caller holds the lock).
+adopt() { # source
+  local tmp
   tmp="$(mktemp "${ENROLL}/.pending.XXXXXX")"
-  printf '%s' "$1" >"$tmp"
+  printf '%s\n%s\n' "${KEY}" "${NAME}" >"$tmp"
   sync "$tmp"
-  mv -f -- "$tmp" "${PENDING}"
   write_status pending 0 0 new-key
+  mv -f -- "$tmp" "${PENDING}"
   sync "${ENROLL}"
-  log "new key from $3${2:+ for machine name $2}"
+  log "new key from $1${NAME:+ for machine name ${NAME}}"
 }
 
 reject_all() { # reason files...
@@ -124,7 +159,7 @@ reject_all() { # reason files...
 }
 
 take_boot_key() {
-  local files=() f key base name
+  local files=() f base name
   shopt -s nullglob nocaseglob
   for f in "${BOOT}"/osb-tailscale*; do
     if regular "$f"; then files+=("$f"); else rm -f -- "$f"; fi
@@ -136,50 +171,54 @@ take_boot_key() {
     return 0
   fi
   f="${files[0]}"
-  key="$(read_token "$f" 1024)"
-  if [[ ! "$key" =~ $KEY_RE ]]; then
-    key=""
+  parse_keyfile "$f"
+  if [[ -z "${KEY}" ]]; then
     reject_all "not a Tailscale auth key (tskey-auth-...)" "$f"
     return 0
   fi
   base="$(basename -- "$f")"; base="${base,,}"; base="${base%.txt}"; base="${base%.key}"
   name="${base#osb-tailscale}"; name="${name#-}"
-  [[ "$name" =~ $NAME_RE ]] || name=""
-  adopt "$key" "$name" "the BOOT partition"
-  key=""
+  [[ "$name" =~ $NAME_RE ]] && NAME="$name"
+  adopt "the BOOT partition"
+  KEY=""
   wipe "$f"
   rm -f -- "${REJECTED_NOTE}"
   sync -f "${BOOT}" 2>/dev/null || true
 }
 
-take_incoming_key() {
-  local key name=""
-  present "${INCOMING}" || return 0
-  key="$(read_token "${INCOMING}" 1024)"
-  if present "${INCOMING_NAME}"; then
-    name="$(read_token "${INCOMING_NAME}" 64)"
-    [[ "$name" =~ $NAME_RE ]] || name=""
-    rm -f -- "${INCOMING_NAME}"
-  fi
-  if [[ ! "$key" =~ $KEY_RE ]]; then
-    key=""
-    wipe "${INCOMING}"
-    log "removed incoming-authkey: not a regular file holding one tskey-auth- key"
-    return 0
-  fi
-  adopt "$key" "$name" "a local writer"
-  key=""
-  wipe "${INCOMING}"
+# Claim incoming-authkey by renaming it, then adopt it. Repeats while the writer
+# keeps dropping keys (bounded), so the newest key is the one tried.
+take_incoming_keys() {
+  local i
+  for ((i = 0; i < 5; i++)); do
+    present "${INCOMING}" || return 0
+    mv -f -- "${INCOMING}" "${CLAIMED}"
+    parse_keyfile "${CLAIMED}"
+    if [[ -z "${KEY}" ]]; then
+      log "removed incoming-authkey: not a regular file holding one tskey-auth- key (and an optional name)"
+    else
+      adopt "a local writer"
+      KEY=""
+    fi
+    wipe "${CLAIMED}"
+  done
 }
 
 give_up() { # reason
   wipe "${PENDING}"
-  rm -f -- "${PENDING_NAME}"
-  if (( joined == 0 )); then
-    # A box that never joined goes back to idle: no state, so tailscaled's
-    # start conditions are false again. (rm never follows a link.)
-    "${SYSTEMCTL}" stop tailscaled.service 2>/dev/null || true
-    rm -f -- "${TS_STATE}/tailscaled.state"
+  if (( joined == 0 )) && [[ -e "${OURS}" ]]; then
+    # Only a state this enrollment created, on a box that never joined and that
+    # tailscaled itself reports as not logged in, is removed (back to idle).
+    local backend=""
+    backend="$("${CLI}" --socket="${SOCKET}" status --json 2>/dev/null \
+      | grep -o '"BackendState": *"[A-Za-z]*"' | head -n1 | grep -o '"[A-Za-z]*"$' | tr -d '"')" || true
+    if [[ "$backend" == NeedsLogin || "$backend" == NoState ]]; then
+      "${SYSTEMCTL}" stop tailscaled.service 2>/dev/null || true
+      rm -f -- "${TS_STATE}/tailscaled.state"   # rm never follows a link
+      rm -f -- "${OURS}"
+    else
+      log "kept tailscaled.state (tailscaled state '${backend:-unknown}')"
+    fi
   fi
   write_status gave-up "$attempts" 0 "$1"
   sync "${ENROLL}" 2>/dev/null || true
@@ -188,44 +227,55 @@ give_up() { # reason
 
 enroll_pending() {
   present "${PENDING}" || return 0
-  if [[ ! "$(read_token "${PENDING}" 1024)" =~ $KEY_RE ]]; then
-    wipe "${PENDING}"; rm -f -- "${PENDING_NAME}"
+  parse_keyfile "${PENDING}"
+  if [[ -z "${KEY}" ]]; then
+    wipe "${PENDING}"
     log "removed pending-authkey: not a regular file holding one tskey-auth- key"
     return 0
   fi
+  local name="${NAME}"
+  KEY=""
   read_status
   if (( next > NOW && next - NOW <= 3600 )); then
     return 0   # backing off; a clock far ahead of `next` is ignored
   fi
-  local name="" i out rc=0 delay
-  name="$(read_token "${PENDING_NAME}" 64)"
-  [[ "$name" =~ $NAME_RE ]] || name=""
+  local i out rc=0 delay keyfile
   attempts=$((attempts + 1))
   # Count and schedule the attempt before anything can fail, so even a daemon
   # that cannot start (or a crash here) backs off and is capped.
   delay=$(( 120 << (attempts > 4 ? 4 : attempts - 1) ))
   (( delay > 1800 )) && delay=1800
   write_status pending "$attempts" "$((NOW + delay))" trying
+  # Any state that appears from now on, where none existed, is ours to clean up.
+  if [[ ! -e "${TS_STATE}/tailscaled.state" && ! -L "${TS_STATE}/tailscaled.state" ]]; then
+    : >"${OURS}"
+  fi
   if ! "${SYSTEMCTL}" start tailscaled.service; then
     log "tailscaled did not start (attempt ${attempts}/${MAX_ATTEMPTS})"
     if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not start after ${attempts} attempts"; fi
     return 1
   fi
   for ((i = 0; i < WAIT; i++)); do [[ -S "${SOCKET}" ]] && break; sleep 1; done
-  local args=(up "--auth-key=file:${PENDING}" --ssh --accept-risk=lose-ssh
+  # The CLI reads a key-only copy (the pending file also carries the name).
+  keyfile="$(mktemp "${ENROLL}/.up-key.XXXXXX")"
+  parse_keyfile "${PENDING}"
+  printf '%s' "${KEY}" >"$keyfile"
+  KEY=""
+  local args=(up "--auth-key=file:${keyfile}" --ssh --accept-risk=lose-ssh
               --accept-dns=false --accept-routes=false --timeout=90s)
   [[ -n "$name" ]] && args+=("--hostname=${name}")
   out="$("${CLI}" --socket="${SOCKET}" "${args[@]}" 2>&1)" || rc=$?
+  wipe "$keyfile"
   out="$(printf '%s' "$out" | sed -E 's/tskey-[A-Za-z0-9_-]+/<key>/g' | tr '\n' ' ' | cut -c1-200)"
   if (( rc == 0 )); then
+    : >"${ENROLL}/joined-once"
+    rm -f -- "${OURS}"
     # `up` resets the auto-update preference to "unset" (then the tailnet
     # default applies), so pin it off after every successful up.
     "${CLI}" --socket="${SOCKET}" set --auto-update=false --update-check=false \
       || log "could not pin auto-update off; tailscaled re-applies it at start"
     wipe "${PENDING}"
-    rm -f -- "${PENDING_NAME}"
     write_status joined "$attempts" 0 ok
-    : >"${ENROLL}/joined-once"
     sync "${ENROLL}"
     log "joined Tailscale${name:+ as ${name}}"
     return 0
@@ -252,13 +302,14 @@ chmod 0700 "${ENROLL}"
 exec 9>"${ENROLL}/.lock"
 flock -w "${LOCK_WAIT}" 9 || { log "another enrollment run holds the lock; the timer retries"; exit 0; }
 
+recover
 take_boot_key
-take_incoming_key
+take_incoming_keys
 rc=0
 enroll_pending || rc=$?
 # A key that arrived during that attempt is used now, not after the back-off.
 if present "${INCOMING}"; then
-  take_incoming_key
+  take_incoming_keys
   rc=0
   enroll_pending || rc=$?
 fi
