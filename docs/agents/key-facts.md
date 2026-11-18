@@ -5853,8 +5853,12 @@ plain USB device on J11 through a C-to-A adapter, the FUSB302 can sit toggling i
 source role with no attach interrupt at all, through every `port_type` cycle and across
 cold boots. A manual `modprobe -r fusb302; modprobe fusb302` recovered it within seconds
 on the bench. The policy instead unbinds and rebinds the one I2C device, which runs the
-same driver remove/probe path without touching other controllers; that automatic rebind
-is **not yet proven on hardware** and needs a bench cold boot before it is relied on.
+same driver remove/probe path without touching other controllers. One cold boot with
+this policy (a Rock 5B+ on back power, an RM520N-GL on J11 through a C-to-A adapter)
+confirmed it: the three cycles at 8/28/60 s found nothing, the rebind ran at 81 s, the
+partner appeared at 88 s and the modem enumerated at 5000 Mbit/s on `fc000000.usb` at
+95 s. Before the rebind the role switch read `device` with no `xhci-hcd` child. One boot
+is a single sample, not a repeat rate.
 
 When the no-partner cycles are used up, `CERALIVE_TYPEC_REPROBE_SETTLE` (20 s) have
 passed since the last one, the source preference is active, `power_role` reads `source`,
