@@ -227,10 +227,14 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
         log "seeding the update preset pair onto $DATA/ceralive"
         cp -a "$WORKDIR/$us" "$DATA/ceralive/.$us.seed"
         cp -a "$WORKDIR/$uc" "$DATA/ceralive/.$uc.seed"
+        # Flush the contents before the renames make them visible, so a power cut
+        # right after first boot cannot leave an empty or partial preset file.
+        sync "$DATA/ceralive/.$us.seed" "$DATA/ceralive/.$uc.seed"
         # The sidecar first: CeraUI treats a settings file without a sidecar as a
         # pre-sidecar install and migrates it, so it must never see that state.
         mv -f "$DATA/ceralive/.$uc.seed" "$DATA/ceralive/$uc"
         mv -f "$DATA/ceralive/.$us.seed" "$DATA/ceralive/$us"
+        sync "$DATA/ceralive"
     elif [ -f "$WORKDIR/$us" ] && [ -f "$WORKDIR/$uc" ] \
        && [ ! -e "$DATA/ceralive/$us" ] && [ ! -L "$DATA/ceralive/$us" ] \
        && [ -f "$DATA/ceralive/$uc" ] && [ ! -L "$DATA/ceralive/$uc" ] \
@@ -238,7 +242,9 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
         # Power was lost between the two renames above: finish the same pair.
         log "completing an interrupted update preset seed"
         cp -a "$WORKDIR/$us" "$DATA/ceralive/.$us.seed"
+        sync "$DATA/ceralive/.$us.seed"
         mv -f "$DATA/ceralive/.$us.seed" "$DATA/ceralive/$us"
+        sync "$DATA/ceralive"
     fi
 fi
 if ! mountpoint -q /var/log; then

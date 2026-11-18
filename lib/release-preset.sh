@@ -171,6 +171,10 @@ release_preset_check_keyring_b64() {
 release_preset_ceraui_check() {
   local dir="$1" ceraui="${CERALIVE_UPDATE_PRESET_CERAUI_DIR:-}" here
   [[ -n "${ceraui}" ]] || return 0
+  [[ "${ceraui}" == /* && "${dir}" == /* ]] || {
+    release_preset_die "the CeraUI live check needs absolute paths (CERALIVE_UPDATE_PRESET_CERAUI_DIR=${ceraui}, preset ${dir}); it runs from the CeraUI checkout"
+    return 1
+  }
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   [[ -f "${ceraui}/apps/backend/src/modules/system/update-settings.ts" ]] \
     || { release_preset_die "CERALIVE_UPDATE_PRESET_CERAUI_DIR is not a CeraUI checkout: ${ceraui}"; return 1; }

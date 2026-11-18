@@ -312,3 +312,19 @@ image() { mkdir -p "$1/opt/ceralive" "$1/data/ceralive"; cp "$T/preset/"*.json "
   [ -e "$T/N/data/ceralive/config.json" ]
   [ ! -e "$T/N/data/ceralive/update-settings.json" ] && [ ! -e "$T/N/data/ceralive/update-image-channel.json" ]
 }
+
+@test "the live CeraUI check refuses relative paths with a clear error" {
+  run env CERALIVE_UPDATE_PRESET_CERAUI_DIR=relative/ceraui "$LIB" validate "$T/preset"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"needs absolute paths"* ]]
+  run bash -c 'cd "$1" && CERALIVE_UPDATE_PRESET_CERAUI_DIR=/nonexistent "$2" validate preset' _ "$T" "$LIB"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"needs absolute paths"* ]]
+}
+
+@test "seeding flushes the preset files before the renames" {
+  local body
+  body="$(awk '/update preset pair onto/{on=1} on && /^    fi$/{exit} on' "$PIPELINE_DIR/mkosi/customize/postinst.d/persistence.sh")"
+  # the sync of both seed files comes before the first rename
+  [[ "$body" == *'sync "$DATA/ceralive/.$us.seed" "$DATA/ceralive/.$uc.seed"'*'mv -f'* ]]
+}
