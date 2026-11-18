@@ -132,7 +132,16 @@ enroll_pending() {
   local name="" i out rc=0 delay
   [[ -f "${PENDING_NAME}" ]] && name="$(cat -- "${PENDING_NAME}")"
   attempts=$((attempts + 1))
-  "${SYSTEMCTL}" start tailscaled.service
+  # Count and schedule the attempt before anything can fail, so even a daemon
+  # that cannot start (or a crash here) backs off and is capped.
+  delay=$(( 120 << (attempts > 4 ? 4 : attempts - 1) ))
+  (( delay > 1800 )) && delay=1800
+  write_status pending "$attempts" "$((NOW + delay))" trying
+  if ! "${SYSTEMCTL}" start tailscaled.service; then
+    log "tailscaled did not start (attempt ${attempts}/${MAX_ATTEMPTS})"
+    if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not start after ${attempts} attempts"; fi
+    return 1
+  fi
   for ((i = 0; i < WAIT; i++)); do [[ -S "${SOCKET}" ]] && break; sleep 1; done
   local args=(up "--auth-key=file:${PENDING}" --ssh --accept-risk=lose-ssh
               --accept-dns=false --accept-routes=false --timeout=90s)
@@ -160,8 +169,6 @@ enroll_pending() {
     give_up "no success after ${attempts} attempts"
     return 1
   fi
-  delay=$(( 120 << (attempts > 4 ? 4 : attempts - 1) ))
-  (( delay > 1800 )) && delay=1800
   write_status pending "$attempts" "$((NOW + delay))" retry
   return 1
 }

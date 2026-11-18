@@ -11,8 +11,10 @@
 #       our tailscaled.service (userspace networking, inert until enrolled) and
 #       the BOOT key-file enrollment service + timer. Its state lives on /data
 #       (persistence.sh adds the /var/lib/tailscale bind for this flag).
-#       tailscaled's loopback re-dials are limited to the CeraUI backend and DNS
-#       (tailscaled-loopback.nft); auto-update is pinned off.
+#       tailscaled runs as the ceralive-tailscale account; its loopback re-dials
+#       are limited to the CeraUI backend and DNS (tailscaled-loopback.nft,
+#       matched by socket owner); auto-update is pinned off. Tailscale SSH
+#       sessions run as that account and reach root with sudo.
 #   CERALIVE_SSH_ROOT_KEYS_B64
 #       Public keys seeded once into root's persistent authorized_keys store by
 #       ceralive-ssh-key-seed.service. The once-flag means a rotated key does not
@@ -96,6 +98,15 @@ setup_remote_access() {
     install_tailscale_binaries "${src}" "${dest}"
     install -D -m 0644 "${src}/tailscaled.service" "${dest}/etc/systemd/system/tailscaled.service"
     install -D -m 0644 "${src}/tailscaled-loopback.nft" "${dest}/usr/lib/ceralive/tailscaled-loopback.nft"
+    # tailscaled's own account (the loopback allowlist matches it by uid) and the
+    # sudo rule that turns its Tailscale SSH sessions into root for admins.
+    install -D -m 0644 "${src}/ceralive-tailscale.sysusers.conf" "${dest}/usr/lib/sysusers.d/ceralive-tailscale.conf"
+    systemd-sysusers --root="${dest:-/}" "${dest}/usr/lib/sysusers.d/ceralive-tailscale.conf" \
+      || die "could not create the ceralive-tailscale account"
+    install -D -m 0440 "${src}/ceralive-tailscale.sudoers" "${dest}/etc/sudoers.d/ceralive-tailscale"
+    if command -v visudo >/dev/null 2>&1; then
+      visudo -c -q -f "${dest}/etc/sudoers.d/ceralive-tailscale" || die "sudoers drop-in does not parse"
+    fi
     install -D -m 0755 "${src}/ceralive-tailscale-enroll.sh" "${dest}/usr/local/sbin/ceralive-tailscale-enroll"
     install -D -m 0644 "${src}/ceralive-tailscale-enroll.service" "${dest}/etc/systemd/system/ceralive-tailscale-enroll.service"
     install -D -m 0644 "${src}/ceralive-tailscale-enroll.timer" "${dest}/etc/systemd/system/ceralive-tailscale-enroll.timer"

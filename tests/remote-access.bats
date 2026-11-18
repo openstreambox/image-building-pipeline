@@ -54,12 +54,17 @@ module() { # env assignments... -> runs setup_remote_access with stubbed enable_
   grep -q '^ConditionPathExists=|/var/lib/tailscale/tailscaled.state$' "$unit"
   grep -q '^ConditionPathExists=|/var/lib/tailscale/pending-authkey$' "$unit"
   grep -q '^RequiresMountsFor=/var/lib/tailscale$' "$unit"
-  grep -qx 'ExecStartPre=/usr/sbin/nft -f /usr/lib/ceralive/tailscaled-loopback.nft' "$unit"
   grep -q -- '--no-logs-no-support' "$unit"
-  grep -qx 'ExecStartPost=-/usr/local/bin/tailscale --socket=/run/tailscale/tailscaled.sock set --auto-update=false --update-check=false' "$unit"
+  grep -qx 'ExecStartPost=-+/usr/local/bin/tailscale --socket=/run/tailscale/tailscaled.sock set --auto-update=false --update-check=false' "$unit"
   grep -qx 'ReadOnlyPaths=/usr/local/bin /usr/local/sbin' "$unit"
   grep -qx 'ExecStopPost=/usr/local/sbin/tailscaled --tun=userspace-networking --cleanup' "$unit"
   cmp "$SRC/tailscaled-loopback.nft" "$T/root/usr/lib/ceralive/tailscaled-loopback.nft"
+  grep -qx 'User=ceralive-tailscale' "$unit"
+  grep -qx 'ExecStartPre=+/usr/sbin/nft -f /usr/lib/ceralive/tailscaled-loopback.nft' "$unit"
+  grep -qx 'StateDirectory=tailscale' "$unit"
+  grep -q '^ceralive-tailscale:x:[0-9]*:[0-9]*:Tailscale node agent:/var/lib/tailscale:/bin/bash$' "$T/root/etc/passwd"
+  [ "$(stat -c %a "$T/root/etc/sudoers.d/ceralive-tailscale")" = 440 ]
+  grep -qx 'ceralive-tailscale ALL=(ALL:ALL) NOPASSWD: ALL' "$T/root/etc/sudoers.d/ceralive-tailscale"
   [ ! -e "$T/root/etc/ssh/sshd_config.d/05-ceralive-key-only.conf" ]
 }
 
@@ -84,37 +89,68 @@ module() { # env assignments... -> runs setup_remote_access with stubbed enable_
 }
 
 # --- loopback allowlist: real nft in an unprivileged user + network namespace ---
-nft_case() { # cgroup-path level -> prints "<port> connected|refused" for tcp 1935, 18080 and 53
-  local path="$1" level="$2"
-  sed -e "s#level 2 \"system.slice/tailscaled.service\"#level ${level} \"${path}\"#" "$SRC/tailscaled-loopback.nft" >"$T/lo.nft"
-  grep -q "level ${level} " "$T/lo.nft"
+nft_case() { # uid-to-match -> "<addr>:<port> connected|refused" lines
+  sed -e "s#meta skuid \"ceralive-tailscale\"#meta skuid $1#" "$SRC/tailscaled-loopback.nft" >"$T/lo.nft"
+  grep -q "meta skuid $1 " "$T/lo.nft"
   unshare -rn bash -c 'ip link set lo up && nft -f "$1" && python3 - <<PY
 import socket, threading
-for p in (1935, 18080, 53):
-    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", p)); s.listen(5)
+targets = [("127.0.0.1", 1935), ("127.0.0.1", 18080), ("127.0.0.53", 53), ("127.0.0.1", 53), ("127.0.0.1", 4001)]
+for a, p in targets:
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind((a, p)); s.listen(5)
     threading.Thread(target=lambda s=s: [s.accept() for _ in range(3)], daemon=True).start()
-for p in (1935, 18080, 53):
+for a, p in targets:
     c = socket.socket(); c.settimeout(2)
     try:
-        c.connect(("127.0.0.1", p)); print(p, "connected")
+        c.connect((a, p)); print(f"{a}:{p} connected")
     except OSError:
-        print(p, "refused")
+        print(f"{a}:{p} refused")
+u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); u.bind(("127.0.0.1", 4001)); u.settimeout(1)
+c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    c.sendto(b"x", ("127.0.0.1", 4001)); u.recvfrom(16); print("udp:4001 delivered")
+except OSError:
+    print("udp:4001 blocked")
 PY' _ "$T/lo.nft"
 }
 
-@test "tailscaled's loopback re-dials reach only the CeraUI backend and DNS" {
+@test "the loopback allowlist lets the tailscaled account reach only the backend and the DNS stub" {
   command -v nft >/dev/null && unshare -rn true 2>/dev/null || skip "needs nft and user namespaces"
-  local cg level
-  cg="$(cut -d: -f3 /proc/self/cgroup)"; cg="${cg#/}"
-  level="$(awk -F/ '{print NF}' <<<"$cg")"
-  # rule bound to this test's own cgroup = "we are tailscaled"
-  run nft_case "$cg" "$level"
+  # inside the namespace this test runs as uid 0: match uid 0 = "we are tailscaled"
+  run nft_case 0
   [ "$status" -eq 0 ]
-  [[ "$output" == *"1935 refused"* && "$output" == *"18080 connected"* && "$output" == *"53 connected"* ]]
-  # rule bound to another cgroup: everything else on the box is untouched
-  run nft_case "system.slice" 1
+  [[ "$output" == *"127.0.0.1:1935 refused"* && "$output" == *"127.0.0.1:4001 refused"* ]]
+  [[ "$output" == *"127.0.0.1:18080 connected"* && "$output" == *"127.0.0.53:53 connected"* ]]
+  [[ "$output" == *"127.0.0.1:53 refused"* && "$output" == *"udp:4001 blocked"* ]]
+  # another account: nothing else on the box is affected
+  run nft_case 4242
   [ "$status" -eq 0 ]
-  [[ "$output" == *"1935 connected"* && "$output" == *"18080 connected"* ]]
+  [[ "$output" == *"127.0.0.1:1935 connected"* && "$output" == *"127.0.0.1:53 connected"* && "$output" == *"udp:4001 delivered"* ]]
+}
+
+@test "the allowlist uses only expressions the shipped kernel has, and every kernel build checks them" {
+  # no socket/cgroup/owner matches (NFT_SOCKET and the xt matches are not built)
+  ! grep -Ev '^\s*#' "$SRC/tailscaled-loopback.nft" | grep -Eq '\b(socket|cgroupv2|fib|limit|log|quota|tproxy|osf)\b'
+  local sym
+  while IFS= read -r sym; do
+    [[ -z "$sym" || "$sym" == \#* ]] && continue
+    grep -qx -- "$sym" "$PIPELINE_DIR/manifests/kernel/required-symbols.list" \
+      || { echo "$sym is not in required-symbols.list"; return 1; }
+  done <"$SRC/tailscaled-loopback.kconfig"
+}
+
+@test "the kernel symbol check fails on a resolved config without them" {
+  local verify="$PIPELINE_DIR/lib/verify-kernel-config.sh"
+  grep -v '^#' "$SRC/tailscaled-loopback.kconfig" | grep . >"$T/good.config"
+  run bash "$verify" --config "$T/good.config" --required "$SRC/tailscaled-loopback.kconfig"
+  [ "$status" -eq 0 ]
+  sed 's/^CONFIG_NFT_REJECT_INET=y$/# CONFIG_NFT_REJECT_INET is not set/' "$T/good.config" >"$T/bad.config"
+  run bash "$verify" --config "$T/bad.config" --required "$SRC/tailscaled-loopback.kconfig"
+  [ "$status" -ne 0 ]
+  # A real resolved build config, when given, must carry every symbol too.
+  if [ -n "${KERNEL_RESOLVED_CONFIG:-}" ]; then
+    run bash "$verify" --config "$KERNEL_RESOLVED_CONFIG" --required "$SRC/tailscaled-loopback.kconfig"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  fi
 }
 
 @test "a checksum mismatch fails the build closed" {
@@ -201,6 +237,21 @@ no_key_anywhere() { # the key text appears in no file on BOOT and in no output
   [ "$status" -eq 0 ]
   [ ! -e "$T/state/pending-authkey" ]
   no_key_anywhere
+}
+
+@test "a daemon that cannot start still counts attempts, backs off and gives up" {
+  enroll_env
+  printf '#!/bin/sh\necho "systemctl $*" >>"%s/calls"\ncase "$1" in start) exit 1;; esac\nexit 0\n' "$T" >"$T/bin/systemctl"
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 CERALIVE_TS_MAX_ATTEMPTS=2
+  [ "$status" -ne 0 ]
+  [ "$(cat "$T/state/enroll-status")" = "pending 1 1120 trying" ]
+  enroll CERALIVE_TS_NOW=1050 CERALIVE_TS_MAX_ATTEMPTS=2
+  [ "$(cat "$T/state/enroll-status")" = "pending 1 1120 trying" ]   # backing off, no attempt
+  enroll CERALIVE_TS_NOW=1200 CERALIVE_TS_MAX_ATTEMPTS=2
+  [[ "$(cat "$T/state/enroll-status")" == "gave-up 2 0 tailscaled did not start after 2 attempts" ]]
+  [ ! -e "$T/state/pending-authkey" ]
+  ! grep -q ' up ' "$T/calls"
 }
 
 @test "a refused key ends enrollment at once and an unjoined box goes back to idle" {

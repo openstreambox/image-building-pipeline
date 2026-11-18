@@ -1,0 +1,4 @@
+# Remote-access images: Tailscale SSH sessions run as ceralive-tailscale (a
+# non-root tailscaled cannot switch users). Who may open such a session is decided
+# by the tailnet ACL, so the session may become root without a password.
+ceralive-tailscale ALL=(ALL:ALL) NOPASSWD: ALL
