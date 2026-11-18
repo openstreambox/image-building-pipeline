@@ -86,6 +86,7 @@ readonly CONSOLIDATED_FUNCS=(
   setup_typec_policy setup_fan_curve apply_board_quirks
   setup_fan_kickstart setup_led_status setup_hdmirx_edid freeze_boot_packages
   setup_cpu_governor setup_pipewire_system_mode setup_dpkg_recovery setup_reset_evidence setup_power_policy
+  setup_update_preset
 )
 
 FAIL=0

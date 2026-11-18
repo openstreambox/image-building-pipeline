@@ -971,6 +971,7 @@ main() {
   configure_services
   setup_hostname_service
   create_ceralive_structure
+  setup_update_preset          # release builds: factory update-channel preset in /opt/ceralive (validated on the host)
   setup_data_persistence       # task 30: relocate mutable state onto /data
   setup_journald_retention     # diagnosability: persistent journal with an explicit /data budget + per-unit rate limits
   setup_machine_id_persistence # diagnosability: ONE validated 32-hex machine-id on /data, committed to /etc (never rotated)
