@@ -1,0 +1,13 @@
+# Kernel symbols tailscaled-loopback.nft needs (checked by tests/remote-access.bats
+# against a resolved .config with lib/verify-kernel-config.sh --required, and each
+# also listed in manifests/kernel/required-symbols.list so every kernel build
+# enforces them). meta skuid, ip/ip6 daddr, th dport, sets and counter are built
+# into nf_tables core (nft_meta.o, nft_payload.o, nft_lookup.o, nft_counter.o),
+# so they have no symbol of their own.
+CONFIG_NETFILTER=y
+CONFIG_NF_TABLES=y
+CONFIG_NF_TABLES_INET=y
+CONFIG_NFT_REJECT=y
+CONFIG_NFT_REJECT_INET=y
+CONFIG_NF_REJECT_IPV4=y
+CONFIG_NF_REJECT_IPV6=y

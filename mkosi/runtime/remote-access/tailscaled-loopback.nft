@@ -1,0 +1,47 @@
+#!/usr/sbin/nft -f
+# Tailscale loopback allowlist (remote-access images).
+#
+# In userspace-networking mode tailscaled terminates tailnet connections itself
+# and re-dials them to 127.0.0.1:<port> (or ::1). The box's other firewalls key
+# on the ingress interface and accept loopback, so without this table every
+# loopback service would be reachable from any tailnet peer the ACL allows:
+# anonymous RTMP/SRT ingest on :1935/:4001, preview and helper ports, and so on.
+#
+# Packets that the tailscaled account sends to loopback may only reach:
+#   tcp 127.0.0.1/::1 port 18080   the CeraUI backend (static UI + password RPC;
+#                                   the LAN front door on 80/443 binds to physical
+#                                   interfaces only, by design)
+#   127.0.0.53/127.0.0.54 port 53  the systemd-resolved stub, which tailscaled
+#                                   itself uses for DNS
+# Everything else is refused. Tailscale SSH is served inside tailscaled and never
+# dials loopback. Shells opened through Tailscale SSH run as the same account and
+# get the same allowlist until they `sudo` to root, which is not restricted.
+#
+# Matching is by socket owner (meta skuid), part of nf_tables core. The RK3588
+# kernel has no NFT_SOCKET, so a cgroup match would not load there. The symbols
+# this table needs are listed in tailscaled-loopback.kconfig and checked against
+# the resolved kernel config.
+#
+# Loaded by tailscaled.service ExecStartPre (as root), so the account name is
+# resolved to the current slot's uid on every start. Self-replacing like the
+# other ceralive tables.
+table inet ceralive_tailscale_lo
+delete table inet ceralive_tailscale_lo
+
+table inet ceralive_tailscale_lo {
+	chain output {
+		type filter hook output priority 0; policy accept;
+		oifname "lo" meta skuid "ceralive-tailscale" jump from_tailscaled
+	}
+	chain from_tailscaled {
+		ip daddr 127.0.0.1 tcp dport 18080 accept
+		ip6 daddr ::1 tcp dport 18080 accept
+		ip daddr { 127.0.0.53, 127.0.0.54 } meta l4proto { tcp, udp } th dport 53 accept
+		# Any other new TCP connection is refused. Later segments can only belong
+		# to a connection allowed above, or be replies from a socket this account
+		# listens on, so they pass; no conntrack needed.
+		tcp flags & (syn | ack) == syn counter reject with tcp reset
+		meta l4proto tcp accept
+		counter reject
+	}
+}

@@ -1,0 +1,47 @@
+[Unit]
+Description=Tailscale node agent (remote access, idle until enrolled)
+Documentation=https://tailscale.com/docs/
+# Enabled in the image but inert: it starts only once the box holds Tailscale
+# state or a pending enrollment key (root-only /data/tailscale-enroll), both on
+# /data so they survive A/B updates.
+# A box that is never enrolled never runs it.
+ConditionPathExists=|/var/lib/tailscale/tailscaled.state
+ConditionPathExists=|/data/tailscale-enroll/pending-authkey
+Wants=network-pre.target
+After=network-pre.target NetworkManager.service ceralive-migrate-data.service nftables.service
+RequiresMountsFor=/var/lib/tailscale /data/tailscale-enroll
+
+[Service]
+# Not root: the loopback allowlist matches this account's sockets (meta skuid).
+User=ceralive-tailscale
+Group=ceralive-tailscale
+# Loopback allowlist for tailnet connections (tailscaled-loopback.nft), loaded
+# as root. If it cannot be loaded, tailscaled does not start.
+ExecStartPre=+/usr/sbin/nft -f /usr/lib/ceralive/tailscaled-loopback.nft
+# Userspace networking: no tailscale0 interface, routes, policy rules or
+# firewall rules of Tailscale's own, so CeraUI's uplink, bonding and
+# default-route handling never see Tailscale. Tailscale SSH (as this account,
+# then sudo) and the CeraUI backend (127.0.0.1:18080) are reachable from
+# permitted tailnet peers. No log upload to Tailscale (so no Tailscale support).
+ExecStart=/usr/local/sbin/tailscaled --tun=userspace-networking --no-logs-no-support --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock --port=0
+# The binaries are pinned by the image. A tailnet "auto-update" default must not
+# replace them: pin the preference off on every start (`tailscale up` resets
+# it). This account cannot write /usr/local anyway; keep it read-only regardless.
+ExecStartPost=-+/usr/local/bin/tailscale --socket=/run/tailscale/tailscaled.sock set --auto-update=false --update-check=false
+ReadOnlyPaths=/usr/local/bin /usr/local/sbin
+ExecStopPost=/usr/local/sbin/tailscaled --tun=userspace-networking --cleanup
+ExecStopPost=-+/usr/sbin/nft delete table inet ceralive_tailscale_lo
+Restart=on-failure
+RestartSec=5
+# /var/lib/tailscale is the /data bind; StateDirectory= re-owns it to this
+# slot's uid for the account (sysusers may assign a different one after an OTA).
+StateDirectory=tailscale
+StateDirectoryMode=0700
+RuntimeDirectory=tailscale
+RuntimeDirectoryMode=0755
+CacheDirectory=tailscale
+CacheDirectoryMode=0750
+Type=notify
+
+[Install]
+WantedBy=multi-user.target

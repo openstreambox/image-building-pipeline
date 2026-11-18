@@ -92,6 +92,8 @@ BUILD_LOCK_FD=""
 INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-1}"
 # shellcheck source=lib/rauc-pki-contract.sh
 source "${RAUC_PKI_CONTRACT_SH}"
+# shellcheck source=lib/release-remote-access.sh
+source "${HERE}/release-remote-access.sh"
 CERALIVE_BUILD_MODE="${CERALIVE_BUILD_MODE:-development}"
 export CERALIVE_BUILD_MODE
 CHANNEL="${CHANNEL:-stable}"
@@ -249,6 +251,8 @@ main() {
   if (( kernel_only == 0 )); then
     rauc_pki_resolve "${CERALIVE_BUILD_MODE}" "${CERALIVE_RAUC_PKI_DIR:-}" "${RAUC_KEYRING_FILE:-}"
     export CERALIVE_RAUC_PKI_DIR RAUC_KEYRING_FILE RAUC_ROOT_SHA256
+    # Opt-in remote access (Tailscale, seeded SSH keys, key-only SSH): lib/release-remote-access.sh.
+    release_remote_access_resolve
     acquire_board_lock "${board}"
     prune_local_conf_install_traps
     prune_local_conf_preflight
@@ -379,6 +383,7 @@ run_mkosi_build() {
     CERALIVE_BENCH_LABELS CERALIVE_BOARD CERALIVE_MKOSI_CACHE_DIR
     CERALIVE_DTB_KEEP_OVERLAYS
     CERALIVE_PRUNE_PATHS_B64 CERALIVE_FIRST_PARTY_NAMES_B64
+    CERALIVE_TAILSCALE CERALIVE_SSH_ROOT_KEYS_B64 CERALIVE_SSH_PASSWORD_AUTH
     SOURCE_DATE_EPOCH
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
@@ -448,6 +453,10 @@ run_mkosi_build() {
   # without repo access.
   RAUC_ROOT_CA_B64="$(base64 -w0 <"${RAUC_KEYRING_FILE}")"
   export RAUC_ROOT_CA_B64
+  # Remote-access options (lib/release-remote-access.sh); off on a normal build.
+  export CERALIVE_TAILSCALE="${CERALIVE_TAILSCALE:-0}"
+  export CERALIVE_SSH_ROOT_KEYS_B64="${CERALIVE_SSH_ROOT_KEYS_B64:-}"
+  export CERALIVE_SSH_PASSWORD_AUTH="${CERALIVE_SSH_PASSWORD_AUTH:-}"
 
   # Add-on signing keyring (task 24): the PUBLIC add-on keyring baked at
   # /usr/share/ceralive/addon-keyring.gpg so the device can verify optional add-on

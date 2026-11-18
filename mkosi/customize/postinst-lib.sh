@@ -83,6 +83,7 @@ CERALIVE_POSTINST_MODULES=(
   persistence.sh
   services.sh
   tls-ssh.sh
+  remote-access.sh
 )
 
 for _ceralive_postinst_module in "${CERALIVE_POSTINST_MODULES[@]}"; do

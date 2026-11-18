@@ -185,6 +185,20 @@ mkdir -p "$DATA/ceralive/rauc-downloads" "$DATA/ceralive/hawkbit-updater"
 chmod 0755 "$DATA/ceralive" "$DATA/log" "$DATA/srtla" "$DATA/ceralive/rauc-downloads"
 chmod 0700 "$DATA/nm" "$DATA/nm/system-connections" "$DATA/ceralive/hawkbit-updater"
 
+# Tailscale state (only on images that ship tailscaled): root-only, on /data so
+# the node identity survives A/B slot changes; bound over /var/lib/tailscale.
+# Enrollment keys stay root-only, outside tailscaled's account-owned state.
+# NON-FATAL by design: this script gates every /data bind, so a problem here may
+# cost remote access but must never stop the box's own persistence.
+if [ -x /usr/local/sbin/tailscaled ]; then
+    { mkdir -p "$DATA/tailscale" && chmod 0700 "$DATA/tailscale"; } \
+        || log "WARN: could not prepare $DATA/tailscale; remote access may not work"
+    { { [ ! -L "$DATA/tailscale-enroll" ] || rm -f "$DATA/tailscale-enroll"; } \
+        && mkdir -p "$DATA/tailscale-enroll" && chown 0:0 "$DATA/tailscale-enroll" \
+        && chmod 0700 "$DATA/tailscale-enroll"; } \
+        || log "WARN: could not prepare $DATA/tailscale-enroll; remote access enrollment may not work"
+fi
+
 # Cert-rotation store (task 42): persistent intermediate/leaf certs + the staging
 # dir a rotation bundle's install hook drops candidates into. The .rauc-certs-slot
 # placeholder is the [slot.certs.0] device referenced by /etc/rauc/system.conf so a
@@ -300,9 +314,13 @@ EOF
   enable_service ceralive-migrate-data.service
 
   local spec src dst unit
-  for spec in "${data_root}/ceralive:${workdir}" \
-              "${data_root}/log:/var/log" \
-              "${data_root}/nm/system-connections:${nm_conn}"; do
+  local -a specs=("${data_root}/ceralive:${workdir}"
+                  "${data_root}/log:/var/log"
+                  "${data_root}/nm/system-connections:${nm_conn}")
+  # Remote access (postinst.d/remote-access.sh): Tailscale's node identity must
+  # survive A/B updates, or the box drops off the tailnet at the first OTA.
+  [[ "${CERALIVE_TAILSCALE:-0}" == 1 ]] && specs+=("${data_root}/tailscale:/var/lib/tailscale")
+  for spec in "${specs[@]}"; do
     src="${spec%%:*}"
     dst="${spec#*:}"
     unit="$(systemd-escape -p --suffix=mount "${dst}")"
