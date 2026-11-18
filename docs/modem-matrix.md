@@ -114,23 +114,46 @@ for every added `2c7c:0801` device. The script
 `/usr/local/sbin/ceralive-modem-usbspeed`):
 
 - does nothing while the link is at 480 Mbit/s or slower;
-- otherwise acts once per USB port per boot (marker in
+- holds back while `srtla_send` runs (CeraLive's stream process; `cerastream`
+  runs while idle too) or `/data/ceralive/modem-usbspeed.disabled` exists, and
+  checks both again right before asking ModemManager for the modem, before the
+  write and before the reset. A stream that starts in between ends the attempt
+  with the modem released; after the write it means no reset, and `"20"` applies
+  at the module's next power-up;
+- acts once per USB port and once per unit per boot (markers in
   `/run/ceralive/modem-usbspeed/`, written before ModemManager is asked and
-  before the reset), never while `srtla_send`, `ceracoder` or `belacoder` runs,
-  and never when `/data/ceralive/modem-usbspeed.disabled` exists;
+  before the reset);
 - accepts only ModemManager models `RM520N-GL` and `RM520N-EU` (the RM530N-GL
-  shares the USB ID and is left alone);
-- holds the modem with `mmcli --inhibit-device`, talks to an AT port that
+  shares the USB ID and is left alone); the modem is matched by ModemManager's
+  `physdev`, so slot names from `ID_MM_PHYSDEV_UID` don't hide it;
+- holds the modem with `mmcli --inhibit-device` (ModemManager then closes all
+  its ports, the secondary AT port included), talks to an AT port that
   ModemManager had typed `(at)` for that device and nobody holds open, reads
-  `usbspeed`, records a value other than `"20"` (journal, marker,
-  `/data/ceralive/modem-usbspeed/<digest>.json`), writes `"20"`, reads it back and
-  only then sends `AT+CFUN=1,1`; the module is back on USB about 20 s later;
-- verifies on the re-enumeration that follows and never tries a second time
-  that boot.
+  `usbspeed`, records a value other than `"20"`, writes `"20"`, reads it back
+  and only then sends `AT+CFUN=1,1`;
+- watches the module leave and return. At 480 Mbit/s it comes back on the
+  controller's High Speed bus under another kernel name (`10-1` → `9-1` on the
+  Rock 5B+ USB-C port), so it is recognised by the USB port's `peer` link, or as
+  the only new `2c7c:0801`. `verified`, `failed` (still fast), `not-reset` (never
+  left) or `not-back` is logged and stored.
+
+The per-unit record is `/data/ceralive/modem-usbspeed/<unit>.json`, where `<unit>`
+is HMAC-SHA256(`/etc/machine-id`, IMEI) cut to 16 hex digits; it holds the
+original value and the last outcome. A unit that ended `failed` or `not-back`
+is left alone on later boots until its record is deleted. The whole run has a
+270 s budget that also bounds every `mmcli` call.
 
 Every decision is one journal line (`journalctl -u 'ceralive-modem-usbspeed@*'`).
 To put a unit back: create the `.disabled` file, then with ModemManager held
 send `AT+QCFG="usbspeed","<original>"` and `AT+CFUN=1,1`.
+
+Notes: CeraUI takes its own `mmcli --inhibit-device` for modem mutations. If
+both want the same modem at once, the second hold is refused; here that ends
+as `inhibit-failed` with nothing sent. On a box that autostarts a stream, a
+modem that appears late (the USB-C port's about 95 s) usually finds the stream
+running and is left for the next boot. A carrier with no USB 2 wiring would
+lose the module at `"20"`; every measured SuperSpeed socket on the Rock 5B+
+and Orange Pi 5 Plus has a USB 2 path.
 
 ---
 

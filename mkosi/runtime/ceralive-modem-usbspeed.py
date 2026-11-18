@@ -15,46 +15,63 @@ then, for that one device:
   1. Reads the link speed from sysfs. At 480 Mbit/s or slower the module is
      already on USB 2 (or the port only offers USB 2): nothing is done, no
      ModemManager hold, no AT command.
-  2. Acts at most once per USB port per boot. A marker in /run is written
-     before ModemManager is asked for anything, and before the reset, so the
-     re-enumeration that follows only verifies the new speed and never starts
-     a second attempt.
-  3. Holds back while a stream runs (srtla_send, ceracoder or belacoder alive),
-     and when /data/ceralive/modem-usbspeed.disabled exists.
-  4. Waits for ModemManager to list the modem, and accepts only the models in
-     MODELS (2c7c:0801 is shared with the RM530N-GL, which is not verified).
+  2. Holds back while a stream runs (an srtla_send process, CeraLive's bonding
+     sender, which runs exactly while a stream is live) and while
+     /data/ceralive/modem-usbspeed.disabled exists. Both are checked again
+     right before ModemManager is asked to hold the modem, before the write and
+     before the reset; a stream that starts in between ends the attempt with
+     the modem released and nothing (more) sent.
+  3. Waits for ModemManager to list the modem (matched by its physical device,
+     so slot names from ID_MM_PHYSDEV_UID don't hide it) and accepts only the
+     models in MODELS (2c7c:0801 is shared with the RM530N-GL, not verified).
+  4. Acts once per USB port and once per unit per boot: a marker in /run is
+     written before ModemManager is asked for anything and again before the
+     reset. A unit whose earlier attempt did not bring it to USB 2 is recorded
+     as failed in /data and left alone on later boots.
   5. Takes the modem from ModemManager with `mmcli --inhibit-device` (held for
-     the whole exchange; ModemManager closes its ports and re-probes when the
-     hold ends), then talks to one AT port that ModemManager had listed as
-     "(at)" for this device and that no process holds open.
+     the whole exchange; ModemManager closes all its ports, the secondary AT
+     port included, and re-probes when the hold ends), then talks to one AT
+     port that ModemManager had listed as "(at)" for this device and that no
+     process holds open.
   6. Reads AT+QCFG="usbspeed". If it is not "20", records the old value
      (journal, /run marker and /data/ceralive/modem-usbspeed/<unit>.json),
      writes "20" and reads it back; a mismatch stops before any reset. Then
-     AT+CFUN=1,1 restarts the module (about 50 s without that link: back on USB
-     in roughly 17 s, data in roughly 50 s). A stored "20" with a fast link
-     means the value was never applied, so it is reset once without a write.
-  7. Releases the hold. The module re-enumerates; the next instance reads the
-     marker and logs whether the link came back at 480 Mbit/s.
+     AT+CFUN=1,1 restarts the module (back on USB in roughly 13-24 s, data in
+     about a minute). A stored "20" with a fast link means the value was never
+     applied, so the module is reset once without a write.
+  7. Releases the hold and watches the module leave and come back. A module
+     that returns at 480 Mbit/s usually lands on the controller's High Speed
+     bus under another kernel name (4-1 -> 1-1), so it is recognised by the
+     USB port's peer link, or as the only new 2c7c:0801 device. Verified,
+     still fast, never left or never back: each is one journal line.
+
+The unit id in /data is HMAC-SHA256(machine-id, IMEI) truncated to 16 hex
+digits: stable on this box, not reversible from the file alone.
 
 Restore by hand: AT+QCFG="usbspeed","<original>" and AT+CFUN=1,1 on the AT
 port, with ModemManager held off (mmcli --inhibit-device), after creating the
 .disabled file so this service leaves the unit alone.
 
 Test seams (production uses every default):
-  CERALIVE_USBSPEED_SYSFS     sysfs root (default /sys)
-  CERALIVE_USBSPEED_DEV       device node dir (default /dev)
-  CERALIVE_USBSPEED_PROC      procfs root (default /proc)
-  CERALIVE_USBSPEED_RUN       volatile markers (default /run/ceralive/modem-usbspeed)
-  CERALIVE_USBSPEED_DATA      persistent records (default /data/ceralive/modem-usbspeed)
-  CERALIVE_USBSPEED_MMCLI     mmcli binary (default mmcli)
-  CERALIVE_USBSPEED_MM_WAIT   seconds to wait for ModemManager (default 90)
-  CERALIVE_USBSPEED_POLL      poll interval seconds (default 2)
-  CERALIVE_USBSPEED_AT_TIMEOUT seconds per AT command (default 3)
-  CERALIVE_USBSPEED_PORT_WAIT seconds for ModemManager to let go of the port (default 10)
+  CERALIVE_USBSPEED_SYSFS       sysfs root (default /sys)
+  CERALIVE_USBSPEED_DEV         device node dir (default /dev)
+  CERALIVE_USBSPEED_PROC        procfs root (default /proc)
+  CERALIVE_USBSPEED_RUN         volatile markers (default /run/ceralive/modem-usbspeed)
+  CERALIVE_USBSPEED_DATA        persistent records (default /data/ceralive/modem-usbspeed)
+  CERALIVE_USBSPEED_MACHINE_ID  HMAC key file (default /etc/machine-id)
+  CERALIVE_USBSPEED_MMCLI       mmcli binary (default mmcli)
+  CERALIVE_USBSPEED_BUDGET      seconds for the whole run (default 270)
+  CERALIVE_USBSPEED_MM_WAIT     seconds to wait for ModemManager (default 90)
+  CERALIVE_USBSPEED_POLL        poll interval seconds (default 2)
+  CERALIVE_USBSPEED_AT_TIMEOUT  seconds per AT command (default 3)
+  CERALIVE_USBSPEED_PORT_WAIT   seconds for ModemManager to let go of the port (default 10)
+  CERALIVE_USBSPEED_LEAVE_WAIT  seconds for the module to drop off after the reset (default 15)
+  CERALIVE_USBSPEED_RETURN_WAIT seconds for it to come back (default 60)
 """
 import errno
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -74,8 +91,11 @@ USB_IDS = {('2c7c', '0801')}
 # 2c7c:0801 and is deliberately absent.
 MODELS = {'RM520N-GL', 'RM520N-EU'}
 DESIRED = '20'
-STREAM_PROCESSES = {'srtla_send', 'ceracoder', 'belacoder'}
+# CeraLive's live-stream process: the backend spawns srtla_send for exactly the
+# stream's lifetime (cerastream itself is a daemon that runs while idle too).
+STREAM_PROCESSES = {'srtla_send'}
 USB2_MAX_MBPS = 480
+KERNEL_NAME = re.compile(r'\d+-\d+(\.\d+)*')
 
 SYSFS = Path(os.environ.get('CERALIVE_USBSPEED_SYSFS', '/sys'))
 DEV = Path(os.environ.get('CERALIVE_USBSPEED_DEV', '/dev'))
@@ -83,11 +103,20 @@ PROC = Path(os.environ.get('CERALIVE_USBSPEED_PROC', '/proc'))
 RUN = Path(os.environ.get('CERALIVE_USBSPEED_RUN', '/run/ceralive/modem-usbspeed'))
 DATA = Path(os.environ.get('CERALIVE_USBSPEED_DATA', '/data/ceralive/modem-usbspeed'))
 DISABLED = DATA.parent / 'modem-usbspeed.disabled'
+MACHINE_ID = Path(os.environ.get('CERALIVE_USBSPEED_MACHINE_ID', '/etc/machine-id'))
 MMCLI = os.environ.get('CERALIVE_USBSPEED_MMCLI', 'mmcli')
+BUDGET = float(os.environ.get('CERALIVE_USBSPEED_BUDGET', '270'))
 MM_WAIT = float(os.environ.get('CERALIVE_USBSPEED_MM_WAIT', '90'))
 POLL = float(os.environ.get('CERALIVE_USBSPEED_POLL', '2'))
 AT_TIMEOUT = float(os.environ.get('CERALIVE_USBSPEED_AT_TIMEOUT', '3'))
 PORT_WAIT = float(os.environ.get('CERALIVE_USBSPEED_PORT_WAIT', '10'))
+LEAVE_WAIT = float(os.environ.get('CERALIVE_USBSPEED_LEAVE_WAIT', '15'))
+RETURN_WAIT = float(os.environ.get('CERALIVE_USBSPEED_RETURN_WAIT', '60'))
+DEADLINE = time.monotonic() + BUDGET
+
+
+def remaining():
+    return DEADLINE - time.monotonic()
 
 
 def log(level, message):
@@ -102,6 +131,13 @@ def read(path):
         return None
 
 
+def realpath(path):
+    try:
+        return os.path.realpath(path, strict=True)
+    except OSError:
+        return None
+
+
 def atomic_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(path.name + '.tmp')
@@ -111,6 +147,8 @@ def atomic_json(path, data):
         os.fsync(stream.fileno())
     os.replace(temp, path)
 
+
+# --- per-boot markers (/run) and per-unit records (/data) --------------------
 
 def marker_path(port):
     return RUN / f'{port}.json'
@@ -129,6 +167,57 @@ def save_marker(port, phase, **fields):
     return data
 
 
+def markers():
+    """(port, marker) for every marker written this boot."""
+    try:
+        paths = sorted(RUN.glob('*.json'))
+    except OSError:
+        return []
+    found = []
+    for path in paths:
+        try:
+            found.append((path.stem, json.loads(path.read_text())))
+        except (OSError, ValueError):
+            continue
+    return found
+
+
+def unit_id(equipment):
+    """HMAC-SHA256(machine-id, IMEI)[:16]: stable on this box, not reversible from /data."""
+    key = read(MACHINE_ID)
+    if not equipment or not key:
+        return None
+    return hmac.new(key.encode(), equipment.encode(), hashlib.sha256).hexdigest()[:16]
+
+
+def load_record(unit):
+    if not unit:
+        return {}
+    try:
+        return json.loads((DATA / f'{unit}.json').read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_record(unit, port, **fields):
+    """Merge fields into the unit's record; the first original value is kept."""
+    if not unit:
+        return
+    if not DATA.parent.is_dir():
+        log(6, f'{port}: no {DATA.parent}; this result is only in the journal and the /run marker')
+        return
+    record = load_record(unit)
+    if 'original' in record:
+        fields.pop('original', None)
+    record.update(fields, time=int(time.time()), port=port)
+    try:
+        atomic_json(DATA / f'{unit}.json', record)
+    except OSError as error:
+        log(4, f'{port}: could not write the record ({error}); see this journal')
+
+
+# --- what may stop an attempt ----------------------------------------------
+
 def streaming():
     """Return the name of a running stream process, or None. Unreadable means streaming."""
     try:
@@ -141,6 +230,16 @@ def streaming():
         name = read(entry / 'comm')
         if name in STREAM_PROCESSES:
             return name
+    return None
+
+
+def holding_back():
+    """Why this run must not go on right now, or None."""
+    if DISABLED.exists():
+        return f'{DISABLED} exists'
+    stream = streaming()
+    if stream:
+        return f'a stream is running ({stream})'
     return None
 
 
@@ -169,11 +268,48 @@ def holders(node):
     return found
 
 
+# --- sysfs ------------------------------------------------------------------
+
+def link_speed(device_dir):
+    try:
+        return int(float(read(Path(device_dir) / 'speed') or ''))
+    except ValueError:
+        return None
+
+
+def rm520_devices():
+    """Kernel names of every 2c7c:0801 USB device present now."""
+    names = set()
+    try:
+        entries = list((SYSFS / 'bus/usb/devices').iterdir())
+    except OSError:
+        return names
+    for entry in entries:
+        if KERNEL_NAME.fullmatch(entry.name) and (read(entry / 'idVendor'), read(entry / 'idProduct')) in USB_IDS:
+            names.add(entry.name)
+    return names
+
+
+def port_paths(device_dir):
+    """The device's USB port and that port's peer (the same socket's other bus)."""
+    paths = set()
+    port = realpath(Path(device_dir) / 'port')
+    if port:
+        paths.add(port)
+        peer = realpath(Path(port) / 'peer')
+        if peer:
+            paths.add(peer)
+    return sorted(paths)
+
+
 # --- ModemManager -----------------------------------------------------------
 
 def mmcli(*args, timeout=15):
+    budget = min(timeout, remaining())
+    if budget < 0.5:
+        return None
     try:
-        done = subprocess.run([MMCLI, *args], capture_output=True, text=True, timeout=timeout)
+        done = subprocess.run([MMCLI, *args], capture_output=True, text=True, timeout=budget)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return done.stdout if done.returncode == 0 else None
@@ -196,17 +332,22 @@ def keyed(text):
 
 
 def find_modem(device):
-    """The ModemManager record whose generic.device is this USB device, or None."""
+    """The ModemManager record of this USB device, or None.
+
+    `generic.device` is the inhibit uid; it is a sysfs path unless udev set
+    ID_MM_PHYSDEV_UID (slot names), so the match also accepts `generic.physdev`.
+    """
     _, lists = keyed(mmcli('-L', '-K'))
     for path in lists.get('modem-list', []):
         values, mlists = keyed(mmcli('-m', path, '-K'))
-        if os.path.realpath(values.get('modem.generic.device', '') or '/nonexistent') == device:
+        uid = values.get('modem.generic.device', '')
+        physdev = values.get('modem.generic.physdev', '')
+        if device in (realpath(uid) if uid.startswith('/') else None, realpath(physdev) if physdev.startswith('/') else None):
             return {
                 'path': path,
-                'uid': values.get('modem.generic.device'),
+                'uid': uid,
                 'model': values.get('modem.generic.model', ''),
                 'revision': values.get('modem.generic.revision', ''),
-                'state': values.get('modem.generic.state', ''),
                 'equipment': values.get('modem.generic.equipment-identifier', ''),
                 'ports': mlists.get('modem.generic.ports', []),
             }
@@ -243,9 +384,10 @@ class Hold:
         except OSError as error:
             self.reason = str(error)
             return
-        self.reason = 'no confirmation from mmcli within 15 s'
+        wait = max(0.0, min(15.0, remaining()))
+        self.reason = f'no confirmation from mmcli within {wait:g} s'
         fd = self.process.stdout.fileno()
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + wait
         seen = b''
         while time.monotonic() < deadline:
             ready, _, _ = select.select([fd], [], [], max(0.0, deadline - time.monotonic()))
@@ -317,10 +459,27 @@ class AtPort:
 
     def command(self, text, timeout=None):
         """Send one command; return (final, lines) with the echo removed, final None on timeout."""
-        self.drain()
-        os.write(self.fd, (text + '\r').encode())
         deadline = time.monotonic() + (AT_TIMEOUT if timeout is None else timeout)
         buffer, lines = b'', []
+        try:
+            self.drain()
+            pending = (text + '\r').encode()
+            while pending:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None, lines
+                _, ready, _ = select.select([], [self.fd], [], left)
+                if not ready:
+                    continue
+                try:
+                    pending = pending[os.write(self.fd, pending):]
+                except OSError as error:
+                    if error.errno != errno.EAGAIN:
+                        raise
+        except OSError:
+            # EIO and friends: the port went away (a module restarting, a
+            # hang-up). Same as no reply: the caller stops before anything else.
+            return None, lines
         while True:
             left = deadline - time.monotonic()
             if left <= 0:
@@ -353,39 +512,37 @@ def usbspeed_value(lines):
     return values[0] if len(values) == 1 else None
 
 
+
+
 # --- the decision -----------------------------------------------------------
 
-def unit_name(modem, port):
-    """A stable name for the persistent record without storing the IMEI itself."""
-    if modem.get('equipment'):
-        return hashlib.sha256(modem['equipment'].encode()).hexdigest()[:16]
-    return 'port-' + port
-
-
-def record_original(modem, port, original):
-    if not DATA.parent.is_dir():
-        log(6, f'{port}: no {DATA.parent}; original value only in the journal and the /run marker')
-        return
-    try:
-        path = DATA / (unit_name(modem, port) + '.json')
-        atomic_json(path, {
-            'original': original, 'desired': DESIRED, 'time': int(time.time()), 'port': port,
-            'model': modem.get('model'), 'revision': modem.get('revision'),
-        })
-    except OSError as error:
-        log(4, f'{port}: could not write the record ({error}); original "{original}" is in this journal')
-
-
-def verify_after_reset(port, marker, speed):
+def fallback_verify(port, marker, speed):
+    """A marker still at reset-sent means the run that reset the module ended
+    before it saw the module return (same kernel name, so this instance waited
+    behind it). Judge by the link it came back with; never try again."""
     kept = {k: v for k, v in marker.items() if k not in ('phase', 'time')}
     kept['speed'] = speed
-    if speed is not None and speed <= USB2_MAX_MBPS:
-        save_marker(port, 'verified', **kept)
-        log(6, f'{port}: back at {speed} Mbit/s after the reset (stored was "{marker.get("original")}"); done for this boot')
+    phase = 'verified' if speed is not None and speed <= USB2_MAX_MBPS else 'failed'
+    save_marker(port, phase, **kept)
+    save_record(marker.get('unit'), port, status=phase, speed=speed)
+    if phase == 'verified':
+        log(6, f'{port}: back at {speed} Mbit/s after the reset; done for this boot')
     else:
-        save_marker(port, 'failed', **kept)
-        log(4, f'{port}: still at {speed} Mbit/s after setting usbspeed "{DESIRED}" and a reset; '
-               'not trying again this boot')
+        log(4, f'{port}: still at {speed} Mbit/s after the reset; recorded as failed, not tried again')
+
+
+def adopt(port, speed):
+    """A USB 2 appearance that matches a pending reset on another kernel name
+    whose own run is gone. While that run lives, it judges the return itself."""
+    mine = port_paths(SYSFS / 'bus/usb/devices' / port)
+    pending = [(name, m) for name, m in markers() if m.get('phase') == 'reset-sent' and name != port]
+    for name, marker in pending:
+        if (PROC / str(marker.get('pid', 0))).exists():
+            continue
+        if mine and set(mine) & set(marker.get('port_paths', [])):
+            fallback_verify(name, dict(marker, returned_as=port), speed)
+            return True
+    return False
 
 
 def run(port):
@@ -398,14 +555,11 @@ def run(port):
     if ids not in USB_IDS:
         log(6, f'{port}: {ids[0]}:{ids[1]} is not an RM520N ID; leaving it alone')
         return 0
-    try:
-        speed = int(float(read(device_dir / 'speed') or ''))
-    except ValueError:
-        speed = None
+    speed = link_speed(device_dir)
 
     marker = load_marker(port)
     if marker and marker.get('phase') == 'reset-sent':
-        verify_after_reset(port, marker, speed)
+        fallback_verify(port, marker, speed)
         return 0
     if marker:
         log(6, f'{port}: already handled this boot ({marker.get("phase")}); nothing to do')
@@ -414,19 +568,16 @@ def run(port):
         log(4, f'{port}: link speed unreadable; leaving it alone')
         return 0
     if speed <= USB2_MAX_MBPS:
-        log(6, f'{port}: link at {speed} Mbit/s, already USB 2; nothing to do')
+        if not adopt(port, speed):
+            log(6, f'{port}: link at {speed} Mbit/s, already USB 2; nothing to do')
         return 0
-    if DISABLED.exists():
-        log(6, f'{port}: link at {speed} Mbit/s, but {DISABLED} exists; leaving it alone')
-        return 0
-    stream = streaming()
-    if stream:
-        log(6, f'{port}: link at {speed} Mbit/s, but a stream is running ({stream}); '
-               'checking again at the next appearance or boot')
+    reason = holding_back()
+    if reason:
+        log(6, f'{port}: link at {speed} Mbit/s, but {reason}; checking again at the next appearance or boot')
         return 0
 
     log(6, f'{port}: link at {speed} Mbit/s; waiting for ModemManager to list the modem')
-    deadline = time.monotonic() + MM_WAIT
+    deadline = time.monotonic() + min(MM_WAIT, max(0.0, remaining() - 60))
     modem = find_modem(device)
     while modem is None and time.monotonic() < deadline:
         time.sleep(POLL)
@@ -436,39 +587,63 @@ def run(port):
         modem = find_modem(device)
     if modem is None:
         save_marker(port, 'no-modemmanager', speed=speed)
-        log(4, f'{port}: ModemManager did not list the modem within {MM_WAIT:g} s; leaving it alone this boot')
+        log(4, f'{port}: ModemManager did not list the modem in time; leaving it alone this boot')
         return 0
     if modem['model'] not in MODELS:
         save_marker(port, 'other-model', model=modem['model'], speed=speed)
         log(6, f'{port}: model "{modem["model"]}" is not on the list ({", ".join(sorted(MODELS))}); leaving it alone')
         return 0
+    unit = unit_id(modem['equipment'])
+    if unit:
+        for name, other in markers():
+            if other.get('unit') == unit:
+                save_marker(port, 'unit-handled', unit=unit, speed=speed, other_port=name)
+                log(6, f'{port}: this unit was already handled this boot on {name} ({other.get("phase")}); nothing to do')
+                return 0
+        previous = load_record(unit).get('status')
+        if previous in ('failed', 'not-back'):
+            save_marker(port, 'gave-up', unit=unit, speed=speed)
+            log(4, f'{port}: an earlier attempt on this unit ended "{previous}"; leaving it alone '
+                   f'(delete {DATA}/{unit}.json to try again)')
+            return 0
     candidates = [tty for tty in at_ports(modem['ports']) if belongs_to(device, tty)]
     if not candidates:
         save_marker(port, 'no-at-port', model=modem['model'], speed=speed)
         log(4, f'{port}: ModemManager lists no AT port of this device ({", ".join(modem["ports"]) or "none"}); leaving it alone')
         return 0
 
-    base = dict(model=modem['model'], revision=modem['revision'], speed_before=speed)
+    base = dict(model=modem['model'], revision=modem['revision'], speed_before=speed, unit=unit,
+                port_paths=port_paths(device_dir))
     # Written before anything is asked of ModemManager: whatever happens next,
-    # this port is not tried a second time this boot.
+    # this port and this unit are not tried a second time this boot.
     save_marker(port, 'attempting', **base)
+    reason = holding_back()
+    if reason:
+        marker_path(port).unlink(missing_ok=True)
+        log(6, f'{port}: {reason} now; not asking ModemManager, checking again at the next appearance or boot')
+        return 0
+    before = rm520_devices() - {port}
     hold = Hold(modem['uid'])
     if not hold.held:
         save_marker(port, 'inhibit-failed', **base, reason=hold.reason)
         log(4, f'{port}: ModemManager would not release the modem ({hold.reason}); leaving it alone this boot')
         return 0
     try:
-        return exchange(port, candidates, base, modem)
+        reset = exchange(port, candidates, base, unit)
     finally:
         hold.release()
+    if reset:
+        watch_return(port, before, base, unit)
+    return 0
 
 
-def exchange(port, candidates, base, modem):
-    stream = streaming()
-    if stream:
+def exchange(port, candidates, base, unit):
+    """The AT part, under the hold. True when the reset was sent."""
+    reason = holding_back()
+    if reason:
         marker_path(port).unlink(missing_ok=True)
-        log(6, f'{port}: a stream started ({stream}); released the modem untouched, checking again at the next appearance or boot')
-        return 0
+        log(6, f'{port}: {reason}; released the modem untouched, checking again at the next appearance or boot')
+        return False
     node = None
     deadline = time.monotonic() + PORT_WAIT
     while node is None and time.monotonic() < deadline:
@@ -482,48 +657,112 @@ def exchange(port, candidates, base, modem):
     if node is None:
         save_marker(port, 'port-busy', **base)
         log(4, f'{port}: no free AT port among {", ".join(candidates)} while held; leaving it alone this boot')
-        return 0
+        return False
     try:
         at = AtPort(node)
     except OSError as error:
         save_marker(port, 'port-failed', **base, reason=str(error))
         log(4, f'{port}: cannot open {node.name} ({error}); leaving it alone this boot')
-        return 0
+        return False
     try:
         final, lines = at.command('AT+QCFG="usbspeed"')
         original = usbspeed_value(lines) if final == 'OK' else None
         if original is None:
             save_marker(port, 'read-failed', **base, reply=final)
             log(4, f'{port}: AT+QCFG="usbspeed" gave no value ({final or "timeout"}); nothing written')
-            return 0
+            return False
         base['original'] = original
         if original != DESIRED:
+            reason = holding_back()
+            if reason:
+                marker_path(port).unlink(missing_ok=True)
+                log(6, f'{port}: stored usbspeed "{original}", but {reason}; nothing written, released')
+                return False
             log(6, f'{port}: stored usbspeed "{original}" at {base["speed_before"]} Mbit/s; '
                    f'writing "{DESIRED}" (old value recorded)')
             save_marker(port, 'writing', **base)
-            record_original(modem, port, original)
+            save_record(unit, port, original=original, desired=DESIRED, status='writing',
+                        model=base['model'], revision=base['revision'])
             final, _ = at.command(f'AT+QCFG="usbspeed","{DESIRED}"')
             check_final, check_lines = at.command('AT+QCFG="usbspeed"')
             readback = usbspeed_value(check_lines) if check_final == 'OK' else None
             if final != 'OK' or readback != DESIRED:
                 save_marker(port, 'write-failed', **base, write=final, readback=readback)
+                save_record(unit, port, status='write-failed')
                 log(4, f'{port}: write answered {final or "nothing"}, read back "{readback}"; '
                        'no reset, leaving it this boot')
-                return 0
+                return False
         else:
             log(6, f'{port}: stored usbspeed is already "{DESIRED}" but the link is at '
                    f'{base["speed_before"]} Mbit/s, so it was never applied; resetting once')
-        save_marker(port, 'reset-sent', **base)
+            save_record(unit, port, original=original, desired=DESIRED, status='resetting',
+                        model=base['model'], revision=base['revision'])
+        reason = holding_back()
+        if reason:
+            save_marker(port, 'stored-no-reset', **base)
+            save_record(unit, port, status='stored-no-reset')
+            log(6, f'{port}: "{DESIRED}" is stored, but {reason}; no reset now, it applies at the next power-up')
+            return False
+        save_marker(port, 'reset-sent', **base, pid=os.getpid())
+        save_record(unit, port, status='reset-sent')
         final, _ = at.command('AT+CFUN=1,1', timeout=5)
+        if final is not None and final != 'OK':
+            save_marker(port, 'reset-refused', **base, reply=final)
+            save_record(unit, port, status='reset-refused')
+            log(4, f'{port}: AT+CFUN=1,1 answered {final}; the module did not restart, '
+                   f'"{DESIRED}" applies at its next power-up')
+            return False
         log(6, f'{port}: AT+CFUN=1,1 answered {final or "nothing (the module may already be restarting)"}; '
-               'module restarting, back on USB in about 20 s and with data in about a minute')
-        return 0
+               'watching for it to come back')
+        return True
     finally:
         at.close()
 
 
+def watch_return(port, before, base, unit):
+    """After the reset: the module must leave, then return; judge its new link."""
+    device_dir = SYSFS / 'bus/usb/devices' / port
+    deadline = time.monotonic() + min(LEAVE_WAIT, max(0.0, remaining()))
+    while device_dir.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if device_dir.exists():
+        save_marker(port, 'not-reset', **base)
+        save_record(unit, port, status='not-reset')
+        log(4, f'{port}: still enumerated {LEAVE_WAIT:g} s after AT+CFUN=1,1; the module did not restart, '
+               f'"{DESIRED}" applies at its next power-up')
+        return
+    paths = set(base.get('port_paths', []))
+    deadline = time.monotonic() + min(RETURN_WAIT, max(0.0, remaining()))
+    while time.monotonic() < deadline:
+        new = sorted(rm520_devices() - before)
+        matched = [n for n in new if paths & set(port_paths(SYSFS / 'bus/usb/devices' / n))]
+        pick = matched[0] if len(matched) == 1 else (new[0] if not matched and len(new) == 1 else None)
+        if pick:
+            speed = link_speed(SYSFS / 'bus/usb/devices' / pick)
+            if speed is None:
+                time.sleep(0.1)
+                continue
+            phase = 'verified' if speed <= USB2_MAX_MBPS else 'failed'
+            save_marker(port, phase, **base, speed=speed, returned_as=pick)
+            save_record(unit, port, status=phase, speed=speed)
+            if phase == 'verified':
+                log(6, f'{port}: back as {pick} at {speed} Mbit/s; done for this boot')
+            else:
+                log(4, f'{port}: back as {pick} still at {speed} Mbit/s after setting "{DESIRED}"; '
+                       'recorded as failed, not tried again')
+            return
+        if len(matched) > 1 or len(new) > 1 and not matched:
+            save_marker(port, 'returned-ambiguous', **base, candidates=new)
+            log(4, f'{port}: several RM520N devices appeared ({", ".join(new)}); cannot tell which one returned')
+            return
+        time.sleep(0.2)
+    save_marker(port, 'not-back', **base)
+    save_record(unit, port, status='not-back')
+    log(3, f'{port}: the module left after AT+CFUN=1,1 and has not come back within {RETURN_WAIT:g} s')
+
+
 def main(argv):
-    if len(argv) != 2 or not re.fullmatch(r'\d+-\d+(\.\d+)*', argv[1]):
+    if len(argv) != 2 or not KERNEL_NAME.fullmatch(argv[1]):
         print(f'usage: {TAG} <usb device kernel name, e.g. 5-1.4>', file=sys.stderr)
         return 2
     return run(argv[1])
