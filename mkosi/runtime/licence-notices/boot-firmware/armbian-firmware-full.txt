@@ -20513,6 +20513,295 @@ The layout generally follows upstream `linux-firmware` standards, with additiona
 > ⚠️ Note: Some firmware files are proprietary and distributed under their respective licenses. Redistribution is limited to non-commercial or usage-only contexts.
 
 ==============================================================================
+Historical linux-firmware origins
+==============================================================================
+armbian/firmware replaced each file below with bytes that differ from
+linux-firmware at the pinned commit, so the WHENCE above does not describe
+them. An earlier commit of the same linux-firmware repository has these exact
+bytes at the same path, and its WHENCE lists that path. For each file, this
+section names that commit, reproduces verbatim the WHENCE section that lists
+the path, gives the byte range of the group within it that lists the path, and
+gives the licence file that group names.
+
+armbian/firmware does not record where it took these bytes from, and this
+section does not establish that step. It records origins. It does not
+interpret the licence text, and it does not establish that the text's
+conditions are met.
+
+rtl_bt/rtl8852bu_fw.bin
+  sha256 f1e0427317f147a78606ede85f3f8977ed0ab85c41c6b525560e5bd5a51e5818, 74324 bytes, git blob 2636ae5a1a95cd12619638dcbb894227e2bdce76
+  armbian/firmware commit f50a2a21bcdb77a562b3976930c5c6b521a1df08: these bytes at this path (the package's copy)
+  linux-firmware commit eeed587f5b5032c39b3fb01cf8feffff46f9967c (pinned): other bytes at this path (git blob c45c68047017e5ec63cba74bacaa06304f8faed0)
+  linux-firmware commit 0061a2dde6c3ad74dd5dbfa0f645408bf846f9cd: these bytes at this path
+    subject: rtl_bt: Update RTL8852B BT USB firmware to 0xDBC6_B20F
+
+  WHENCE at that commit is git blob d108c96f98ba21c7a006c5d7fec71f3730fcc2bb.
+  The section below, bytes 111365 to 118053 of it, lists this path under
+  "Driver: btusb - Bluetooth USB driver". The Licence field "Redistributable.
+  See LICENCE.rtlwifi_firmware.txt for details." closes the group that lists
+  this path: bytes 116104 to 117347 of that WHENCE. The other Licence fields
+  in this section close other groups and do not apply to this path.
+
+==============================================================================
+linux-firmware WHENCE section for rtl_bt/rtl8852bu_fw.bin, at the commit above
+File: WHENCE (excerpt)
+Source: https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git at 0061a2dde6c3ad74dd5dbfa0f645408bf846f9cd
+Git blob of the whole file: d108c96f98ba21c7a006c5d7fec71f3730fcc2bb, 205550 bytes
+Excerpt: bytes 111365 to 118053 of that file (6689 bytes), reproduced verbatim from the next line
+==============================================================================
+Driver: btusb - Bluetooth USB driver
+
+File: intel/ibt-hw-37.7.bseq
+Version: 1316.02.00
+File: intel/ibt-hw-37.7.10-fw-1.80.2.3.d.bseq
+Version: BT_WilkinsPeak_B3_REL_87_0001
+File: intel/ibt-hw-37.7.10-fw-1.0.2.3.d.bseq
+Version: BT_WilkinsPeak_B3_REL_87_0001
+File: intel/ibt-hw-37.7.10-fw-1.80.1.2d.d.bseq
+Version: BT_WilkinsPeak_B5_REL_42_0001
+File: intel/ibt-hw-37.7.10-fw-1.0.1.2d.d.bseq
+Version: BT_WilkinsPeak_B5_REL_42_0001
+File: intel/ibt-hw-37.8.bseq
+Version: 1339_02.00
+File: intel/ibt-hw-37.8.10-fw-1.10.2.27.d.bseq
+Version: BT_StonePeak_C0_REL_59_0001
+File: intel/ibt-hw-37.8.10-fw-1.10.3.11.e.bseq
+Version: BT_StonePeak_D0_REL_50_0002
+File: intel/ibt-hw-37.8.10-fw-22.50.19.14.f.bseq
+Version: BT_StonePeak_D1_REL_67_1278
+File: intel/ibt-11-5.ddc
+Version: LnP/SfP_REL1294
+File: intel/ibt-11-5.sfi
+Version: BT_LightningPeak_REL0487
+File: intel/ibt-12-16.ddc
+Version: BT_WindStormPeak_REL1299
+File: intel/ibt-12-16.sfi
+Version: BT_WindStormPeak_REL1299
+File: intel/ibt-17-16-1.sfi
+Version: BT_JeffersonPeak_B0_B0_REL20332
+File: intel/ibt-17-16-1.ddc
+Version: BT_JeffersonPeak_B0_B0_REL20332
+File: intel/ibt-17-2.sfi
+Version: BT_JeffersonPeak_B0_B0_REL20332
+File: intel/ibt-17-2.ddc
+Version: BT_JeffersonPeak_B0_B0_REL20332
+File: intel/ibt-17-0-1.sfi
+Version: BT_JeffersonPeak_A0_B0_REL0201
+File: intel/ibt-17-0-1.ddc
+Version: BT_JeffersonPeak_A0_B0_REL0201
+File: intel/ibt-17-1.sfi
+Version: BT_JeffersonPeak_A0_B0_REL0201
+File: intel/ibt-17-1.ddc
+Version: BT_JeffersonPeak_A0_B0_REL0201
+File: intel/ibt-18-16-1.sfi
+Version: BT_ThunderPeak_B0_B0_REL20182
+File: intel/ibt-18-16-1.ddc
+Version: BT_ThunderPeak_B0_B0_REL20182
+File: intel/ibt-18-2.sfi
+Version: BT_ThunderPeak_B0_B0_REL20182
+File: intel/ibt-18-2.ddc
+Version: BT_ThunderPeak_B0_B0_REL20182
+File: intel/ibt-18-0-1.sfi
+Version: BT_ThunderPeak_A0_B0_REL0201
+File: intel/ibt-18-0-1.ddc
+Version: BT_ThunderPeak_A0_B0_REL0201
+File: intel/ibt-18-1.sfi
+Version: BT_ThunderPeak_A0_B0_REL0201
+File: intel/ibt-18-1.ddc
+Version: BT_ThunderPeak_A0_B0_REL0201
+File:intel/ibt-20-0-3.sfi
+Version: BT_CyclonePeak_A0_REL53392
+File:intel/ibt-20-0-3.ddc
+Version: BT_CyclonePeak_A0_REL53392
+File:intel/ibt-20-1-3.sfi
+Version: BT_CyclonePeak_A0_REL53392
+File:intel/ibt-20-1-3.ddc
+Version: BT_CyclonePeak_A0_REL53392
+File:intel/ibt-20-1-4.sfi
+Version: BT_CyclonePeak_A0_REL53392
+File:intel/ibt-20-1-4.ddc
+Version: BT_CyclonePeak_A0_REL53392
+File:intel/ibt-19-0-0.sfi
+Version: BT_Quasar_REL53392
+File:intel/ibt-19-0-0.ddc
+Version: BT_Quasar_REL53392
+File:intel/ibt-19-0-1.sfi
+Version: BT_Quasar_REL53392
+File:intel/ibt-19-0-1.ddc
+Version: BT_Quasar_REL53392
+File:intel/ibt-19-0-3.sfi
+Version: BT_Quasar_REL53263
+File:intel/ibt-19-0-3.ddc
+Version: BT_Quasar_REL53263
+File:intel/ibt-19-0-4.sfi
+Version: BT_HarrisonPeak_REL53392
+File:intel/ibt-19-0-4.ddc
+Version: BT_HarrisonPeak_REL53392
+File:intel/ibt-19-16-4.sfi
+Version: BT_HarrisonPeak_REL53392
+File:intel/ibt-19-16-4.ddc
+Version: BT_HarrisonPeak_REL53392
+File:intel/ibt-19-32-1.sfi
+Version: BT_HarrisonPeak_REL53392
+File:intel/ibt-19-32-1.ddc
+Version: BT_HarrisonPeak_REL53392
+File:intel/ibt-19-32-0.sfi
+Version: BT_HarrisonPeak_REL53392
+File:intel/ibt-19-32-0.ddc
+Version: BT_HarrisonPeak_REL53392
+File:intel/ibt-19-32-4.sfi
+Version: BT_HarrisonPeak_REL53392
+File:intel/ibt-19-32-4.ddc
+Version: BT_HarrisonPeak_REL53392
+File:intel/ibt-19-240-1.sfi
+Version: BT_HarrisonPeak_REL53392
+File:intel/ibt-19-240-1.ddc
+Version: BT_HarrisonPeak_REL53392
+File:intel/ibt-19-240-4.sfi
+Version: BT_HarrisonPeak_REL53392
+File:intel/ibt-19-240-4.ddc
+Version: BT_HarrisonPeak_REL53392
+File:intel/ibt-0041-0041.sfi
+Version: BT_TyphoonPeak_REL62562
+File:intel/ibt-0041-0041.ddc
+Version: BT_TyphoonPeak_REL62562
+File:intel/ibt-0040-0041.sfi
+Version: BT_Solar_GfP2_REL62562
+File:intel/ibt-0040-0041.ddc
+Version: BT_Solar_GfP2_REL62562
+File:intel/ibt-1040-0041.sfi
+Version: BT_SolarF_GfP2_REL62562
+File:intel/ibt-1040-0041.ddc
+Version: BT_SolarF_GfP2_REL62562
+
+File:intel/ibt-0040-1020.sfi
+Version: BT_Solar_JfP1_REL59564
+File:intel/ibt-0040-1020.ddc
+Version: BT_Solar_JfP1_REL59564
+File:intel/ibt-1040-1020.sfi
+Version: BT_SolarF_JfP1_REL59564
+File:intel/ibt-1040-1020.ddc
+Version: BT_SolarF_JfP1_REL59564
+
+File:intel/ibt-0040-2120.sfi
+Version: BT_Solar_JfP2_REL52159
+File:intel/ibt-0040-2120.ddc
+Version: BT_Solar_JfP2_REL52159
+File:intel/ibt-1040-2120.sfi
+Version: BT_SolarF_JfP2_REL59564
+File:intel/ibt-1040-2120.ddc
+Version: BT_SolarF_JfP2_REL59564
+
+File:intel/ibt-0040-4150.sfi
+Version: BT_Solar_JnP2_REL62562
+File:intel/ibt-0040-4150.ddc
+Version: BT_Solar_JnP2_REL62562
+File:intel/ibt-1040-4150.sfi
+Version: BT_SolarF_JnP2_REL62562
+File:intel/ibt-1040-4150.ddc
+Version: BT_SolarF_JnP2_REL62562
+
+Licence: Redistributable. See LICENCE.ibt_firmware for details
+
+File: rtl_bt/rtl8192ee_fw.bin
+File: rtl_bt/rtl8192eu_fw.bin
+File: rtl_bt/rtl8723a_fw.bin
+File: rtl_bt/rtl8723b_fw.bin
+File: rtl_bt/rtl8723bs_fw.bin
+File: rtl_bt/rtl8723bs_config-OBDA8723.bin
+Link: rtl_bt/rtl8723bs_config-OBDA0623.bin -> rtl8723bs_config-OBDA8723.bin
+File: rtl_bt/rtl8761a_fw.bin
+File: rtl_bt/rtl8761b_fw.bin
+File: rtl_bt/rtl8761b_config.bin
+File: rtl_bt/rtl8761bu_fw.bin
+File: rtl_bt/rtl8761bu_config.bin
+File: rtl_bt/rtl8812ae_fw.bin
+File: rtl_bt/rtl8821a_fw.bin
+Link: rtl_bt/rtl8821a_config.bin -> rtl8821c_config.bin
+File: rtl_bt/rtl8822b_fw.bin
+File: rtl_bt/rtl8822b_config.bin
+File: rtl_bt/rtl8723d_fw.bin
+File: rtl_bt/rtl8723d_config.bin
+File: rtl_bt/rtl8821c_fw.bin
+File: rtl_bt/rtl8821c_config.bin
+File: rtl_bt/rtl8821cs_fw.bin
+File: rtl_bt/rtl8821cs_config.bin
+File: rtl_bt/rtl8822cu_fw.bin
+File: rtl_bt/rtl8822cu_config.bin
+File: rtl_bt/rtl8822cs_fw.bin
+File: rtl_bt/rtl8822cs_config.bin
+File: rtl_bt/rtl8852au_fw.bin
+File: rtl_bt/rtl8852au_config.bin
+File: rtl_bt/rtl8852bu_fw.bin
+File: rtl_bt/rtl8852bu_config.bin
+File: rtl_bt/rtl8852cu_fw.bin
+File: rtl_bt/rtl8852cu_config.bin
+File: rtl_bt/rtl8851bu_fw.bin
+File: rtl_bt/rtl8851bu_config.bin
+
+Licence: Redistributable. See LICENCE.rtlwifi_firmware.txt for details.
+
+Found in vendor driver, linux_bt_usb_2.11.20140423_8723be.rar
+From https://github.com/troy-tan/driver_store
+Files rtl_bt/rtl8822b_* came directly from Realtek. These files are
+updated on April 14, 2017.
+Files rtl_bt/rtl8821c_* and rtl_bt/rtl8723d_* came directly from Realtek.
+File rtl_bt/rtl8822cu_fw.bin came directly from Realtek.
+updated on February 24, 2019
+File rtl_bt/rtl8822cu_fw.bin came directly from Realtek.
+updated on October 23, 2019
+File rtl_bt/rtl8822cu_config.bin came directly from Realtek.
+
+Found in vendor driver, 20200806_LINUX_BT_DRIVER_RTL8761B_COEX_v0202.zip
+File rtl_bt/rtl8761b_fw.bin
+File rtl_bt/rtl8761b_config.bin
+File rtl_bt/rtl8761bu_fw.bin
+File rtl_bt/rtl8761bu_config.bin
+
+Licence file named by that group: LICENCE.rtlwifi_firmware.txt at commit
+0061a2dde6c3ad74dd5dbfa0f645408bf846f9cd, git blob
+d70921f493795acb9af2a38f405193ba7a1b28a3. These are the same bytes as
+LICENSES/LICENCE.rtlwifi_firmware.txt, reproduced above from linux-firmware at
+eeed587f5b5032c39b3fb01cf8feffff46f9967c.
+
+rtw89/rtw8852b_fw-1.bin
+  sha256 2dc9f2fb587219ddace6120c4bf0543e4918ee0396b60ee8d0a6dcd690fb4b12, 1242808 bytes, git blob ab2f80819cbbeefe266e34f4d85470e588f87fbe
+  armbian/firmware commit f50a2a21bcdb77a562b3976930c5c6b521a1df08: these bytes at this path (the package's copy)
+  linux-firmware commit eeed587f5b5032c39b3fb01cf8feffff46f9967c (pinned): other bytes at this path (git blob 21fdfe0729a0939c86ec7ca773ad21336f2c3b90)
+  linux-firmware commit 2afd1423e4765eb691711ea5e78a19853cb2f6eb: these bytes at this path
+    subject: rtw89: 8852b: update fw to v0.29.29.5
+
+  WHENCE at that commit is git blob e32e5c587d28a911d5f57b0edfda0fde3dcee149.
+  The section below, bytes 94815 to 95115 of it, lists this path under
+  "Driver: rtw89 - Realtek 802.11ax WLAN driver for
+  RTL8851B/RTL8852A/RTL8852B/RTL8852C". The Licence field "Redistributable.
+  See LICENCE.rtlwifi_firmware.txt for details." closes the group that lists
+  this path: bytes 94901 to 95115 of that WHENCE.
+
+==============================================================================
+linux-firmware WHENCE section for rtw89/rtw8852b_fw-1.bin, at the commit above
+File: WHENCE (excerpt)
+Source: https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git at 2afd1423e4765eb691711ea5e78a19853cb2f6eb
+Git blob of the whole file: e32e5c587d28a911d5f57b0edfda0fde3dcee149, 242410 bytes
+Excerpt: bytes 94815 to 95115 of that file (301 bytes), reproduced verbatim from the next line
+==============================================================================
+Driver: rtw89 - Realtek 802.11ax WLAN driver for RTL8851B/RTL8852A/RTL8852B/RTL8852C
+
+File: rtw89/rtw8851b_fw.bin
+File: rtw89/rtw8852a_fw.bin
+File: rtw89/rtw8852b_fw.bin
+File: rtw89/rtw8852b_fw-1.bin
+File: rtw89/rtw8852c_fw.bin
+
+Licence: Redistributable. See LICENCE.rtlwifi_firmware.txt for details.
+
+Licence file named by that group: LICENCE.rtlwifi_firmware.txt at commit
+2afd1423e4765eb691711ea5e78a19853cb2f6eb, git blob
+d70921f493795acb9af2a38f405193ba7a1b28a3. These are the same bytes as
+LICENSES/LICENCE.rtlwifi_firmware.txt, reproduced above from linux-firmware at
+eeed587f5b5032c39b3fb01cf8feffff46f9967c.
+
+==============================================================================
 Firmware files of this package
 ==============================================================================
 Columns: shipped or removed (by the image build), class, path under
