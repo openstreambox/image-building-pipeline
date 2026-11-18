@@ -10,6 +10,9 @@
 # PR_SWAP is never requested: the proven correction is a port_type cycle, always
 # restoring dual, rather than writing power_role. A tmpfs marker suppresses the
 # cycle's partner-add recursion; a failed-attach marker prevents charger loops.
+# When those cycles are used up and the port still shows no partner while it is
+# the source, the recheck rebinds the port's FUSB302 once per boot: the chip can
+# sit toggling without ever raising an attach interrupt until it is reset.
 #
 # udev starts the systemd oneshot on partner and port add events. The boot enable
 # is a second coldplug path, so every run inspects CURRENT sysfs state and is safe
@@ -30,6 +33,9 @@
 #   CERALIVE_TYPEC_SETTLED_POWER_ROLE post-cycle readback (default power_role)
 #   CERALIVE_TYPEC_NOPARTNER_MAX      recheck cycles per boot with no partner (default 3)
 #   CERALIVE_TYPEC_NOPARTNER_SPACING  seconds between those cycles (default 30)
+#   CERALIVE_TYPEC_REPROBE_SETTLE     seconds after the last cycle before the
+#                                     one FUSB302 rebind (default 20)
+#   CERALIVE_TYPEC_I2C_DRIVERS_DIR    I2C drivers (default /sys/bus/i2c/drivers)
 
 set -uo pipefail
 
@@ -46,6 +52,9 @@ NOPARTNER_MAX="${CERALIVE_TYPEC_NOPARTNER_MAX:-3}"
 NOPARTNER_SPACING="${CERALIVE_TYPEC_NOPARTNER_SPACING:-30}"
 [[ "${NOPARTNER_MAX}" =~ ^[0-9]+$ && "${NOPARTNER_SPACING}" =~ ^[0-9]+$ ]] \
   || die "CERALIVE_TYPEC_NOPARTNER_MAX and _SPACING must be unsigned integers"
+REPROBE_SETTLE="${CERALIVE_TYPEC_REPROBE_SETTLE:-20}"
+[[ "${REPROBE_SETTLE}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_REPROBE_SETTLE must be an unsigned integer"
+I2C_DRIVERS_DIR="${CERALIVE_TYPEC_I2C_DRIVERS_DIR:-/sys/bus/i2c/drivers}"
 
 PORT_DIR="${CLASS_DIR}/${PORT}"
 PARTNER_DIR="${PORT_DIR}-partner"
@@ -69,6 +78,109 @@ active_role() {
   else
     printf '%s\n' "${raw//[[:space:]]/}"
   fi
+}
+
+# Every FUSB302 rebind decision is journaled under this tag.
+reprobe_log() { log "$1: fusb302-reprobe: $2"; }
+
+# reprobe_record <state> — the once-per-boot marker; false when it cannot be kept.
+reprobe_record() {
+  printf '%s %s\n' "$1" "$(date +%s)" >"${RUN_DIR}/reprobe"
+}
+
+# reprobe_defer <reason> — a condition that may still change; journal it only
+# when it differs from the last deferral so the ten-second recheck stays quiet.
+reprobe_defer() {
+  local previous=""
+  [[ ! -r "${RUN_DIR}/reprobe-deferred" ]] || previous="$(cat "${RUN_DIR}/reprobe-deferred")"
+  [[ "${previous}" != "$1" ]] || return 0
+  reprobe_log INFO "deferred: $1"
+  printf '%s\n' "$1" >"${RUN_DIR}/reprobe-deferred" \
+    || reprobe_log ERROR "cannot record the deferral"
+}
+
+# rock_fusb302_reprobe <last cycle epoch> <now epoch> — runs only from the Rock
+# recheck with back power present, the source preference set, no partner and
+# the no-partner cycles used up. It unbinds and rebinds the one I2C FUSB302 that
+# owns ${PORT} (the J11 data connector; the board's supply comes from the back
+# input), once per boot, then re-reads the partner. Module unload is avoided so
+# no other controller is touched.
+rock_fusb302_reprobe() {
+  local last="$1" now="$2" power dev name driver unbind bind deadline data
+  [[ ! -e "${RUN_DIR}/reprobe" ]] || return 0
+  (( now - last >= REPROBE_SETTLE )) || return 0
+
+  if [[ ! -r "${PORT_DIR}/preferred_role" ||
+        "$(active_role "${PORT_DIR}/preferred_role")" != source ]]; then
+    reprobe_defer "${PORT} source preference not active"
+    return 0
+  fi
+  power=unreadable
+  [[ ! -r "${POWER_ROLE}" ]] || power="$(active_role "${POWER_ROLE}")"
+  if [[ "${power}" != source ]]; then
+    reprobe_defer "${PORT} power_role=${power}, not source"
+    return 0
+  fi
+
+  dev="$(readlink -f -- "${PORT_DIR}/device" 2>/dev/null)" || dev=""
+  name="${dev##*/}"
+  driver=""
+  [[ -z "${dev}" || ! -L "${dev}/driver" ]] || driver="$(readlink -f -- "${dev}/driver")"
+  if [[ -z "${dev}" || ! "${name}" =~ ^[0-9]+-[0-9a-f]{4}$ ]]; then
+    reprobe_log INFO "skipped: ${PORT} is not backed by an I2C device"
+    reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
+    return 0
+  fi
+  if [[ "${driver##*/}" != fusb302 ]]; then
+    reprobe_log INFO "skipped: ${name} is bound to '${driver##*/}', not fusb302"
+    reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
+    return 0
+  fi
+  unbind="${I2C_DRIVERS_DIR}/fusb302/unbind"
+  bind="${I2C_DRIVERS_DIR}/fusb302/bind"
+
+  # Record before acting: a crash or kill mid-rebind must not earn another one.
+  if ! reprobe_record attempted; then
+    reprobe_log ERROR "cannot record the attempt — no rebind"
+    return 0
+  fi
+  if [[ -e "${PARTNER_DIR}" ]]; then
+    reprobe_log INFO "skipped: a partner appeared on ${PORT}"
+    reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
+    return 0
+  fi
+  reprobe_log INFO "${PORT} is source with no partner $((now - last))s after the last cycle: rebinding ${name}"
+  if ! printf '%s\n' "${name}" >"${unbind}"; then
+    reprobe_log ERROR "unbind of ${name} was rejected — not retrying this boot"
+    reprobe_record failed-unbind || reprobe_log ERROR "cannot record the failure"
+    return 0
+  fi
+  sleep "${POLL_INTERVAL}"
+  if ! printf '%s\n' "${name}" >"${bind}"; then
+    reprobe_log ERROR "bind of ${name} was rejected — retrying once"
+    sleep 1
+    if ! printf '%s\n' "${name}" >"${bind}"; then
+      reprobe_log ERROR "bind of ${name} was rejected again — ${PORT} stays without a controller until reboot"
+      reprobe_record failed-bind || reprobe_log ERROR "cannot record the failure"
+      return 0
+    fi
+  fi
+
+  deadline=$((SECONDS + WAIT_SECONDS))
+  while [[ ! -e "${PARTNER_DIR}" ]] && (( SECONDS < deadline )); do
+    sleep "${POLL_INTERVAL}"
+  done
+  if [[ -e "${PARTNER_DIR}" ]]; then
+    power=unknown data=unknown
+    [[ ! -r "${POWER_ROLE}" ]] || power="$(active_role "${POWER_ROLE}")"
+    [[ ! -r "${DATA_ROLE}" ]] || data="$(active_role "${DATA_ROLE}")"
+    reprobe_log INFO "partner found after rebinding ${name}: power_role=${power} data_role=${data}"
+    reprobe_record recovered || reprobe_log ERROR "cannot record the result"
+  else
+    reprobe_log WARNING "still no partner ${WAIT_SECONDS}s after rebinding ${name} — not retrying this boot"
+    reprobe_record no-partner || reprobe_log ERROR "cannot record the result"
+  fi
+  return 0
 }
 
 rock_back_power_correction() {
@@ -137,7 +249,11 @@ rock_back_power_correction() {
     [[ ! -r "${RUN_DIR}/nopartner" ]] || read -r tries last <"${RUN_DIR}/nopartner"
     [[ "${tries}" =~ ^[0-9]+$ && "${last}" =~ ^[0-9]+$ ]] || { tries=0; last=0; }
     now="$(date +%s)"
-    (( tries < NOPARTNER_MAX && now - last >= NOPARTNER_SPACING )) || return 0
+    if (( tries >= NOPARTNER_MAX )); then
+      rock_fusb302_reprobe "${last}" "${now}"
+      return 0
+    fi
+    (( now - last >= NOPARTNER_SPACING )) || return 0
     if ! mkdir -p "${RUN_DIR}" || ! printf '%s %s\n' "$((tries + 1))" "${now}" >"${RUN_DIR}/nopartner"; then
       log "ERROR: cannot record Rock no-partner try — no port_type write"
       return 0

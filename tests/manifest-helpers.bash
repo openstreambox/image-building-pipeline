@@ -1091,8 +1091,30 @@ typec_rock_fixture() {
   export CERALIVE_TYPEC_WAIT=0 CERALIVE_TYPEC_ADC_RETRY=0
 }
 
+# typec_rock_reprobe_fixture <root> — the field state the FUSB302 rebind targets:
+# back power present, J11 source with the source preference, no partner, all
+# no-partner cycles used 30 s ago, and port0 owned by I2C device 4-0022 bound to
+# fusb302.
+typec_rock_reprobe_fixture() {
+  local root="$1"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  printf '[source] sink\n' >"$root/typec/port0/power_role"
+  printf '[host] device\n' >"$root/typec/port0/data_role"
+  printf 'sink [source]\n' >"$root/typec/port0/preferred_role"
+  mkdir -p "$root/i2c/drivers/fusb302" "$root/i2c/devices/4-0022" "$root/run"
+  : >"$root/i2c/drivers/fusb302/unbind"
+  : >"$root/i2c/drivers/fusb302/bind"
+  ln -sfn "$root/i2c/drivers/fusb302" "$root/i2c/devices/4-0022/driver"
+  ln -sfn "$root/i2c/devices/4-0022" "$root/typec/port0/device"
+  printf '3 %s\n' "$(( $(date +%s) - 30 ))" >"$root/run/nopartner"
+  export CERALIVE_TYPEC_I2C_DRIVERS_DIR="$root/i2c/drivers"
+  export CERALIVE_TYPEC_MODE=recheck CERALIVE_TYPEC_POLL=0
+}
+
 # Observe the actual redirected writes; emulate only the kernel's post-cycle
-# detach and ADC changes, which regular files cannot produce themselves.
+# detach, the FUSB302 rebind and ADC changes, which regular files cannot
+# produce themselves.
 run_typec_rock() {
   bash -c '
     printf() {
@@ -1118,6 +1140,22 @@ run_typec_rock() {
           fi
           if [[ -f "$CERALIVE_TYPEC_IIO_DIR/accepted-port-type" ]]; then
             builtin printf "%s\n" "$2" >"$CERALIVE_TYPEC_IIO_DIR/accepted-port-type"
+          fi
+          ;;
+        "${CERALIVE_TYPEC_I2C_DRIVERS_DIR:-/nonexistent}/fusb302/unbind")
+          builtin printf "unbind %s\n" "$2" >>"$CERALIVE_TYPEC_IIO_DIR/i2c-writes"
+          [[ ! -e "$CERALIVE_TYPEC_IIO_DIR/reject-unbind" ]] || return 1
+          ;;
+        "${CERALIVE_TYPEC_I2C_DRIVERS_DIR:-/nonexistent}/fusb302/bind")
+          builtin printf "bind %s\n" "$2" >>"$CERALIVE_TYPEC_IIO_DIR/i2c-writes"
+          if [[ -e "$CERALIVE_TYPEC_IIO_DIR/reject-bind" ]] ||
+              [[ -e "$CERALIVE_TYPEC_IIO_DIR/reject-bind-once" &&
+                 ! -e "$CERALIVE_TYPEC_IIO_DIR/bind-rejected" ]]; then
+            touch "$CERALIVE_TYPEC_IIO_DIR/bind-rejected"
+            return 1
+          fi
+          if [[ -e "$CERALIVE_TYPEC_IIO_DIR/reprobe-attaches" ]]; then
+            mkdir -p "$CERALIVE_TYPEC_CLASS_DIR/port0-partner"
           fi
           ;;
       esac

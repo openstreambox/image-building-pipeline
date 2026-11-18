@@ -5848,6 +5848,23 @@ blind. Whether the camera then offers its webcam personality is the camera's own
 setting (the Pocket 3 enumerates `2ca3:0020` RNDIS/storage by default and `2ca3:0023` UVC
 in webcam mode); nothing in the image switches it.
 
+**Source port that never sees its partner (Rock 5B+, back power confirmed).** With a
+plain USB device on J11 through a C-to-A adapter, the FUSB302 can sit toggling in the
+source role with no attach interrupt at all, through every `port_type` cycle and across
+cold boots; one unbind/bind of the chip recovered it within seconds on the bench. When
+the no-partner cycles are used up, `CERALIVE_TYPEC_REPROBE_SETTLE` (20 s) have passed
+since the last one, the source preference is active, `power_role` reads `source` and
+still no partner exists, the recheck unbinds and rebinds the I2C device that owns
+`port0` (only when that device is bound to `fusb302`; no module unload, so no other
+controller is touched), then waits `CERALIVE_TYPEC_WAIT` for the partner. It runs at
+most once per boot (`/run/ceralive-typec/reprobe` records `attempted`, then
+`recovered`, `no-partner`, `skipped`, `failed-unbind` or `failed-bind`, written before
+the unbind), never in the boot-time run, never with a partner present and never
+without confirmed back power. Every decision is journaled with the `fusb302-reprobe:`
+tag; deferrals (source preference or role not yet source) log once per reason. A
+rejected bind is retried once. Guards: the "typec policy: fusb302 rebind …" cases in
+`runtime-services.bats` drive a mocked sysfs whose fake bind can create the partner.
+
 Guards: `runtime-services.bats` §18d "typec policy: …" (10 cases) — installer +
 enablement with the legacy script/unit asserted ABSENT, the udev handoff (both
 `typec_partner` and `typec_port` add events, exactly two `SYSTEMD_WANTS+=`, zero
