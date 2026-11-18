@@ -1,14 +1,17 @@
 [Unit]
 Description=Enroll in Tailscale from a key file on the BOOT partition
-# Runs when someone put an osb-tailscale*.key file (any case) on the card's BOOT drive
-# (readable on any PC after flashing), or when an earlier attempt left a pending
-# key on /data. ceralive-tailscale-enroll.timer re-runs it; the script itself backs
-# off (2 to 30 minutes) and gives up after a final refusal or 100 attempts.
+# Runs when someone put an osb-tailscale*.key file (any case) on the card's BOOT
+# drive (readable on any PC after flashing), when another local writer (CeraUI's
+# Remote access card) dropped incoming-authkey, or when an earlier attempt left a
+# pending key in the root-only /data/tailscale-enroll. ceralive-tailscale-enroll.timer
+# re-runs it; the script backs off (2 to 30 minutes) and gives up after a final
+# refusal or 100 attempts.
 ConditionPathExistsGlob=|/boot/[oO][sS][bB]-[tT][aA][iI][lL][sS][cC][aA][lL][eE]*
-ConditionPathExists=|/var/lib/tailscale/pending-authkey
+ConditionPathExists=|/data/tailscale-enroll/pending-authkey
+ConditionPathExists=|/data/tailscale-enroll/incoming-authkey
 After=local-fs.target ceralive-migrate-data.service network-online.target
 Wants=network-online.target
-RequiresMountsFor=/boot /var/lib/tailscale
+RequiresMountsFor=/boot /var/lib/tailscale /data/tailscale-enroll
 
 [Service]
 Type=oneshot

@@ -6231,41 +6231,49 @@ separate from kernel-pin acceptance; no fleet release is inferred.
 ## Remote-access enrollment contract (CeraUI Remote access card)
 
 Images built with `CERALIVE_TAILSCALE=1` (`mkosi/customize/postinst.d/remote-access.sh`)
-accept a Tailscale auth key from two writers: a key file on the FAT BOOT partition
-and CeraUI's Remote access card. Both hand the key to the same oneshot,
+accept a Tailscale auth key from two sources: a key file on the FAT BOOT partition,
+and CeraUI's Remote access card. Both are handled by one oneshot,
 `ceralive-tailscale-enroll.service` (`/usr/local/sbin/ceralive-tailscale-enroll`).
 These names, paths and formats are a stable interface; change them only together
 with the card.
 
 - **Detect:** the card offers "Join" on this path only when
   `systemctl show -p LoadState --value ceralive-tailscale-enroll.service` is `loaded`.
-- **State directory:** `/var/lib/tailscale` (bound from `/data/tailscale`, 0700,
-  owned by `ceralive-tailscale`, tailscaled's account). Writers run as root.
-  Root-owned files there are expected: the enroll unit runs as root and the root
-  `tailscale` CLI reads the key (`--auth-key=file:`); tailscaled never reads it.
-  Do not chown or chmod the directory; `StateDirectory=` in `tailscaled.service`
-  manages its owner.
-- **Join, in this order:**
-  1. optional `pending-hostname`: the machine name, `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
-     (the unit re-checks it and drops an invalid name);
-  2. `enroll-status` reset to `pending 0 0 new-key` (tmp file + rename);
-  3. `pending-authkey` last: the exact `tskey-auth-…` text, mode 0600, written to a
-     tmp file in the same directory and renamed into place;
-  4. `systemctl start --no-block ceralive-tailscale-enroll.service`. The unit's
-     condition (`pending-authkey` exists) is then true. `ceralive-tailscale-enroll.timer`
-     would also pick it up within about 2 minutes. `systemctl enable tailscaled` is
-     not needed: the image ships it enabled and conditioned on state or a pending key.
-- **Status:** `enroll-status` is one line, `<state> <attempts> <next-epoch> <reason>`,
-  with `<state>` one of `pending`, `joined`, `gave-up`. The reason is free text and
-  may contain spaces. `pending-authkey` exists while a key waits. `joined-once`
-  exists after the first successful join. A refused key, or 100 failed attempts
-  (back-off 2 to 30 minutes), ends in `gave-up`, removes the key, and on a box
-  that never joined also removes `tailscaled.state`.
+- **Directory:** `/data/tailscale-enroll`, root:root 0700, created at boot by
+  `ceralive-migrate-data`. It is deliberately not tailscaled's state directory
+  (`/var/lib/tailscale`, owned by the unprivileged `ceralive-tailscale` account), so
+  that account can never place files that root then follows.
+- **One writer:** only the enroll unit writes `pending-authkey`, `pending-hostname`,
+  `enroll-status` and `joined-once`. Every run holds `.lock` (flock) for its whole
+  duration.
+- **What the card writes (as root), in this order, each via a tmp file in the same
+  directory + rename:**
+  1. optional `incoming-hostname`: the machine name, `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
+     (an invalid name is dropped);
+  2. `incoming-authkey`: the exact `tskey-auth-…` text, mode 0600;
+
+  then `systemctl start --no-block ceralive-tailscale-enroll.service`. The card does
+  not touch any other file. Under the lock, the unit adopts the incoming pair, resets
+  `enroll-status` to `pending 0 0 new-key` itself and tries the key at once, ignoring
+  any back-off of an older key. A key that arrives while a run is mid-attempt is
+  adopted and tried when that attempt ends. The timer would also pick it up within
+  about 2 minutes. `systemctl enable tailscaled` is not needed: the image ships it
+  enabled and conditioned on state or a pending key. If a BOOT file and an incoming
+  key arrive together, the incoming key wins (it is adopted last).
+- **Rejected input:** anything that is not a regular file (links, FIFOs, devices) is
+  unlinked without being followed, and so is a file that does not hold exactly
+  one `tskey-auth-` key. No key text is logged.
+- **What the card reads:** `enroll-status`, one line
+  `<state> <attempts> <next-epoch> <reason>` with `<state>` one of `pending`,
+  `joined`, `gave-up`. The reason is free text and may contain spaces, so parse the
+  first field. `pending-authkey` exists while a key waits, and `joined-once` exists
+  after the first successful join. A refused key, or 100 failed attempts (back-off
+  2 to 30 minutes), ends in `gave-up`. That removes the key, and on a box that
+  never joined also `/var/lib/tailscale/tailscaled.state`.
 - **Auto-update:** `tailscale up` resets the auto-update preference to unset (measured
   on 1.104.7). After any `up` the card runs
   `tailscale set --auto-update=false --update-check=false`. tailscaled also re-applies
   it at every start (`ExecStartPost`).
 - **Loopback fence:** tailnet peers reach only TCP 18080 (CeraUI backend) on the box
-  (`tailscaled-loopback.nft`, matched by tailscaled's account). Tailscale SSH sessions run as
-  `ceralive-tailscale` and become root with `sudo`.
-
+  (`tailscaled-loopback.nft`, matched by tailscaled's account). Tailscale SSH sessions
+  run as `ceralive-tailscale` and become root with `sudo`.

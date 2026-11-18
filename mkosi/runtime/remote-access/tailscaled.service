@@ -2,13 +2,14 @@
 Description=Tailscale node agent (remote access, idle until enrolled)
 Documentation=https://tailscale.com/docs/
 # Enabled in the image but inert: it starts only once the box holds Tailscale
-# state or a pending enrollment key, both on /data so they survive A/B updates.
+# state or a pending enrollment key (root-only /data/tailscale-enroll), both on
+# /data so they survive A/B updates.
 # A box that is never enrolled never runs it.
 ConditionPathExists=|/var/lib/tailscale/tailscaled.state
-ConditionPathExists=|/var/lib/tailscale/pending-authkey
+ConditionPathExists=|/data/tailscale-enroll/pending-authkey
 Wants=network-pre.target
 After=network-pre.target NetworkManager.service ceralive-migrate-data.service nftables.service
-RequiresMountsFor=/var/lib/tailscale
+RequiresMountsFor=/var/lib/tailscale /data/tailscale-enroll
 
 [Service]
 # Not root: the loopback allowlist matches this account's sockets (meta skuid).

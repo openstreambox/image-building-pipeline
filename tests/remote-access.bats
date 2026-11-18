@@ -52,8 +52,8 @@ module() { # env assignments... -> runs setup_remote_access with stubbed enable_
   local unit="$T/root/etc/systemd/system/tailscaled.service"
   grep -q -- '--tun=userspace-networking' "$unit"
   grep -q '^ConditionPathExists=|/var/lib/tailscale/tailscaled.state$' "$unit"
-  grep -q '^ConditionPathExists=|/var/lib/tailscale/pending-authkey$' "$unit"
-  grep -q '^RequiresMountsFor=/var/lib/tailscale$' "$unit"
+  grep -q '^ConditionPathExists=|/data/tailscale-enroll/pending-authkey$' "$unit"
+  grep -q '^RequiresMountsFor=/var/lib/tailscale /data/tailscale-enroll$' "$unit"
   grep -q -- '--no-logs-no-support' "$unit"
   grep -qx 'ExecStartPost=-+/usr/local/bin/tailscale --socket=/run/tailscale/tailscaled.sock set --auto-update=false --update-check=false' "$unit"
   grep -qx 'ReadOnlyPaths=/usr/local/bin /usr/local/sbin' "$unit"
@@ -195,7 +195,7 @@ enroll_env() {
   chmod +x "$T/bin/systemctl" "$T/bin/tailscale"
 }
 enroll() {
-  run env PATH="$T/bin:$PATH" CERALIVE_TS_BOOT_DIR="$T/boot" CERALIVE_TS_STATE_DIR="$T/state" \
+  run env PATH="$T/bin:$PATH" CERALIVE_TS_BOOT_DIR="$T/boot" CERALIVE_TS_STATE_DIR="$T/state" CERALIVE_TS_ENROLL_DIR="$T/enroll" \
     CERALIVE_TS_CLI="$T/bin/tailscale" SYSTEMCTL_BIN="$T/bin/systemctl" CERALIVE_TS_SOCKET="$T/none.sock" \
     CERALIVE_TS_SOCKET_WAIT=0 "$@" bash "$ENROLL"
 }
@@ -209,12 +209,12 @@ no_key_anywhere() { # the key text appears in no file on BOOT and in no output
   enroll CERALIVE_TS_NOW=1000
   [ "$status" -eq 0 ]
   [ -z "$(ls -A "$T/boot")" ]
-  [ ! -e "$T/state/pending-authkey" ]
+  [ ! -e "$T/enroll/pending-authkey" ]
   grep -q 'systemctl start tailscaled.service' "$T/calls"
-  grep -q -- "up --auth-key=file:$T/state/pending-authkey --ssh --accept-risk=lose-ssh --accept-dns=false --accept-routes=false --timeout=90s --hostname=white" "$T/calls"
+  grep -q -- "up --auth-key=file:$T/enroll/pending-authkey --ssh --accept-risk=lose-ssh --accept-dns=false --accept-routes=false --timeout=90s --hostname=white" "$T/calls"
   [ "$(tail -n1 "$T/calls")" = "tailscale --socket=$T/none.sock set --auto-update=false --update-check=false" ]
-  [ "$(cut -d' ' -f1 "$T/state/enroll-status")" = joined ]
-  [ -e "$T/state/joined-once" ]
+  [ "$(cut -d' ' -f1 "$T/enroll/enroll-status")" = joined ]
+  [ -e "$T/enroll/joined-once" ]
   no_key_anywhere
 }
 
@@ -224,18 +224,18 @@ no_key_anywhere() { # the key text appears in no file on BOOT and in no output
   enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="connection refused"
   [ "$status" -ne 0 ]
   [ -z "$(ls -A "$T/boot")" ]
-  [ "$(cat "$T/state/pending-authkey")" = "$KEY" ]
-  [ "$(stat -c %a "$T/state/pending-authkey")" = 600 ] && [ "$(stat -c %a "$T/state")" = 700 ]
-  [ "$(cat "$T/state/enroll-status")" = "pending 1 1120 retry" ]
+  [ "$(cat "$T/enroll/pending-authkey")" = "$KEY" ]
+  [ "$(stat -c %a "$T/enroll/pending-authkey")" = 600 ] && [ "$(stat -c %a "$T/enroll")" = 700 ]
+  [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 retry" ]
   ! grep -q -- '--hostname' "$T/calls"
   rm "$T/calls"
   enroll CERALIVE_TS_NOW=1060          # inside the back-off window: no attempt
   [ "$status" -eq 0 ] && [ ! -e "$T/calls" ]
   enroll CERALIVE_TS_NOW=1130 TS_RC=1 TS_OUT="no network"
-  [ "$(cat "$T/state/enroll-status")" = "pending 2 1370 retry" ]
+  [ "$(cat "$T/enroll/enroll-status")" = "pending 2 1370 retry" ]
   enroll CERALIVE_TS_NOW=1400
   [ "$status" -eq 0 ]
-  [ ! -e "$T/state/pending-authkey" ]
+  [ ! -e "$T/enroll/pending-authkey" ]
   no_key_anywhere
 }
 
@@ -245,12 +245,12 @@ no_key_anywhere() { # the key text appears in no file on BOOT and in no output
   printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
   enroll CERALIVE_TS_NOW=1000 CERALIVE_TS_MAX_ATTEMPTS=2
   [ "$status" -ne 0 ]
-  [ "$(cat "$T/state/enroll-status")" = "pending 1 1120 trying" ]
+  [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 trying" ]
   enroll CERALIVE_TS_NOW=1050 CERALIVE_TS_MAX_ATTEMPTS=2
-  [ "$(cat "$T/state/enroll-status")" = "pending 1 1120 trying" ]   # backing off, no attempt
+  [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 trying" ]   # backing off, no attempt
   enroll CERALIVE_TS_NOW=1200 CERALIVE_TS_MAX_ATTEMPTS=2
-  [[ "$(cat "$T/state/enroll-status")" == "gave-up 2 0 tailscaled did not start after 2 attempts" ]]
-  [ ! -e "$T/state/pending-authkey" ]
+  [[ "$(cat "$T/enroll/enroll-status")" == "gave-up 2 0 tailscaled did not start after 2 attempts" ]]
+  [ ! -e "$T/enroll/pending-authkey" ]
   ! grep -q ' up ' "$T/calls"
 }
 
@@ -260,10 +260,10 @@ no_key_anywhere() { # the key text appears in no file on BOOT and in no output
   mkdir -p "$T/state"; : >"$T/state/tailscaled.state"
   enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="backend error: invalid key: API key does not exist"
   [ "$status" -ne 0 ]
-  [ ! -e "$T/state/pending-authkey" ] && [ ! -e "$T/state/pending-hostname" ]
+  [ ! -e "$T/enroll/pending-authkey" ] && [ ! -e "$T/enroll/pending-hostname" ]
   [ ! -e "$T/state/tailscaled.state" ]
   grep -q 'systemctl stop tailscaled.service' "$T/calls"
-  [[ "$(cat "$T/state/enroll-status")" == "gave-up 1 0 the control server refused the key" ]]
+  [[ "$(cat "$T/enroll/enroll-status")" == "gave-up 1 0 the control server refused the key" ]]
   [[ "$output" == *"gave up Tailscale enrollment"* ]]
   rm "$T/calls"; enroll CERALIVE_TS_NOW=5000
   [ ! -e "$T/calls" ]                  # nothing left to retry
@@ -271,13 +271,13 @@ no_key_anywhere() { # the key text appears in no file on BOOT and in no output
 
 @test "retries are capped, and a box that joined before keeps its state" {
   enroll_env
-  mkdir -p "$T/state"; : >"$T/state/tailscaled.state"; : >"$T/state/joined-once"
+  mkdir -p "$T/state" "$T/enroll"; : >"$T/state/tailscaled.state"; : >"$T/enroll/joined-once"
   printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
   enroll CERALIVE_TS_NOW=1000 CERALIVE_TS_MAX_ATTEMPTS=2 TS_RC=1 TS_OUT="timeout"
   enroll CERALIVE_TS_NOW=2000 CERALIVE_TS_MAX_ATTEMPTS=2 TS_RC=1 TS_OUT="timeout"
   [ "$status" -ne 0 ]
-  [[ "$(cat "$T/state/enroll-status")" == "gave-up 2 0 no success after 2 attempts" ]]
-  [ ! -e "$T/state/pending-authkey" ]
+  [[ "$(cat "$T/enroll/enroll-status")" == "gave-up 2 0 no success after 2 attempts" ]]
+  [ ! -e "$T/enroll/pending-authkey" ]
   [ -e "$T/state/tailscaled.state" ]
   ! grep -q 'systemctl stop' "$T/calls"
 }
@@ -291,7 +291,7 @@ no_key_anywhere() { # the key text appears in no file on BOOT and in no output
   ! grep -rq 'SECRETSECRET' "$T/boot"
   grep -q 'osb-tailscale-black.key' "$T/boot/TAILSCALE-KEY-REJECTED.txt"
   [[ "$output" != *SECRETSECRET* ]]
-  [ ! -e "$T/state/pending-authkey" ] && [ ! -e "$T/calls" ]
+  [ ! -e "$T/enroll/pending-authkey" ] && [ ! -e "$T/calls" ]
 }
 
 @test "two key files are both removed and neither is used" {
@@ -301,29 +301,129 @@ no_key_anywhere() { # the key text appears in no file on BOOT and in no output
   enroll
   [ "$status" -eq 0 ]
   [ "$(ls -A "$T/boot")" = TAILSCALE-KEY-REJECTED.txt ]
-  [ ! -e "$T/state/pending-authkey" ] && [ ! -e "$T/calls" ]
+  [ ! -e "$T/enroll/pending-authkey" ] && [ ! -e "$T/calls" ]
   no_key_anywhere
 }
 
-@test "contract: a root writer's pending key and name are used, and a bad name is ignored" {
+card_drop() { # key name: the documented writer protocol (tmp + rename, name first)
+  mkdir -p "$T/enroll"; chmod 700 "$T/enroll"
+  ( umask 077
+    if [ -n "$2" ]; then printf '%s' "$2" >"$T/enroll/.n.tmp"; mv "$T/enroll/.n.tmp" "$T/enroll/incoming-hostname"; fi
+    printf '%s' "$1" >"$T/enroll/.k.tmp"; mv "$T/enroll/.k.tmp" "$T/enroll/incoming-authkey" )
+}
+
+@test "contract: a writer's incoming key and name are adopted and used; a bad name is ignored" {
   enroll_env
-  mkdir -p "$T/state"; chmod 700 "$T/state"
-  ( umask 077; printf 'black' >"$T/state/pending-hostname"
-    printf 'pending 0 0 new-key\n' >"$T/state/enroll-status"
-    printf '%s' "$KEY" >"$T/state/.pk.tmp"; mv "$T/state/.pk.tmp" "$T/state/pending-authkey" )
+  card_drop "$KEY" black
   enroll CERALIVE_TS_NOW=1000
   [ "$status" -eq 0 ]
   grep -q -- "--hostname=black" "$T/calls"
-  [ "$(cut -d' ' -f1 "$T/state/enroll-status")" = joined ]
-  [ ! -e "$T/state/pending-authkey" ] && [ ! -e "$T/state/pending-hostname" ]
+  [ "$(cut -d' ' -f1 "$T/enroll/enroll-status")" = joined ]
+  [ -z "$(ls "$T/enroll")" ] || [ "$(ls "$T/enroll")" = "$(printf 'enroll-status\njoined-once')" ]
   rm "$T/calls"
-  ( umask 077; printf 'Bad Name;rm' >"$T/state/pending-hostname"
-    printf 'pending 0 0 new-key\n' >"$T/state/enroll-status"
-    printf '%s' "$KEY" >"$T/state/pending-authkey" )
+  card_drop "$KEY" 'Bad Name;rm'
   enroll CERALIVE_TS_NOW=2000
   [ "$status" -eq 0 ]
   ! grep -q -- '--hostname' "$T/calls"
   no_key_anywhere
+}
+
+@test "contract: a new key from a writer resets a backing-off key and is tried at once" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="timeout"
+  [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 retry" ]
+  rm "$T/calls"
+  card_drop tskey-auth-kNEWNEWNEW-2222222222 ""
+  enroll CERALIVE_TS_NOW=1010          # inside the old back-off window
+  [ "$status" -eq 0 ]
+  grep -q ' up ' "$T/calls"
+  [ "$(cut -d' ' -f1-2 "$T/enroll/enroll-status")" = "joined 1" ]
+}
+
+race_env() { # stub whose `up` records the key it got, then waits, then fails with $1
+  enroll_env
+  cat >"$T/bin/tailscale" <<STUB
+#!/bin/sh
+case "\$*" in *" up "*)
+  f="\${*##*auth-key=file:}"; f="\${f%% *}"; echo "used \$(cut -c12-20 "\$f")" >>"$T/used"
+  [ "\$(cut -c12-14 "\$f")" = OLD ] && { sleep 2; echo "$1" >&2; exit 1; }
+  exit 0;; esac
+exit 0
+STUB
+  chmod +x "$T/bin/tailscale"
+  mkdir -p "$T/enroll"; chmod 700 "$T/enroll"
+  printf 'tskey-auth-OLDOLDOLD-1111111111' >"$T/enroll/pending-authkey"
+  printf 'pending 3 0 retry\n' >"$T/enroll/enroll-status"
+}
+race() { # old-up-output -> run, drop the card's new key mid-attempt, wait
+  race_env "$1"
+  ( env PATH="$T/bin:$PATH" CERALIVE_TS_BOOT_DIR="$T/boot" CERALIVE_TS_STATE_DIR="$T/state" CERALIVE_TS_ENROLL_DIR="$T/enroll" \
+      CERALIVE_TS_CLI="$T/bin/tailscale" SYSTEMCTL_BIN="$T/bin/systemctl" CERALIVE_TS_SOCKET="$T/none.sock" \
+      CERALIVE_TS_SOCKET_WAIT=0 CERALIVE_TS_NOW=5000 bash "$ENROLL" >"$T/run.log" 2>&1 ) &
+  local pid=$!
+  sleep 1
+  card_drop tskey-auth-NEWNEWNEW-2222222222 white
+  wait "$pid" || true
+}
+
+@test "race: a writer's key arriving during a refused attempt is used, not shredded" {
+  race "backend error: invalid key: unable to validate API key"
+  [ "$(cat "$T/used")" = "$(printf 'used OLDOLDOLD\nused NEWNEWNEW')" ]
+  [ "$(cut -d' ' -f1-2 "$T/enroll/enroll-status")" = "joined 1" ]
+  grep -q -- '--hostname=white' "$T/calls" 2>/dev/null || grep -q 'for machine name white' "$T/run.log"
+}
+
+@test "race: a writer's key arriving during a transient failure starts fresh, not with old attempts" {
+  race "timeout waiting for Tailscale service to enter a Running state"
+  [ "$(cat "$T/used")" = "$(printf 'used OLDOLDOLD\nused NEWNEWNEW')" ]
+  [ "$(cut -d' ' -f1-2 "$T/enroll/enroll-status")" = "joined 1" ]
+}
+
+@test "two runs never overlap: the second waits for the lock" {
+  race_env "timeout"
+  ( env PATH="$T/bin:$PATH" CERALIVE_TS_BOOT_DIR="$T/boot" CERALIVE_TS_STATE_DIR="$T/state" CERALIVE_TS_ENROLL_DIR="$T/enroll" \
+      CERALIVE_TS_CLI="$T/bin/tailscale" SYSTEMCTL_BIN="$T/bin/systemctl" CERALIVE_TS_SOCKET="$T/none.sock" \
+      CERALIVE_TS_SOCKET_WAIT=0 CERALIVE_TS_NOW=5000 bash "$ENROLL" >/dev/null 2>&1 ) &
+  local pid=$!
+  sleep 1
+  enroll CERALIVE_TS_NOW=5000 CERALIVE_TS_LOCK_WAIT=0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"another enrollment run holds the lock"* ]]
+  wait "$pid" || true
+  [ "$(grep -c used "$T/used")" -eq 1 ]
+}
+
+@test "links and non-regular files are never followed, read or shredded through" {
+  enroll_env
+  mkdir -p "$T/enroll"; chmod 700 "$T/enroll"
+  printf 'secret-root-only-content\n' >"$T/victim"; printf 'victim-name\n' >"$T/name"
+  ln -s "$T/victim" "$T/enroll/pending-authkey"; ln -s "$T/name" "$T/enroll/pending-hostname"
+  enroll CERALIVE_TS_NOW=1000 CERALIVE_TS_MAX_ATTEMPTS=1
+  [ "$(cat "$T/victim")" = secret-root-only-content ]
+  [ ! -e "$T/enroll/pending-authkey" ] && [ ! -L "$T/enroll/pending-authkey" ]
+  [ ! -e "$T/calls" ] || ! grep -q ' up ' "$T/calls"
+  ln -s "$T/victim" "$T/enroll/incoming-authkey"
+  mkfifo "$T/enroll/incoming-hostname"
+  enroll CERALIVE_TS_NOW=2000
+  [ "$(cat "$T/victim")" = secret-root-only-content ]
+  [ ! -L "$T/enroll/incoming-authkey" ] && [ ! -e "$T/enroll/incoming-hostname" ]
+  [ ! -e "$T/calls" ] || ! grep -q ' up ' "$T/calls"
+  ln -s "$T/victim" "$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=3000
+  [ "$(cat "$T/victim")" = secret-root-only-content ] && [ ! -L "$T/boot/osb-tailscale.key" ]
+  ln -s "$T" "$T/enroll2"
+  run env PATH="$T/bin:$PATH" CERALIVE_TS_BOOT_DIR="$T/boot" CERALIVE_TS_ENROLL_DIR="$T/enroll2" bash "$ENROLL"
+  [ "$status" -ne 0 ] && [[ "$output" == *"not a plain directory"* ]]
+}
+
+@test "a pending key that is not a tskey-auth key is removed without a join attempt" {
+  enroll_env
+  mkdir -p "$T/enroll"; chmod 700 "$T/enroll"
+  printf 'tskey-client-kSECRETSECRET-0123456789' >"$T/enroll/pending-authkey"
+  enroll CERALIVE_TS_NOW=1000
+  [ ! -e "$T/enroll/pending-authkey" ]
+  [ ! -e "$T/calls" ]
 }
 
 @test "no key file and nothing pending is a no-op" {
@@ -361,7 +461,7 @@ no_key_anywhere() { # the key text appears in no file on BOOT and in no output
   # the first-boot migrate body creates /data/tailscale 0700 only when tailscaled ships
   local body
   body="$(awk '/cat >>\/usr\/local\/sbin\/ceralive-migrate-data <<.EOF./{on=1; next} on && /^EOF$/{exit} on' "$p")"
-  [[ "$body" == *'if [ -x /usr/local/sbin/tailscaled ]; then'*'mkdir -p "$DATA/tailscale"'*'chmod 0700 "$DATA/tailscale"'* ]]
+  [[ "$body" == *'if [ -x /usr/local/sbin/tailscaled ]; then'*'mkdir -p "$DATA/tailscale"'*'chmod 0700 "$DATA/tailscale"'*'mkdir -p "$DATA/tailscale-enroll"'*'chown 0:0 "$DATA/tailscale-enroll"'*'chmod 0700 "$DATA/tailscale-enroll"'* ]]
 }
 
 # --- host-side validation ------------------------------------------------------------
