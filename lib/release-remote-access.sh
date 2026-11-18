@@ -59,8 +59,8 @@ release_remote_access_resolve() {
   if [[ "${password}" == no && "${CERALIVE_DEBUG_IMAGE:-0}" == 1 ]]; then
     release_remote_access_die "key-only SSH cannot be combined with the lab debug image (password login)"; return 1
   fi
-  if [[ "${password}" == no && -z "${file}" && "${tailscale}" != 1 ]]; then
-    release_remote_access_die "key-only SSH without seeded keys or Tailscale leaves no way in; set CERALIVE_SSH_ROOT_KEYS_FILE"; return 1
+  if [[ "${password}" == no && -z "${file}" ]]; then
+    release_remote_access_die "key-only SSH without seeded keys leaves no LAN way in (Tailscale may never be enrolled); set CERALIVE_SSH_ROOT_KEYS_FILE"; return 1
   fi
   if [[ -n "${file}" ]]; then
     release_remote_access_check_keys "${file}" || return 1

@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
 #
 # Opt-in remote access for release images: pinned Tailscale (inert until a key
-# file on BOOT enrolls it), its /data state, seeded SSH keys and key-only sshd.
-# Offline: fake tarballs, stub tailscale/systemctl, temporary roots.
+# file on BOOT enrolls it), its loopback allowlist, its /data state, seeded SSH
+# keys and key-only sshd. Offline: fake tarballs, stub tailscale/systemctl,
+# temporary roots, and an unprivileged network namespace for the nft rule.
 
 setup() {
   TESTS_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")" && pwd)"
@@ -53,7 +54,67 @@ module() { # env assignments... -> runs setup_remote_access with stubbed enable_
   grep -q '^ConditionPathExists=|/var/lib/tailscale/tailscaled.state$' "$unit"
   grep -q '^ConditionPathExists=|/var/lib/tailscale/pending-authkey$' "$unit"
   grep -q '^RequiresMountsFor=/var/lib/tailscale$' "$unit"
+  grep -qx 'ExecStartPre=/usr/sbin/nft -f /usr/lib/ceralive/tailscaled-loopback.nft' "$unit"
+  grep -q -- '--no-logs-no-support' "$unit"
+  grep -qx 'ExecStartPost=-/usr/local/bin/tailscale --socket=/run/tailscale/tailscaled.sock set --auto-update=false --update-check=false' "$unit"
+  grep -qx 'ReadOnlyPaths=/usr/local/bin /usr/local/sbin' "$unit"
+  grep -qx 'ExecStopPost=/usr/local/sbin/tailscaled --tun=userspace-networking --cleanup' "$unit"
+  cmp "$SRC/tailscaled-loopback.nft" "$T/root/usr/lib/ceralive/tailscaled-loopback.nft"
   [ ! -e "$T/root/etc/ssh/sshd_config.d/05-ceralive-key-only.conf" ]
+}
+
+@test "Tailscale is refused on images without the FAT /boot (x86)" {
+  module CERALIVE_TAILSCALE=1 TAILSCALE_ARCH=amd64
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"needs the arm64 board layout"* ]]
+  [ ! -e "$T/root/usr/local/sbin/tailscaled" ]
+}
+
+@test "the enrollment unit starts for any case of the key file name" {
+  grep -qx 'ConditionPathExistsGlob=|/boot/\[oO\]\[sS\]\[bB\]-\[tT\]\[aA\]\[iI\]\[lL\]\[sS\]\[cC\]\[aA\]\[lL\]\[eE\]\*' "$SRC/ceralive-tailscale-enroll.service"
+}
+
+@test "units pass systemd-analyze verify apart from binaries absent on the build host" {
+  command -v systemd-analyze >/dev/null || skip "no systemd-analyze"
+  run systemd-analyze verify --man=no "$SRC"/*.service "$SRC"/*.timer
+  local line
+  while IFS= read -r line; do
+    [[ -z "$line" || "$line" == *"is not executable: No such file or directory"* ]] || { echo "unexpected: $line"; return 1; }
+  done <<<"$output"
+}
+
+# --- loopback allowlist: real nft in an unprivileged user + network namespace ---
+nft_case() { # cgroup-path level -> prints "<port> connected|refused" for tcp 1935, 18080 and 53
+  local path="$1" level="$2"
+  sed -e "s#level 2 \"system.slice/tailscaled.service\"#level ${level} \"${path}\"#" "$SRC/tailscaled-loopback.nft" >"$T/lo.nft"
+  grep -q "level ${level} " "$T/lo.nft"
+  unshare -rn bash -c 'ip link set lo up && nft -f "$1" && python3 - <<PY
+import socket, threading
+for p in (1935, 18080, 53):
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", p)); s.listen(5)
+    threading.Thread(target=lambda s=s: [s.accept() for _ in range(3)], daemon=True).start()
+for p in (1935, 18080, 53):
+    c = socket.socket(); c.settimeout(2)
+    try:
+        c.connect(("127.0.0.1", p)); print(p, "connected")
+    except OSError:
+        print(p, "refused")
+PY' _ "$T/lo.nft"
+}
+
+@test "tailscaled's loopback re-dials reach only the CeraUI backend and DNS" {
+  command -v nft >/dev/null && unshare -rn true 2>/dev/null || skip "needs nft and user namespaces"
+  local cg level
+  cg="$(cut -d: -f3 /proc/self/cgroup)"; cg="${cg#/}"
+  level="$(awk -F/ '{print NF}' <<<"$cg")"
+  # rule bound to this test's own cgroup = "we are tailscaled"
+  run nft_case "$cg" "$level"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1935 refused"* && "$output" == *"18080 connected"* && "$output" == *"53 connected"* ]]
+  # rule bound to another cgroup: everything else on the box is untouched
+  run nft_case "system.slice" 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1935 connected"* && "$output" == *"18080 connected"* ]]
 }
 
 @test "a checksum mismatch fails the build closed" {
@@ -89,10 +150,12 @@ module() { # env assignments... -> runs setup_remote_access with stubbed enable_
 }
 
 # --- BOOT key-file enrollment -------------------------------------------------
+KEY=tskey-auth-kAbC123-XyZ987654321
 enroll_env() {
   mkdir -p "$T/boot" "$T/bin"
   printf '#!/bin/sh\necho "systemctl $*" >>"%s/calls"\n' "$T" >"$T/bin/systemctl"
-  printf '#!/bin/sh\necho "tailscale $*" >>"%s/calls"\ncase "$*" in *"auth-key=file:"*) cat "${*##*auth-key=file:}" 2>/dev/null | head -c0;; esac\nexit "${TS_RC:-0}"\n' "$T" >"$T/bin/tailscale"
+  # stub CLI: logs its arguments; `up` prints $TS_OUT and exits $TS_RC
+  printf '#!/bin/sh\necho "tailscale $*" >>"%s/calls"\ncase "$*" in *" up "*) [ -n "$TS_OUT" ] && echo "$TS_OUT" >&2; exit "${TS_RC:-0}";; esac\nexit 0\n' "$T" >"$T/bin/tailscale"
   chmod +x "$T/bin/systemctl" "$T/bin/tailscale"
 }
 enroll() {
@@ -100,53 +163,95 @@ enroll() {
     CERALIVE_TS_CLI="$T/bin/tailscale" SYSTEMCTL_BIN="$T/bin/systemctl" CERALIVE_TS_SOCKET="$T/none.sock" \
     CERALIVE_TS_SOCKET_WAIT=0 "$@" bash "$ENROLL"
 }
+no_key_anywhere() { # the key text appears in no file on BOOT and in no output
+  ! grep -rqF "$KEY" "$T/boot" && [[ "$output" != *"$KEY"* ]] && { [ ! -e "$T/calls" ] || ! grep -qF "$KEY" "$T/calls"; }
+}
 
-@test "enrollment takes the key off BOOT, joins with Tailscale SSH and the file's name" {
+@test "enrollment takes the key off BOOT, joins with Tailscale SSH and the file's name, then pins auto-update off" {
   enroll_env
-  printf '\xef\xbb\xbftskey-auth-kAbC123-XyZ987654321\r\n' >"$T/boot/osb-tailscale-White.key.txt"
-  enroll
+  printf '\xef\xbb\xbf%s\r\n' "$KEY" >"$T/boot/OSB-Tailscale-White.key.txt"
+  enroll CERALIVE_TS_NOW=1000
   [ "$status" -eq 0 ]
   [ -z "$(ls -A "$T/boot")" ]
   [ ! -e "$T/state/pending-authkey" ]
   grep -q 'systemctl start tailscaled.service' "$T/calls"
-  grep -q -- "up --auth-key=file:$T/state/pending-authkey --ssh --accept-dns=false --accept-routes=false --timeout=90s --hostname=white" "$T/calls"
+  grep -q -- "up --auth-key=file:$T/state/pending-authkey --ssh --accept-risk=lose-ssh --accept-dns=false --accept-routes=false --timeout=90s --hostname=white" "$T/calls"
+  [ "$(tail -n1 "$T/calls")" = "tailscale --socket=$T/none.sock set --auto-update=false --update-check=false" ]
+  [ "$(cut -d' ' -f1 "$T/state/enroll-status")" = joined ]
+  [ -e "$T/state/joined-once" ]
+  no_key_anywhere
 }
 
-@test "a failed join keeps the key pending on /data, never on BOOT, and the retry uses it" {
+@test "a transient failure keeps the key pending on /data, backs off, then joins" {
   enroll_env
-  printf 'tskey-auth-kAbC123-XyZ987654321' >"$T/boot/osb-tailscale.key"
-  enroll TS_RC=1
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="connection refused"
   [ "$status" -ne 0 ]
   [ -z "$(ls -A "$T/boot")" ]
-  [ "$(cat "$T/state/pending-authkey")" = tskey-auth-kAbC123-XyZ987654321 ]
-  [ "$(stat -c %a "$T/state/pending-authkey")" = 600 ]
-  [ "$(stat -c %a "$T/state")" = 700 ]
+  [ "$(cat "$T/state/pending-authkey")" = "$KEY" ]
+  [ "$(stat -c %a "$T/state/pending-authkey")" = 600 ] && [ "$(stat -c %a "$T/state")" = 700 ]
+  [ "$(cat "$T/state/enroll-status")" = "pending 1 1120 retry" ]
   ! grep -q -- '--hostname' "$T/calls"
-  enroll
+  rm "$T/calls"
+  enroll CERALIVE_TS_NOW=1060          # inside the back-off window: no attempt
+  [ "$status" -eq 0 ] && [ ! -e "$T/calls" ]
+  enroll CERALIVE_TS_NOW=1130 TS_RC=1 TS_OUT="no network"
+  [ "$(cat "$T/state/enroll-status")" = "pending 2 1370 retry" ]
+  enroll CERALIVE_TS_NOW=1400
   [ "$status" -eq 0 ]
   [ ! -e "$T/state/pending-authkey" ]
+  no_key_anywhere
 }
 
-@test "a file that is not an auth key is set aside and never used" {
+@test "a refused key ends enrollment at once and an unjoined box goes back to idle" {
   enroll_env
-  printf 'hello world\n' >"$T/boot/osb-tailscale-black.key"
-  enroll
-  [ "$status" -eq 0 ]
-  [ -e "$T/boot/osb-tailscale-black.key.rejected" ]
-  [ ! -e "$T/state/pending-authkey" ]
-  [ ! -e "$T/calls" ]
-  enroll   # the rejected file is not picked up again
-  [ ! -e "$T/calls" ]
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale-black.key"
+  mkdir -p "$T/state"; : >"$T/state/tailscaled.state"
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="backend error: invalid key: API key does not exist"
+  [ "$status" -ne 0 ]
+  [ ! -e "$T/state/pending-authkey" ] && [ ! -e "$T/state/pending-hostname" ]
+  [ ! -e "$T/state/tailscaled.state" ]
+  grep -q 'systemctl stop tailscaled.service' "$T/calls"
+  [[ "$(cat "$T/state/enroll-status")" == "gave-up 1 0 the control server refused the key" ]]
+  [[ "$output" == *"gave up Tailscale enrollment"* ]]
+  rm "$T/calls"; enroll CERALIVE_TS_NOW=5000
+  [ ! -e "$T/calls" ]                  # nothing left to retry
 }
 
-@test "two key files are both set aside" {
+@test "retries are capped, and a box that joined before keeps its state" {
   enroll_env
-  printf 'tskey-auth-kAAAAAAAA-1111111111' >"$T/boot/osb-tailscale-white.key"
-  printf 'tskey-auth-kBBBBBBBB-2222222222' >"$T/boot/osb-tailscale-black.key"
+  mkdir -p "$T/state"; : >"$T/state/tailscaled.state"; : >"$T/state/joined-once"
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 CERALIVE_TS_MAX_ATTEMPTS=2 TS_RC=1 TS_OUT="timeout"
+  enroll CERALIVE_TS_NOW=2000 CERALIVE_TS_MAX_ATTEMPTS=2 TS_RC=1 TS_OUT="timeout"
+  [ "$status" -ne 0 ]
+  [[ "$(cat "$T/state/enroll-status")" == "gave-up 2 0 no success after 2 attempts" ]]
+  [ ! -e "$T/state/pending-authkey" ]
+  [ -e "$T/state/tailscaled.state" ]
+  ! grep -q 'systemctl stop' "$T/calls"
+}
+
+@test "a file that is not an auth key is removed from BOOT, not kept" {
+  enroll_env
+  printf 'tskey-client-kSECRETSECRET-0123456789' >"$T/boot/osb-tailscale-black.key"
   enroll
   [ "$status" -eq 0 ]
-  [ -e "$T/boot/osb-tailscale-white.key.rejected" ] && [ -e "$T/boot/osb-tailscale-black.key.rejected" ]
-  [ ! -e "$T/state/pending-authkey" ]
+  [ "$(ls -A "$T/boot")" = TAILSCALE-KEY-REJECTED.txt ]
+  ! grep -rq 'SECRETSECRET' "$T/boot"
+  grep -q 'osb-tailscale-black.key' "$T/boot/TAILSCALE-KEY-REJECTED.txt"
+  [[ "$output" != *SECRETSECRET* ]]
+  [ ! -e "$T/state/pending-authkey" ] && [ ! -e "$T/calls" ]
+}
+
+@test "two key files are both removed and neither is used" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale-white.key"
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale-white (1).key"
+  enroll
+  [ "$status" -eq 0 ]
+  [ "$(ls -A "$T/boot")" = TAILSCALE-KEY-REJECTED.txt ]
+  [ ! -e "$T/state/pending-authkey" ] && [ ! -e "$T/calls" ]
+  no_key_anywhere
 }
 
 @test "no key file and nothing pending is a no-op" {
@@ -215,7 +320,8 @@ host() { run env -i PATH="$PATH" "$@" bash -c 'source "$1"; release_remote_acces
   host CERALIVE_SSH_PASSWORD_AUTH=off; [ "$status" -ne 0 ]
   host CERALIVE_SSH_PASSWORD_AUTH=no CERALIVE_SSH_ROOT_KEYS_FILE="$T/support.pub" CERALIVE_DEBUG_IMAGE=1; [ "$status" -ne 0 ]
   host CERALIVE_SSH_PASSWORD_AUTH=no; [ "$status" -ne 0 ]
-  [[ "$output" == *"leaves no way in"* ]]
+  [[ "$output" == *"leaves no LAN way in"* ]]
+  host CERALIVE_SSH_PASSWORD_AUTH=no CERALIVE_TAILSCALE=1; [ "$status" -ne 0 ]
 }
 
 @test "options reach the runtime chroot and the executor calls the writer" {

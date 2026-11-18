@@ -7,16 +7,26 @@ Documentation=https://tailscale.com/docs/
 ConditionPathExists=|/var/lib/tailscale/tailscaled.state
 ConditionPathExists=|/var/lib/tailscale/pending-authkey
 Wants=network-pre.target
-After=network-pre.target NetworkManager.service ceralive-migrate-data.service
+After=network-pre.target NetworkManager.service ceralive-migrate-data.service nftables.service
 RequiresMountsFor=/var/lib/tailscale
 
 [Service]
+# Loopback allowlist for tailnet connections (tailscaled-loopback.nft). If it
+# cannot be loaded, tailscaled does not start.
+ExecStartPre=/usr/sbin/nft -f /usr/lib/ceralive/tailscaled-loopback.nft
 # Userspace networking: no tailscale0 interface, routes, policy rules or
-# firewall rules, so CeraUI's uplink, bonding and default-route handling never
-# see Tailscale. Tailscale SSH and connections to the box's own ports (web UI)
-# still work through the userspace stack.
-ExecStart=/usr/local/sbin/tailscaled --tun=userspace-networking --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock --port=0
-ExecStopPost=/usr/local/sbin/tailscaled --cleanup
+# firewall rules of Tailscale's own, so CeraUI's uplink, bonding and
+# default-route handling never see Tailscale. Tailscale SSH and the CeraUI
+# backend (127.0.0.1:18080) are reachable from permitted tailnet peers.
+# No log upload to Tailscale (this also means no Tailscale support for the box).
+ExecStart=/usr/local/sbin/tailscaled --tun=userspace-networking --no-logs-no-support --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock --port=0
+# The binaries are pinned by the image. A tailnet "auto-update" default must not
+# replace them: pin the preference off on every start (`tailscale up` resets
+# it), and keep their directories read-only for this service and its sessions.
+ExecStartPost=-/usr/local/bin/tailscale --socket=/run/tailscale/tailscaled.sock set --auto-update=false --update-check=false
+ReadOnlyPaths=/usr/local/bin /usr/local/sbin
+ExecStopPost=/usr/local/sbin/tailscaled --tun=userspace-networking --cleanup
+ExecStopPost=-/usr/sbin/nft delete table inet ceralive_tailscale_lo
 Restart=on-failure
 RestartSec=5
 RuntimeDirectory=tailscale

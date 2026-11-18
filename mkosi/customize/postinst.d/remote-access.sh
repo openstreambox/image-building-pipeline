@@ -11,9 +11,12 @@
 #       our tailscaled.service (userspace networking, inert until enrolled) and
 #       the BOOT key-file enrollment service + timer. Its state lives on /data
 #       (persistence.sh adds the /var/lib/tailscale bind for this flag).
+#       tailscaled's loopback re-dials are limited to the CeraUI backend and DNS
+#       (tailscaled-loopback.nft); auto-update is pinned off.
 #   CERALIVE_SSH_ROOT_KEYS_B64
 #       Public keys seeded once into root's persistent authorized_keys store by
-#       ceralive-ssh-key-seed.service.
+#       ceralive-ssh-key-seed.service. The once-flag means a rotated key does not
+#       arrive by OTA: rotate through Tailscale SSH (edit the store on /data).
 #   CERALIVE_SSH_PASSWORD_AUTH=no
 #       sshd drop-in 05-ceralive-key-only.conf: keys only, no passwords.
 #
@@ -84,8 +87,15 @@ setup_remote_access() {
   [[ -n "${CERALIVE_RUNTIME_SRC:-}" && -d "${src}" ]] || die "remote-access sources not found: ${src}"
 
   if [[ "${tailscale}" == 1 ]]; then
+    # Enrollment reads the key file from the FAT partition mounted at /boot,
+    # which only the arm64 board layout has (x86 mounts its ESP at /boot/efi).
+    local target_arch="${TAILSCALE_ARCH:-}"
+    [[ -n "${target_arch}" ]] || target_arch="$(dpkg --print-architecture)"
+    [[ "${target_arch}" == arm64 ]] \
+      || die "CERALIVE_TAILSCALE=1 needs the arm64 board layout (FAT /boot for key-file enrollment), not '${target_arch}'"
     install_tailscale_binaries "${src}" "${dest}"
     install -D -m 0644 "${src}/tailscaled.service" "${dest}/etc/systemd/system/tailscaled.service"
+    install -D -m 0644 "${src}/tailscaled-loopback.nft" "${dest}/usr/lib/ceralive/tailscaled-loopback.nft"
     install -D -m 0755 "${src}/ceralive-tailscale-enroll.sh" "${dest}/usr/local/sbin/ceralive-tailscale-enroll"
     install -D -m 0644 "${src}/ceralive-tailscale-enroll.service" "${dest}/etc/systemd/system/ceralive-tailscale-enroll.service"
     install -D -m 0644 "${src}/ceralive-tailscale-enroll.timer" "${dest}/etc/systemd/system/ceralive-tailscale-enroll.timer"
