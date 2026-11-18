@@ -1,0 +1,14 @@
+[Unit]
+Description=Enroll in Tailscale from a key file on the BOOT partition
+# Runs when someone put an osb-tailscale*.key file on the card's BOOT drive
+# (readable on any PC after flashing), or when an earlier attempt left a pending
+# key on /data. Retried by ceralive-tailscale-enroll.timer until it joins.
+ConditionPathExistsGlob=|/boot/osb-tailscale*
+ConditionPathExists=|/var/lib/tailscale/pending-authkey
+After=local-fs.target ceralive-migrate-data.service network-online.target
+Wants=network-online.target
+RequiresMountsFor=/boot /var/lib/tailscale
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ceralive-tailscale-enroll

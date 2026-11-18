@@ -1,0 +1,9 @@
+[Unit]
+Description=Retry Tailscale enrollment while a key is pending
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=2min
+
+[Install]
+WantedBy=timers.target

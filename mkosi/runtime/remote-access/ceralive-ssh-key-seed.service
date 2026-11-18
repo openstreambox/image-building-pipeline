@@ -1,0 +1,14 @@
+[Unit]
+Description=Seed the image's support SSH keys into root's persistent key store
+# authorized_keys is read per connection, so this needs no ordering against
+# sshd; it only follows the guard that creates and links the store.
+After=ceralive-ssh-firstboot.service data.mount
+ConditionPathExists=/usr/share/ceralive/ssh/root_authorized_keys.seed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ceralive-ssh-key-seed
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
