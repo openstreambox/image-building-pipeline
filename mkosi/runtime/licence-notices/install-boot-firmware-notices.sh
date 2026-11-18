@@ -15,10 +15,10 @@
 # md5sums control file (which pins the archive's file list), every installed file
 # against its sha256 (missing required files, changed bytes, symlinks and files
 # the package database lists but the tables do not are refused), and the
-# verbatim texts inside the payloads. The firmware file is completed with a list
-# of every firmware file of the package, shipped or removed, with the source
-# entry for its exact bytes. Other linux-u-boot-* and armbian-firmware* packages
-# are logged as uncovered; nothing is written for them.
+# verbatim texts and excerpts inside the payloads. The firmware file is completed
+# with a list of every firmware file of the package, shipped or removed, with the
+# source entry for its exact bytes. Other linux-u-boot-* and armbian-firmware*
+# packages are logged as uncovered; nothing is written for them.
 #
 # Test seams: LICENCE_NOTICES_DESTROOT (install prefix, default /),
 # BOOT_FIRMWARE_NOTICES_BASE (payload directory).
@@ -40,7 +40,7 @@ RULE='==========================================================================
 
 # --- 1. Static payloads, exactly as generated -----------------------------------
 [[ -f "${BASE}/SHA256SUMS" && ! -L "${BASE}/SHA256SUMS" ]] || die "missing ${BASE}/SHA256SUMS"
-expected='SHA256SUMS armbian-firmware-full.txt firmware-files.tsv identity.tsv inputs.json linux-u-boot-rock-5b-plus-edge.txt texts.tsv '
+expected='SHA256SUMS armbian-firmware-full.txt excerpts.tsv firmware-files.tsv identity.tsv inputs.json linux-u-boot-rock-5b-plus-edge.txt texts.tsv '
 listed="$(awk '{print $2}' "${BASE}/SHA256SUMS" | sort | tr '\n' ' ')"
 [[ "SHA256SUMS ${listed}" == "${expected}" ]] || die "SHA256SUMS lists '${listed}', expected '${expected#SHA256SUMS }'"
 for name in ${expected}; do
@@ -62,6 +62,19 @@ while IFS=$'\t' read -r payload offset bytes sum blob source commit path extra |
   [[ "${actual}" == "${sum}" ]] || die "verbatim text ${path} (${source}) inside ${payload} changed"
   text_count[${payload}]=$(( ${text_count[${payload}]:-0} + 1 ))
 done < "${BASE}/texts.tsv"
+
+# Every verbatim excerpt (part of a source file, such as a historical WHENCE
+# section) inside a payload still has its pinned bytes.
+while IFS=$'\t' read -r payload offset bytes sum source commit path blob from part extra || [[ -n "${payload:-}" ]]; do
+  [[ -z "${payload}" || "${payload}" == \#* ]] && continue
+  [[ "${offset}" =~ ^[0-9]+$ && "${bytes}" =~ ^[1-9][0-9]*$ && "${sum}" =~ ${SHA_RE} && -n "${source}" \
+     && "${commit}" =~ ^[0-9a-f]{40}$ && -n "${path}" && "${blob}" =~ ^[0-9a-f]{40}$ && "${from}" =~ ^[0-9]+$ \
+     && -n "${part}" && -z "${extra}" ]] \
+    || die "malformed excerpts.tsv row for '${path:-?}'"
+  [[ -f "${BASE}/${payload}" ]] || die "excerpts.tsv names unknown payload ${payload}"
+  actual="$(head -c "$((offset + bytes))" "${BASE}/${payload}" | tail -c "${bytes}" | sha256sum | awk '{print $1}')"
+  [[ "${actual}" == "${sum}" ]] || die "verbatim excerpt of ${path} (${source}, ${part}) inside ${payload} changed"
+done < "${BASE}/excerpts.tsv"
 
 # --- 2. Covered identities ---------------------------------------------------------
 declare -A pkg_version=() pkg_arch=() pkg_md5=() pkg_payload=()

@@ -44,6 +44,31 @@ identifier that is no file stops generation, except for the reviewed names in
 `licence_names_without_file` in `inputs.json`, each of which must appear beside a
 named licence file in the same field and must still be used.
 
+**Historical origins.** Two shipped `armbian-changed` files are older
+linux-firmware bytes at the same path: `rtw89/rtw8852b_fw-1.bin` (git blob
+`ab2f8081`) is at linux-firmware `2afd1423` ("rtw89: 8852b: update fw to
+v0.29.29.5"), and `rtl_bt/rtl8852bu_fw.bin` (`2636ae5a`) is at `0061a2dd`
+("rtl_bt: Update RTL8852B BT USB firmware to 0xDBC6_B20F"). Upstream later
+replaced both, so the pinned `eeed587f` WHENCE describes other bytes. For these
+two, `historical_origins` in `inputs.json` names the earlier commit, and the
+payload gets a section "Historical linux-firmware origins" with, for each file:
+the commit, the WHENCE section that lists the path at that commit (verbatim,
+with its byte range in that WHENCE), the byte range of the group that lists the
+path, and the licence file that group names. In both cases that is
+`LICENCE.rtlwifi_firmware.txt`, git blob `d70921f4`, the same bytes as the
+`LICENSES/LICENCE.rtlwifi_firmware.txt` already reproduced, so the payload cites
+that copy instead of repeating it. A historical licence file with other bytes
+would be reproduced from its own commit. The `rtl_bt` group sits in the btusb
+section after an Intel group; the Intel group's `LICENCE.ibt_firmware` line does
+not apply to it.
+
+Both files stay in the `armbian-changed` class. Their rows in the file table
+cite the earlier commit; every other `armbian-changed` and `armbian-only` row is
+unchanged. armbian/firmware does not record where it took these bytes from,
+and nothing here establishes that copy step, interprets the licence text, or
+says that its conditions are met. A file of the same name with other bytes, at
+any commit, establishes nothing.
+
 **U-Boot.** The archive, the loader's sha256, and its parts:
 
 - DDR init (TPL): the bytes are `rk35/rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.20_20250926.bin`
@@ -68,7 +93,20 @@ each claim first (archive hashes and control fields, every firmware file's git
 blob against the pinned trees, the loader's RKNS hashes, the DDR blob identity,
 version strings, the U-Boot licence summary). It writes the two static payloads,
 `firmware-files.tsv`, `identity.tsv`, `texts.tsv` (byte range, sha256 and git blob
-of every verbatim text) and `SHA256SUMS`.
+of every verbatim text), `excerpts.tsv` (byte range and sha256 of every verbatim
+excerpt, with its place in the source file) and `SHA256SUMS`.
+
+For each historical origin the generator checks, before it writes anything: the
+reviewed sha256, size and git blob against the package and the pinned
+armbian/firmware tree; that the pinned linux-firmware has other bytes at that
+path; that the earlier commit comes from the same linux-firmware repository, has
+the reviewed subject and these exact bytes at that path; that its WHENCE is the
+reviewed blob and lists the path on exactly one File line, in exactly one group,
+under the reviewed Driver line, closed by the reviewed Licence field; and that
+the field names exactly the reviewed licence files, as the reviewed blobs. It
+does not check that a commit is on linux-firmware's main branch or in a release
+tag; that was checked when the pins were reviewed (both files' bytes are in the
+signed release tag `20231211`).
 
 ```bash
 tools/fetch-boot-firmware-notice-sources.sh /tmp/bfn     # network: blobless clones, archives
@@ -76,7 +114,8 @@ tools/generate-boot-firmware-notices.py --sources /tmp/bfn/sources --debs /tmp/b
 ```
 
 The fetch keeps only the pinned commits' trees and the text blobs the generator
-reads, a few MB; it never downloads source firmware. `--check` regenerates in
+reads, a few MB; it never downloads source firmware. The two earlier
+linux-firmware commits are fetched the same way. `--check` regenerates in
 memory and compares byte for byte. Regenerate when either package pin moves; the
 host test fails until then.
 
@@ -86,7 +125,7 @@ The app layer runs `install-boot-firmware-notices.sh` after the package and
 other notice installs and before the doc prune. It reads the dpkg status, `.list`
 and `.md5sums` files as text and hashes installed files; it runs nothing from the
 image and needs no network. Before writing anything it refuses: payloads that
-differ from `SHA256SUMS`, a changed verbatim text, another version or
+differ from `SHA256SUMS`, a changed verbatim text or excerpt, another version or
 architecture, an md5sums file other than the pinned archive's, a changed or
 missing required file, a package file the tables do not list, a pinned file the
 package database does not list, a symlinked file or directory, an unmerged
@@ -105,7 +144,10 @@ when present, and checks that both files survive byte for byte.
 
 - The applicable terms for the DDR blob, and its build origin.
 - A licence statement for the shipped `armbian-changed` and `armbian-only`
-  firmware files.
+  firmware files at the pinned commits. Two `armbian-changed` files have a
+  historical linux-firmware origin (above); for the others no statement has
+  been found. How armbian/firmware obtained the two files' bytes is not
+  recorded.
 - A build of the DDR init blob from source, and the exact Armbian build commit.
   A separate rebuild from the pinned U-Boot and TF-A commits, with Armbian's
   configuration and patches and the matching Debian cross compiler, reproduced

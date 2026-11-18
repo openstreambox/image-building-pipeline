@@ -70,7 +70,7 @@ GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.inva
                GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
 
 
-def make_repo(sources, key, files):
+def make_repo(sources, key, files, message='fixture'):
     work = sources / f'{key}.work'
     for path, data in files.items():
         (work / path).parent.mkdir(parents=True, exist_ok=True)
@@ -78,7 +78,7 @@ def make_repo(sources, key, files):
     run = lambda *a: subprocess.run(['git', *a], cwd=work, env=GIT_ENV, check=True, capture_output=True).stdout
     run('init', '-q')
     run('add', '-A')
-    run('commit', '-q', '-m', 'fixture')
+    run('commit', '-q', '-m', message)
     subprocess.run(['git', 'clone', '-q', '--bare', str(work), str(sources / f'{key}.git')],
                    env=GIT_ENV, check=True, capture_output=True)
     commit = run('rev-parse', 'HEAD').decode().strip()
@@ -154,7 +154,7 @@ class Fixture:
         self.lf_files = {
             'WHENCE': b('   WHENCE\n\n' + '-' * 40 + '\n\nDriver: alpha - Alpha\n\nFile: a/up.bin\nFile: a/same.bin\n'
                         'Licence: Redistributable. See LICENCE.alpha for details.\n\n' + '-' * 40 + '\n\n'
-                        'Driver: beta - Beta\n\nFile: b/changed.bin\nLicence: GPL-2.0\n\n' + '-' * 40 + '\n\n'
+                        'Driver: beta - Beta\n\nFile: b/changed.bin\nFile: g/bt.bin\nFile: h/wifi.bin\nLicence: GPL-2.0\n\n' + '-' * 40 + '\n\n'
                         'Driver: gamma\n\nFile: c/orig.bin\nLicence:\n  Redistributable.\n  See LICENCE.alpha.\n\n'
                         + '-' * 40 + '\n\nDriver: delta\n\nFile: a/up2.bin\nLicence: Allegedly free.\n\n'
                         + '-' * 40 + '\n\nDriver: epsilon\n\nFile: f/mit.bin\n\nLicence: MIT\n\nCopyright 2009 Example\n\n'
@@ -173,14 +173,35 @@ class Fixture:
             'a/up.bin': b'\x00UP', 'a/same.bin': b'\x00SAME', 'a/up2.bin': b'\x00UP2',
             'b/changed.bin': b'\x00UPSTREAM-B', 'c/orig.bin': b'\x00ORIG', 'README.md': b('upstream readme\n'),
             'f/mit.bin': b'\x00MIT', 'f/apache.bin': b'\x00APACHE', 'f/bsd.bin': b'\x00BSD', 'f/dual.bin': b'\x00DUAL',
-            'f/twice.bin': b'\x00TWICE',
+            'f/twice.bin': b'\x00TWICE', 'g/bt.bin': b'\x00BT-NEW', 'h/wifi.bin': b'\x00WIFI-NEW',
         }
         self.arm_files = {
             'README.md': b('# Armbian firmware\n\nNote: Some firmware files are proprietary and distributed under '
                            'their respective licenses. Redistribution is limited to non-commercial or usage-only '
                            'contexts.\n'),
             'a/same.bin': b'\x00SAME', 'b/changed.bin': b'\x00ARMBIAN-B', 'd/copy.bin': b'\x00ORIG',
-            'e/only.bin': b'\x00ONLY',
+            'e/only.bin': b'\x00ONLY', 'g/bt.bin': b'\x00BT-OLD', 'h/wifi.bin': b'\x00WIFI-OLD',
+        }
+        # Two earlier linux-firmware commits with the overlay's g/bt.bin and h/wifi.bin bytes.
+        # old1 names a LICENCE.alpha with the bytes of the pinned LICENSES/LICENCE.alpha, has
+        # b/changed.bin and README.md with other bytes, and an entry with no Licence field (as
+        # older WHENCE files have). old2 has its rtl_bt-like group after an Intel-like group in
+        # the same section, and names a LICENCE.alpha with other bytes than the pinned one.
+        sep = '\n' + '-' * 40 + '\n\n'
+        self.old1_files = {
+            'WHENCE': b('   WHENCE\n' + sep + 'Driver: wifi - WiFi\n\nFile: h/wifi.bin\nFile: b/changed.bin\n\n'
+                        'Licence: Redistributable. See LICENCE.alpha for details.\n' + sep
+                        + 'Driver: keyspan\n\nFile: z/nolicence.bin\n'),
+            'LICENCE.alpha': self.lf_files['LICENSES/LICENCE.alpha'], 'README.md': b('old upstream readme\n'),
+            'h/wifi.bin': b'\x00WIFI-OLD', 'b/changed.bin': b'\x00OLD-B', 'z/nolicence.bin': b'\x00Z',
+        }
+        self.old2_files = {
+            'WHENCE': b('   WHENCE\n' + sep + 'Driver: btusb - BT\n\nFile: k/intel.bin\nVersion: 1\n\n'
+                        'Licence: Redistributable. See LICENCE.ibt for details\n\nFile: g/bt.bin\nFile: g/bt_config.bin\n\n'
+                        'Licence: Redistributable. See\n  LICENCE.alpha for details.\n\nFound in vendor driver.\n'
+                        + sep + 'Driver: other\n\nFile: o/other.bin\nLicence: Redistributable.\n'),
+            'LICENCE.alpha': b('Old alpha licence, other bytes.\n'), 'LICENCE.ibt': b('Intel BT licence\n'),
+            'g/bt.bin': b'\x00BT-OLD', 'g/bt_config.bin': b'\x00CFG', 'k/intel.bin': b'\x00INTEL', 'o/other.bin': b'\x00O',
         }
         self.tpl = bytes(range(256)) * 2 + b'TPLTAIL'
         self.uboot_files = {'Licenses/README': b('U-Boot licence summary\n'), 'Licenses/gpl-2.0.txt': b('GPL2\n'),
@@ -195,6 +216,8 @@ class Fixture:
             'tf-a': make_repo(self.sources, 'tf-a', self.tfa_files),
             'armbian-rkbin': make_repo(self.sources, 'armbian-rkbin', {
                 'LICENSE.TXT': b('Repository binary licence agreement\n'), 'rk35/ddr.bin': self.tpl}),
+            'linux-firmware-old1': make_repo(self.sources, 'linux-firmware-old1', self.old1_files, 'old1: wifi'),
+            'linux-firmware-old2': make_repo(self.sources, 'linux-firmware-old2', self.old2_files, 'old2: bt'),
             'rockchip-rkbin': make_repo(self.sources, 'rockchip-rkbin', {
                 'LICENSE': b('Rockchip licence\n'), 'bin/rk35/ddr.bin': self.tpl[:-1] + b'X'}),
         }
@@ -254,8 +277,14 @@ class Fixture:
                  'sha256': sha(self.ub_deb.read_bytes()), 'bytes': self.ub_deb.stat().st_size,
                  'armbian_original_hash': 'ub-hash'},
         }
+        for entry in real['firmware']['historical_origins'].values():
+            inputs['sources'].pop(entry['source'], None)
         for key, commit in self.commits.items():
-            inputs['sources'][key].update(url=f'https://example.invalid/{key}', commit=commit)
+            if key.startswith('linux-firmware-old'):
+                inputs['sources'][key] = dict(inputs['sources']['linux-firmware'], commit=commit)
+            else:
+                inputs['sources'][key].update(url=f'https://example.invalid/{key}', commit=commit)
+        inputs['firmware']['historical_origins'] = self.historical()
         u = inputs['uboot']
         u['u_boot_banner'] = 'U-Boot 2026.04_armbian-fixture'
         u['tpl'].update(bytes=len(self.tpl), path='rk35/ddr.bin', compare_path='bin/rk35/ddr.bin')
@@ -263,6 +292,19 @@ class Fixture:
             tweak(inputs)
         (self.out / 'inputs.json').write_text(json.dumps(inputs, indent=2) + '\n')
         return inputs
+
+    def historical(self):
+        def entry(path, data, key, files, driver, licence, texts):
+            return {'sha256': sha(data), 'bytes': len(data), 'git_blob': blob(data), 'source': key,
+                    'subject': f'{key.rsplit("-", 1)[1]}: {"wifi" if key.endswith("1") else "bt"}',
+                    'whence_blob': blob(files['WHENCE']), 'driver': driver, 'licence': licence,
+                    'licence_files': {t: blob(files[t]) for t in texts}}
+        return {
+            'h/wifi.bin': entry('h/wifi.bin', b'\x00WIFI-OLD', 'linux-firmware-old1', self.old1_files, 'wifi - WiFi',
+                                'Redistributable. See LICENCE.alpha for details.', ['LICENCE.alpha']),
+            'g/bt.bin': entry('g/bt.bin', b'\x00BT-OLD', 'linux-firmware-old2', self.old2_files, 'btusb - BT',
+                              'Redistributable. See LICENCE.alpha for details.', ['LICENCE.alpha']),
+        }
 
     def generate(self):
         out, _ = gen.generate(self.out, self.sources, self.debs)
@@ -294,7 +336,7 @@ try:
                       'a/up2.bin': 'upstream', 'b/changed.bin': 'armbian-changed', 'c/orig.bin': 'upstream',
                       'd/copy.bin': 'upstream-other-path', 'e/only.bin': 'armbian-only', 'f/mit.bin': 'upstream',
                       'f/apache.bin': 'upstream', 'f/bsd.bin': 'upstream', 'f/dual.bin': 'upstream',
-                      'f/twice.bin': 'upstream'},
+                      'f/twice.bin': 'upstream', 'g/bt.bin': 'armbian-changed', 'h/wifi.bin': 'armbian-changed'},
           f'classes {classes}')
     check('link.bin' not in rows, 'symlinks are not firmware files')
     check(rows['a/up.bin'][3] == 'WHENCE entry for this path; licence files: LICENSES/LICENCE.alpha', 'upstream cover')
@@ -326,14 +368,56 @@ try:
                  'tf-a': fix.tfa_files}.get(src)
         if files is not None:
             check(files[path] == data, f'{path} is the source bytes')
+        files = {'linux-firmware-old1': fix.old1_files, 'linux-firmware-old2': fix.old2_files}.get(src, files)
+        check(files is None or files[path] == data, f'{src} {path} is the source bytes')
         check(commit == fix.commits[src], f'{path} commit')
     fw_paths = [t[7] for t in texts if t[0] == f'{FW}.txt']
     check(fw_paths == ['WHENCE', 'LICENSES/Apache-2.0', 'LICENSES/GPL-2.0', 'LICENSES/LICENCE.alpha', 'LICENSES/MIT',
-                       'README.md'], f'firmware texts {fw_paths}')
+                       'README.md', 'LICENCE.alpha', 'LICENCE.alpha'], f'firmware texts {fw_paths}')
     check(b'Redistribution is limited to non-commercial or usage-only contexts.' in payload, 'overlay README verbatim')
     check(b'does not grant any licence' in payload and re.search(rb'\n +1  upstream-other-path\n', payload),
           'scope statement and counts')
     ok('every verbatim text is byte-identical to its pinned source blob; the overlay notice is kept as published')
+
+    old1, old2 = fix.commits['linux-firmware-old1'], fix.commits['linux-firmware-old2']
+    alpha, old_alpha = blob(fix.lf_files['LICENSES/LICENCE.alpha']), blob(fix.old2_files['LICENCE.alpha'])
+    for path, commit, lic in (('h/wifi.bin', old1, alpha), ('g/bt.bin', old2, old_alpha)):
+        check(rows[path][2] == 'armbian-changed' and rows[path][3] == (
+            f'linux-firmware has other bytes at this path (git blob {blob(fix.lf_files[path])}); its WHENCE entry '
+            f'describes those, not these; linux-firmware commit {commit} has these exact bytes at this path, and its '
+            f'WHENCE group for this path names LICENCE.alpha (git blob {lic}); see "Historical linux-firmware origins"'),
+              f'{path} historical cover {rows[path][3]}')
+    for path in ('b/changed.bin', 'README.md'):
+        check(rows[path][3].endswith('; no licence statement established for these bytes')
+              and old1 not in rows[path][3], f'{path}: the same path with other bytes at an earlier commit grants nothing')
+    by = {(t[5], t[7]): t for t in texts}
+    cur, b1, b2 = (by[('linux-firmware', 'LICENSES/LICENCE.alpha')], by[('linux-firmware-old1', 'LICENCE.alpha')],
+                   by[('linux-firmware-old2', 'LICENCE.alpha')])
+    check(b1[1:5] == cur[1:5], 'identical licence bytes are cited at the reproduced range, not duplicated')
+    check(b2[1:3] != cur[1:3] and payload[int(b2[1]):int(b2[1]) + int(b2[2])] == fix.old2_files['LICENCE.alpha'],
+          'a licence file of the same name with other bytes is reproduced from its own commit')
+    ex = [l.split('\t') for l in out['excerpts.tsv'].decode().splitlines() if not l.startswith('#')]
+    check([(e[4], e[9]) for e in ex] == [('linux-firmware-old2', 'section'), ('linux-firmware-old2', 'group for g/bt.bin'),
+                                         ('linux-firmware-old1', 'section'), ('linux-firmware-old1', 'group for h/wifi.bin')],
+          f'excerpt rows {ex}')
+    for name, off, n, s_, src, commit, path, whole, start, part in ex:
+        files = fix.old1_files if src.endswith('1') else fix.old2_files
+        data = out[name][int(off):int(off) + int(n)]
+        check(sha(data) == s_ and path == 'WHENCE' and whole == blob(files['WHENCE']) and commit == fix.commits[src]
+              and files['WHENCE'][int(start):int(start) + int(n)] == data, f'excerpt {src} {part}')
+    part = lambda e: payload[int(e[1]):int(e[1]) + int(e[2])]
+    check(part(ex[1]) == b'File: g/bt.bin\nFile: g/bt_config.bin\n\nLicence: Redistributable. See\n  LICENCE.alpha for details.\n',
+          f'group after another group in its section: {part(ex[1])!r}')
+    check(part(ex[0]).startswith(b'Driver: btusb - BT\n') and b'LICENCE.ibt' in part(ex[0])
+          and part(ex[0]).endswith(b'Found in vendor driver.\n') and part(ex[1]) in part(ex[0]), 'its whole section')
+    check(part(ex[3]) == b'File: h/wifi.bin\nFile: b/changed.bin\n\nLicence: Redistributable. See LICENCE.alpha for details.\n',
+          'first group of its section')
+    flat = ' '.join(payload.decode().split())
+    check(flat.count('The other Licence fields in this section close other groups and do not apply to this path.') == 1
+          and 'does not establish that step' in flat and 'Historical linux-firmware origins' in flat,
+          'historical section scope statements')
+    ok('two armbian-changed files cite the earlier linux-firmware commit with their exact bytes, its WHENCE section '
+       'and group verbatim, and the licence text that group names')
 
     ub_payload = out[f'{UB}.txt'].decode()
     ub_paths = [(t[5], t[7]) for t in texts if t[0] == f'{UB}.txt']
@@ -418,6 +502,81 @@ try:
     check(fix.generate() == out, 'restored fixture regenerates identical output')
     ok('fixture restored after the refusal controls')
 
+    def hist(fn):
+        fix.write_inputs(lambda i: fn(i['firmware']['historical_origins'], i))
+
+    wifi, bt = fix.historical()['h/wifi.bin'], fix.historical()['g/bt.bin']
+    ident = lambda data: {'sha256': sha(data), 'bytes': len(data), 'git_blob': blob(data)}
+    hist(lambda h, i: h['h/wifi.bin'].update(git_blob=bt['git_blob']))
+    refuses(fix, 'h/wifi.bin: the package bytes differ from the reviewed', 'refuses a wrong historical git blob')
+    hist(lambda h, i: h['h/wifi.bin'].update(sha256=sha(b'other')))
+    refuses(fix, 'h/wifi.bin: the package bytes differ from the reviewed', 'refuses a wrong historical sha256')
+    hist(lambda h, i: h['h/wifi.bin'].update(bytes=wifi['bytes'] + 1))
+    refuses(fix, 'h/wifi.bin: the package bytes differ from the reviewed', 'refuses a wrong historical size')
+    hist(lambda h, i: h['h/wifi.bin'].update(ident(b'\x00BT-OLD')))
+    refuses(fix, 'h/wifi.bin: the package bytes differ from the reviewed', "refuses another file's coordinated identity")
+    hist(lambda h, i: h.update({'b/changed.bin': dict(wifi, **ident(b'\x00ARMBIAN-B'))}))
+    refuses(fix, r'b/changed\.bin: linux-firmware \w+ does not have these bytes',
+            'the same path with other bytes at the earlier commit grants nothing')
+    hist(lambda h, i: h.update({'README.md': dict(wifi, **ident(fix.arm_files['README.md']))}))
+    refuses(fix, r'README\.md: linux-firmware \w+ does not have these bytes', 'a same-name README with other bytes grants nothing')
+    hist(lambda h, i: h.update({'a/up.bin': dict(wifi, **ident(fix.lf_files['a/up.bin']))}))
+    refuses(fix, r'a/up\.bin: armbian/firmware \w+ does not have these bytes', 'refuses an entry for a file the overlay lacks')
+    hist(lambda h, i: h.update({'a/same.bin': dict(wifi, **ident(fix.arm_files['a/same.bin']))}))
+    refuses(fix, 'a/same.bin: not armbian-changed', 'refuses an entry for a file that is not armbian-changed')
+    hist(lambda h, i: h.update({'h/missing.bin': h.pop('h/wifi.bin')}))
+    refuses(fix, 'h/missing.bin: the package has no firmware file', 'refuses an entry for a path the package lacks')
+    hist(lambda h, i: h['h/wifi.bin'].update(source='linux-firmware-old2'))
+    refuses(fix, r'h/wifi\.bin: linux-firmware \w+ does not have these bytes', 'refuses a commit without these bytes')
+    hist(lambda h, i: h['h/wifi.bin'].update(source='linux-firmware'))
+    refuses(fix, 'is not a separate pinned source', 'refuses the pinned commit as its own history')
+    hist(lambda h, i: h['h/wifi.bin'].update(source='linux-firmware-old9'))
+    refuses(fix, 'is not a separate pinned source', 'refuses an unknown source')
+    hist(lambda h, i: i['sources']['linux-firmware-old1'].update(url='https://example.invalid/fork'))
+    refuses(fix, 'is not another commit of the pinned linux-firmware repository', 'refuses a commit of another repository')
+    hist(lambda h, i: h['h/wifi.bin'].update(subject='old1: other'))
+    refuses(fix, 'has the subject', 'refuses a wrong commit subject')
+    hist(lambda h, i: h['g/bt.bin'].update(whence_blob=wifi['whence_blob']))
+    refuses(fix, 'is not the reviewed blob', 'refuses another WHENCE')
+    hist(lambda h, i: h['g/bt.bin'].update(driver='other'))
+    refuses(fix, 'is under Driver', 'refuses a wrong Driver line')
+    hist(lambda h, i: h['g/bt.bin'].update(licence='Redistributable. See LICENCE.ibt for details',
+                                           licence_files={'LICENCE.ibt': blob(fix.old2_files['LICENCE.ibt'])}))
+    refuses(fix, "g/bt.bin: the group's Licence field is", "refuses the preceding group's Licence field")
+    hist(lambda h, i: h['g/bt.bin'].update(licence_files={'LICENCE.alpha': alpha}))
+    refuses(fix, 'g/bt.bin: the Licence field names', 'refuses the pinned same-name licence text for other bytes')
+    hist(lambda h, i: h['g/bt.bin']['licence_files'].update({'LICENCE.ibt': blob(fix.old2_files['LICENCE.ibt'])}))
+    refuses(fix, 'g/bt.bin: the Licence field names', 'refuses a licence file the group does not name')
+    hist(lambda h, i: h['g/bt.bin'].pop('subject'))
+    refuses(fix, 'needs exactly the fields', 'refuses partial historical metadata')
+    hist(lambda h, i: h['g/bt.bin'].update(granted=True))
+    refuses(fix, 'needs exactly the fields', 'refuses unreviewed extra historical metadata')
+    hist(lambda h, i: h['g/bt.bin'].update(licence_files={}))
+    refuses(fix, 'licence_files must map', 'refuses an entry without licence files')
+    fix.write_debs(fw_mutate=lambda f: f.update({'lib/firmware/h/wifi.bin': b'\x00WIFI-DRIFT'}))
+    refuses(fix, 'h/wifi.bin: the package bytes differ from the reviewed', 'refuses archive bytes that drifted')
+    fix.write_debs()
+    o2 = fix.sources / 'linux-firmware-old2.git'
+
+    def old2_whence(whence):
+        shutil.rmtree(o2)
+        fix.commits['linux-firmware-old2'] = make_repo(fix.sources, 'linux-firmware-old2',
+                                                       dict(fix.old2_files, WHENCE=whence), 'old2: bt')
+        hist(lambda h, i: h['g/bt.bin'].update(whence_blob=blob(whence)))
+
+    sep = b'\n' + b'-' * 40 + b'\n\n'
+    old2_whence(fix.old2_files['WHENCE'] + sep + b'Driver: again\n\nFile: g/bt.bin\nLicence: Redistributable.\n')
+    refuses(fix, 'lists this path in 2 groups', 'refuses a path that two WHENCE groups list')
+    old2_whence(fix.old2_files['WHENCE'].replace(b'File: g/bt.bin\n', b'') + sep + b'Driver: btusb - BT\n\nFile: g/bt.bin\n')
+    refuses(fix, 'lists this path in 0 groups', 'refuses a WHENCE entry without a Licence field')
+    old2_whence(fix.old2_files['WHENCE'].replace(b'File: g/bt.bin\n', b'File: g/bt.bin\nFile: g/bt.bin\n'))
+    refuses(fix, 'has 2 File lines for this path', 'refuses a path listed twice in one group')
+    shutil.rmtree(o2)
+    fix.commits['linux-firmware-old2'] = make_repo(fix.sources, 'linux-firmware-old2', fix.old2_files, 'old2: bt')
+    fix.write_inputs()
+    check(fix.generate() == out, 'restored historical fixture regenerates identical output')
+    ok('historical origins refuse wrong blobs, paths, commits, repositories, groups, texts and partial metadata')
+
     # --- Part B: committed data ---------------------------------------------------------
     names = sorted(p.name for p in DATA.iterdir())
     check(names == sorted(['SHA256SUMS', 'inputs.json', *gen.OUTPUTS]), f'committed file set {names}')
@@ -444,17 +603,67 @@ try:
                             ('armbian-rkbin', 'LICENSE.TXT', '07488283c5a5937bd109164e5ca9c6f07b4b0dc9')):
         check(pinned.get((key, path)) == want, f'{key} {path} is blob {want}')
     check(not any(t[5] == 'rockchip-rkbin' for t in texts), 'no Rockchip licence text is presented for the DDR blob')
-    fw_texts = [t for t in texts if t[0] == f'{FW}.txt']
+    historical_sources = {'linux-firmware-2afd1423', 'linux-firmware-0061a2dd'}
+    fw_texts = [t for t in texts if t[0] == f'{FW}.txt' and t[5] not in historical_sources]
     check(len(fw_texts) == 133 and sum(t[7].startswith('LICENSES/') for t in fw_texts) == 131,
           'WHENCE, 131 licence files and the overlay README')
+    rtlwifi = next(t for t in fw_texts if t[7] == 'LICENSES/LICENCE.rtlwifi_firmware.txt')
+    bound = [t for t in texts if t[5] in historical_sources]
+    check(sorted(t[5] for t in bound) == sorted(historical_sources)
+          and all(t[0] == f'{FW}.txt' and t[7] == 'LICENCE.rtlwifi_firmware.txt' and t[1:5] == rtlwifi[1:5]
+                  and t[4] == 'd70921f493795acb9af2a38f405193ba7a1b28a3' for t in bound),
+          'each historical commit\'s LICENCE.rtlwifi_firmware.txt is bound to the identical reproduced text')
     check(any(t[7] == 'Licenses/gpl-2.0.txt' for t in texts), 'U-Boot GPL-2.0 text included')
     rows = [l.split('\t') for l in (DATA / 'firmware-files.tsv').read_text().splitlines() if not l.startswith('#')]
+    # Exactly two armbian-changed files carry a historical linux-firmware origin, with these pins.
+    historical = {
+        'rtw89/rtw8852b_fw-1.bin': ('linux-firmware-2afd1423', '2afd1423e4765eb691711ea5e78a19853cb2f6eb',
+                                    'ab2f80819cbbeefe266e34f4d85470e588f87fbe', '21fdfe0729a0939c86ec7ca773ad21336f2c3b90',
+                                    'e32e5c587d28a911d5f57b0edfda0fde3dcee149',
+                                    'rtw89 - Realtek 802.11ax WLAN driver for RTL8851B/RTL8852A/RTL8852B/RTL8852C'),
+        'rtl_bt/rtl8852bu_fw.bin': ('linux-firmware-0061a2dd', '0061a2dde6c3ad74dd5dbfa0f645408bf846f9cd',
+                                    '2636ae5a1a95cd12619638dcbb894227e2bdce76', 'c45c68047017e5ec63cba74bacaa06304f8faed0',
+                                    'd108c96f98ba21c7a006c5d7fec71f3730fcc2bb', 'btusb - Bluetooth USB driver'),
+    }
+    rtl_line = 'Redistributable. See LICENCE.rtlwifi_firmware.txt for details.'
+    check(sorted(real['firmware']['historical_origins']) == sorted(historical), 'two reviewed historical origins')
+    by_path = {r[0]: r for r in rows}
+    for path, (key, commit, git_blob, current, whence_blob, driver) in historical.items():
+        e = real['firmware']['historical_origins'][path]
+        check((e['source'], real['sources'][key]['commit'], e['git_blob'], e['whence_blob'], e['driver'], e['licence'],
+               e['licence_files']) == (key, commit, git_blob, whence_blob, driver, rtl_line,
+                                       {'LICENCE.rtlwifi_firmware.txt': 'd70921f493795acb9af2a38f405193ba7a1b28a3'}),
+              f'{path} historical pins')
+        check(real['sources'][key]['url'] == real['sources']['linux-firmware']['url'], f'{key} is linux-firmware')
+        check(by_path[path][2] == 'armbian-changed' and by_path[path][4] == git_blob and by_path[path][3] == (
+            f'linux-firmware has other bytes at this path (git blob {current}); its WHENCE entry describes those, not '
+            f'these; linux-firmware commit {commit} has these exact bytes at this path, and its WHENCE group for this '
+            'path names LICENCE.rtlwifi_firmware.txt (git blob d70921f493795acb9af2a38f405193ba7a1b28a3); see '
+            '"Historical linux-firmware origins"'), f'{path}: {by_path[path][3]}')
+    check(sum('Historical linux-firmware origins' in r[3] for r in rows) == 2, 'no other row cites a historical origin')
+    payload = (DATA / f'{FW}.txt').read_bytes()
+    ex = [l.split('\t') for l in (DATA / 'excerpts.tsv').read_text().splitlines() if not l.startswith('#')]
+    check(len(ex) == 4, f'{len(ex)} excerpt rows')
+    for path, (key, commit, git_blob, current, whence_blob, driver) in historical.items():
+        mine = [e for e in ex if e[4] == key]
+        check([e[9] for e in mine] == ['section', f'group for {path}'], f'{path} excerpt rows')
+        (section, group) = [payload[int(e[1]):int(e[1]) + int(e[2])] for e in mine]
+        for e, data in zip(mine, (section, group)):
+            check(sha(data) == e[3] and (e[5], e[6], e[7]) == (commit, 'WHENCE', whence_blob), f'{path} {e[9]} range')
+        sec, grp = mine
+        check(int(grp[1]) - int(sec[1]) == int(grp[8]) - int(sec[8]) and group in section, f'{path} group inside section')
+        check(section.startswith(f'Driver: {driver}\n'.encode()), f'{path} section starts at its Driver line')
+        check(group.endswith(f'\nLicence: {rtl_line}\n'.encode()) and group.count(f'File: {path}\n'.encode()) == 1
+              and group.count(b'Licence:') == 1, f'{path} group lists it once and ends with the rtlwifi Licence field')
+        check(b'LICENCE.ibt_firmware' not in group, f'{path} group does not carry the Intel Licence field')
+    check(b'LICENCE.ibt_firmware' in payload[int(ex[0][1]):int(ex[0][1]) + int(ex[0][2])],
+          'the btusb section keeps the preceding Intel group for context')
     counts = {}
     for r in rows:
         counts[r[2]] = counts.get(r[2], 0) + 1
         refs = re.findall(r'LICENSES/[\w.\-]+', r[3])
         check(all(any(t[7] == x for t in fw_texts) for x in refs), f'{r[0]} names only included texts')
-        if r[2] in ('armbian-changed', 'armbian-only'):
+        if r[2] in ('armbian-changed', 'armbian-only') and r[0] not in historical:
             check(not refs and 'no licence statement established' in r[3], f'{r[0]} borrows no licence')
     check(counts == {'upstream': 4505, 'upstream-other-path': 51, 'armbian-changed': 49, 'armbian-only': 700},
           f'committed class counts {counts}')
@@ -556,7 +765,10 @@ try:
     for p in (FW, UB):
         check(oct((root / f'usr/share/doc/{p}/copyright').stat().st_mode & 0o777) == '0o644', 'mode 0644')
     tail = fwc[len(out[f'{FW}.txt']):].decode()
-    check('Shipped in this image: 11 of 13' in tail, 'shipped count')
+    check('Shipped in this image: 13 of 15' in tail, 'shipped count')
+    check(f'\nshipped\tarmbian-changed\th/wifi.bin\tlinux-firmware has other bytes at this path (git blob '
+          f'{blob(fix.lf_files["h/wifi.bin"])}); its WHENCE entry describes those, not these; linux-firmware commit '
+          f'{fix.commits["linux-firmware-old1"]} has these exact bytes at this path' in tail, 'historical row shipped')
     check('\nshipped\tupstream\ta/up.bin\tWHENCE entry for this path; licence files: LICENSES/LICENCE.alpha\n' in tail,
           'shipped row')
     check('\nremoved\tarmbian-only\te/only.bin\t' in tail and '\nremoved\tupstream\ta/up2.bin\t' in tail, 'removed rows')
@@ -691,6 +903,19 @@ try:
 
     refused(build_root('text-edit'), 'verbatim text LICENSES/LICENCE.alpha .* changed',
             'refuses an altered verbatim text even with matching checksums', base=bad_base('text', edit_text))
+
+    def edit_excerpt(base):
+        p = base / f'{FW}.txt'
+        p.write_bytes(p.read_bytes().replace(b'File: g/bt_config.bin\n', b'File: g/bt_CONFIG.bin\n', 1))
+        resum(base)
+
+    refused(build_root('excerpt-edit'), r'verbatim excerpt of WHENCE \(linux-firmware-old2, section\) .* changed',
+            'refuses an altered historical WHENCE excerpt even with matching checksums', base=bad_base('excerpt', edit_excerpt))
+    refused(build_root('excerpts-missing'), 'SHA256SUMS lists', 'refuses a missing excerpt table',
+            base=bad_base('nox', lambda b: ((b / 'excerpts.tsv').unlink(), resum(b))))
+    root = build_root('fw-historical-drift')
+    (root / 'usr/lib/firmware/h/wifi.bin').write_bytes(b'\x00WIFI-DRIFT')
+    refused(root, 'firmware file h/wifi.bin differs', 'refuses installed bytes of a historically mapped file that drifted')
     refused(build_root('payload-edit'), 'do not match SHA256SUMS', 'refuses a payload that differs from its checksum',
             base=bad_base('payload', lambda b: (b / f'{UB}.txt').write_bytes(b'x')))
     refused(build_root('payload-missing'), 'SHA256SUMS lists', 'refuses a missing payload file',

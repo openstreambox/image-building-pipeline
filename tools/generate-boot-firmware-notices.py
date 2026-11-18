@@ -14,12 +14,17 @@ Writes, deterministically:
   identity.tsv                        installed identity the installer checks
   texts.tsv                           byte range, sha256 and git blob of every
                                       verbatim text inside the payloads
+  excerpts.tsv                        byte range and sha256 of every verbatim
+                                      excerpt inside the payloads, with its place
+                                      in the source file
   SHA256SUMS                          all of the above plus inputs.json
 
 Every claim the payloads make about an archive is checked here first: archive
 sha256 and size, control fields, each firmware file's git blob against the
 pinned trees, the loader's RKNS header hashes, the DDR blob identity, version
-strings and the U-Boot licence summary. Any mismatch stops before output exists.
+strings and the U-Boot licence summary, and each reviewed historical origin (an
+earlier linux-firmware commit with an armbian-changed file's exact bytes, its
+WHENCE group and licence files). Any mismatch stops before output exists.
 Nothing from the archives is executed or written to disk.
 
   generate-boot-firmware-notices.py --sources DIR --debs DIR [--out DIR]
@@ -42,7 +47,7 @@ import tempfile
 DEFAULT_DIR = Path(__file__).resolve().parents[1] / 'mkosi/runtime/licence-notices/boot-firmware'
 RULE = '=' * 78
 OUTPUTS = ('armbian-firmware-full.txt', 'linux-u-boot-rock-5b-plus-edge.txt',
-           'firmware-files.tsv', 'identity.tsv', 'texts.tsv')
+           'firmware-files.tsv', 'identity.tsv', 'texts.tsv', 'excerpts.tsv')
 NOTICE_NAME = re.compile(r'(?i)(licen[cs]e|notice|readme|whence|copying|copyright)')
 # A WHENCE Licence field is free text. Each word is resolved against the pinned
 # licence directories: a word that is the name of a file there names that file. A
@@ -279,11 +284,64 @@ def parse_whence(text):
     return entries
 
 
+def whence_groups(data):
+    """Every licence group of a WHENCE file, located by byte offset in data.
+
+    Uses the same section, File and Licence rules as parse_whence. A section runs
+    between separator lines, without its leading and trailing blank lines. A group
+    runs from its first non-blank line after the section's last Driver line, or
+    after the previous group's Licence field, to the end of its own Licence field,
+    continuation lines included. Returns dicts with 'section' and 'span' (byte
+    ranges), 'driver', 'files' and 'licence' (whitespace-normalised field body).
+    """
+    lines, pos = [], 0
+    for raw in data.splitlines(keepends=True):
+        lines.append((pos, pos + len(raw), raw.decode('utf-8').rstrip('\n')))
+        pos += len(raw)
+    groups, section, driver, start, files, i = [], [], None, None, [], 0
+    sec_start = sec_end = None
+    while i < len(lines):
+        begin, end, line = lines[i]
+        if re.fullmatch(r'-{10,}', line):
+            for g in section:
+                g['section'] = (sec_start, sec_end)
+            groups.extend(section)
+            section, driver, start, files, sec_start, sec_end = [], None, None, [], None, None
+            i += 1
+            continue
+        if line.strip():
+            sec_start = begin if sec_start is None else sec_start
+            sec_end = end
+        if line.startswith('Driver:'):
+            driver, start, files = line[len('Driver:'):].strip(), None, []
+        elif line.strip():
+            start = begin if start is None else start
+            file_match = re.match(r'^(?:Raw)?File:\s*(.+?)\s*$', line)
+            licence_match = re.match(r'^Licen[cs]e:\s*(.*)$', line)
+            if file_match:
+                files.append(file_match.group(1).strip('"'))
+            elif licence_match:
+                body = licence_match.group(1)
+                while i + 1 < len(lines) and re.match(r'^[ \t]+\S', lines[i + 1][2]):
+                    i += 1
+                    body += ' ' + lines[i][2].strip()
+                    end = lines[i][1]
+                sec_end = end
+                section.append({'span': (start, end), 'driver': driver, 'files': files,
+                                'licence': ' '.join(body.split())})
+                start, files = None, []
+        i += 1
+    for g in section:
+        g['section'] = (sec_start, sec_end)
+    groups.extend(section)
+    return groups
+
+
 # --- payload assembly -----------------------------------------------------------
 
 class Payload:
     def __init__(self, name):
-        self.name, self.buf, self.texts = name, bytearray(), []
+        self.name, self.buf, self.texts, self.excerpts = name, bytearray(), [], []
 
     def write(self, text=''):
         self.buf += text.encode()
@@ -305,6 +363,33 @@ class Payload:
         self.texts.append((self.name, offset, len(data), sha256(data), git_blob_id(data),
                            repo.key, repo.commit, path))
         if not data.endswith(b'\n'):
+            self.write('\n')
+        self.line()
+
+    def excerpt(self, repo, path, data, spans, title):
+        """Reproduce the first of spans [((start, end), label), ...] of data verbatim.
+
+        Each later span must lie inside the first. Every span is recorded at its own
+        position within the reproduced bytes, so excerpts.tsv locates it both in the
+        payload and in the source file.
+        """
+        (first, last), _ = spans[0]
+        if not 0 <= first < last <= len(data) or any(not first <= a < b <= last for (a, b), _ in spans[1:]):
+            fail(f'{repo.key}: excerpt of {path} out of range')
+        self.line(RULE)
+        self.line(title)
+        self.line(f'File: {path} (excerpt)')
+        self.line(f'Source: {repo.at()}')
+        self.line(f'Git blob of the whole file: {git_blob_id(data)}, {len(data)} bytes')
+        self.line(f'Excerpt: bytes {first} to {last - 1} of that file ({last - first} bytes), '
+                  'reproduced verbatim from the next line')
+        self.line(RULE)
+        offset = len(self.buf)
+        self.buf += data[first:last]
+        for (a, b), what in spans:
+            self.excerpts.append((self.name, offset + a - first, b - a, sha256(data[a:b]), repo.key, repo.commit,
+                                  path, git_blob_id(data), a, what))
+        if not data[first:last].endswith(b'\n'):
             self.write('\n')
         self.line()
 
@@ -360,10 +445,99 @@ def licence_field_files(body, tree, dirs):
     return files, unresolved
 
 
+HISTORICAL_KEYS = frozenset({'sha256', 'bytes', 'git_blob', 'source', 'subject', 'whence_blob', 'driver',
+                             'licence', 'licence_files'})
+
+
+def derive_historical(inputs, deb, repos):
+    """Check every reviewed historical origin; return its facts, or stop.
+
+    An entry names an armbian-changed file whose exact bytes an earlier linux-firmware
+    commit has at the same path. Before anything is rendered, each claim is checked:
+    the reviewed sha256, size and git blob against the package and the pinned overlay;
+    the pinned linux-firmware has other bytes there; the earlier commit is from the
+    same repository, has the reviewed subject and these exact bytes at this path; its
+    WHENCE is the reviewed blob, lists the path in exactly one group, under the
+    reviewed Driver line, closed by the reviewed Licence field; and that field names
+    exactly the reviewed licence files, as the reviewed blobs. A file of the same
+    name with other bytes, at any commit, establishes nothing.
+    """
+    cfg = inputs['firmware']
+    entries = cfg.get('historical_origins', {})
+    if not isinstance(entries, dict):
+        fail('historical_origins must be an object')
+    upstream, overlay = repos[cfg['upstream']], repos[cfg['overlay']]
+    up_pin = inputs['sources'][cfg['upstream']]
+    facts = {}
+    for path, e in sorted(entries.items()):
+        label = f'historical origin of {path}'
+        if not isinstance(e, dict) or set(e) != HISTORICAL_KEYS:
+            fail(f'{label}: needs exactly the fields {", ".join(sorted(HISTORICAL_KEYS))}')
+        if not (isinstance(e['licence_files'], dict) and e['licence_files']
+                and all(re.fullmatch(r'[0-9a-f]{40}', str(v)) for v in e['licence_files'].values())):
+            fail(f'{label}: licence_files must map each licence file to its git blob')
+        key = e['source']
+        if key not in repos or key in (cfg['upstream'], cfg['overlay']):
+            fail(f'{label}: source {key!r} is not a separate pinned source')
+        pin = inputs['sources'][key]
+        if (pin['url'], pin['fetch']) != (up_pin['url'], up_pin['fetch']) or pin['commit'] == up_pin['commit']:
+            fail(f'{label}: {key} is not another commit of the pinned linux-firmware repository')
+        hist = repos[key]
+        info = deb['files'].get(cfg['prefix'] + path)
+        if info is None:
+            fail(f'{label}: the package has no firmware file {path}')
+        if (info['sha256'], info['size'], info['git_blob']) != (e['sha256'], e['bytes'], e['git_blob']):
+            fail(f'{label}: the package bytes differ from the reviewed sha256, size or git blob')
+        blob = info['git_blob']
+        if overlay.tree.get(path) != blob:
+            fail(f'{label}: armbian/firmware {overlay.commit} does not have these bytes at this path')
+        if path not in upstream.tree or upstream.tree[path] == blob:
+            fail(f'{label}: not armbian-changed; linux-firmware {upstream.commit} has no other bytes at this path')
+        if hist.tree.get(path) != blob:
+            fail(f'{label}: linux-firmware {hist.commit} does not have these bytes at this path')
+        subject = hist.git('log', '-1', '--format=%s', hist.commit).decode().strip()
+        if subject != e['subject']:
+            fail(f'{label}: commit {hist.commit} has the subject {subject!r}, reviewed {e["subject"]!r}')
+        whence_path = cfg['whence']
+        if hist.tree.get(whence_path) != e['whence_blob']:
+            fail(f'{label}: {whence_path} at {hist.commit} is not the reviewed blob {e["whence_blob"]}')
+        hist.prefetch([whence_path, *e['licence_files']])
+        whence_data = hist.text(whence_path)
+        groups = [g for g in whence_groups(whence_data) if path in g['files']]
+        if len(groups) != 1:
+            fail(f'{label}: {whence_path} at {hist.commit} lists this path in {len(groups)} groups, not one')
+        group = groups[0]
+        listed = re.findall(rf'(?m)^(?:Raw)?File:[ \t]*"?{re.escape(path)}"?[ \t]*$', whence_data.decode('utf-8'))
+        if len(listed) != 1:
+            fail(f'{label}: {whence_path} at {hist.commit} has {len(listed)} File lines for this path, not one')
+        if group['driver'] != e['driver']:
+            fail(f'{label}: the group is under Driver {group["driver"]!r}, reviewed {e["driver"]!r}')
+        if group['licence'] != e['licence']:
+            fail(f'{label}: the group\'s Licence field is {group["licence"]!r}, reviewed {e["licence"]!r}')
+        files, unresolved = licence_field_files(group['licence'], hist.tree, cfg['licence_dirs'])
+        if unresolved:
+            fail(f'{label}: the Licence field names {", ".join(unresolved)}, which is not a file at {hist.commit}')
+        named = {f: hist.tree[f] for f in files}
+        if named != e['licence_files']:
+            fail(f'{label}: the Licence field names {named} at {hist.commit}, reviewed {e["licence_files"]}')
+        facts[path] = {'entry': e, 'repo': hist, 'blob': blob, 'upstream_blob': upstream.tree[path],
+                       'whence': whence_data, 'group': group,
+                       'texts': [(f, hist.text(f)) for f in sorted(named)]}
+    return facts
+
+
+def historical_cover(path, fact):
+    names = ', '.join(f'{f} (git blob {b})' for f, b in sorted(fact['entry']['licence_files'].items()))
+    return (f'linux-firmware has other bytes at this path (git blob {fact["upstream_blob"]}); its WHENCE entry '
+            f'describes those, not these; linux-firmware commit {fact["repo"].commit} has these exact bytes at '
+            f'this path, and its WHENCE group for this path names {names}; see "Historical linux-firmware origins"')
+
+
 def derive_firmware(inputs, deb, repos):
     cfg = inputs['firmware']
     upstream, overlay = repos[cfg['upstream']], repos[cfg['overlay']]
     prefix = cfg['prefix']
+    historical = derive_historical(inputs, deb, repos)
     whence_data = upstream.text(cfg['whence'])
     whence = parse_whence(whence_data.decode('utf-8'))
     by_blob = {}
@@ -432,6 +606,8 @@ def derive_firmware(inputs, deb, repos):
                      if other in whence else
                      f'same bytes as linux-firmware {other}, which has no WHENCE entry; '
                      'no licence statement established')
+        elif cls == 'armbian-changed' and path in historical:
+            cover = historical_cover(path, historical[path])
         elif cls == 'armbian-changed':
             cover = (f'linux-firmware has other bytes at this path (git blob {upstream_blob})'
                      + ('; its WHENCE entry describes those, not these' if entry != '-' else ', with no WHENCE entry')
@@ -448,10 +624,10 @@ def derive_firmware(inputs, deb, repos):
              'package\'s files uses; review the list')
     notices = sorted(p[len(prefix):] for p in deb['files']
                      if p.startswith(prefix) and NOTICE_NAME.search(p.rsplit('/', 1)[-1]))
-    return rows, sorted(texts), counts, whence_data, notices
+    return rows, sorted(texts), counts, whence_data, notices, historical
 
 
-def firmware_payload(inputs, deb, repos, rows, texts, counts, whence_data, notices):
+def firmware_payload(inputs, deb, repos, rows, texts, counts, whence_data, notices, historical):
     cfg = inputs['firmware']
     pin = inputs['packages'][cfg['package']]
     upstream, overlay = repos[cfg['upstream']], repos[cfg['overlay']]
@@ -507,12 +683,61 @@ def firmware_payload(inputs, deb, repos, rows, texts, counts, whence_data, notic
         p.verbatim(upstream, path, upstream.text(path))
     p.verbatim(overlay, cfg['overlay_readme'], overlay.text(cfg['overlay_readme']),
                title='armbian/firmware README, reproduced as published')
+    if historical:
+        historical_section(p, cfg, upstream, overlay, historical)
     p.line(RULE)
     p.line('Firmware files of this package')
     p.line(RULE)
     para(p, 'Columns: shipped or removed (by the image build), class, path under /usr/lib/firmware, '
             'source entry and licence files. Added when the image was built, from the files present.')
     return p
+
+
+def historical_section(p, cfg, upstream, overlay, historical):
+    """Origins of armbian-changed files whose exact bytes an earlier linux-firmware commit has."""
+    p.line(RULE)
+    p.line('Historical linux-firmware origins')
+    p.line(RULE)
+    para(p, 'armbian/firmware replaced each file below with bytes that differ from linux-firmware at the '
+            'pinned commit, so the WHENCE above does not describe them. An earlier commit of the same '
+            'linux-firmware repository has these exact bytes at the same path, and its WHENCE lists that '
+            'path. For each file, this section names that commit, reproduces verbatim the WHENCE section '
+            'that lists the path, gives the byte range of the group within it that lists the path, and '
+            'gives the licence file that group names.')
+    para(p, 'armbian/firmware does not record where it took these bytes from, and this section does not '
+            'establish that step. It records origins. It does not interpret the licence text, and it does '
+            'not establish that the text\'s conditions are met.')
+    reproduced = {t[4]: t for t in p.texts}
+    for path, fact in sorted(historical.items()):
+        e, hist, group = fact['entry'], fact['repo'], fact['group']
+        (s0, s1), (g0, g1) = group['section'], group['span']
+        p.line(path)
+        p.line(f'  sha256 {e["sha256"]}, {e["bytes"]} bytes, git blob {fact["blob"]}')
+        p.line(f'  armbian/firmware commit {overlay.commit}: these bytes at this path (the package\'s copy)')
+        p.line(f'  linux-firmware commit {upstream.commit} (pinned): other bytes at this path '
+               f'(git blob {fact["upstream_blob"]})')
+        p.line(f'  linux-firmware commit {hist.commit}: these bytes at this path')
+        p.line(f'    subject: {e["subject"]}')
+        p.line()
+        para(p, f'{cfg["whence"]} at that commit is git blob {e["whence_blob"]}. The section below, '
+                f'bytes {s0} to {s1 - 1} of it, lists this path under "Driver: {e["driver"]}". The '
+                f'Licence field "{e["licence"]}" closes the group that lists this path: bytes {g0} to '
+                f'{g1 - 1} of that {cfg["whence"]}.'
+                + (' The other Licence fields in this section close other groups and do not apply to '
+                   'this path.' if len(re.findall(rb'(?m)^Licen[cs]e:', fact['whence'][s0:s1])) > 1
+                   else ''), '  ')
+        p.excerpt(hist, cfg['whence'], fact['whence'], [((s0, s1), 'section'), ((g0, g1), f'group for {path}')],
+                  title=f'linux-firmware WHENCE section for {path}, at the commit above')
+        for name, data in fact['texts']:
+            same = reproduced.get(git_blob_id(data))
+            if same:
+                para(p, f'Licence file named by that group: {name} at commit {hist.commit}, git blob '
+                        f'{git_blob_id(data)}. These are the same bytes as {same[7]}, reproduced above from '
+                        f'{same[5]} at {same[6]}.')
+                p.texts.append((p.name, same[1], same[2], same[3], same[4], hist.key, hist.commit, name))
+            else:
+                p.verbatim(hist, name, data, title=f'Licence file named by the WHENCE group for {path}')
+                reproduced[git_blob_id(data)] = p.texts[-1]
 
 
 # --- U-Boot -------------------------------------------------------------------
@@ -665,8 +890,8 @@ def generate(base, sources, debs):
 
     fw_name = inputs['firmware']['package']
     fw_deb = archives[fw_name][1]
-    rows, texts, counts, whence_data, notices = derive_firmware(inputs, fw_deb, repos)
-    fw = firmware_payload(inputs, fw_deb, repos, rows, texts, counts, whence_data, notices)
+    rows, texts, counts, whence_data, notices, historical = derive_firmware(inputs, fw_deb, repos)
+    fw = firmware_payload(inputs, fw_deb, repos, rows, texts, counts, whence_data, notices, historical)
 
     ub_name = inputs['uboot']['package']
     ub_deb = archives[ub_name][1]
@@ -701,6 +926,12 @@ def generate(base, sources, debs):
           '# payload\tbyte offset\tbytes\tsha256\tgit blob\tsource\tcommit\tpath']
     tl += ['\t'.join(map(str, t)) for t in fw.texts + ub.texts]
     out['texts.tsv'] = ('\n'.join(tl) + '\n').encode()
+
+    el = ['# Generated by tools/generate-boot-firmware-notices.py. Verbatim excerpts inside the payloads.',
+          '# payload\tbyte offset\tbytes\tsha256\tsource\tcommit\tpath\tgit blob of the whole file'
+          '\tbyte offset in that file\tpart']
+    el += ['\t'.join(map(str, t)) for t in fw.excerpts + ub.excerpts]
+    out['excerpts.tsv'] = ('\n'.join(el) + '\n').encode()
 
     sums = {name: sha256(data) for name, data in out.items()}
     sums['inputs.json'] = sha256(inputs_raw)

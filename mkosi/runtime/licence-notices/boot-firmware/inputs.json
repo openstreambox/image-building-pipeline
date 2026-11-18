@@ -25,6 +25,16 @@
       "fetch": "https://gitlab.com/kernel-firmware/linux-firmware.git",
       "commit": "eeed587f5b5032c39b3fb01cf8feffff46f9967c"
     },
+    "linux-firmware-2afd1423": {
+      "url": "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git",
+      "fetch": "https://gitlab.com/kernel-firmware/linux-firmware.git",
+      "commit": "2afd1423e4765eb691711ea5e78a19853cb2f6eb"
+    },
+    "linux-firmware-0061a2dd": {
+      "url": "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git",
+      "fetch": "https://gitlab.com/kernel-firmware/linux-firmware.git",
+      "commit": "0061a2dde6c3ad74dd5dbfa0f645408bf846f9cd"
+    },
     "armbian-firmware": {
       "url": "https://github.com/armbian/firmware",
       "fetch": "https://github.com/armbian/firmware.git",
@@ -62,6 +72,34 @@
     "licence_dirs": ["LICENSES/", ""],
     "licence_names_without_file": {
       "BSD-3-Clause": "The qcom/yamato_* Licence field names BSD-3-Clause beside LICENSE.qcom_yamato; that named file is reproduced. linux-firmware has no file called BSD-3-Clause."
+    },
+    "historical_origins": {
+      "rtw89/rtw8852b_fw-1.bin": {
+        "sha256": "2dc9f2fb587219ddace6120c4bf0543e4918ee0396b60ee8d0a6dcd690fb4b12",
+        "bytes": 1242808,
+        "git_blob": "ab2f80819cbbeefe266e34f4d85470e588f87fbe",
+        "source": "linux-firmware-2afd1423",
+        "subject": "rtw89: 8852b: update fw to v0.29.29.5",
+        "whence_blob": "e32e5c587d28a911d5f57b0edfda0fde3dcee149",
+        "driver": "rtw89 - Realtek 802.11ax WLAN driver for RTL8851B/RTL8852A/RTL8852B/RTL8852C",
+        "licence": "Redistributable. See LICENCE.rtlwifi_firmware.txt for details.",
+        "licence_files": {
+          "LICENCE.rtlwifi_firmware.txt": "d70921f493795acb9af2a38f405193ba7a1b28a3"
+        }
+      },
+      "rtl_bt/rtl8852bu_fw.bin": {
+        "sha256": "f1e0427317f147a78606ede85f3f8977ed0ab85c41c6b525560e5bd5a51e5818",
+        "bytes": 74324,
+        "git_blob": "2636ae5a1a95cd12619638dcbb894227e2bdce76",
+        "source": "linux-firmware-0061a2dd",
+        "subject": "rtl_bt: Update RTL8852B BT USB firmware to 0xDBC6_B20F",
+        "whence_blob": "d108c96f98ba21c7a006c5d7fec71f3730fcc2bb",
+        "driver": "btusb - Bluetooth USB driver",
+        "licence": "Redistributable. See LICENCE.rtlwifi_firmware.txt for details.",
+        "licence_files": {
+          "LICENCE.rtlwifi_firmware.txt": "d70921f493795acb9af2a38f405193ba7a1b28a3"
+        }
+      }
     },
     "overlay_readme": "README.md",
     "recipe": "Armbian builds this package by installing linux-firmware with its own \"make install\" and then extracting a \"git archive\" of armbian/firmware over the result, so armbian/firmware wins where both have a file."
