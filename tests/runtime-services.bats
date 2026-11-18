@@ -1494,21 +1494,28 @@ EOF
 }
 
 @test "typec policy: fusb302 rebind leaves a working data path without a partner object alone" {
+  local root="$BATS_TEST_TMPDIR/rock" dev
+  for dev in usb3/3-1 usb4/4-1 usb3/3-1/3-1.2; do
+    typec_rock_reprobe_fixture "$root"
+    mkdir -p "$root/otg/fc000000.usb/xhci-hcd.3.auto/$dev"
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"deferred: a USB device is enumerated under fc000000.usb"* ]]
+    [ ! -e "$root/iio/i2c-writes" ]
+    [ ! -e "$root/run/reprobe" ]
+  done
+}
+
+@test "typec policy: host mode with only root hubs (N-0:1.0) is not a working data path" {
   local root="$BATS_TEST_TMPDIR/rock"
   typec_rock_reprobe_fixture "$root"
-  printf 'host\n' >"$root/usb_role/role"
-  run run_typec_rock
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"deferred: USB role switch already reads host"* ]]
-  [ ! -e "$root/iio/i2c-writes" ]
+  mkdir -p "$root/otg/fc000000.usb/xhci-hcd.3.auto/usb10/10-0:1.0"
+  [ -d "$root/otg/fc000000.usb/xhci-hcd.3.auto/usb3/3-0:1.0" ]
 
-  typec_rock_reprobe_fixture "$root"
-  mkdir -p "$root/otg/fc000000.usb/xhci-hcd.3.auto/usb3/3-1"
   run run_typec_rock
   [ "$status" -eq 0 ]
-  [[ "$output" == *"deferred: a USB device is enumerated under fc000000.usb"* ]]
-  [ ! -e "$root/iio/i2c-writes" ]
-  [ ! -e "$root/run/reprobe" ]
+  [[ "$output" != *"enumerated"* ]]
+  [ "$(cat "$root/iio/i2c-writes")" = $'unbind 4-0022\nbind 4-0022' ]
 }
 
 @test "typec policy: fusb302 rebind only touches an I2C device bound to typec_fusb302" {
@@ -1614,6 +1621,36 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"INFO: port0 is present again"* ]]
   [ ! -e "$root/run/port-absent" ]
+}
+
+@test "typec policy: a boot run before the port is registered notes it without later present-again noise" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  mv "$root/typec/port0" "$root/port0.later"
+  export CERALIVE_TYPEC_MODE=normal
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INFO: port0 not registered yet — no connector writes"* ]]
+  [[ "$output" != *"ERROR"* ]]
+  [ ! -e "$root/run/port-absent" ]
+
+  mv "$root/port0.later" "$root/typec/port0"
+  export CERALIVE_TYPEC_MODE=recheck
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"present again"* ]]
+}
+
+@test "typec policy: an unrecordable absent port logs an error with its priority" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0"
+  mkdir -p "$root/run"
+  ln -sfn "$root/missing/dir/port-absent" "$root/run/port-absent"
+  export CERALIVE_TYPEC_MODE=recheck
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<3>ceralive-typec-policy: ERROR: cannot record the absent port0"* ]]
 }
 
 @test "typec policy: a rebound fusb302 whose port0 does not come back is reported" {

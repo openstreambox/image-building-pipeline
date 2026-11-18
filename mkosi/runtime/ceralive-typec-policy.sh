@@ -37,7 +37,6 @@
 #                                     one FUSB302 rebind (default 20)
 #   CERALIVE_TYPEC_REBIND_GAP         seconds between unbind and bind (default 1)
 #   CERALIVE_TYPEC_BIND_WAIT          seconds to wait for each driver-link change (default 3)
-#   CERALIVE_TYPEC_ROLE_SWITCH        OTG role (default /sys/class/usb_role/fc000000.usb-role-switch/role)
 #   CERALIVE_TYPEC_OTG_DEV            OTG controller (default /sys/bus/platform/devices/fc000000.usb)
 
 set -uo pipefail
@@ -61,7 +60,6 @@ REBIND_GAP="${CERALIVE_TYPEC_REBIND_GAP:-1}"
 [[ "${REBIND_GAP}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "CERALIVE_TYPEC_REBIND_GAP must be a non-negative number"
 BIND_WAIT="${CERALIVE_TYPEC_BIND_WAIT:-3}"
 [[ "${BIND_WAIT}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_BIND_WAIT must be an unsigned integer"
-ROLE_SWITCH="${CERALIVE_TYPEC_ROLE_SWITCH:-/sys/class/usb_role/fc000000.usb-role-switch/role}"
 OTG_DEV="${CERALIVE_TYPEC_OTG_DEV:-/sys/bus/platform/devices/fc000000.usb}"
 
 PORT_DIR="${CLASS_DIR}/${PORT}"
@@ -146,9 +144,8 @@ wait_bound() {
 #
 # An empty J11 looks exactly like a stuck one (source, no partner, no CC event in
 # sysfs), so on a back-powered boot with nothing plugged in this rebind runs once
-# and ends in an info line. A working data path without a partner object (role
-# switch already host, or a device enumerated under the OTG controller) is left
-# alone.
+# and ends in an info line. A working data path without a partner object (a
+# device enumerated under the OTG controller) is left alone.
 rock_fusb302_reprobe() {
   local last="$1" now="$2" power dev name driver bus deadline data
   [[ ! -e "${RUN_DIR}/reprobe" ]] || return 0
@@ -165,11 +162,9 @@ rock_fusb302_reprobe() {
     reprobe_defer "${PORT} power_role=${power}, not source"
     return 0
   fi
-  if [[ -r "${ROLE_SWITCH}" && "$(cat "${ROLE_SWITCH}")" == host ]]; then
-    reprobe_defer "USB role switch already reads host"
-    return 0
-  fi
-  if compgen -G "${OTG_DEV}/xhci-hcd.*/usb[0-9]*/[0-9]*-[0-9]*" >/dev/null; then
+  # Device ports start at 1: every root hub has its own N-0:1.0 interface, and
+  # host role with nothing enumerated is not a working data path.
+  if compgen -G "${OTG_DEV}/xhci-hcd.*/usb[0-9]*/[0-9]*-[1-9]*" >/dev/null; then
     reprobe_defer "a USB device is enumerated under ${OTG_DEV##*/}"
     return 0
   fi
@@ -284,12 +279,17 @@ rock_back_power_correction() {
   printf '%s\n' "${decision}" >"${RUN_DIR}/state" || log "ERROR: cannot record Rock back-power state"
   [[ "${decision}" == present ]] || return 0
 
-  # No port (e.g. the controller is unbound) means nothing to write; say so once
-  # per change instead of failing the preference write on every tick.
+  # No port means nothing to write. At boot the driver may simply not have
+  # registered it yet (its port-add event runs the policy again), so the boot run
+  # only notes that. The recheck says so once per change instead of failing the
+  # preference write on every tick (e.g. after a failed rebind).
   if [[ ! -d "${PORT_DIR}" ]]; then
-    if [[ ! -e "${RUN_DIR}/port-absent" ]]; then
+    if [[ "${MODE}" != recheck ]]; then
+      log "INFO: ${PORT} not registered yet — no connector writes"
+    elif [[ ! -e "${RUN_DIR}/port-absent" ]]; then
       log "INFO: ${PORT} is absent — no connector writes until it returns"
-      : >"${RUN_DIR}/port-absent" || log "ERROR: cannot record the absent ${PORT}"
+      : >"${RUN_DIR}/port-absent" \
+        || printf '<3>ceralive-typec-policy: ERROR: cannot record the absent %s\n' "${PORT}"
     fi
     return 0
   fi

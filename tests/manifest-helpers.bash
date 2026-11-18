@@ -1093,7 +1093,9 @@ typec_rock_fixture() {
 
 # typec_rock_reprobe_fixture <root> — the field state the FUSB302 rebind targets:
 # back power present, J11 source with the source preference, no partner, all
-# no-partner cycles used 30 s ago, and port0 owned by I2C device 4-0022. The
+# no-partner cycles used 30 s ago, and port0 owned by I2C device 4-0022. The OTG
+# controller is in host mode with only its two root hubs (each has an N-0:1.0
+# interface of its own), i.e. nothing enumerated. The
 # driver directory carries the kernel's driver name, typec_fusb302 (fusb302.ko
 # registers it so; modinfo shows alias i2c:typec_fusb302), not the module name.
 typec_rock_reprobe_fixture() {
@@ -1105,16 +1107,15 @@ typec_rock_reprobe_fixture() {
   printf '[host] device\n' >"$root/typec/port0/data_role"
   printf 'sink [source]\n' >"$root/typec/port0/preferred_role"
   mkdir -p "$root/i2c/drivers/typec_fusb302" "$root/i2c/devices/4-0022" "$root/run" \
-    "$root/otg/fc000000.usb/xhci-hcd.3.auto/usb3" "$root/usb_role"
+    "$root/otg/fc000000.usb/xhci-hcd.3.auto/usb3/3-0:1.0" \
+    "$root/otg/fc000000.usb/xhci-hcd.3.auto/usb4/4-0:1.0"
   : >"$root/i2c/drivers/typec_fusb302/unbind"
   : >"$root/i2c/drivers/typec_fusb302/bind"
   : >"$root/i2c/drivers_probe"
-  printf 'device\n' >"$root/usb_role/role"
   ln -sfn "$root/i2c/drivers/typec_fusb302" "$root/i2c/devices/4-0022/driver"
   ln -sfn "$root/i2c/devices/4-0022" "$root/typec/port0/device"
   printf '3 %s\n' "$(( $(date +%s) - 30 ))" >"$root/run/nopartner"
   export TYPEC_FAKE_I2C="$root/i2c"
-  export CERALIVE_TYPEC_ROLE_SWITCH="$root/usb_role/role"
   export CERALIVE_TYPEC_OTG_DEV="$root/otg/fc000000.usb"
   export CERALIVE_TYPEC_MODE=recheck CERALIVE_TYPEC_POLL=0
   export CERALIVE_TYPEC_REBIND_GAP=0 CERALIVE_TYPEC_BIND_WAIT=0

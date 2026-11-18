@@ -5858,8 +5858,9 @@ is **not yet proven on hardware** and needs a bench cold boot before it is relie
 
 When the no-partner cycles are used up, `CERALIVE_TYPEC_REPROBE_SETTLE` (20 s) have
 passed since the last one, the source preference is active, `power_role` reads `source`,
-the OTG role switch does not already read `host`, no USB device is enumerated under
-`fc000000.usb` and there is still no partner, the recheck rebinds the I2C device behind
+no USB device is enumerated under `fc000000.usb` (a device port `N-M` with M ≥ 1; each
+root hub's own `N-0:1.0` interface does not count, and host role alone is not a working
+data path) and there is still no partner, the recheck rebinds the I2C device behind
 `port0/device`. The driver directory comes from that device's `driver` link: the kernel
 registers the driver as `typec_fusb302` (modalias `i2c:typec_fusb302`); only the module
 file is `fusb302.ko`. Unbind and bind are judged by the driver link, not by the write's
@@ -5873,7 +5874,9 @@ without confirmed back power. An empty J11 cannot be told from a stuck one in sy
 a back-powered boot with nothing plugged in the rebind runs once and ends in an info line.
 Every decision is journaled with the `fusb302-reprobe:` tag and a syslog priority prefix,
 so `journalctl -p warning` shows failures; deferrals log once per reason. If `port0` is
-absent the Rock recheck logs that once and makes no connector writes until it returns.
+absent the Rock recheck logs that once per change and makes no connector writes until it
+returns; the boot-time run, which can start before the driver registers the port, only
+notes "not registered yet".
 Residual risk: a TCPM worker wedged in I2C could block the unbind in D state; the recheck
 unit then times out holding the lock (boot is not held), as a manual module unload would.
 Guards: the "typec policy: fusb302 rebind …" cases and their neighbours in
