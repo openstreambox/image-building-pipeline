@@ -19,6 +19,15 @@
 # Files that cannot be used (more than one key file, or not a tskey-auth- key)
 # are overwritten and removed; only their names are logged and written to
 # BOOT/TAILSCALE-KEY-REJECTED.txt. No key text is ever logged or printed.
+#
+# CONTRACT with other writers (CeraUI's Remote access card; docs/agents/key-facts.md,
+# "Remote-access enrollment contract"). Stable paths in STATE: pending-authkey,
+# pending-hostname, enroll-status, joined-once. A writer running as root puts the
+# key in pending-authkey (exact text, 0600, tmp file + rename in STATE, written
+# last), an optional name in pending-hostname, resets enroll-status to
+# "pending 0 0 new-key" and starts this unit. Root-owned files are fine: this runs
+# as root and the root CLI reads the key; tailscaled never reads the file.
+# enroll-status is one line "<pending|joined|gave-up> <attempts> <next-epoch> <reason>".
 set -euo pipefail
 
 BOOT="${CERALIVE_TS_BOOT_DIR:-/boot}"
@@ -130,7 +139,9 @@ enroll_pending() {
     return 0   # backing off; a clock far ahead of `next` is ignored
   fi
   local name="" i out rc=0 delay
-  [[ -f "${PENDING_NAME}" ]] && name="$(cat -- "${PENDING_NAME}")"
+  [[ -f "${PENDING_NAME}" ]] && name="$(head -c 64 -- "${PENDING_NAME}" | tr -d '\r\n')"
+  # Another writer (the CeraUI Remote access card) may supply the name: same rule.
+  [[ "$name" =~ ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$ ]] || name=""
   attempts=$((attempts + 1))
   # Count and schedule the attempt before anything can fail, so even a daemon
   # that cannot start (or a crash here) backs off and is capped.

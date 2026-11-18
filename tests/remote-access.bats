@@ -305,6 +305,27 @@ no_key_anywhere() { # the key text appears in no file on BOOT and in no output
   no_key_anywhere
 }
 
+@test "contract: a root writer's pending key and name are used, and a bad name is ignored" {
+  enroll_env
+  mkdir -p "$T/state"; chmod 700 "$T/state"
+  ( umask 077; printf 'black' >"$T/state/pending-hostname"
+    printf 'pending 0 0 new-key\n' >"$T/state/enroll-status"
+    printf '%s' "$KEY" >"$T/state/.pk.tmp"; mv "$T/state/.pk.tmp" "$T/state/pending-authkey" )
+  enroll CERALIVE_TS_NOW=1000
+  [ "$status" -eq 0 ]
+  grep -q -- "--hostname=black" "$T/calls"
+  [ "$(cut -d' ' -f1 "$T/state/enroll-status")" = joined ]
+  [ ! -e "$T/state/pending-authkey" ] && [ ! -e "$T/state/pending-hostname" ]
+  rm "$T/calls"
+  ( umask 077; printf 'Bad Name;rm' >"$T/state/pending-hostname"
+    printf 'pending 0 0 new-key\n' >"$T/state/enroll-status"
+    printf '%s' "$KEY" >"$T/state/pending-authkey" )
+  enroll CERALIVE_TS_NOW=2000
+  [ "$status" -eq 0 ]
+  ! grep -q -- '--hostname' "$T/calls"
+  no_key_anywhere
+}
+
 @test "no key file and nothing pending is a no-op" {
   enroll_env
   enroll
