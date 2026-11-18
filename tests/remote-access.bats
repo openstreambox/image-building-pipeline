@@ -291,6 +291,39 @@ fresh() { # wipe the per-scenario state inside this test's own tmpdir
   [ ! -e "$T/calls" ]                  # nothing left to retry
 }
 
+@test "Tailscale and headscale refusal texts end enrollment; a transient error does not" {
+  local msg
+  for msg in "backend error: invalid key: API key does not exist" \
+             "backend error: invalid key: unable to validate API key" \
+             "backend error: invalid key: API key $KEY not valid" \
+             "backend error: invalid pre auth key" \
+             "backend error: auth-key not found" \
+             "backend error: auth-key expired" \
+             "backend error: auth-key has already been used" \
+             "backend error: authkey expired" \
+             "backend error: AuthKey has expired" \
+             "backend error: auth key has already been used" \
+             "backend error: authkey already used" \
+             "backend error: pre auth key not found" \
+             "backend error: key revoked"; do
+    fresh; enroll_env
+    card_drop "$KEY"
+    enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="$msg"
+    [[ "$(cat "$T/enroll/enroll-status")" == "gave-up 1 0 the control server refused the key" ]] \
+      || { echo "not treated as final: $msg"; return 1; }
+    no_key_anywhere
+  done
+  for msg in "timeout waiting for Tailscale service to enter a Running state" \
+             "x509: certificate has expired or is not yet valid" \
+             "backend error: tls: invalid key in server certificate" \
+             "dial tcp: lookup controlplane.tailscale.com: no such host"; do
+    fresh; enroll_env
+    card_drop "$KEY"
+    enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="$msg"
+    [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 retry" ] || { echo "treated as final: $msg"; return 1; }
+  done
+}
+
 @test "R8: a state that existed before (old-layout box after an OTA) survives a refused key" {
   enroll_env
   printf '{"node":"key"}' >"$T/state/tailscaled.state"; : >"$T/state/joined-once"
@@ -317,6 +350,37 @@ fresh() { # wipe the per-scenario state inside this test's own tmpdir
   enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="backend error: invalid key" TS_BACKEND=Running
   [ -e "$T/state/tailscaled.state" ]
   [[ "$output" == *"kept tailscaled.state (tailscaled state 'Running')"* ]]
+}
+
+@test "give-up preserves enrollment-owned state on NoState, with a node key, or on status failure" {
+  local response status_rc
+  for response in \
+    '{"BackendState": "NoState", "HaveNodeKey": true}' \
+    '{"BackendState": "NoState"}' \
+    '{"BackendState": "NeedsLogin", "HaveNodeKey": true}' \
+    '{"BackendState": "NeedsLogin"}'; do
+    fresh
+    enroll_env
+    status_rc=0
+    if [[ "$response" == '{"BackendState": "NeedsLogin"}' ]]; then status_rc=1; fi
+    cat >"$T/bin/tailscale" <<STUB
+#!/bin/sh
+case "\$*" in
+  *" up "*) printf '%s' test-node-state >"$T/state/tailscaled.state"; exit 1;;
+  *"status --json"*) printf '%s\n' '$response'; exit $status_rc;;
+esac
+STUB
+    card_drop "$KEY"
+    enroll CERALIVE_TS_MAX_ATTEMPTS=1
+    [ "$status" -eq 1 ]
+    [ "$(cat "$T/state/tailscaled.state")" = test-node-state ]
+    [ -e "$T/enroll/state-ours" ]
+    [ ! -e "$T/enroll/joined-once" ]
+    [ ! -e "$T/enroll/pending-authkey" ]
+    run grep -q 'systemctl stop tailscaled.service' "$T/calls"
+    [ "$status" -eq 1 ]
+    [[ "$(cat "$T/enroll/enroll-status")" == "gave-up 1 0 no success after 1 attempts" ]]
+  done
 }
 
 @test "retries are capped, and a box that joined before keeps its state" {
@@ -510,6 +574,32 @@ STUB
   ln -s "$T" "$T/enroll2"
   run env PATH="$T/bin:$PATH" CERALIVE_TS_BOOT_DIR="$T/boot" CERALIVE_TS_ENROLL_DIR="$T/enroll2" bash "$ENROLL"
   [ "$status" -ne 0 ] && [[ "$output" == *"not a plain directory"* ]]
+}
+
+@test "R10: a directory at incoming-authkey does not block an existing pending key" {
+  enroll_env
+  mkdir -p "$T/enroll/incoming-authkey"
+  printf '%s\n' "$KEY" >"$T/enroll/pending-authkey"
+  enroll
+  [ "$status" -eq 0 ]
+  [ -e "$T/enroll/joined-once" ]
+  [ ! -e "$T/enroll/incoming-authkey" ]
+  grep -q 'used kAbC123-X' "$T/used"
+  no_leftovers
+}
+
+@test "R10: a leftover populated claim directory does not block the next real drop" {
+  enroll_env
+  mkdir -p "$T/enroll/.claimed"
+  printf '%s\n' 'unrelated contents' >"$T/enroll/.claimed/keep"
+  card_drop "$KEY" white
+  enroll
+  [ "$status" -eq 0 ]
+  [ -e "$T/enroll/joined-once" ]
+  grep -q 'used kAbC123-X' "$T/used"
+  grep -q -- '--hostname=white' "$T/calls"
+  grep -qx 'unrelated contents' "$T/enroll"/.rejected.*/incoming-authkey/keep
+  no_leftovers
 }
 
 @test "a pending key that is not a tskey-auth key is removed without a join attempt" {

@@ -6269,8 +6269,9 @@ with the card.
     files, so a crash at any point loses nothing.
   - If a BOOT file and an incoming key arrive together, the incoming key wins.
 - **Rejected input:** anything that is not a regular file (links, FIFOs, devices) is
-  unlinked without being followed, and so is a file not in the format above. No key
-  text is logged.
+  unlinked without being followed, and so is a file not in the format above.
+  Empty incoming directories are removed. Populated ones are moved to a private
+  `.rejected.*` directory for inspection. No key text is logged.
 - **What the card reads:** `enroll-status`, one line
   `<state> <attempts> <next-epoch> <reason>` with `<state>` one of `pending`,
   `joined`, `gave-up`. The reason is free text and may contain spaces, so parse the
@@ -6282,7 +6283,8 @@ with the card.
   - this enrollment created it (`state-ours`, written before tailscaled first ran
     without state);
   - the box never joined;
-  - tailscaled reports `NeedsLogin`.
+  - tailscaled reports `NeedsLogin` without a node key. `NoState` can describe
+    a registered node waiting for control, so the state is kept.
 
   A state that existed before (for example an older box after an OTA) is never
   removed.

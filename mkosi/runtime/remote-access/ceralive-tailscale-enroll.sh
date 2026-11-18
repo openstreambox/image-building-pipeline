@@ -33,13 +33,13 @@
 #    network yet) back off from 2 to 30 minutes and give up after MAX_ATTEMPTS.
 #    Giving up removes the key. It also removes tailscaled.state, but only when
 #    this enrollment created it (state-ours, written before tailscaled first ran
-#    without state), the box never joined, and tailscaled reports it is not
-#    logged in. A state that existed before is never touched.
+#    without state), the box never joined, and tailscaled reports NeedsLogin
+#    without a node key. A state that existed before is never touched.
 # 4. A key that arrives while a run is busy is adopted when that attempt ends.
 #
 # Unusable inputs (several key files, not a tskey-auth- key, links, non-regular
-# files) are removed; only names are logged (BOOT/TAILSCALE-KEY-REJECTED.txt for
-# files from the card). No key text is ever logged or printed.
+# files) are removed from the input path; only names are logged
+# (BOOT/TAILSCALE-KEY-REJECTED.txt for files from the card). No key text is logged.
 #
 # CONTRACT with other writers: docs/agents/key-facts.md, "Remote-access
 # enrollment contract". A writer creates only ENROLL/incoming-authkey (tmp file +
@@ -66,6 +66,9 @@ OURS="${ENROLL}/state-ours"
 REJECTED_NOTE="${BOOT}/TAILSCALE-KEY-REJECTED.txt"
 KEY_RE='^tskey-auth-[A-Za-z0-9_-]{8,200}$'
 NAME_RE='^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$'
+REFUSED_RE='^(backend error: )?(invalid key|key (has )?(been )?(expired|revoked|already (been )?used))\b
+\binvalid (pre[- ]?)?auth[- ]?key\b
+\b(pre[- ]?)?auth[- ]?key (has )?(been )?(not found|not valid|invalid|expired|revoked|(already (been )?)?used)\b'
 
 log() { logger -t ceralive-tailscale-enroll -- "$*" 2>/dev/null || true; echo "ceralive-tailscale-enroll: $*"; }
 
@@ -75,6 +78,21 @@ present() { [[ -e "$1" || -L "$1" ]]; }
 wipe() { # never follows a link: a link (or other non-regular file) is only unlinked
   if ! regular "$1"; then rm -f -- "$1"; return 0; fi
   shred -u -z -- "$1" 2>/dev/null || rm -f -- "$1"
+}
+
+discard_claim() {
+  if [[ ! -d "${CLAIMED}" || -L "${CLAIMED}" ]]; then
+    wipe "${CLAIMED}"
+    return
+  fi
+
+  # A directory is never a key drop. Clear the claim without deleting its contents.
+  if ! rmdir -- "${CLAIMED}" 2>/dev/null; then
+    local rejected
+    rejected="$(mktemp -d "${ENROLL}/.rejected.XXXXXX")"
+    mv -T -- "${CLAIMED}" "${rejected}/incoming-authkey"
+    log "quarantined a populated incoming-authkey directory"
+  fi
 }
 
 # Parse a key file into KEY and NAME: a regular, non-link file of at most 1 KiB,
@@ -128,7 +146,7 @@ recover() {
     if regular "${CLAIMED}" && ! present "${INCOMING}"; then
       mv -f -- "${CLAIMED}" "${INCOMING}"
     else
-      wipe "${CLAIMED}"
+      discard_claim
     fi
   fi
   shopt -s nullglob dotglob
@@ -192,7 +210,7 @@ take_incoming_keys() {
   local i
   for ((i = 0; i < 5; i++)); do
     present "${INCOMING}" || return 0
-    mv -f -- "${INCOMING}" "${CLAIMED}"
+    mv -fT -- "${INCOMING}" "${CLAIMED}"
     parse_keyfile "${CLAIMED}"
     if [[ -z "${KEY}" ]]; then
       log "removed incoming-authkey: not a regular file holding one tskey-auth- key (and an optional name)"
@@ -200,19 +218,21 @@ take_incoming_keys() {
       adopt "a local writer"
       KEY=""
     fi
-    wipe "${CLAIMED}"
+    discard_claim
   done
 }
 
 give_up() { # reason
   wipe "${PENDING}"
   if (( joined == 0 )) && [[ -e "${OURS}" ]]; then
-    # Only a state this enrollment created, on a box that never joined and that
-    # tailscaled itself reports as not logged in, is removed (back to idle).
-    local backend=""
-    backend="$("${CLI}" --socket="${SOCKET}" status --json 2>/dev/null \
-      | grep -o '"BackendState": *"[A-Za-z]*"' | head -n1 | grep -o '"[A-Za-z]*"$' | tr -d '"')" || true
-    if [[ "$backend" == NeedsLogin || "$backend" == NoState ]]; then
+    # NoState is also possible for a registered node waiting for control.
+    # Keep its state if the status is ambiguous or already has a node key.
+    local backend="" status_json node_key_re='"HaveNodeKey"[[:space:]]*:[[:space:]]*true'
+    if status_json="$("${CLI}" --socket="${SOCKET}" status --json 2>/dev/null)"; then
+      backend="$(grep -o '"BackendState": *"[A-Za-z]*"' <<<"$status_json" \
+        | head -n1 | grep -o '"[A-Za-z]*"$' | tr -d '"')" || true
+    fi
+    if [[ "$backend" == NeedsLogin && ! "$status_json" =~ $node_key_re ]]; then
       "${SYSTEMCTL}" stop tailscaled.service 2>/dev/null || true
       rm -f -- "${TS_STATE}/tailscaled.state"   # rm never follows a link
       rm -f -- "${OURS}"
@@ -239,7 +259,7 @@ enroll_pending() {
   if (( next > NOW && next - NOW <= 3600 )); then
     return 0   # backing off; a clock far ahead of `next` is ignored
   fi
-  local i out rc=0 delay keyfile
+  local i out message rc=0 delay keyfile
   attempts=$((attempts + 1))
   # Count and schedule the attempt before anything can fail, so even a daemon
   # that cannot start (or a crash here) backs off and is capped.
@@ -266,7 +286,6 @@ enroll_pending() {
   [[ -n "$name" ]] && args+=("--hostname=${name}")
   out="$("${CLI}" --socket="${SOCKET}" "${args[@]}" 2>&1)" || rc=$?
   wipe "$keyfile"
-  out="$(printf '%s' "$out" | sed -E 's/tskey-[A-Za-z0-9_-]+/<key>/g' | tr '\n' ' ' | cut -c1-200)"
   if (( rc == 0 )); then
     : >"${ENROLL}/joined-once"
     rm -f -- "${OURS}"
@@ -280,8 +299,13 @@ enroll_pending() {
     log "joined Tailscale${name:+ as ${name}}"
     return 0
   fi
-  log "tailscale up failed (attempt ${attempts}/${MAX_ATTEMPTS}): ${out}"
-  if printf '%s' "$out" | grep -qiE 'invalid key|expired|revoked|already used|not valid|authkey.*(used|invalid)'; then
+  message="$(printf '%s' "$out" | sed -E 's/tskey-[A-Za-z0-9_-]+/<key>/g' | tr '\n' ' ' | cut -c1-200)"
+  log "tailscale up failed (attempt ${attempts}/${MAX_ATTEMPTS}): ${message}"
+  # Final refusals: Tailscale's control plane ("invalid key: …", expired, revoked,
+  # already used) and headscale ("invalid pre auth key", "… has expired", "… has
+  # already been used"). Every phrase must be about the key: a TLS error such as
+  # "certificate has expired" (a wrong clock on first boot) is transient.
+  if printf '%s' "$out" | grep -qiE "$REFUSED_RE"; then
     give_up "the control server refused the key"
     return 1
   fi
