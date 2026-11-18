@@ -1321,6 +1321,562 @@ EOF
   [ ! -e "$root/iio/writes" ]
 }
 
+@test "typec policy: fusb302 rebind recovers a source port with no partner through the typec_fusb302 driver" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  touch "$root/iio/reprobe-attaches"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  # Paths come from the device's driver link, i.e. the kernel's typec_fusb302.
+  [ "$(cat "$root/iio/i2c-writes")" = $'unbind 4-0022\nbind 4-0022' ]
+  [ -L "$root/i2c/devices/4-0022/driver" ]
+  [ -d "$root/typec/port0" ]
+  [ ! -e "$root/iio/writes" ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = recovered ]
+  [[ "$output" == *"<6>ceralive-typec-policy: INFO: fusb302-reprobe: port0 is source with no partner 3"?"s after the last cycle: rebinding 4-0022 from typec_fusb302"* ]]
+  [[ "$output" == *"INFO: fusb302-reprobe: partner found after rebinding 4-0022: power_role=source data_role=host"* ]]
+}
+
+@test "typec policy: fusb302 rebind also accepts the module name as the driver directory" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  mkdir -p "$root/i2c/drivers/fusb302"
+  ln -sfn "$root/i2c/drivers/fusb302" "$root/i2c/devices/4-0022/driver"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(head -1 "$root/iio/i2c-writes")" = 'unbind 4-0022' ]
+}
+
+@test "typec policy: fusb302 rebind with nothing on J11 ends in one info line and runs once per boot" {
+  local root="$BATS_TEST_TMPDIR/rock" n
+  typec_rock_reprobe_fixture "$root"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = no-partner ]
+  [[ "$output" == *"<6>ceralive-typec-policy: INFO: fusb302-reprobe: no partner 0s after rebinding 4-0022: J11 is empty or the chip is still stuck — only a partner that appears again re-arms another rebind"* ]]
+  [[ "$output" != *"WARNING"* && "$output" != *"<4>"* && "$output" != *"<3>"* ]]
+  # Without a partner ever appearing, nothing re-arms: no further rebind, no log.
+  export CERALIVE_TYPEC_REARM_SETTLE=0
+  for n in 1 2 3 4 5; do
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"fusb302-reprobe"* ]]
+  done
+  [ "$(cat "$root/iio/i2c-writes")" = $'unbind 4-0022\nbind 4-0022' ]
+  [ ! -e "$root/iio/writes" ]
+  [ ! -e "$root/run/detached" ]
+}
+
+@test "typec policy: a partner that leaves after the rebind re-arms one more rebind (hot replug)" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  touch "$root/iio/reprobe-attaches"
+  run run_typec_rock
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = recovered ]
+  run run_typec_rock                      # partner present: armed
+  [ -e "$root/run/partner-seen" ]
+
+  rm -rf "$root/typec/port0-partner"      # unplugged; the replug sticks
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INFO: fusb302-reprobe: port0 lost its partner after this boot's rebind: one more rebind if none returns within 30s"* ]]
+  [ -e "$root/run/detached" ]
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 1 ]
+
+  export CERALIVE_TYPEC_REARM_SETTLE=0
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<6>ceralive-typec-policy: INFO: fusb302-reprobe: re-arm 1/3: port0 lost its partner and has had none for 0s or more: rebinding 4-0022 from typec_fusb302"* ]]
+  [[ "$output" == *"INFO: fusb302-reprobe: re-arm 1/3: partner found after rebinding 4-0022"* ]]
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 2 ]
+  [ "$(cat "$root/run/rearm")" = 1 ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = recovered ]
+  [ ! -e "$root/run/detached" ]
+  [ ! -e "$root/iio/writes" ]
+}
+
+@test "typec policy: an empty J11 after an unplug costs exactly one re-arm rebind" {
+  local root="$BATS_TEST_TMPDIR/rock" n
+  typec_rock_reprobe_fixture "$root"
+  touch "$root/iio/reprobe-attaches"
+  run run_typec_rock
+  run run_typec_rock
+  rm -f "$root/iio/reprobe-attaches"
+  rm -rf "$root/typec/port0-partner"
+  export CERALIVE_TYPEC_REARM_SETTLE=0
+  for n in 1 2 3 4 5 6; do
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+  done
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 2 ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = no-partner ]
+  [ "$(cat "$root/run/rearm")" = 1 ]
+  [ ! -e "$root/run/detached" ]
+  [ ! -e "$root/run/partner-seen" ]
+}
+
+@test "typec policy: a partner that returns within the re-arm settle time cancels the rebind" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  touch "$root/iio/reprobe-attaches"
+  run run_typec_rock
+  run run_typec_rock
+  rm -rf "$root/typec/port0-partner"
+  run run_typec_rock
+  [ -e "$root/run/detached" ]
+  mkdir -p "$root/typec/port0-partner"
+  run run_typec_rock
+  [ ! -e "$root/run/detached" ]
+  [ -e "$root/run/partner-seen" ]
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 1 ]
+}
+
+@test "typec policy: re-arm rebinds stop at three per boot" {
+  local root="$BATS_TEST_TMPDIR/rock" n
+  typec_rock_reprobe_fixture "$root"
+  touch "$root/iio/reprobe-attaches"
+  export CERALIVE_TYPEC_REARM_SETTLE=0
+  run run_typec_rock
+  for n in 1 2 3 4; do
+    run run_typec_rock                    # partner present: armed
+    rm -rf "$root/typec/port0-partner"
+    run run_typec_rock                    # detach + due in the same tick
+    [ "$status" -eq 0 ]
+  done
+  [[ "$output" == *"INFO: fusb302-reprobe: re-arm limit of 3 per boot reached — no further rebind this boot"* ]]
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 4 ]
+  [ "$(cat "$root/run/rearm")" = 3 ]
+  [ ! -e "$root/run/detached" ]
+}
+
+@test "typec policy: a re-arm keeps every rebind guard and waits out a recent cycle" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  touch "$root/iio/reprobe-attaches"
+  run run_typec_rock
+  run run_typec_rock
+  rm -rf "$root/typec/port0-partner"
+  export CERALIVE_TYPEC_REARM_SETTLE=0
+
+  # A cycle 5 s ago: the rebind waits; the cycle path itself stays untouched.
+  printf '3 %s\n' "$(( $(date +%s) - 5 ))" >"$root/run/nopartner"
+  run run_typec_rock
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 1 ]
+  [ -e "$root/run/detached" ]
+
+  # Port not source: deferred, and the re-arm is not spent.
+  printf '3 %s\n' "$(( $(date +%s) - 30 ))" >"$root/run/nopartner"
+  printf 'source [sink]\n' >"$root/typec/port0/power_role"
+  run run_typec_rock
+  [[ "$output" == *"deferred: port0 power_role=sink, not source"* ]]
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 1 ]
+  [ -e "$root/run/detached" ]
+  [ ! -e "$root/run/rearm" ]
+
+  # Back power gone: nothing at all.
+  printf '[source] sink\n' >"$root/typec/port0/power_role"
+  printf '3\n' >"$root/iio/iio:device7/in_voltage6_raw"
+  run run_typec_rock
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 1 ]
+
+  printf '910\n' >"$root/iio/iio:device7/in_voltage6_raw"
+  run run_typec_rock
+  [[ "$output" == *"re-arm 1/3: partner found"* ]]
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 2 ]
+}
+
+# rearm_due_state <root> — a recovered rebind, the partner gone for 40 s, and
+# the no-partner cycles available again (the partner had stayed up > 60 s).
+rearm_due_state() {
+  typec_rock_reprobe_fixture "$1"
+  rm -f "$1/run/nopartner"
+  printf 'recovered 1\n' >"$1/run/reprobe"
+  printf '%s\n' "$(( $(date +%s) - 40 ))" >"$1/run/detached"
+}
+
+@test "typec policy: a deferred re-arm lets the stock no-partner cycles run" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  rearm_due_state "$root"
+  printf 'source [sink]\n' >"$root/typec/port0/power_role"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"deferred: port0 power_role=sink, not source"* ]]
+  # The cycle that can make the port source again still runs (tries < 3).
+  [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+  [ "$(cut -d' ' -f1 "$root/run/nopartner")" = 1 ]
+  [ -e "$root/run/detached" ]
+  [ ! -e "$root/run/rearm" ]
+  [ ! -e "$root/iio/i2c-writes" ]
+}
+
+@test "typec policy: a partner racing the re-arm neither spends it nor ends the chain" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  rearm_due_state "$root"
+  printf '3 %s\n' "$(( $(date +%s) - 30 ))" >"$root/run/nopartner"
+  touch "$root/iio/partner-on-attempt"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipped: a partner appeared on port0"* ]]
+  [ ! -e "$root/run/rearm" ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = recovered ]
+  [ ! -e "$root/iio/i2c-writes" ]
+
+  rm -f "$root/iio/partner-on-attempt"
+  run run_typec_rock                      # partner present: re-armed for the next detach
+  [ -e "$root/run/partner-seen" ]
+  [ ! -e "$root/run/detached" ]
+}
+
+@test "typec policy: a re-arm that finds the wrong driver skips once and stops" {
+  local root="$BATS_TEST_TMPDIR/rock" n
+  rearm_due_state "$root"
+  printf '3 %s\n' "$(( $(date +%s) - 30 ))" >"$root/run/nopartner"
+  mkdir -p "$root/i2c/drivers/tcpci"
+  ln -sfn "$root/i2c/drivers/tcpci" "$root/i2c/devices/4-0022/driver"
+
+  run run_typec_rock
+  [[ "$output" == *"skipped: 4-0022 is bound to 'tcpci', not typec_fusb302"* ]]
+  [ ! -e "$root/run/detached" ]
+  for n in 1 2; do
+    run run_typec_rock
+    [[ "$output" != *"fusb302-reprobe"* ]]
+  done
+  [ ! -e "$root/iio/i2c-writes" ]
+}
+
+@test "typec policy: the boot-time and udev runs never re-arm" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  rearm_due_state "$root"
+  export CERALIVE_TYPEC_MODE=normal
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -e "$root/iio/i2c-writes" ]
+  [ -e "$root/run/detached" ]
+  [ ! -e "$root/run/rearm" ]
+}
+
+@test "typec policy: skipped or failed rebinds never re-arm" {
+  local root="$BATS_TEST_TMPDIR/rock" state
+  for state in skipped failed-unbind failed-bind; do
+    typec_rock_reprobe_fixture "$root"
+    printf '%s 1\n' "$state" >"$root/run/reprobe"
+    mkdir -p "$root/typec/port0-partner"
+    run run_typec_rock
+    [ ! -e "$root/run/partner-seen" ]
+    rm -rf "$root/typec/port0-partner"
+    export CERALIVE_TYPEC_REARM_SETTLE=0
+    run run_typec_rock
+    [ ! -e "$root/iio/i2c-writes" ]
+    [ ! -e "$root/run/detached" ]
+    unset CERALIVE_TYPEC_REARM_SETTLE
+  done
+}
+
+@test "typec policy: fusb302 rebind waits for the settle time after the last cycle" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  printf '3 %s\n' "$(( $(date +%s) - 5 ))" >"$root/run/nopartner"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"fusb302-reprobe"* ]]
+  [ ! -e "$root/iio/i2c-writes" ]
+  [ ! -e "$root/run/reprobe" ]
+
+  export CERALIVE_TYPEC_REPROBE_SETTLE=5
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 1 ]
+}
+
+@test "typec policy: fusb302 rebind waits until the no-partner cycles are used up" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  printf '2 %s\n' "$(( $(date +%s) - 30 ))" >"$root/run/nopartner"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+  [ ! -e "$root/iio/i2c-writes" ]
+  [ ! -e "$root/run/reprobe" ]
+}
+
+@test "typec policy: fusb302 rebind never runs while a partner is present" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  mkdir -p "$root/typec/port0-partner"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -e "$root/iio/i2c-writes" ]
+  [ ! -e "$root/run/reprobe" ]
+  [[ "$output" != *"fusb302-reprobe"* ]]
+}
+
+@test "typec policy: a partner that appears after the attempt is recorded stops the rebind" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  touch "$root/iio/partner-on-attempt"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INFO: fusb302-reprobe: skipped: a partner appeared on port0"* ]]
+  [ ! -e "$root/iio/i2c-writes" ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = skipped ]
+}
+
+@test "typec policy: fusb302 rebind needs confirmed back power" {
+  local root="$BATS_TEST_TMPDIR/rock" raw
+  for raw in 3 300 invalid; do
+    typec_rock_reprobe_fixture "$root"
+    printf '%s\n' "$raw" >"$root/iio/iio:device7/in_voltage6_raw"
+
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [ ! -e "$root/iio/i2c-writes" ]
+    [ ! -e "$root/run/reprobe" ]
+    [ "$(cat "$root/typec/port0/preferred_role")" = 'sink [source]' ]
+  done
+}
+
+@test "typec policy: fusb302 rebind is recheck-only and Rock-only" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  export CERALIVE_TYPEC_MODE=normal
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -e "$root/iio/i2c-writes" ]
+  [ ! -e "$root/run/reprobe" ]
+
+  export CERALIVE_TYPEC_MODE=recheck
+  printf 'raspberrypi,5-model-b\0' >"$root/dt/compatible"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -e "$root/iio/i2c-writes" ]
+  [ ! -e "$root/run/reprobe" ]
+}
+
+@test "typec policy: fusb302 rebind defers while the port is not source, journaling each reason once" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  printf 'source [sink]\n' >"$root/typec/port0/power_role"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INFO: fusb302-reprobe: deferred: port0 power_role=sink, not source"* ]]
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ ! -e "$root/iio/i2c-writes" ]
+  [ ! -e "$root/run/reprobe" ]
+
+  printf '[source] sink\n' >"$root/typec/port0/power_role"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/i2c-writes")" = $'unbind 4-0022\nbind 4-0022' ]
+}
+
+@test "typec policy: fusb302 rebind defers when the kernel keeps reporting a sink preference" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  printf '[sink] source\n' >"$root/typec/port0/preferred_role"
+  touch "$root/iio/ignore-preferred"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"cannot set Rock source preference"* ]]
+  [[ "$output" == *"INFO: fusb302-reprobe: deferred: port0 source preference not active"* ]]
+  [ ! -e "$root/iio/i2c-writes" ]
+  [ ! -e "$root/run/reprobe" ]
+}
+
+@test "typec policy: fusb302 rebind leaves a working data path without a partner object alone" {
+  local root="$BATS_TEST_TMPDIR/rock" dev
+  for dev in usb3/3-1 usb4/4-1 usb3/3-1/3-1.2; do
+    typec_rock_reprobe_fixture "$root"
+    mkdir -p "$root/otg/fc000000.usb/xhci-hcd.3.auto/$dev"
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"deferred: a USB device is enumerated under fc000000.usb"* ]]
+    [ ! -e "$root/iio/i2c-writes" ]
+    [ ! -e "$root/run/reprobe" ]
+  done
+}
+
+@test "typec policy: host mode with only root hubs (N-0:1.0) is not a working data path" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  mkdir -p "$root/otg/fc000000.usb/xhci-hcd.3.auto/usb10/10-0:1.0"
+  [ -d "$root/otg/fc000000.usb/xhci-hcd.3.auto/usb3/3-0:1.0" ]
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"enumerated"* ]]
+  [ "$(cat "$root/iio/i2c-writes")" = $'unbind 4-0022\nbind 4-0022' ]
+}
+
+@test "typec policy: fusb302 rebind only touches an I2C device bound to typec_fusb302" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  mkdir -p "$root/i2c/drivers/tcpci"
+  ln -sfn "$root/i2c/drivers/tcpci" "$root/i2c/devices/4-0022/driver"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INFO: fusb302-reprobe: skipped: 4-0022 is bound to 'tcpci', not typec_fusb302"* ]]
+  [ ! -e "$root/iio/i2c-writes" ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = skipped ]
+  run run_typec_rock
+  [[ "$output" != *"fusb302-reprobe"* ]]
+
+  typec_rock_reprobe_fixture "$root"
+  mkdir -p "$root/platform/fc000000.usb"
+  ln -sfn "$root/platform/fc000000.usb" "$root/typec/port0/device"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipped: port0 is not backed by an I2C device"* ]]
+  [ ! -e "$root/iio/i2c-writes" ]
+
+  typec_rock_reprobe_fixture "$root"
+  rm "$root/typec/port0/device"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipped: port0 is not backed by an I2C device"* ]]
+  [ ! -e "$root/iio/i2c-writes" ]
+}
+
+@test "typec policy: a rejected fusb302 unbind never binds and is not retried" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  touch "$root/iio/reject-unbind"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<3>ceralive-typec-policy: ERROR: fusb302-reprobe: unbind of 4-0022 did not take"* ]]
+  [ "$(cat "$root/iio/i2c-writes")" = 'unbind 4-0022' ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = failed-unbind ]
+  [ -L "$root/i2c/devices/4-0022/driver" ]
+  run run_typec_rock
+  [ "$(cat "$root/iio/i2c-writes")" = 'unbind 4-0022' ]
+}
+
+@test "typec policy: a bind write that errors but binds is judged by the driver link" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  touch "$root/iio/bind-errors-but-binds" "$root/iio/reprobe-attaches"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/i2c-writes")" = $'unbind 4-0022\nbind 4-0022' ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = recovered ]
+}
+
+@test "typec policy: an unbound fusb302 gets a bus probe, then one more bind" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  printf '1\n' >"$root/iio/fail-probes"
+  touch "$root/iio/reprobe-attaches"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/i2c-writes")" = $'unbind 4-0022\nbind 4-0022\ndrivers_probe 4-0022' ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = recovered ]
+  [[ "$output" == *"<4>ceralive-typec-policy: WARNING: fusb302-reprobe: 4-0022 not bound after bind — asking the bus to probe it"* ]]
+
+  typec_rock_reprobe_fixture "$root"
+  printf '2\n' >"$root/iio/fail-probes"
+  touch "$root/iio/reprobe-attaches"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/i2c-writes")" = $'unbind 4-0022\nbind 4-0022\ndrivers_probe 4-0022\nbind 4-0022' ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = recovered ]
+}
+
+@test "typec policy: a failed fusb302 bind is recorded once and later ticks stay quiet without port0" {
+  local root="$BATS_TEST_TMPDIR/rock" n
+  typec_rock_reprobe_fixture "$root"
+  touch "$root/iio/reject-bind"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/i2c-writes")" = $'unbind 4-0022\nbind 4-0022\ndrivers_probe 4-0022\nbind 4-0022' ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = failed-bind ]
+  [[ "$output" == *"<3>ceralive-typec-policy: ERROR: fusb302-reprobe: 4-0022 is still unbound after bind, bus probe and a second bind"* ]]
+  [ ! -e "$root/typec/port0" ]
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$output" = "ceralive-typec-policy: INFO: port0 is absent — no connector writes until it returns" ]
+  for n in 1 2 3; do
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+  done
+  [ "$(grep -c . "$root/iio/i2c-writes")" -eq 4 ]
+
+  mv "$root/iio/port0.unbound" "$root/typec/port0"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INFO: port0 is present again"* ]]
+  [ ! -e "$root/run/port-absent" ]
+}
+
+@test "typec policy: a boot run before the port is registered notes it without later present-again noise" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  mv "$root/typec/port0" "$root/port0.later"
+  export CERALIVE_TYPEC_MODE=normal
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INFO: port0 not registered yet — no connector writes"* ]]
+  [[ "$output" != *"ERROR"* ]]
+  [ ! -e "$root/run/port-absent" ]
+
+  mv "$root/port0.later" "$root/typec/port0"
+  export CERALIVE_TYPEC_MODE=recheck
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"present again"* ]]
+}
+
+@test "typec policy: an unrecordable absent port logs an error with its priority" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0"
+  mkdir -p "$root/run"
+  ln -sfn "$root/missing/dir/port-absent" "$root/run/port-absent"
+  export CERALIVE_TYPEC_MODE=recheck
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<3>ceralive-typec-policy: ERROR: cannot record the absent port0"* ]]
+}
+
+@test "typec policy: a rebound fusb302 whose port0 does not come back is reported" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  touch "$root/iio/port-not-back"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = port-missing ]
+  [[ "$output" == *"<4>ceralive-typec-policy: WARNING: fusb302-reprobe: 4-0022 is bound again but port0 did not come back"* ]]
+}
+
+@test "typec policy: fusb302 rebind never acts without a writable once-per-boot marker" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  ln -sfn "$root/missing/dir/reprobe" "$root/run/reprobe"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<3>ceralive-typec-policy: ERROR: fusb302-reprobe: cannot record the attempt — no rebind"* ]]
+  [ ! -e "$root/iio/i2c-writes" ]
+}
+
 @test "typec policy: script, unit and udev rules are installed and the boot unit is enabled" {
   local unit_dir="$BATS_TEST_TMPDIR/typec-units"
   local sbin_dir="$BATS_TEST_TMPDIR/typec-sbin"
@@ -1451,6 +2007,22 @@ SH
   [ "$status" -ne 0 ]
   run grep -E '>.*(port_type|preferred_role)' "$outside"
   [ "$status" -ne 0 ]
+  # Driver rebinds live only in the reprobe, which only the Rock function calls.
+  awk '
+    /^rock_fusb302_reprobe\(\) \{/ { inside=1 }
+    !inside { print }
+    inside && /^}/ { inside=0 }
+  ' "$script" >"$outside"
+  run grep -E '>.*(unbind|bind)\}?"' "$outside"
+  [ "$status" -ne 0 ]
+  # The rebind has exactly two callers: the Rock correction (first rebind) and
+  # the re-arm, which only the Rock correction calls.
+  [ "$(grep -c 'rock_fusb302_reprobe "' "$script")" -eq 2 ]
+  [ "$(grep -c 'rock_reprobe_rearm "' "$script")" -eq 1 ]
+  body() { awk -v f="$1" '$0 ~ "^"f"\\(\\) \\{" { inside=1 } inside { print } inside && /^}/ { inside=0 }' "$script"; }
+  body rock_back_power_correction | grep -Fq 'rock_fusb302_reprobe "${last}" "${now}"'
+  body rock_back_power_correction | grep -Fq 'rock_reprobe_rearm "${last}" "${now}"'
+  body rock_reprobe_rearm | grep -Fq 'rock_fusb302_reprobe "${last}" "${now}" "$((count + 1))/${REARM_MAX}"'
 }
 
 @test "typec policy: absent partner and unsettled role attributes are bounded clean no-ops" {

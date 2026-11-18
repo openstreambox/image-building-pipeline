@@ -5848,6 +5848,66 @@ blind. Whether the camera then offers its webcam personality is the camera's own
 setting (the Pocket 3 enumerates `2ca3:0020` RNDIS/storage by default and `2ca3:0023` UVC
 in webcam mode); nothing in the image switches it.
 
+**Source port that never sees its partner (Rock 5B+, back power confirmed).** With a
+plain USB device on J11 through a C-to-A adapter, the FUSB302 can sit toggling in the
+source role with no attach interrupt at all, through every `port_type` cycle and across
+cold boots. A manual `modprobe -r fusb302; modprobe fusb302` recovered it within seconds
+on the bench. The policy instead unbinds and rebinds the one I2C device, which runs the
+same driver remove/probe path without touching other controllers. One cold boot with
+this policy (a Rock 5B+ on back power, an RM520N-GL on J11 through a C-to-A adapter)
+confirmed it: the three cycles at 8/28/60 s found nothing, the rebind ran at 81 s, the
+partner appeared at 88 s and the modem enumerated at 5000 Mbit/s on `fc000000.usb` at
+95 s. Before the rebind the role switch read `device` with no `xhci-hcd` child. One boot
+is a single sample, not a repeat rate.
+
+When the no-partner cycles are used up, `CERALIVE_TYPEC_REPROBE_SETTLE` (20 s) have
+passed since the last one, the source preference is active, `power_role` reads `source`,
+no USB device is enumerated under `fc000000.usb` (a device port `N-M` with M ≥ 1; each
+root hub's own `N-0:1.0` interface does not count, and host role alone is not a working
+data path) and there is still no partner, the recheck rebinds the I2C device behind
+`port0/device`. The driver directory comes from that device's `driver` link: the kernel
+registers the driver as `typec_fusb302` (modalias `i2c:typec_fusb302`); only the module
+file is `fusb302.ko`. Unbind and bind are judged by the driver link, not by the write's
+exit status; an unbound device gets one `drivers_probe` and then one more bind. The gap
+between unbind and bind is `CERALIVE_TYPEC_REBIND_GAP` (1 s, not bench-validated).
+
+The first rebind runs once per boot (`/run/ceralive-typec/reprobe`: `attempted`, written
+before the unbind, then `recovered`, `no-partner`, `port-missing`, `skipped`,
+`failed-unbind` or `failed-bind`), never in the boot-time run, never with a partner present
+and never without confirmed back power. An empty J11 cannot be told from a stuck one in
+sysfs, so on a back-powered boot with nothing plugged in the rebind runs once and ends in an
+info line.
+
+**Re-arm after a detach.** A hot unplug and replug of the same modem sticks the chip just
+like a cold boot (no partner, `vbus5v0_typec` off), and a second unbind/bind recovered it on
+the bench within 14 s. So once a partner has been seen after this boot's rebind (outcome
+`recovered`, `no-partner` or `port-missing`; never after `skipped` or a failed rebind) and
+then disappears, the recheck records the detach time (`detached`) and allows one more
+rebind once the port has stayed partnerless for `CERALIVE_TYPEC_REARM_SETTLE` (30 s) and
+`CERALIVE_TYPEC_REPROBE_SETTLE` has passed since the last `port_type` cycle. All the other
+guards stay the same: back power, source preference, `power_role` source, the
+`typec_fusb302` driver link, and the policy lock, which the cycles also hold. A partner
+that returns within the settle time cancels it. Re-arm rebinds are labelled `re-arm k/3`
+and capped at `CERALIVE_TYPEC_REARM_MAX` (3) per boot (`rearm` counts them). A deferral
+does not spend one and lets that tick's `port_type` cycles run, since after a charger or
+camera leaves, the port may need a cycle to become source again. A partner that comes
+back just before the unbind keeps the earlier outcome, so the next detach still re-arms,
+and the count stays unspent. A driver or I2C skip in re-arm mode clears the pending
+re-arm. The boot-time and udev runs never re-arm. An empty port after an unplug costs one info-logged rebind and cannot
+loop, because only a partner that appears again re-arms another. Known gap: a modem
+plugged in after that rebind has already run on the empty port (a swap slower than the
+settle time) is not recovered until the next boot.
+Every decision is journaled with the `fusb302-reprobe:` tag and a syslog priority prefix,
+so `journalctl -p warning` shows failures; deferrals log once per reason. If `port0` is
+absent the Rock recheck logs that once per change and makes no connector writes until it
+returns; the boot-time run, which can start before the driver registers the port, only
+notes "not registered yet".
+Residual risk: a TCPM worker wedged in I2C could block the unbind in D state; the recheck
+unit then times out holding the lock (boot is not held), as a manual module unload would.
+Guards: the "typec policy: fusb302 rebind …" cases and their neighbours in
+`runtime-services.bats` drive a mocked sysfs whose fake kernel removes and restores the
+driver link and `port0` and can create the partner.
+
 Guards: `runtime-services.bats` §18d "typec policy: …" (10 cases) — installer +
 enablement with the legacy script/unit asserted ABSENT, the udev handoff (both
 `typec_partner` and `typec_port` add events, exactly two `SYSTEMD_WANTS+=`, zero
