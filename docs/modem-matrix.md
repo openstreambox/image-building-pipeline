@@ -133,14 +133,19 @@ for every added `2c7c:0801` device. The script
   and only then sends `AT+CFUN=1,1`;
 - watches the module leave and return. At 480 Mbit/s it comes back on the
   controller's High Speed bus under another kernel name (`10-1` → `9-1` on the
-  Rock 5B+ USB-C port), so it is recognised by the USB port's `peer` link, or as
-  the only new `2c7c:0801`. `verified`, `failed` (still fast), `not-reset` (never
-  left) or `not-back` is logged and stored.
+  Rock 5B+ USB-C port), so it is recognised by the USB port's `peer` link. A
+  socket whose USB 2 lines go to another controller (the Rock 5B+ upper blue
+  port: `8-1` on xHCI `fcd00000`, back as `5-1` on EHCI) has no such relation,
+  so there it is matched as the only new `2c7c:0801` that no other run claims,
+  and only while no other reset is in flight. `verified`, `failed` (still fast),
+  `not-reset` (never left), `not-back` or `unattributed` (two resets at once and
+  a return on no known socket; not a failure) is logged and stored.
 
 The per-unit record is `/data/ceralive/modem-usbspeed/<unit>.json`, where `<unit>`
 is HMAC-SHA256(`/etc/machine-id`, IMEI) cut to 16 hex digits; it holds the
 original value and the last outcome. A unit that ended `failed` or `not-back`
-is left alone on later boots until its record is deleted. The whole run has a
+is left alone on later boots; `touch /data/ceralive/modem-usbspeed.retry`
+clears every unit's last outcome once, keeping the original values. The whole run has a
 270 s budget that also bounds every `mmcli` call.
 
 Every decision is one journal line (`journalctl -u 'ceralive-modem-usbspeed@*'`).

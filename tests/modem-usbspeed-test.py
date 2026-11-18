@@ -398,6 +398,96 @@ class UsbSpeed(unittest.TestCase):
         self.invoke()
         self.assertEqual(self.modem.stored, '20')
 
+    # --- two RM520Ns reset at the same time ----------------------------------
+
+    def other_socket(self):
+        """Socket B: SS root port usb8-port1 with HS peer usb7-port1."""
+        xhci = self.device.parent.parent
+        ss, hs = xhci / 'usb8/8-0:1.0/usb8-port1', xhci / 'usb7/7-0:1.0/usb7-port1'
+        ss.mkdir(parents=True)
+        hs.mkdir(parents=True)
+        (ss / 'peer').symlink_to(hs)
+        (hs / 'peer').symlink_to(ss)
+        return ss, hs
+
+    def pending_b(self, ss, hs, **extra):
+        marker = dict({'phase': 'reset-sent', 'pid': 99999, 'port_paths': [str(ss), str(hs)]}, **extra)
+        (self.run_dir / '8-1.json').write_text(json.dumps(marker))
+
+    def two_returns(self, first, second):
+        """A leaves; `first` then `second` appear: (name, directory, speed, port)."""
+        def later():
+            time.sleep(0.2)
+            self.remove_device(PORT)
+            for name, directory, speed, port in (first, second):
+                time.sleep(0.4)
+                self.add_device(name, directory, speed, port)
+        threading.Thread(target=later, daemon=True).start()
+
+    def test_another_modems_return_is_never_credited_to_this_one(self):
+        ss, hs = self.other_socket()
+        self.pending_b(ss, hs)
+        xhci = self.device.parent.parent
+        self.modem.hooks['AT+CFUN=1,1'] = lambda: self.two_returns(
+            ('7-1', xhci / 'usb7/7-1', 480, hs), (PORT, self.device, 5000, self.ss_port))
+        done = self.invoke(CERALIVE_USBSPEED_RETURN_WAIT='4')
+        marker = self.marker()
+        self.assertEqual((marker['phase'], marker['returned_as'], marker['speed']), ('failed', PORT, 5000))
+        self.assertNotIn('back as 7-1', done.stdout)
+
+    def test_unclaimed_return_while_another_reset_is_pending_is_unattributed_not_failed(self):
+        ss, hs = self.other_socket()
+        self.pending_b(ss, hs)
+        self.modem.hooks['AT+CFUN=1,1'] = lambda: self.reenumerate('5-1', 480, None)
+        done = self.invoke()
+        self.assertEqual(self.marker()['phase'], 'unattributed')
+        self.assertEqual(self.record()['status'], 'unattributed')
+        self.assertIn('not counted as a failure', done.stdout)
+        self.new_boot()
+        (self.sys / 'bus/usb/devices/5-1').unlink()
+        self.device = self.add_device(PORT, self.device, 5000, self.ss_port)
+        self.mm()
+        self.modem.hooks['AT+CFUN=1,1'] = lambda: self.reenumerate('1-1', 480, self.hs_port)
+        self.invoke()
+        self.assertEqual(self.marker()['phase'], 'verified')
+
+    def test_unclaimed_return_is_attributed_once_the_other_reset_is_judged(self):
+        ss, hs = self.other_socket()
+        self.pending_b(ss, hs)
+        def b_judged():
+            time.sleep(1.0)
+            self.pending_b(ss, hs, phase='verified', returned_as='7-1')
+        def cfun():
+            self.reenumerate('5-1', 480, None)
+            threading.Thread(target=b_judged, daemon=True).start()
+        self.modem.hooks['AT+CFUN=1,1'] = cfun
+        self.invoke(CERALIVE_USBSPEED_RETURN_WAIT='4')
+        marker = self.marker()
+        self.assertEqual((marker['phase'], marker['returned_as']), ('verified', '5-1'))
+
+    def test_newcomer_another_run_already_named_is_skipped(self):
+        (self.run_dir / '9-1.json').write_text(json.dumps({'phase': 'verified', 'returned_as': '5-1'}))
+        self.modem.hooks['AT+CFUN=1,1'] = lambda: self.reenumerate('5-1', 480, None)
+        self.invoke()
+        self.assertEqual(self.marker()['phase'], 'not-back')
+
+    def test_retry_file_clears_a_give_up_and_keeps_the_original(self):
+        self.modem.hooks['AT+CFUN=1,1'] = lambda: self.reenumerate(PORT, 5000, self.ss_port)
+        self.invoke()
+        self.assertEqual(self.record()['status'], 'failed')
+        self.new_boot()
+        self.assertUntouched(self.invoke())
+        self.assertEqual(self.marker()['phase'], 'gave-up')
+        self.new_boot()
+        (self.data / 'modem-usbspeed.retry').touch()
+        self.modem.hooks['AT+CFUN=1,1'] = lambda: self.reenumerate('1-1', 480, self.hs_port)
+        done = self.invoke()
+        self.assertIn('original values kept', done.stdout)
+        self.assertFalse((self.data / 'modem-usbspeed.retry').exists())
+        self.assertEqual(self.marker()['phase'], 'verified')
+        record = self.record()
+        self.assertEqual((record['original'], record['status']), ('312', 'verified'))
+
     # --- the once-per-boot rules ------------------------------------------
 
     def test_same_name_fallback_judges_a_pending_reset(self):

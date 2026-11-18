@@ -27,7 +27,9 @@ then, for that one device:
   4. Acts once per USB port and once per unit per boot: a marker in /run is
      written before ModemManager is asked for anything and again before the
      reset. A unit whose earlier attempt did not bring it to USB 2 is recorded
-     as failed in /data and left alone on later boots.
+     as failed in /data and left alone on later boots;
+     `touch /data/ceralive/modem-usbspeed.retry` clears those outcomes (the
+     recorded original values stay) so each unit is tried once more.
   5. Takes the modem from ModemManager with `mmcli --inhibit-device` (held for
      the whole exchange; ModemManager closes all its ports, the secondary AT
      port included, and re-probes when the hold ends), then talks to one AT
@@ -42,8 +44,10 @@ then, for that one device:
   7. Releases the hold and watches the module leave and come back. A module
      that returns at 480 Mbit/s usually lands on the controller's High Speed
      bus under another kernel name (4-1 -> 1-1), so it is recognised by the
-     USB port's peer link, or as the only new 2c7c:0801 device. Verified,
-     still fast, never left or never back: each is one journal line.
+     USB port's peer link, or as the only unclaimed new 2c7c:0801 while no
+     other reset is in flight. Verified, still fast, never left, never back or
+     unattributed (two resets at once, return on no known socket; not a
+     failure): each is one journal line.
 
 The unit id in /data is HMAC-SHA256(machine-id, IMEI) truncated to 16 hex
 digits: stable on this box, not reversible from the file alone.
@@ -103,6 +107,7 @@ PROC = Path(os.environ.get('CERALIVE_USBSPEED_PROC', '/proc'))
 RUN = Path(os.environ.get('CERALIVE_USBSPEED_RUN', '/run/ceralive/modem-usbspeed'))
 DATA = Path(os.environ.get('CERALIVE_USBSPEED_DATA', '/data/ceralive/modem-usbspeed'))
 DISABLED = DATA.parent / 'modem-usbspeed.disabled'
+RETRY = DATA.parent / 'modem-usbspeed.retry'
 MACHINE_ID = Path(os.environ.get('CERALIVE_USBSPEED_MACHINE_ID', '/etc/machine-id'))
 MMCLI = os.environ.get('CERALIVE_USBSPEED_MMCLI', 'mmcli')
 BUDGET = float(os.environ.get('CERALIVE_USBSPEED_BUDGET', '270'))
@@ -214,6 +219,29 @@ def save_record(unit, port, **fields):
         atomic_json(DATA / f'{unit}.json', record)
     except OSError as error:
         log(4, f'{port}: could not write the record ({error}); see this journal')
+
+
+def honour_retry():
+    """`touch /data/ceralive/modem-usbspeed.retry` forgets every unit's last
+    outcome (so a unit that gave up is tried once more) and keeps each recorded
+    original value. The file is consumed."""
+    if not RETRY.exists():
+        return
+    cleared = 0
+    for path in sorted(DATA.glob('*.json')) if DATA.is_dir() else []:
+        try:
+            record = json.loads(path.read_text())
+            if record.pop('status', None) is not None:
+                atomic_json(path, record)
+                cleared += 1
+        except (OSError, ValueError):
+            continue
+    try:
+        RETRY.unlink()
+    except OSError as error:
+        log(4, f'could not remove {RETRY} ({error})')
+        return
+    log(6, f'{RETRY}: cleared the last outcome of {cleared} unit(s); original values kept')
 
 
 # --- what may stop an attempt ----------------------------------------------
@@ -442,6 +470,12 @@ class AtPort:
             raise
 
     def close(self):
+        # Exclusive mode outlives this fd while anything else holds the tty;
+        # hand the port back as found.
+        try:
+            fcntl.ioctl(self.fd, termios.TIOCNXCL)
+        except OSError:
+            pass
         os.close(self.fd)
 
     def drain(self):
@@ -556,6 +590,7 @@ def run(port):
         log(6, f'{port}: {ids[0]}:{ids[1]} is not an RM520N ID; leaving it alone')
         return 0
     speed = link_speed(device_dir)
+    honour_retry()
 
     marker = load_marker(port)
     if marker and marker.get('phase') == 'reset-sent':
@@ -604,7 +639,7 @@ def run(port):
         if previous in ('failed', 'not-back'):
             save_marker(port, 'gave-up', unit=unit, speed=speed)
             log(4, f'{port}: an earlier attempt on this unit ended "{previous}"; leaving it alone '
-                   f'(delete {DATA}/{unit}.json to try again)')
+                   f'(touch {RETRY} to try once more)')
             return 0
     candidates = [tty for tty in at_ports(modem['ports']) if belongs_to(device, tty)]
     if not candidates:
@@ -719,8 +754,33 @@ def exchange(port, candidates, base, unit):
         at.close()
 
 
+def claims_of_others(port):
+    """What other runs this boot account for: (claimed names, claimed port paths, busy).
+
+    A newcomer that sits on another pending reset's socket, or that another run
+    already named as its return, is never this module. `busy` is True while
+    another reset is in flight; then a newcomer that matches no socket can't be
+    attributed by elimination."""
+    names, paths, busy = set(), set(), False
+    for name, marker in markers():
+        if name == port:
+            continue
+        if marker.get('phase') == 'reset-sent':
+            busy = True
+            paths.update(marker.get('port_paths', []))
+        if marker.get('returned_as'):
+            names.add(marker['returned_as'])
+    return names, paths, busy
+
+
 def watch_return(port, before, base, unit):
-    """After the reset: the module must leave, then return; judge its new link."""
+    """After the reset: the module must leave, then return; judge its new link.
+
+    It is recognised by its USB port or that port's peer. A socket whose USB 2
+    lines go to another controller (the module returns on an EHCI bus with no
+    peer relation) is matched as the only unclaimed new 2c7c:0801, but only
+    while no other reset is in flight; otherwise the outcome is `unattributed`,
+    which is logged and never counted as a failure."""
     device_dir = SYSFS / 'bus/usb/devices' / port
     deadline = time.monotonic() + min(LEAVE_WAIT, max(0.0, remaining()))
     while device_dir.exists() and time.monotonic() < deadline:
@@ -732,11 +792,22 @@ def watch_return(port, before, base, unit):
                f'"{DESIRED}" applies at its next power-up')
         return
     paths = set(base.get('port_paths', []))
+    unexplained = set()
     deadline = time.monotonic() + min(RETURN_WAIT, max(0.0, remaining()))
     while time.monotonic() < deadline:
+        claimed_names, claimed_paths, busy = claims_of_others(port)
         new = sorted(rm520_devices() - before)
-        matched = [n for n in new if paths & set(port_paths(SYSFS / 'bus/usb/devices' / n))]
-        pick = matched[0] if len(matched) == 1 else (new[0] if not matched and len(new) == 1 else None)
+        located = {n: set(port_paths(SYSFS / 'bus/usb/devices' / n)) for n in new}
+        matched = [n for n in new if paths & located[n]]
+        loose = [n for n in new if n not in matched and n not in claimed_names
+                 and not claimed_paths & located[n]]
+        unexplained.update(loose)
+        if len(matched) > 1:
+            save_marker(port, 'returned-ambiguous', **base, candidates=matched)
+            log(4, f'{port}: several RM520N devices appeared on this socket ({", ".join(matched)}); '
+                   'cannot tell which one returned')
+            return
+        pick = matched[0] if matched else (loose[0] if len(loose) == 1 and not busy else None)
         if pick:
             speed = link_speed(SYSFS / 'bus/usb/devices' / pick)
             if speed is None:
@@ -751,11 +822,18 @@ def watch_return(port, before, base, unit):
                 log(4, f'{port}: back as {pick} still at {speed} Mbit/s after setting "{DESIRED}"; '
                        'recorded as failed, not tried again')
             return
-        if len(matched) > 1 or len(new) > 1 and not matched:
-            save_marker(port, 'returned-ambiguous', **base, candidates=new)
-            log(4, f'{port}: several RM520N devices appeared ({", ".join(new)}); cannot tell which one returned')
+        if len(loose) > 1 and not busy:
+            save_marker(port, 'returned-ambiguous', **base, candidates=loose)
+            log(4, f'{port}: several RM520N devices appeared ({", ".join(loose)}); cannot tell which one returned')
             return
         time.sleep(0.2)
+    if unexplained:
+        save_marker(port, 'unattributed', **base, candidates=sorted(unexplained))
+        save_record(unit, port, status='unattributed')
+        log(4, f'{port}: another RM520N reset at the same time and {", ".join(sorted(unexplained))} '
+               'appeared on no known socket; cannot tell whether this module came back at USB 2 '
+               '(not counted as a failure)')
+        return
     save_marker(port, 'not-back', **base)
     save_record(unit, port, status='not-back')
     log(3, f'{port}: the module left after AT+CFUN=1,1 and has not come back within {RETURN_WAIT:g} s')
