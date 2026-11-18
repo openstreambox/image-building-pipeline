@@ -134,7 +134,8 @@ wait_bound() {
   done
 }
 
-# rock_fusb302_reprobe <last cycle epoch> <now epoch> — runs only from the Rock
+# rock_fusb302_reprobe <last cycle epoch> <now epoch> [re-arm k/max] — returns 2
+# when it did nothing (marker, settle time or a deferral), otherwise 0. Runs only from the Rock
 # recheck with back power present, no partner and the no-partner cycles used up.
 # It unbinds and rebinds the one I2C device that owns ${PORT} (the J11 data
 # connector; the board's supply comes from the back input), once per boot, then
@@ -163,26 +164,27 @@ wait_bound() {
 # An empty port after an unplug costs one such rebind; it cannot loop, because
 # only a partner that appears again re-arms it.
 rock_fusb302_reprobe() {
-  local last="$1" now="$2" rearm="${3:-}" power dev name driver bus deadline data label=""
-  [[ -n "${rearm}" || ! -e "${RUN_DIR}/reprobe" ]] || return 0
-  (( now - last >= REPROBE_SETTLE )) || return 0
+  local last="$1" now="$2" rearm="${3:-}" power dev name driver bus deadline data label="" prev=""
+  [[ -n "${rearm}" || ! -e "${RUN_DIR}/reprobe" ]] || return 2
+  (( now - last >= REPROBE_SETTLE )) || return 2
+  [[ -z "${rearm}" || ! -r "${RUN_DIR}/reprobe" ]] || read -r prev _ <"${RUN_DIR}/reprobe"
 
   if [[ ! -r "${PORT_DIR}/preferred_role" ||
         "$(active_role "${PORT_DIR}/preferred_role")" != source ]]; then
     reprobe_defer "${PORT} source preference not active"
-    return 0
+    return 2
   fi
   power=unreadable
   [[ ! -r "${POWER_ROLE}" ]] || power="$(active_role "${POWER_ROLE}")"
   if [[ "${power}" != source ]]; then
     reprobe_defer "${PORT} power_role=${power}, not source"
-    return 0
+    return 2
   fi
   # Device ports start at 1: every root hub has its own N-0:1.0 interface, and
   # host role with nothing enumerated is not a working data path.
   if compgen -G "${OTG_DEV}/xhci-hcd.*/usb[0-9]*/[0-9]*-[1-9]*" >/dev/null; then
     reprobe_defer "a USB device is enumerated under ${OTG_DEV##*/}"
-    return 0
+    return 2
   fi
 
   dev="$(readlink -f -- "${PORT_DIR}/device" 2>/dev/null)" || dev=""
@@ -192,6 +194,7 @@ rock_fusb302_reprobe() {
   if [[ -z "${dev}" || ! "${name}" =~ ^[0-9]+-[0-9a-f]{4}$ ]]; then
     reprobe_log INFO "skipped: ${PORT} is not backed by an I2C device"
     reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
+    rm -f "${RUN_DIR}/detached"
     return 0
   fi
   case "${driver##*/}" in
@@ -199,6 +202,7 @@ rock_fusb302_reprobe() {
     *)
       reprobe_log INFO "skipped: ${name} is bound to '${driver##*/}', not typec_fusb302"
       reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
+      rm -f "${RUN_DIR}/detached"
       return 0
       ;;
   esac
@@ -209,19 +213,25 @@ rock_fusb302_reprobe() {
     reprobe_log ERROR "cannot record the attempt — no rebind"
     return 0
   fi
+  if [[ -e "${PARTNER_DIR}" ]]; then
+    reprobe_log INFO "skipped: a partner appeared on ${PORT}"
+    if [[ -n "${rearm}" && -n "${prev}" ]]; then
+      # The partner came back on its own: keep the earlier outcome so it re-arms
+      # the next detach, and leave the count unspent.
+      reprobe_record "${prev}" || reprobe_log ERROR "cannot restore the rebind outcome"
+    else
+      reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
+    fi
+    return 0
+  fi
   if [[ -n "${rearm}" ]]; then
-    # Spend the re-arm only now that every guard has passed.
+    # Spend the re-arm only now that every guard and the partner check passed.
     rm -f "${RUN_DIR}/detached"
     if ! printf '%s\n' "${rearm%%/*}" >"${RUN_DIR}/rearm"; then
       reprobe_log ERROR "cannot record the re-arm count — no rebind"
       return 0
     fi
     label="re-arm ${rearm}: "
-  fi
-  if [[ -e "${PARTNER_DIR}" ]]; then
-    reprobe_log INFO "skipped: a partner appeared on ${PORT}"
-    reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
-    return 0
   fi
   if [[ -n "${rearm}" ]]; then
     reprobe_log INFO "${label}${PORT} lost its partner and has had none for ${REARM_SETTLE}s or more: rebinding ${name} from ${driver##*/}"
@@ -275,8 +285,9 @@ rock_fusb302_reprobe() {
 # recorded partner (partner-seen) into a detach time, then hands one labelled
 # rebind to rock_fusb302_reprobe once the port has stayed partnerless for
 # REARM_SETTLE seconds and REPROBE_SETTLE seconds have passed since the last
-# port_type cycle. Returns 0 when it acted or decided this tick, 1 to let the
-# caller go on with the usual no-partner handling.
+# port_type cycle. Returns 0 when it acted (rebind attempted, skipped, or the cap
+# reached), 1 to let the caller go on with the usual no-partner handling: nothing
+# pending, not due yet, or the rebind deferred on a guard.
 rock_reprobe_rearm() {
   local last="$1" now="$2" gone=0 count=0
   if [[ -e "${RUN_DIR}/partner-seen" ]]; then
@@ -300,8 +311,11 @@ rock_reprobe_rearm() {
     reprobe_log INFO "re-arm limit of ${REARM_MAX} per boot reached — no further rebind this boot"
     return 0
   fi
+  # A deferral (return 2) leaves the re-arm pending and lets this tick's usual
+  # no-partner handling run, so the port_type cycles can still make the port
+  # source again (e.g. after a charger or camera left it as sink).
   rock_fusb302_reprobe "${last}" "${now}" "$((count + 1))/${REARM_MAX}"
-  return 0
+  (( $? != 2 ))
 }
 
 rock_back_power_correction() {

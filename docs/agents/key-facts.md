@@ -5888,8 +5888,12 @@ rebind once the port has stayed partnerless for `CERALIVE_TYPEC_REARM_SETTLE` (3
 guards stay the same: back power, source preference, `power_role` source, the
 `typec_fusb302` driver link, and the policy lock, which the cycles also hold. A partner
 that returns within the settle time cancels it. Re-arm rebinds are labelled `re-arm k/3`
-and capped at `CERALIVE_TYPEC_REARM_MAX` (3) per boot (`rearm` counts them); a deferral
-does not spend one. An empty port after an unplug costs one info-logged rebind and cannot
+and capped at `CERALIVE_TYPEC_REARM_MAX` (3) per boot (`rearm` counts them). A deferral
+does not spend one and lets that tick's `port_type` cycles run, since after a charger or
+camera leaves, the port may need a cycle to become source again. A partner that comes
+back just before the unbind keeps the earlier outcome, so the next detach still re-arms,
+and the count stays unspent. A driver or I2C skip in re-arm mode clears the pending
+re-arm. The boot-time and udev runs never re-arm. An empty port after an unplug costs one info-logged rebind and cannot
 loop, because only a partner that appears again re-arms another. Known gap: a modem
 plugged in after that rebind has already run on the empty port (a swap slower than the
 settle time) is not recovered until the next boot.

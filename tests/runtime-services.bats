@@ -1488,6 +1488,78 @@ EOF
   [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 2 ]
 }
 
+# rearm_due_state <root> — a recovered rebind, the partner gone for 40 s, and
+# the no-partner cycles available again (the partner had stayed up > 60 s).
+rearm_due_state() {
+  typec_rock_reprobe_fixture "$1"
+  rm -f "$1/run/nopartner"
+  printf 'recovered 1\n' >"$1/run/reprobe"
+  printf '%s\n' "$(( $(date +%s) - 40 ))" >"$1/run/detached"
+}
+
+@test "typec policy: a deferred re-arm lets the stock no-partner cycles run" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  rearm_due_state "$root"
+  printf 'source [sink]\n' >"$root/typec/port0/power_role"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"deferred: port0 power_role=sink, not source"* ]]
+  # The cycle that can make the port source again still runs (tries < 3).
+  [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+  [ "$(cut -d' ' -f1 "$root/run/nopartner")" = 1 ]
+  [ -e "$root/run/detached" ]
+  [ ! -e "$root/run/rearm" ]
+  [ ! -e "$root/iio/i2c-writes" ]
+}
+
+@test "typec policy: a partner racing the re-arm neither spends it nor ends the chain" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  rearm_due_state "$root"
+  printf '3 %s\n' "$(( $(date +%s) - 30 ))" >"$root/run/nopartner"
+  touch "$root/iio/partner-on-attempt"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipped: a partner appeared on port0"* ]]
+  [ ! -e "$root/run/rearm" ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = recovered ]
+  [ ! -e "$root/iio/i2c-writes" ]
+
+  rm -f "$root/iio/partner-on-attempt"
+  run run_typec_rock                      # partner present: re-armed for the next detach
+  [ -e "$root/run/partner-seen" ]
+  [ ! -e "$root/run/detached" ]
+}
+
+@test "typec policy: a re-arm that finds the wrong driver skips once and stops" {
+  local root="$BATS_TEST_TMPDIR/rock" n
+  rearm_due_state "$root"
+  printf '3 %s\n' "$(( $(date +%s) - 30 ))" >"$root/run/nopartner"
+  mkdir -p "$root/i2c/drivers/tcpci"
+  ln -sfn "$root/i2c/drivers/tcpci" "$root/i2c/devices/4-0022/driver"
+
+  run run_typec_rock
+  [[ "$output" == *"skipped: 4-0022 is bound to 'tcpci', not typec_fusb302"* ]]
+  [ ! -e "$root/run/detached" ]
+  for n in 1 2; do
+    run run_typec_rock
+    [[ "$output" != *"fusb302-reprobe"* ]]
+  done
+  [ ! -e "$root/iio/i2c-writes" ]
+}
+
+@test "typec policy: the boot-time and udev runs never re-arm" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  rearm_due_state "$root"
+  export CERALIVE_TYPEC_MODE=normal
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -e "$root/iio/i2c-writes" ]
+  [ -e "$root/run/detached" ]
+  [ ! -e "$root/run/rearm" ]
+}
+
 @test "typec policy: skipped or failed rebinds never re-arm" {
   local root="$BATS_TEST_TMPDIR/rock" state
   for state in skipped failed-unbind failed-bind; do
