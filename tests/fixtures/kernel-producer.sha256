@@ -1,13 +1,13 @@
 # Production inputs include the reviewed ramoops injection and fingerprint coverage.
 # artifact-cache.sh also freezes the input-selection code; release-only files stay outside it.
 10f866c20565340a36cfa14631380a96497c9e0df661a6c995bec27d7999826c  manifests/kernel/rk3588-edge.fragment
-c3f067235a1d5b9c11e0001ee67f0cc8e7d39efba7d750293f7e94c2fb47d46e  lib/build-kernel.sh
+9461be8c250dbe3a2d9b37d80d04c1e3ce7a25d4cdbb3aff90aa34f3df65aab8  lib/build-kernel.sh
 e1bcce8314d650df690eadd9dff677d6a4bc77c43dc1919a20417c234cd0ecd2  lib/kernel/config.sh
 598fc799a517088270d066e45b8f5e7bef4738b13a5d017f8d21d2a831c344ea  lib/kernel/checkout.sh
 f2a18a890a12de4c793ec07ba86aecba963160e4b5023e307622c592b9903609  lib/kernel/builder.sh
 7abe255c92911280642e7e50b99eb72166514decea8d3ba4a8f7decf5963e2a5  lib/kernel/package.sh
-bf3d81d0048f13ee34b6fa44b559538a4a31379fd3f83146aa2d48c455b6c071  lib/kernel/artifact-cache.sh
-536e67f2f69c4f49a2cd99277591ac6b401c2f83d3cd96d71029d0857ac95d46  lib/kernel/cache-dir.sh
+6e02092565e5baba3bc0a20025f74836e4d7b0b0bc71c11de004a75457229337  lib/kernel/artifact-cache.sh
+a49a90b183f4d597fdedb0a8999ca10df52a4f76b6291ac011cf540779c256cd  lib/kernel/cache-dir.sh
 7708d50e8ef39f7baec3b0bbd2bc1d5bc8ce3532e79f164596b179eebeb1e0a7  lib/kernel/only.sh
 4870e1cfa126bcf3e3533b642528751d0a8438839344c81df34d250ad1ba1b6b  lib/shared/remote-cache.sh
 11142b7dcef18bc540b2355c7b41ea1c5f690ee38481cb3a5e551327bd7dfa45  lib/verify-kernel-config.sh

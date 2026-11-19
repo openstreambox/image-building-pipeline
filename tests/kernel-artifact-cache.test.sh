@@ -441,5 +441,124 @@ else
   bad "concurrent workers: ${race_failures} failed, same=${race_same}, leftovers=${leftovers}"
 fi
 unset CERALIVE_KERNEL_CACHE_DIR
+# --- review fixes: toolchain-scoped ccache, ownership, strictness, evidence ---
+export CERALIVE_KERNEL_CACHE_DIR="${WORK}/shared"
+ID_A="sha256:$(printf 'a%.0s' {1..64})"; ID_B="sha256:$(printf 'b%.0s' {1..64})"
+leaf_a="$(kernel_ccache_leaf "${WORK}/cc/" "${ID_A}")"; leaf_b="$(kernel_ccache_leaf "${WORK}/cc" "${ID_B#sha256:}")"
+if [[ "${leaf_a}" == "${WORK}/cc/${ID_A#sha256:}" && "${leaf_b}" == "${WORK}/cc/${ID_B#sha256:}" && "${leaf_a}" != "${leaf_b}" ]]; then
+  ok 'each builder image id gets its own ccache directory'
+else bad "ccache leaves ${leaf_a} ${leaf_b}"; fi
+if kernel_ccache_leaf "${WORK}/cc" 'not-an-image-id' >/dev/null; then bad 'non-digest image id accepted'
+else ok 'a builder image id that is not a sha256 digest is refused'; fi
+grep -Fq 'ccache_dir="$(kernel_ccache_leaf "${ccache_dir}" "${builder_digest}")"' "${ROOT}/lib/build-kernel.sh" \
+  && grep -Fq -- '-v "${ccache_dir}:/ccache"' "${ROOT}/lib/build-kernel.sh" \
+  && ok 'the stage mounts the per-image ccache leaf' || bad 'the stage mounts an unscoped ccache'
+mkdir -p "${WORK}/fakebin"
+printf '#!/bin/sh\necho "[name=seccomp,profile=builtin ${FAKE_ROOTLESS}]"\n' >"${WORK}/fakebin/docker"; chmod 755 "${WORK}/fakebin/docker"
+owner_rootful="$(PATH="${WORK}/fakebin:${PATH}" FAKE_ROOTLESS='' kernel_ccache_owner docker)"
+owner_rootless="$(PATH="${WORK}/fakebin:${PATH}" FAKE_ROOTLESS='name=rootless' kernel_ccache_owner docker)"
+owner_podman="$(kernel_ccache_owner podman)"
+if [[ "${owner_rootful}" == "$(id -u):$(id -g)" && -z "${owner_rootless}" && -z "${owner_podman}" ]]; then
+  ok 'ccache is handed back to the invoking user only under a rootful docker daemon'
+else bad "ccache owner rootful='${owner_rootful}' rootless='${owner_rootless}' podman='${owner_podman}'"; fi
+grep -Fq -- '-e "CCACHE_OWNER=${ccache_owner}"' "${ROOT}/lib/build-kernel.sh" \
+  && grep -Fq 'ccache_handback() { chown -R "${CCACHE_OWNER}" /ccache' "${ROOT}/lib/build-kernel.sh" \
+  && grep -Fq 'then trap ccache_handback EXIT; fi' "${ROOT}/lib/build-kernel.sh" \
+  && ok 'the container chowns /ccache back on every exit' || bad 'ccache ownership not handed back'
+
+mkdir -p "${WORK}/loose"; chmod 0775 "${WORK}/loose"
+if (CERALIVE_KERNEL_CACHE_DIR="${WORK}/loose"; kernel_artifact_cache_root) >/dev/null 2>&1; then
+  bad 'group-writable shared root accepted'
+else ok 'a group-writable shared root is refused'; fi
+ln -s "${WORK}/shared" "${WORK}/linked"
+if (CERALIVE_KERNEL_CACHE_DIR="${WORK}/linked"; kernel_artifact_cache_root) >/dev/null 2>&1; then
+  bad 'symlinked shared root accepted'
+else ok 'a symlinked shared root is refused'; fi
+chmod 0777 "${WORK}/shared/kernel-artifacts"
+if kernel_artifact_cache_root >/dev/null 2>&1; then bad 'world-writable kernel-artifacts accepted'
+else ok 'a world-writable kernel-artifacts directory is refused'; fi
+chmod 0755 "${WORK}/shared/kernel-artifacts"
+for bad_dir in "${WORK}/a:b" "${WORK}/a,b"; do
+  if (CERALIVE_KERNEL_CACHE_DIR="${bad_dir}"; kernel_artifact_cache_root) >/dev/null 2>&1; then
+    bad "mount-splitting root '${bad_dir}' accepted"
+  else ok "a root containing '${bad_dir: -2:1}' (would split the -v mount) is refused"; fi
+done
+
+# P2-2: a different deb for the same key returns 3; production stops before staging.
+reseed
+store_rc=0
+kernel_artifact_cache_store "${BASE_KEY}" "${WORK}/built-b/${DEB_NAME}" "${WORK}/built-b" || store_rc=$?
+(( store_rc == 3 )) && ok 'a differing deb for one key is reported to the stage (status 3)' || bad "differing deb store rc=${store_rc}"
+store_rc=0
+kernel_artifact_cache_store "${BASE_KEY}" "${WORK}/built/${DEB_NAME}" "${WORK}/built" || store_rc=$?
+(( store_rc == 0 )) && ok 'an identical deb for one key is not a conflict' || bad "identical store rc=${store_rc}"
+if (CERALIVE_BUILD_MODE=production; kernel_artifact_cache_build_strict) &&
+   ! (CERALIVE_BUILD_MODE=development; kernel_artifact_cache_build_strict) &&
+   ! (unset CERALIVE_BUILD_MODE; kernel_artifact_cache_build_strict); then
+  ok 'only production builds treat a differing deb as fatal'
+else bad 'strictness does not follow CERALIVE_BUILD_MODE'; fi
+post="$(sed -n '/kernel build failed for board/,$p' "${ROOT}/lib/build-kernel.sh")"
+store_line="$(grep -n 'kernel_artifact_cache_store "${cache_key}"' <<<"${post}" | cut -d: -f1)"
+stage_line="$(grep -n 'MKOSI_PACKAGE_STAGING_SH' <<<"${post}" | cut -d: -f1)"
+if [[ -n "${store_line}" && -n "${stage_line}" ]] && (( store_line < stage_line )) &&
+   grep -Fq 'kernel_artifact_cache_build_strict; then' <<<"${post}"; then
+  ok 'the stage stores and checks strictness before staging the built deb'
+else bad 'the built deb can be staged before the conflict check'; fi
+
+# P3-3: quarantine instead of delete; bounded.
+rm -rf "${WORK}/shared/kernel-artifacts/.quarantine"
+reseed
+python3 - "${SHARED_ENTRY}/manifest.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); m['inputs']['builder_digest'] = 'sha256:tampered'; json.dump(m, open(sys.argv[1], 'w'))
+PY
+refused_and_evicted 'tampered current-format entry'
+q=("${WORK}/shared/kernel-artifacts/.quarantine/${BASE_KEY}".*)
+if [[ -d "${q[0]}" && -f "${q[0]}/${DEB_NAME}" ]]; then ok 'a refused current-format entry is quarantined with its files'
+else bad 'refused entry left no evidence'; fi
+reseed
+python3 - "${SHARED_ENTRY}/manifest.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); json.dump({'sha256': m['sha256']}, open(sys.argv[1], 'w'))
+PY
+before="$(find "${WORK}/shared/kernel-artifacts/.quarantine" -mindepth 1 -maxdepth 1 | wc -l)"
+refused_and_evicted 'format 1 entry (deleted, not quarantined)'
+after="$(find "${WORK}/shared/kernel-artifacts/.quarantine" -mindepth 1 -maxdepth 1 | wc -l)"
+(( before == after )) && ok 'an older-format entry is deleted, not quarantined' || bad 'format 1 entry quarantined'
+for _ in $(seq 1 10); do
+  reseed
+  python3 - "${SHARED_ENTRY}/manifest.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); m['inputs']['dtb_path'] = '/tampered'; json.dump(m, open(sys.argv[1], 'w'))
+PY
+  kernel_artifact_cache_hit "${BASE_KEY}" "${WORK}/staged-3" "${DEB_NAME}" >/dev/null 2>&1 || :
+done
+kept="$(find "${WORK}/shared/kernel-artifacts/.quarantine" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+(( kept == 8 )) && ok 'quarantine keeps the newest eight entries' || bad "quarantine holds ${kept}"
+
+# P3-2: interrupted stores are swept once they are clearly not in flight.
+mkdir -p "${WORK}/shared/kernel-artifacts/.pending.old" "${WORK}/shared/kernel-artifacts/.remote.old" \
+  "${WORK}/shared/kernel-artifacts/.pending.fresh"
+touch -d '7 hours ago' "${WORK}/shared/kernel-artifacts/.pending.old" "${WORK}/shared/kernel-artifacts/.remote.old"
+kernel_artifact_cache_store "${BASE_KEY}" "${WORK}/built/${DEB_NAME}" "${WORK}/built" || :
+if [[ ! -e "${WORK}/shared/kernel-artifacts/.pending.old" && ! -e "${WORK}/shared/kernel-artifacts/.remote.old" &&
+      -d "${WORK}/shared/kernel-artifacts/.pending.fresh" ]]; then
+  ok 'stale .pending/.remote debris is swept; a fresh one is left alone'
+else bad 'debris sweep wrong'; fi
+rmdir "${WORK}/shared/kernel-artifacts/.pending.fresh"
+
+# P3-4: inputs that change during the build are logged and not stored.
+rm -rf "${SHARED_ENTRY}"; : >"${WORK}/warnings"
+builder_digest='sha256:changed-mid-build'
+kernel_artifact_cache_store "${BASE_KEY}" "${WORK}/built/${DEB_NAME}" "${WORK}/built" || :
+builder_digest="${old_digest}"
+if [[ ! -e "${SHARED_ENTRY}" ]] && grep -Fq 'inputs changed during the build' "${WORK}/warnings"; then
+  ok 'inputs that changed during the build are logged and not stored'
+else bad 'fingerprint drift stored or silent'; fi
+
+# P3-6: the CI uploader refuses a host-wide root.
+grep -Fq 'CERALIVE_KERNEL_CACHE_DIR is a host-wide cache' "${ROOT}/ci/upload-build-cache.sh" \
+  && ok 'CI cache upload refuses a shared kernel cache root' || bad 'upload walks a shared root'
+unset CERALIVE_KERNEL_CACHE_DIR
 printf 'Kernel artifact cache contract: %s passed, %s failed\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

@@ -156,6 +156,11 @@ for fragment in ${KERNEL_SOURCE_DEFCONFIG_FRAGMENT:-${KERNEL_SOURCE_DEFCONFIG_FR
   fragments+=("${root}/${fragment}")
 done
 (( ${#fragments[@]} > 0 )) || die 'kernel config declaration missing'
+# Upload walks every entry of the checkout's own cache, which only this run's
+# builds wrote. A host-wide shared root holds other boards' and other producer
+# revisions' entries, so it is refused here rather than filtered.
+[[ -z "${CERALIVE_KERNEL_CACHE_DIR:-}" ]] \
+  || die 'CERALIVE_KERNEL_CACHE_DIR is a host-wide cache; unset it for the CI cache upload'
 kernel_root="$(kernel_artifact_cache_root)" || die 'kernel artifact cache root invalid'
 for entry in "${kernel_root}/"[0-9a-f]*; do
   [[ -d "${entry}" ]] || continue
