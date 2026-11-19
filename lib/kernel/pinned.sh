@@ -10,7 +10,8 @@
 # that produced them and the producer's own kernel-artifact.json record. When the
 # manifest's kernel inputs equal the pin's, the stage takes those bytes from a
 # trusted store instead of compiling them again:
-#   1. the kernel artifact cache (CERALIVE_KERNEL_CACHE_DIR or the in-tree one),
+#   1. the kernel artifact cache (CERALIVE_KERNEL_CACHE_DIR or the in-tree one;
+#      skipped when CERALIVE_KERNEL_ARTIFACT_CACHE=0),
 #      looked up by content, so a producer-code change that moved the cache key
 #      does not hide a byte-identical kernel;
 #   2. the pin's "sources": HTTPS base URLs (a published release asset).
@@ -170,7 +171,10 @@ kernel_pin_fetch_sources() {
     [[ -n "${base}" ]] || continue
     rm -f -- "${dest}/"*
     for file in "${deb_name}" resolved.config built-modules.txt; do
-      curl --fail --silent --show-error --proto '=https,http' --connect-timeout 10 --max-time 300 \
+      # Release-asset URLs redirect to a storage host; follow HTTPS redirects
+      # only. Whatever arrives is re-hashed against the pin below.
+      curl --fail --silent --show-error --proto '=https,http' --location --proto-redir '=https' \
+        --max-redirs 5 --connect-timeout 10 --max-time 300 \
         -o "${dest}/${file}" "${base%/}/${file}" 2>/dev/null || continue 2
     done
     if kernel_pin_bytes_match "${dest}" "${pin}"; then
@@ -201,7 +205,7 @@ kernel_pin_stage() {
       origin="artifact cache entry ${key}"
       break
     fi
-  done < <(kernel_pin_cache_candidates "${pin}")
+  done < <([[ "$(kernel_artifact_cache_mode)" == auto ]] && kernel_pin_cache_candidates "${pin}")
   if [[ -z "${origin}" ]] && origin="$(kernel_pin_fetch_sources "${pin}" "${work}" "${deb_name}")"; then
     origin="pinned source ${origin}"
   fi
