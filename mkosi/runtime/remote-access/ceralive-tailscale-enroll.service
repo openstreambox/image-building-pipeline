@@ -9,8 +9,9 @@ Description=Enroll in Tailscale from a key file on the BOOT partition
 ConditionPathExistsGlob=|/boot/[oO][sS][bB]-[tT][aA][iI][lL][sS][cC][aA][lL][eE]*
 ConditionPathExists=|/data/tailscale-enroll/pending-authkey
 ConditionPathExists=|/data/tailscale-enroll/incoming-authkey
-After=local-fs.target ceralive-migrate-data.service network-online.target
-Wants=network-online.target
+# No network-online.target edge (first-party policy, runtime-services.bats): an
+# attempt without a network fails like any DNS or timeout error and backs off.
+After=local-fs.target ceralive-migrate-data.service NetworkManager.service
 RequiresMountsFor=/boot /var/lib/tailscale /data/tailscale-enroll
 
 [Service]
