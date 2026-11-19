@@ -383,6 +383,7 @@ PY
       "$(basename "${out}")" "${sha}" "${A_EXPECT}" "${D_COMMIT}" "${D_ROOT}"
     [[ -f "${stage}/signing-tools.txt" && ! -L "${stage}/signing-tools.txt" ]] && cat "${stage}/signing-tools.txt"
   } >"${out}.signing"
+  chmod 0644 "${out}.sha256" "${out}.signing"
   SIGN_RM_FILES=()
   SIGN_RM_DIR="${stage}"
   log_success "verified and placed ${out} (sha256 ${sha}); squashfs payload matches the build's record"
