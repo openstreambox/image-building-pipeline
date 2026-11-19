@@ -41,7 +41,7 @@ for file in lib/kernel/ramoops.sh manifests/kernel/rk3588-ramoops.dtsi; do
 done
 
 # Changing release orchestration may not become a kernel input through a wrapper.
-for file in lib/kernel/released.sh lib/kernel_release.py ci/check-kernel-version-monotonic.py \
+for file in lib/kernel/released.sh lib/kernel/pinned.sh lib/kernel_release.py ci/check-kernel-version-monotonic.py \
   ci/kernel-floor-lib.sh lib/orchestrate.sh lib/stages/kernel-build.sh; do
   cp "${WORK}/repo/${file}" "${WORK}/original"
   printf '\n# release-only identity boundary probe\n' >>"${WORK}/repo/${file}"

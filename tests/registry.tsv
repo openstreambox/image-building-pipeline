@@ -148,6 +148,7 @@ tests/mkosi-package-staging.test.sh	shell	integration	default-shell	staged packa
 tests/mkosi-cache-privilege-domain.test.sh	shell	unit	default-shell	the mkosi cache stays in one privilege domain; Docker Desktop is refused
 tests/kernel-src-mirror.test.sh	shell	unit	default-shell	persistent kernel-source mirror: reuse with the upstream destroyed, its non-vacuity leg, the per-mirror flock and the auto/0/1 modes
 tests/kernel-artifact-cache.test.sh	shell	unit	default-shell	content-keyed kernel artifacts: input mutations, verified hit, one-byte corruption, config validation and off mode
+tests/kernel-pin.test.sh	shell	unit	default-shell	SHA-pinned kernel reuse through released.sh: content lookup, pinned sources, provenance refusal, require/verify/auto/off modes
 tests/immutable-r2-publication.test.sh	shell	integration	default-shell	create-only immutable publication with exact-byte recovery
 tests/recovery-script-contract.test.sh	shell	unit	default-shell	recovery.scr loads boot artifacts directly from p2 or p3
 tests/production-ci-scope-contract.test.sh	shell	unit	default-shell	production CI scope stays disjoint from bench-only knobs
