@@ -43,6 +43,8 @@ stage() {
     eval "$("${repo}/lib/resolve.sh" rock-5b-plus)"
     set +a
     unset KERNEL_VARIANT
+    # KERNEL_OVERRIDE=NAME=value simulates a caller overriding a resolved pin.
+    [[ -z "${KERNEL_OVERRIDE:-}" ]] || export "${KERNEL_OVERRIDE?}"
     bash "${repo}/lib/kernel/released.sh" --board rock-5b-plus --out "${out}" "$@"
   ) >"${WORK}/stage.log" 2>&1
 }
@@ -78,10 +80,25 @@ else bad "plain build: $(tail -5 "${WORK}/stage.log")"; fi
 
 # --- write: a pin is only ever written from a cold build of committed inputs ---
 if CERALIVE_KERNEL_PIN='write' stage "${WORK}/dirty-write"; then bad 'write accepted uncommitted inputs'
-elif grep -Fq 'needs every kernel input committed' "${WORK}/stage.log" && [[ ! -e "${pin}" ]] && no_kernel_in "${WORK}/dirty-write"; then
+elif grep -Fq 'needs a clean, fully committed checkout' "${WORK}/stage.log" && [[ ! -e "${pin}" ]] && no_kernel_in "${WORK}/dirty-write"; then
   ok 'write refuses uncommitted inputs and writes no pin'
 else bad "dirty write: $(tail -3 "${WORK}/stage.log")"; fi
 commit_repo 'inputs'
+# P2-A (T1183 round 3): the manifest decides the source pins, so the whole tree
+# must be committed, and the build's KERNEL_SOURCE_* must be the manifest's.
+cp "${repo}/manifests/families/rk3588.yaml" "${WORK}/family.committed"
+sed -i -E '0,/patches_commit: [0-9a-f]{40}/s//patches_commit: 0123456789abcdef0123456789abcdef01234567/' \
+  "${repo}/manifests/families/rk3588.yaml"
+expect_refusal 'write refuses an uncommitted manifest change (patch commit)' 'needs a clean, fully committed checkout' \
+  write "${WORK}/manifest-write"
+cp "${WORK}/family.committed" "${repo}/manifests/families/rk3588.yaml"
+touch "${repo}/stray-file"
+expect_refusal 'write refuses an untracked file in the checkout' 'needs a clean, fully committed checkout' \
+  write "${WORK}/untracked-write"
+rm -f "${repo}/stray-file"
+expect_refusal 'write refuses a KERNEL_SOURCE_* override of the committed manifest' 'differs from the committed manifest' \
+  write "${WORK}/override-write" KERNEL_OVERRIDE=KERNEL_SOURCE_PATCHES_COMMIT=0123456789abcdef0123456789abcdef01234567
+[[ ! -e "${pin}" ]] || bad 'a refused write left a pin behind'
 expect_refusal 'write refuses a caller ccache (the pin must come from a cold build)' '--ccache-dir is refused' \
   write "${WORK}/write-cc" -- --ccache-dir "${WORK}/warm"
 if CERALIVE_KERNEL_PIN='write' stage "${WORK}/written" && compiled &&
@@ -119,6 +136,11 @@ if (( ${#listed[@]} >= 15 && ${#missing[@]} == 0 )); then
   ok "the pin covers every file of the fingerprint's input list (${#listed[@]})"
 else bad "pin misses fingerprint inputs: ${missing[*]} (listed ${#listed[@]})"; fi
 expect_refusal 'write refuses to replace an existing pin' 'a pin is replaced only by removing it' write "${WORK}/rewrite"
+commit_repo 'pin'
+expect_refusal 'production require refuses a pin without a recorded independent cold verify' \
+  'needs the pin reproduced by at least one recorded independent cold verify' require "${WORK}/prod-norepro" CERALIVE_BUILD_MODE=production
+expect_refusal 'production refuses a KERNEL_SOURCE_* override of the committed manifest' 'differs from the committed manifest' \
+  require "${WORK}/prod-override" CERALIVE_BUILD_MODE=production KERNEL_OVERRIDE=KERNEL_SOURCE_PATCHES_COMMIT=0123456789abcdef0123456789abcdef01234567
 
 # --- require/auto take the pinned bytes without compiling ----------------------
 if CERALIVE_KERNEL_PIN=require stage "${WORK}/pinned" && ! compiled &&
@@ -265,6 +287,14 @@ if CERALIVE_KERNEL_PIN=verify CERALIVE_KERNEL_PIN_RECORD=1 stage "${WORK}/record
    jq -e '(.reproduced | length) == 1 and .reproduced[0].cold == true and .reproduced[0].tree == "clean"' "${pin}" >/dev/null; then
   ok 'CERALIVE_KERNEL_PIN_RECORD=1 appends the cold run to the pin'
 else bad "record: $(tail -5 "${WORK}/stage.log")"; fi
+# The cache may hold the differing deb from the nondeterminism case above
+# (the cache keeps whatever was built); reseed it with the pinned bytes.
+rm -rf "${WORK}/shared/kernel-artifacts"
+CERALIVE_KERNEL_PIN=0 stage "${WORK}/reseed" || bad "reseed build: $(tail -3 "${WORK}/stage.log")"
+if CERALIVE_KERNEL_PIN=require CERALIVE_BUILD_MODE=production stage "${WORK}/prod-ok" && ! compiled &&
+   [[ -f "${WORK}/prod-ok/${name}" ]]; then
+  ok 'production require accepts the pin once a cold verify is recorded'
+else bad "production require: $(tail -5 "${WORK}/stage.log")"; fi
 cp "${WORK}/pin.orig" "${pin}"
 
 # --- 0 and bad modes -----------------------------------------------------------------

@@ -945,13 +945,18 @@ per file, default 1800). Every candidate is re-hashed against the pin and passes
 the same four-axis deb and Kconfig gates as a fresh build. Pin paths build or
 stage into a private directory and publish into `--out` only after the checks,
 so `--out` never holds a kernel that differs from its pin. A production build
-refuses `CERALIVE_KERNEL_PIN_DIR` and uses the in-tree pin.
+refuses `CERALIVE_KERNEL_PIN_DIR` and uses the in-tree pin. `write` and every
+production build re-resolve the committed manifest in a clean environment and
+stop if any `KERNEL_SOURCE_*` value the producer reads differs from it, so an
+environment override can neither be pinned nor released.
 
 `CERALIVE_KERNEL_PIN` selects the policy:
 
 - `auto` (default): stage the pinned bytes; if no store has them, compile and
   stop unless the result equals the pin.
 - `require`: release builds. Stage the pinned bytes or stop; never compile.
+  In `CERALIVE_BUILD_MODE=production` the pin must also carry at least one
+  recorded independent cold `verify` in `reproduced`.
 - `verify`: the periodic proof that the kernel still builds. Always a cold
   compile (the artifact cache is switched off and a fresh ccache is used; a
   `--ccache-dir` is refused), which must reproduce the pinned bytes and the
@@ -959,8 +964,10 @@ refuses `CERALIVE_KERNEL_PIN_DIR` and uses the in-tree pin.
   `CERALIVE_KERNEL_PIN_RECORD=1` also appends the run to the pin's `reproduced`
   list (committed inputs only). Example:
   `CERALIVE_KERNEL_PIN=verify ./build rk3588 --kernel-only`.
-- `write`: create the pin. Refuses an existing pin and any uncommitted or
-  modified input, then compiles cold and writes the pin from that build.
+- `write`: create the pin. Refuses an existing pin and a checkout with any
+  modified, staged or untracked file (the manifests decide the source pins, so
+  the whole tree must be committed), then compiles cold and writes the pin from
+  that build.
   `CERALIVE_KERNEL_PIN_SOURCES` (space-separated HTTPS base URLs) fills
   `sources`. Commit the pin together with a second cold `verify` run recorded
   in `reproduced`.

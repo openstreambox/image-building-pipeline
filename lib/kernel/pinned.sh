@@ -86,14 +86,17 @@ print(json.dumps({'values': values, 'files': files}, sort_keys=True))
 PY
 }
 
-# kernel_pin_check <pin> — the pin is well formed, names this package, and was
-# produced from exactly the current inputs.
+# kernel_pin_check <pin> [--no-reproduction] — the pin is well formed, names
+# this package, and was produced from exactly the current inputs. In a
+# production build it must also carry a recorded independent cold verify
+# (verify itself, which adds that record, passes --no-reproduction).
 kernel_pin_check() {
-  local pin="$1" current
+  local pin="$1" current production=0
+  [[ "${CERALIVE_BUILD_MODE:-}" != production || "${2:-}" == --no-reproduction ]] || production=1
   current="$(kernel_pin_inputs_json)" || return 1
-  python3 - "${pin}" "${KERNEL_PIN_FORMAT}" "${current}" "${kernel_pkg}_${package_version}_${arch}.deb" <<'PY'
+  python3 - "${pin}" "${KERNEL_PIN_FORMAT}" "${current}" "${kernel_pkg}_${package_version}_${arch}.deb" "${production}" <<'PY'
 import json, re, sys
-pin_path, fmt, current, deb_name = sys.argv[1:]
+pin_path, fmt, current, deb_name, production = sys.argv[1:]
 hexd = re.compile(r'[0-9a-f]{64}')
 try:
     pin = json.load(open(pin_path))
@@ -110,6 +113,10 @@ if pin.get('artifact', {}).get('deb_sha256') != files.get(deb_name):
     problems.append('embedded kernel-artifact.json names a different deb')
 if pin.get('produced_by', {}).get('cold') is not True:
     problems.append('the pin does not record a cold build')
+if production == '1' and not any(
+        isinstance(r, dict) and r.get('cold') is True and r.get('deb_sha256') == files.get(deb_name)
+        for r in pin.get('reproduced', [])):
+    problems.append('a production build needs the pin reproduced by at least one recorded independent cold verify')
 for url in pin.get('sources', []):
     if not isinstance(url, str) or not (url.startswith('https://') or
                                         re.fullmatch(r'http://(127\.0\.0\.1|localhost):[0-9]{1,5}/.*', url)):
@@ -135,20 +142,52 @@ if problems:
 PY
 }
 
-# kernel_pin_inputs_committed — every input file is tracked and unmodified at
-# HEAD, so the pin's pipeline_commit really names what was built.
-kernel_pin_inputs_committed() {
-  local file bad=0
+# kernel_pin_tree_clean — the whole checkout is committed: no modified, staged
+# or untracked file. Checking only the input files is not enough, because the
+# manifests resolve.sh reads decide the source pins too.
+kernel_pin_tree_clean() {
+  local dirty
   git -C "${PIPELINE_DIR}" rev-parse --verify -q HEAD >/dev/null \
     || { log_error "kernel pin: ${PIPELINE_DIR} is not a git checkout"; return 1; }
-  while IFS= read -r file; do
-    if [[ "${file}" != "${PIPELINE_DIR}/"* ]] ||
-       ! git -C "${PIPELINE_DIR}" ls-files --error-unmatch -- "${file#"${PIPELINE_DIR}/"}" >/dev/null 2>&1 ||
-       ! git -C "${PIPELINE_DIR}" diff --quiet HEAD -- "${file#"${PIPELINE_DIR}/"}"; then
-      log_error "kernel pin: input ${file} is outside the checkout, untracked or modified"
+  dirty="$(git -C "${PIPELINE_DIR}" status --porcelain --untracked-files=normal)" || return 1
+  [[ -z "${dirty}" ]] && return 0
+  log_error "kernel pin: the checkout has uncommitted changes:"
+  printf '%s\n' "${dirty}" | head -20 >&2
+  return 1
+}
+
+# The KERNEL_SOURCE_* fields the producer reads (lib/build-kernel.sh::main).
+KERNEL_PIN_SOURCE_FIELDS=(GIT_URL TAG COMMIT PATCHES_GIT_URL PATCHES_COMMIT PATCHES_SERIES
+  DEFCONFIG_BASE DEFCONFIG_FRAGMENT DEFCONFIG_FRAGMENTS CONFIG_GIT_URL CONFIG_COMMIT
+  CONFIG_PATH CONFIG_ABSENT_SYMBOLS BUILDER_IMAGE LOCAL_VERSION KERNEL_RELEASE
+  PACKAGE_VERSION DTB_DEB_DIR)
+
+# kernel_pin_manifest_check <board> — the KERNEL_SOURCE_* values this build
+# received are exactly what the committed manifest resolves to in a clean
+# environment, so an environment override cannot be pinned or released.
+kernel_pin_manifest_check() {
+  local board="$1" resolved field name want bad=0
+  resolved="$(env -i PATH="${PATH}" HOME="${HOME:-/}" LC_ALL=C.UTF-8 \
+    "${PIPELINE_DIR}/lib/resolve.sh" "${board}" --variant "${CERALIVE_KERNEL_VARIANT:-default}")" \
+    || { log_error "kernel pin: cannot resolve the committed manifest for ${board}"; return 1; }
+  declare -A manifest=()
+  while IFS= read -r -d '' field; do
+    manifest["${field%%=*}"]="${field#*=}"
+  done < <(
+    eval "${resolved}" >/dev/null 2>&1 || exit 1
+    for field in "${KERNEL_PIN_SOURCE_FIELDS[@]}"; do
+      name="KERNEL_SOURCE_${field}"
+      printf '%s=%s\0' "${name}" "${!name:-}"
+    done
+  )
+  for field in "${KERNEL_PIN_SOURCE_FIELDS[@]}"; do
+    name="KERNEL_SOURCE_${field}"
+    want="${manifest[${name}]-<unresolved>}"
+    if [[ "${!name:-}" != "${want}" ]]; then
+      log_error "kernel pin: ${name} is '${!name:-}' in this build but '${want}' in the committed manifest"
       bad=1
     fi
-  done < <(kernel_input_files)
+  done
   return "${bad}"
 }
 
@@ -307,7 +346,7 @@ kernel_pin_builder_id() {
 kernel_pin_commit_state() {
   local head
   head="$(git -C "${PIPELINE_DIR}" rev-parse HEAD 2>/dev/null)" || head=""
-  printf '%s %s' "${head:-none}" "$(kernel_pin_inputs_committed >/dev/null 2>&1 && printf clean || printf dirty)"
+  printf '%s %s' "${head:-none}" "$(kernel_pin_tree_clean >/dev/null 2>&1 && printf clean || printf dirty)"
 }
 
 # kernel_pin_write <built dir> <pin> — record a cold build as the pin.
