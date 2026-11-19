@@ -10,6 +10,9 @@
 # PR_SWAP is never requested: the proven correction is a port_type cycle, always
 # restoring dual, rather than writing power_role. A tmpfs marker suppresses the
 # cycle's partner-add recursion; a failed-attach marker prevents charger loops.
+# When those cycles are used up and the port still shows no partner while it is
+# the source, the recheck rebinds the port's FUSB302 once per boot: the chip can
+# sit toggling without ever raising an attach interrupt until it is reset.
 #
 # udev starts the systemd oneshot on partner and port add events. The boot enable
 # is a second coldplug path, so every run inspects CURRENT sysfs state and is safe
@@ -30,6 +33,14 @@
 #   CERALIVE_TYPEC_SETTLED_POWER_ROLE post-cycle readback (default power_role)
 #   CERALIVE_TYPEC_NOPARTNER_MAX      recheck cycles per boot with no partner (default 3)
 #   CERALIVE_TYPEC_NOPARTNER_SPACING  seconds between those cycles (default 30)
+#   CERALIVE_TYPEC_REPROBE_SETTLE     seconds after the last cycle before the
+#                                     one FUSB302 rebind (default 20)
+#   CERALIVE_TYPEC_REARM_SETTLE       seconds a partner must stay gone after a
+#                                     rebind before one more rebind (default 30)
+#   CERALIVE_TYPEC_REARM_MAX          such re-arm rebinds per boot (default 3)
+#   CERALIVE_TYPEC_REBIND_GAP         seconds between unbind and bind (default 1)
+#   CERALIVE_TYPEC_BIND_WAIT          seconds to wait for each driver-link change (default 3)
+#   CERALIVE_TYPEC_OTG_DEV            OTG controller (default /sys/bus/platform/devices/fc000000.usb)
 
 set -uo pipefail
 
@@ -46,6 +57,17 @@ NOPARTNER_MAX="${CERALIVE_TYPEC_NOPARTNER_MAX:-3}"
 NOPARTNER_SPACING="${CERALIVE_TYPEC_NOPARTNER_SPACING:-30}"
 [[ "${NOPARTNER_MAX}" =~ ^[0-9]+$ && "${NOPARTNER_SPACING}" =~ ^[0-9]+$ ]] \
   || die "CERALIVE_TYPEC_NOPARTNER_MAX and _SPACING must be unsigned integers"
+REPROBE_SETTLE="${CERALIVE_TYPEC_REPROBE_SETTLE:-20}"
+[[ "${REPROBE_SETTLE}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_REPROBE_SETTLE must be an unsigned integer"
+REBIND_GAP="${CERALIVE_TYPEC_REBIND_GAP:-1}"
+REARM_SETTLE="${CERALIVE_TYPEC_REARM_SETTLE:-30}"
+REARM_MAX="${CERALIVE_TYPEC_REARM_MAX:-3}"
+[[ "${REARM_SETTLE}" =~ ^[0-9]+$ && "${REARM_MAX}" =~ ^[0-9]+$ ]] \
+  || die "CERALIVE_TYPEC_REARM_SETTLE and _MAX must be unsigned integers"
+[[ "${REBIND_GAP}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "CERALIVE_TYPEC_REBIND_GAP must be a non-negative number"
+BIND_WAIT="${CERALIVE_TYPEC_BIND_WAIT:-3}"
+[[ "${BIND_WAIT}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_BIND_WAIT must be an unsigned integer"
+OTG_DEV="${CERALIVE_TYPEC_OTG_DEV:-/sys/bus/platform/devices/fc000000.usb}"
 
 PORT_DIR="${CLASS_DIR}/${PORT}"
 PARTNER_DIR="${PORT_DIR}-partner"
@@ -71,9 +93,234 @@ active_role() {
   fi
 }
 
+# Every FUSB302 rebind decision is journaled under this tag, with a syslog
+# priority prefix (<3> error, <4> warning, <6> info) that journald strips and
+# applies, so `journalctl -p warning` finds the failures.
+reprobe_log() {
+  local prio=6
+  case "$1" in ERROR) prio=3 ;; WARNING) prio=4 ;; esac
+  printf '<%s>ceralive-typec-policy: %s: fusb302-reprobe: %s\n' "${prio}" "$1" "$2"
+}
+
+# reprobe_record <state> — the once-per-boot marker; false when it cannot be kept.
+reprobe_record() {
+  printf '%s %s\n' "$1" "$(date +%s)" >"${RUN_DIR}/reprobe"
+}
+
+# reprobe_defer <reason> — a condition that may still change; journal it only
+# when it differs from the last deferral so the ten-second recheck stays quiet.
+reprobe_defer() {
+  local previous=""
+  [[ ! -r "${RUN_DIR}/reprobe-deferred" ]] || previous="$(cat "${RUN_DIR}/reprobe-deferred")"
+  [[ "${previous}" != "$1" ]] || return 0
+  reprobe_log INFO "deferred: $1"
+  printf '%s\n' "$1" >"${RUN_DIR}/reprobe-deferred" \
+    || reprobe_log ERROR "cannot record the deferral"
+}
+
+# wait_bound <device dir> <want: bound|unbound> — poll the driver link, the only
+# trustworthy result: a deferred probe fails the bind write yet may bind later,
+# and a repeated write to a bound device fails with EBUSY.
+wait_bound() {
+  local deadline=$((SECONDS + BIND_WAIT))
+  while :; do
+    if [[ -L "$1/driver" ]]; then
+      [[ "$2" == bound ]] && return 0
+    else
+      [[ "$2" == unbound ]] && return 0
+    fi
+    (( SECONDS < deadline )) || return 1
+    sleep "${POLL_INTERVAL}"
+  done
+}
+
+# rock_fusb302_reprobe <last cycle epoch> <now epoch> [re-arm k/max] — returns 2
+# when it did nothing (marker, settle time or a deferral), otherwise 0. Runs only from the Rock
+# recheck with back power present, no partner and the no-partner cycles used up.
+# It unbinds and rebinds the one I2C device that owns ${PORT} (the J11 data
+# connector; the board's supply comes from the back input), once per boot, then
+# re-reads the partner. The driver directory comes from the device's own driver
+# link: the kernel registers the driver as typec_fusb302 (modalias
+# i2c:typec_fusb302) although the module file is fusb302.ko. Unbinding a single
+# device avoids a module unload that would touch every FUSB302.
+#
+# On the bench only `modprobe -r fusb302; modprobe fusb302` has been shown to
+# recover the stuck chip; this rebind runs the same remove/probe path but is
+# unproven until a board boots with it. If the TCPM worker were wedged in I2C,
+# the unbind write could block in D state: the unit then times out holding the
+# lock, later runs log a lock timeout, and boot itself is not held (timer-driven).
+#
+# An empty J11 looks exactly like a stuck one (source, no partner, no CC event in
+# sysfs), so on a back-powered boot with nothing plugged in this rebind runs once
+# and ends in an info line. A working data path without a partner object (a
+# device enumerated under the OTG controller) is left alone.
+#
+# Re-arm: a hot unplug and replug sticks the chip the same way, and a second
+# rebind recovers it. So once a partner has been seen after this boot's rebind
+# and then disappears, the recheck allows one more rebind when the port has
+# stayed partnerless for CERALIVE_TYPEC_REARM_SETTLE seconds (rock_reprobe_rearm),
+# at most CERALIVE_TYPEC_REARM_MAX times per boot. Its third argument labels
+# that run and bypasses only the once-per-boot marker; every other guard holds.
+# An empty port after an unplug costs one such rebind; it cannot loop, because
+# only a partner that appears again re-arms it.
+rock_fusb302_reprobe() {
+  local last="$1" now="$2" rearm="${3:-}" power dev name driver bus deadline data label="" prev=""
+  [[ -n "${rearm}" || ! -e "${RUN_DIR}/reprobe" ]] || return 2
+  (( now - last >= REPROBE_SETTLE )) || return 2
+  [[ -z "${rearm}" || ! -r "${RUN_DIR}/reprobe" ]] || read -r prev _ <"${RUN_DIR}/reprobe"
+
+  if [[ ! -r "${PORT_DIR}/preferred_role" ||
+        "$(active_role "${PORT_DIR}/preferred_role")" != source ]]; then
+    reprobe_defer "${PORT} source preference not active"
+    return 2
+  fi
+  power=unreadable
+  [[ ! -r "${POWER_ROLE}" ]] || power="$(active_role "${POWER_ROLE}")"
+  if [[ "${power}" != source ]]; then
+    reprobe_defer "${PORT} power_role=${power}, not source"
+    return 2
+  fi
+  # Device ports start at 1: every root hub has its own N-0:1.0 interface, and
+  # host role with nothing enumerated is not a working data path.
+  if compgen -G "${OTG_DEV}/xhci-hcd.*/usb[0-9]*/[0-9]*-[1-9]*" >/dev/null; then
+    reprobe_defer "a USB device is enumerated under ${OTG_DEV##*/}"
+    return 2
+  fi
+
+  dev="$(readlink -f -- "${PORT_DIR}/device" 2>/dev/null)" || dev=""
+  name="${dev##*/}"
+  driver=""
+  [[ -z "${dev}" || ! -L "${dev}/driver" ]] || driver="$(readlink -f -- "${dev}/driver")"
+  if [[ -z "${dev}" || ! "${name}" =~ ^[0-9]+-[0-9a-f]{4}$ ]]; then
+    reprobe_log INFO "skipped: ${PORT} is not backed by an I2C device"
+    reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
+    rm -f "${RUN_DIR}/detached"
+    return 0
+  fi
+  case "${driver##*/}" in
+    typec_fusb302 | fusb302) ;;
+    *)
+      reprobe_log INFO "skipped: ${name} is bound to '${driver##*/}', not typec_fusb302"
+      reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
+      rm -f "${RUN_DIR}/detached"
+      return 0
+      ;;
+  esac
+  bus="${driver%/drivers/*}"
+
+  # Record before acting: a crash or kill mid-rebind must not earn another one.
+  if ! reprobe_record attempted; then
+    reprobe_log ERROR "cannot record the attempt — no rebind"
+    return 0
+  fi
+  if [[ -e "${PARTNER_DIR}" ]]; then
+    reprobe_log INFO "skipped: a partner appeared on ${PORT}"
+    if [[ -n "${rearm}" && -n "${prev}" ]]; then
+      # The partner came back on its own: keep the earlier outcome so it re-arms
+      # the next detach, and leave the count unspent.
+      reprobe_record "${prev}" || reprobe_log ERROR "cannot restore the rebind outcome"
+    else
+      reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
+    fi
+    return 0
+  fi
+  if [[ -n "${rearm}" ]]; then
+    # Spend the re-arm only now that every guard and the partner check passed.
+    rm -f "${RUN_DIR}/detached"
+    if ! printf '%s\n' "${rearm%%/*}" >"${RUN_DIR}/rearm"; then
+      reprobe_log ERROR "cannot record the re-arm count — no rebind"
+      return 0
+    fi
+    label="re-arm ${rearm}: "
+  fi
+  if [[ -n "${rearm}" ]]; then
+    reprobe_log INFO "${label}${PORT} lost its partner and has had none for ${REARM_SETTLE}s or more: rebinding ${name} from ${driver##*/}"
+  else
+    reprobe_log INFO "${PORT} is source with no partner $((now - last))s after the last cycle: rebinding ${name} from ${driver##*/}"
+  fi
+  printf '%s\n' "${name}" >"${driver}/unbind" || true
+  if ! wait_bound "${dev}" unbound; then
+    reprobe_log ERROR "unbind of ${name} did not take — ${name} left bound, not retrying this boot"
+    reprobe_record failed-unbind || reprobe_log ERROR "cannot record the failure"
+    return 0
+  fi
+  sleep "${REBIND_GAP}"
+  printf '%s\n' "${name}" >"${driver}/bind" || true
+  if ! wait_bound "${dev}" bound; then
+    reprobe_log WARNING "${name} not bound after bind — asking the bus to probe it"
+    printf '%s\n' "${name}" >"${bus}/drivers_probe" || true
+  fi
+  if ! wait_bound "${dev}" bound; then
+    sleep 2
+    printf '%s\n' "${name}" >"${driver}/bind" || true
+  fi
+  if ! wait_bound "${dev}" bound; then
+    reprobe_log ERROR "${name} is still unbound after bind, bus probe and a second bind — ${PORT} has no controller until reboot"
+    reprobe_record failed-bind || reprobe_log ERROR "cannot record the failure"
+    return 0
+  fi
+
+  deadline=$((SECONDS + WAIT_SECONDS))
+  while [[ ! -e "${PARTNER_DIR}" ]] && (( SECONDS < deadline )); do
+    sleep "${POLL_INTERVAL}"
+  done
+  if [[ ! -d "${PORT_DIR}" ]]; then
+    reprobe_log WARNING "${name} is bound again but ${PORT} did not come back (present: $(cd "${CLASS_DIR}" 2>/dev/null && echo port* || echo none)) — the policy only manages ${PORT}"
+    reprobe_record port-missing || reprobe_log ERROR "cannot record the result"
+  elif [[ -e "${PARTNER_DIR}" ]]; then
+    power=unknown data=unknown
+    [[ ! -r "${POWER_ROLE}" ]] || power="$(active_role "${POWER_ROLE}")"
+    [[ ! -r "${DATA_ROLE}" ]] || data="$(active_role "${DATA_ROLE}")"
+    reprobe_log INFO "${label}partner found after rebinding ${name}: power_role=${power} data_role=${data}"
+    reprobe_record recovered || reprobe_log ERROR "cannot record the result"
+  else
+    reprobe_log INFO "${label}no partner ${WAIT_SECONDS}s after rebinding ${name}: J11 is empty or the chip is still stuck — only a partner that appears again re-arms another rebind"
+    reprobe_record no-partner || reprobe_log ERROR "cannot record the result"
+  fi
+  return 0
+}
+
+# rock_reprobe_rearm <last cycle epoch> <now epoch> — runs in the Rock recheck
+# with back power present and no partner, under the policy lock. Turns a
+# recorded partner (partner-seen) into a detach time, then hands one labelled
+# rebind to rock_fusb302_reprobe once the port has stayed partnerless for
+# REARM_SETTLE seconds and REPROBE_SETTLE seconds have passed since the last
+# port_type cycle. Returns 0 when it acted (rebind attempted, skipped, or the cap
+# reached), 1 to let the caller go on with the usual no-partner handling: nothing
+# pending, not due yet, or the rebind deferred on a guard.
+rock_reprobe_rearm() {
+  local last="$1" now="$2" gone=0 count=0
+  if [[ -e "${RUN_DIR}/partner-seen" ]]; then
+    rm -f "${RUN_DIR}/partner-seen"
+    if printf '%s\n' "${now}" >"${RUN_DIR}/detached"; then
+      reprobe_log INFO "${PORT} lost its partner after this boot's rebind: one more rebind if none returns within ${REARM_SETTLE}s"
+    else
+      reprobe_log ERROR "cannot record the detach — no re-arm"
+    fi
+  fi
+  [[ -r "${RUN_DIR}/detached" ]] || return 1
+  read -r gone <"${RUN_DIR}/detached"
+  [[ "${gone}" =~ ^[0-9]+$ ]] || { rm -f "${RUN_DIR}/detached"; return 1; }
+  # Not due yet: the port_type cycles go on as before (same lock, so the two
+  # never overlap, and the rebind waits REPROBE_SETTLE after any cycle).
+  (( now - gone >= REARM_SETTLE && now - last >= REPROBE_SETTLE )) || return 1
+  [[ ! -r "${RUN_DIR}/rearm" ]] || read -r count <"${RUN_DIR}/rearm"
+  [[ "${count}" =~ ^[0-9]+$ ]] || count=0
+  if (( count >= REARM_MAX )); then
+    rm -f "${RUN_DIR}/detached"
+    reprobe_log INFO "re-arm limit of ${REARM_MAX} per boot reached — no further rebind this boot"
+    return 0
+  fi
+  # A deferral (return 2) leaves the re-arm pending and lets this tick's usual
+  # no-partner handling run, so the port_type cycles can still make the port
+  # source again (e.g. after a charger or camera left it as sink).
+  rock_fusb302_reprobe "${last}" "${now}" "$((count + 1))/${REARM_MAX}"
+  (( $? != 2 ))
+}
+
 rock_back_power_correction() {
   local adc first second decision=unknown previous="" retry deadline stamp=0
-  local settled_power identity=unknown original_port_type
+  local settled_power identity=unknown original_port_type rstate
   local blind=0 tries=0 last=0 now
   retry="${CERALIVE_TYPEC_ADC_RETRY:-15}"
   [[ "${MODE}" != recheck ]] || retry=0
@@ -109,6 +356,25 @@ rock_back_power_correction() {
   printf '%s\n' "${decision}" >"${RUN_DIR}/state" || log "ERROR: cannot record Rock back-power state"
   [[ "${decision}" == present ]] || return 0
 
+  # No port means nothing to write. At boot the driver may simply not have
+  # registered it yet (its port-add event runs the policy again), so the boot run
+  # only notes that. The recheck says so once per change instead of failing the
+  # preference write on every tick (e.g. after a failed rebind).
+  if [[ ! -d "${PORT_DIR}" ]]; then
+    if [[ "${MODE}" != recheck ]]; then
+      log "INFO: ${PORT} not registered yet — no connector writes"
+    elif [[ ! -e "${RUN_DIR}/port-absent" ]]; then
+      log "INFO: ${PORT} is absent — no connector writes until it returns"
+      : >"${RUN_DIR}/port-absent" \
+        || printf '<3>ceralive-typec-policy: ERROR: cannot record the absent %s\n' "${PORT}"
+    fi
+    return 0
+  fi
+  if [[ -e "${RUN_DIR}/port-absent" ]]; then
+    rm -f "${RUN_DIR}/port-absent"
+    log "INFO: ${PORT} is present again"
+  fi
+
   # Set Try.SRC before the no-partner exit, so the next attach needs no reset.
   if [[ ! -r "${PORT_DIR}/preferred_role" ||
         "$(active_role "${PORT_DIR}/preferred_role")" != source ]]; then
@@ -119,6 +385,18 @@ rock_back_power_correction() {
     fi
   fi
   if [[ -e "${PARTNER_DIR}" ]]; then
+    # A partner seen after this boot's rebind arms one more rebind for when it
+    # leaves (rock_reprobe_rearm). Only outcomes that left a working controller
+    # qualify; skipped and failed rebinds never re-arm.
+    rm -f "${RUN_DIR}/detached"
+    if [[ ! -e "${RUN_DIR}/partner-seen" && -r "${RUN_DIR}/reprobe" ]]; then
+      read -r rstate _ <"${RUN_DIR}/reprobe"
+      case "${rstate}" in
+        recovered | no-partner | port-missing)
+          : >"${RUN_DIR}/partner-seen" || log "ERROR: cannot record the partner for the rebind re-arm"
+          ;;
+      esac
+    fi
     # A partner that reappears right after our cycle (a plain charger flaps) must
     # not earn fresh tries; only one that has stayed up for a minute does.
     if [[ -r "${RUN_DIR}/nopartner" ]]; then
@@ -137,7 +415,12 @@ rock_back_power_correction() {
     [[ ! -r "${RUN_DIR}/nopartner" ]] || read -r tries last <"${RUN_DIR}/nopartner"
     [[ "${tries}" =~ ^[0-9]+$ && "${last}" =~ ^[0-9]+$ ]] || { tries=0; last=0; }
     now="$(date +%s)"
-    (( tries < NOPARTNER_MAX && now - last >= NOPARTNER_SPACING )) || return 0
+    ! rock_reprobe_rearm "${last}" "${now}" || return 0
+    if (( tries >= NOPARTNER_MAX )); then
+      rock_fusb302_reprobe "${last}" "${now}"
+      return 0
+    fi
+    (( now - last >= NOPARTNER_SPACING )) || return 0
     if ! mkdir -p "${RUN_DIR}" || ! printf '%s %s\n' "$((tries + 1))" "${now}" >"${RUN_DIR}/nopartner"; then
       log "ERROR: cannot record Rock no-partner try — no port_type write"
       return 0
