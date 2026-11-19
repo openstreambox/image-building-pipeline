@@ -183,7 +183,8 @@ Env:
                                  does not is a cache miss, never a different
                                  build.
   CERALIVE_KERNEL_SRC_MIRROR_DIR mirror location (default:
-                                 ${CERALIVE_REL_KERNEL_SRC_MIRROR_DIR})
+                                 the same leaf under CERALIVE_KERNEL_CACHE_DIR,
+                                 else ${CERALIVE_REL_KERNEL_SRC_MIRROR_DIR})
   CERALIVE_KERNEL_SRC_MIRROR_LOCK_TIMEOUT
                                  seconds to wait for the per-mirror flock
                                  (default: 3600). Boards build concurrently and
@@ -192,6 +193,12 @@ Env:
   CERALIVE_KERNEL_ARTIFACT_CACHE
                                   auto (default) or 0 (disable). Hits revalidate
                                   the deb and resolved kernel configuration.
+  CERALIVE_KERNEL_CACHE_DIR      absolute directory shared by every checkout on
+                                 this host: the artifact cache, the ccache and
+                                 the default source mirror live there instead
+                                 of under ${CERALIVE_REL_MKOSI_CACHE_ROOT}.
+                                 Entries are keyed by the full input fingerprint
+                                 and builder image id, and locked per key.
 EOF
 }
 
@@ -241,8 +248,16 @@ main() {
   validate_kernel_source_inputs
   resolve_kernel_config_mode
   resolve_kernel_package_name
-  local cache_mode
+  local cache_mode shared_cache
   cache_mode="$(kernel_artifact_cache_mode)"
+  shared_cache="$(kernel_shared_cache_dir)" || exit 1
+  # --ccache-dir, then the shared kernel cache root, then the in-tree default.
+  # ccache keys on preprocessed source, compiler and flags; the container path
+  # (/src/linux) is the same in every checkout, so objects are shared as well.
+  if [[ -z "${ccache_dir}" && -n "${shared_cache}" ]]; then
+    ccache_dir="$(kernel_shared_cache_dir "${CERALIVE_REL_KERNEL_CCACHE_DIR}")" || exit 1
+  fi
+  ccache_dir="${ccache_dir:-${PIPELINE_DIR}/${CERALIVE_REL_KERNEL_CCACHE_DIR}}"
   ceralive_remote_cache_mode >/dev/null
 
   local dtb_path="${dtb_deb_dir%/}/${dtb_name}"
@@ -284,6 +299,7 @@ main() {
     log_info "DRY-RUN would run: make -j${KERNEL_BUILD_JOBS} ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=${local_version} KDEB_PKGVERSION=${package_version} KBUILD_BUILD_TIMESTAMP=@<kernel-commit-epoch> bindeb-pkg"
     log_info "DRY-RUN would stage: ${kernel_pkg}_${package_version}_${arch}.deb -> ${out_dir} (linux-headers-*/linux-libc-dev discarded)"
     log_info "DRY-RUN fetch policy: each pinned fetch runs under timeout ${KERNEL_GIT_TIMEOUT}s, up to ${KERNEL_GIT_ATTEMPTS} attempt(s) in a private attempt dir; a pin mismatch is NEVER retried"
+    log_info "DRY-RUN kernel caches: artifacts $(kernel_artifact_cache_root) (CERALIVE_KERNEL_ARTIFACT_CACHE=${cache_mode}), ccache ${ccache_dir}"
     log_info "DRY-RUN source mirror: CERALIVE_KERNEL_SRC_MIRROR=$(kernel_src_mirror_mode), mirror dir $(kernel_src_mirror_dir) (a mirror holding ${commit} is cloned locally with no network; the patch series and config are always fetched fresh)"
     log_success "=== DRY-RUN complete: kernel-build plan emitted; no network, container or build touched ==="
     return 0
@@ -306,7 +322,6 @@ main() {
   trap "${runtime} run --rm -v '${work}/src:/src' '${KERNEL_BUILDER_IMAGE_TAG}' bash -c 'find /src -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +'; rm -rf '${work}'" EXIT
   install -d -m 0755 "${work}/out" "${work}/src" "${out_dir}"
 
-  ccache_dir="${ccache_dir:-${PIPELINE_DIR}/${CERALIVE_REL_KERNEL_CCACHE_DIR}}"
   install -d -m 0755 "${ccache_dir}"
   log_info "ccache: ${ccache_dir}"
 
