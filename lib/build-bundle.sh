@@ -244,6 +244,12 @@ bundle-prepare() {
   # The commit the signing step must run from (a fresh clone, never this tree).
   commit="$(GIT_MASTER=1 git -C "${PIPELINE_DIR}" rev-parse HEAD 2>/dev/null)" \
     || die "deferred signing needs a git checkout: the signing step runs from the same commit"
+  # A release build must be exactly that commit: a tracked change (made before or
+  # during the build) would not be in the clone that signs.
+  if [[ "${CERALIVE_BUILD_MODE:-development}" == production || "${CERALIVE_FORK_RELEASE:-}" == 1 ]]; then
+    [[ -z "$(GIT_MASTER=1 git -C "${PIPELINE_DIR}" status --porcelain --untracked-files=no 2>&1)" ]] \
+      || die "release build from a pipeline tree with tracked changes: refusing to prepare content for ${commit}"
+  fi
 
   python3 -I - "${stage}" "${desc}.tmp" "${UNSIGNED_BUNDLE_SCHEMA}" "${board}" \
     "${compatible}" "${version}" "${ts}" "${keyring_sha}" "${commit}" \

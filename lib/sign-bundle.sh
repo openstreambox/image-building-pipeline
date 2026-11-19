@@ -42,6 +42,9 @@ source "${HERE}/build-bundle.sh"
 unset RAUC_BUNDLE_MKSQUASHFS_ARGS
 
 SIGN_RAUC_MIN=1.15
+# The sign phase resolves rauc, mksquashfs and openssl only from root-owned
+# system directories, never from a PATH entry the caller's user could write.
+SIGN_SYSTEM_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 sign_usage() {
   sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
@@ -260,6 +263,8 @@ sign_require_host_rauc() {
 }
 
 sign-sign() {
+  export PATH="${SIGN_SYSTEM_PATH}"
+  hash -r
   sign_parse_args "$@"
   local stage="${A_STAGE%/}" out
   sign_stage_ok "${stage}"
@@ -283,6 +288,12 @@ sign-sign() {
   ( umask 022; SOURCE_DATE_EPOCH="${D_EPOCH}" "${sign_cmd[@]}" ) || die "rauc bundle failed"
   rauc info "${RAUC_VERIFY_OPTS[@]}" --keyring="${RAUC_ROOT_CA}" "${out}" >/dev/null \
     || die "the new bundle does not verify under the signer root"
+  # The tools that made the bundle, for the record `finish` writes next to it.
+  {
+    printf 'rauc=%s (%s)\n' "$(rauc --version 2>&1 | head -n1)" "$(command -v rauc)"
+    printf 'mksquashfs=%s (%s)\n' "$(mksquashfs -version 2>&1 | head -n1)" "$(command -v mksquashfs)"
+    printf 'signer=%s\n' "$(openssl x509 -in "${RAUC_LEAF_CERT}" -noout -subject -nameopt RFC2253 | sed 's/^subject=//')"
+  } >"${stage}/signing-tools.txt"
   SIGN_RM_FILES=()
   log_success "signed ${out}; run finish to verify and place it"
 }
@@ -302,7 +313,8 @@ sign-finish() {
     || die "the stage's out/ must hold exactly ${D_BUNDLE}"
   out_dir="$(cd "$(dirname "${out}")" && pwd -P)" || die "output directory missing: $(dirname "${out}")"
   out="${out_dir}/$(basename "${out}")"
-  [[ ! -e "${out}" && ! -L "${out}" && ! -e "${out}.sha256" ]] || die "refusing to overwrite ${out}"
+  [[ ! -e "${out}" && ! -L "${out}" && ! -e "${out}.sha256" && ! -e "${out}.signing" ]] \
+    || die "refusing to overwrite ${out}"
 
   sign_image_root "${stage}" "${A_ROOT}"
   rauc info --keyring="${stage}/device-keyring.pem" "${bundle}" >/dev/null 2>&1 \
@@ -365,6 +377,12 @@ PY
   chmod 0644 "${out}.partial"
   mv -T "${out}.partial" "${out}"
   printf '%s  %s\n' "${sha}" "$(basename "${out}")" >"${out}.sha256"
+  # Signing record: what was signed, from which commit, with which tools.
+  {
+    printf 'bundle=%s\nbundle_sha256=%s\ndescriptor_sha256=%s\npipeline_commit=%s\nroot_sha256=%s\n' \
+      "$(basename "${out}")" "${sha}" "${A_EXPECT}" "${D_COMMIT}" "${D_ROOT}"
+    [[ -f "${stage}/signing-tools.txt" && ! -L "${stage}/signing-tools.txt" ]] && cat "${stage}/signing-tools.txt"
+  } >"${out}.signing"
   SIGN_RM_FILES=()
   SIGN_RM_DIR="${stage}"
   log_success "verified and placed ${out} (sha256 ${sha}); squashfs payload matches the build's record"

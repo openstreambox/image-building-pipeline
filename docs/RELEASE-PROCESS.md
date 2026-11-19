@@ -669,7 +669,8 @@ a privileged container. `CERALIVE_RAUC_SIGNING=deferred` splits that:
    compatible, version, `SOURCE_DATE_EPOCH`, the root read back from the slot
    image's `/etc/rauc/ceralive-keyring.pem`, and the size, mode and SHA-256 of
    every file) and its digest in `<ts>.raucb-content.json.sha256`. Record the
-   digest and the commit with the build's other outputs.
+   digest and the commit with the build's other outputs. A production or fork
+   release build refuses to prepare from a pipeline tree with tracked changes.
 2. **Sign from a fresh clone, never from the build tree.** The privileged build
    container mounts the pipeline tree read-write, and the signing scripts run
    while the key is unlocked. Clone the recorded commit after the build (with
@@ -689,7 +690,9 @@ a privileged container. `CERALIVE_RAUC_SIGNING=deferred` splits that:
      re-hashes the stage, requires the signer root to be the image's root, and
      signs with the host's `rauc` (1.15 or newer) into the stage's empty `out/`,
      under the build's `SOURCE_DATE_EPOCH` and umask 022. It ignores
-     `RAUC_BUNDLE_MKSQUASHFS_ARGS`. No container is involved, so the key stays in
+     `RAUC_BUNDLE_MKSQUASHFS_ARGS` and takes `rauc`, `mksquashfs` and `openssl`
+     only from the root-owned system directories (`/usr/local/{s,}bin`,
+     `/usr/{s,}bin`, `/{s,}bin`). No container is involved, so the key stays in
      the caller's process scope.
    - `finish --stage <stage> --expect <digest> --out <ts>.raucb` (no key)
      verifies on the host: `rauc info` under the root read from the image, with
@@ -698,7 +701,9 @@ a privileged container. `CERALIVE_RAUC_SIGNING=deferred` splits that:
      the squashfs lists exactly `manifest.raucm`, `rootfs.ext4`,
      `rootfs.ext4.block-hash-index` (and `layout-check`); `rootfs.ext4` and the
      hook read back from the squashfs hash to the descriptor. Only then is the
-     bundle copied to `--out`.
+     bundle copied to `--out`, with `<ts>.raucb.signing` beside it: bundle and
+     descriptor digests, pipeline commit, root, signer, and the `rauc` and
+     `mksquashfs` versions and paths that made it.
 
    A failure in `sign` or `finish` removes the bundle. Signing with the host's
    `rauc` and `squashfs-tools` keeps the bundle format, verity and the signer
