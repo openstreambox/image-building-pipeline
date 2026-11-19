@@ -123,6 +123,19 @@ check env "${common_env[@]}" BUNDLE_TS=t BUNDLE_OUT_DIR="${work}/p-cli" CERALIVE
   "${BUNDLE}" rock-5b-plus "${work}/tree-a"
 check test -s "${work}/p-cli/t.raucb-content.json"
 check test ! -e "${work}/p-cli/t.raucb"
+# A release build (production, or a fork release) refuses a tree with tracked changes.
+mkdir -p "${work}/dirty-git"
+cat >"${work}/dirty-git/git" <<EOF
+#!/usr/bin/env bash
+for a; do [[ "\$a" == status ]] && { echo ' M lib/common.sh'; exit 0; }; done
+exec $(command -v git) "\$@"
+EOF
+chmod +x "${work}/dirty-git/git"
+for release_env in CERALIVE_BUILD_MODE=production CERALIVE_FORK_RELEASE=1; do
+  refuse "a ${release_env} build from a tree with tracked changes" \
+    prepare "${work}/p-dirty-${release_env%%=*}" "${work}/tree-a" PATH="${work}/dirty-git:${PATH}" "${release_env}"
+done
+check prepare "${work}/p-dirty-dev" "${work}/tree-a" PATH="${work}/dirty-git:${PATH}"
 
 # --- 3. check / sign / finish: the happy path ----------------------------------
 echo '# check, sign, finish'
@@ -169,6 +182,10 @@ refuse 'rauc info of the signed bundle under another root' \
   rauc info --keyring="${keys_b}/root-ca.pem" "${work}/ok/t.raucb"
 refuse 'the pseudo-file entry in the signed squashfs' unsquashfs -cat "${work}/ok/t.raucb" leak
 check test -z "$(find "${work}/ok" -name '*.partial')"
+check grep -qx "pipeline_commit=$(git -C "${repo}" rev-parse HEAD)" "${work}/ok/t.raucb.signing"
+check grep -qx "bundle_sha256=$(sha256sum <"${work}/ok/t.raucb" | cut -c1-64)" "${work}/ok/t.raucb.signing"
+check grep -q '^rauc=rauc [0-9]' "${work}/ok/t.raucb.signing"
+check grep -q '^mksquashfs=mksquashfs version [0-9]' "${work}/ok/t.raucb.signing"
 check grep -Fxq 'unset RAUC_BUNDLE_MKSQUASHFS_ARGS' "${SIGN}"
 if grep -Eq '(docker|podman) ' "${SIGN}"; then bad 'the signing step runs a container'; else ok 'the signing step runs no container'; fi
 
@@ -276,20 +293,28 @@ stage="$(check_c "${work}/open-stage/t.raucb-content" "${digest}" "${work}/open-
 chmod 0755 "${stage}"
 refuse 'a stage that is not private' sign_s "${stage}" "${digest}"
 
-# A failing signer leaves nothing in out/.
-fresh fail-sign
-stage="$(check_c "${work}/fail-sign/t.raucb-content" "${digest}" "${work}/fail-sign-stages")"
+# The sign phase takes rauc only from system directories: a rauc earlier on
+# PATH is ignored.
+fresh fake-path
+stage="$(check_c "${work}/fake-path/t.raucb-content" "${digest}" "${work}/fake-path-stages")"
 mkdir -p "${work}/fake-rauc"
 cat >"${work}/fake-rauc/rauc" <<'EOF'
 #!/usr/bin/env bash
-[[ "$1" == --version ]] && { echo 'rauc 1.15.9'; exit 0; }
-for a; do out="$a"; done
-printf 'half a bundle' >"${out}"
+[[ "$1" == --version ]] && { echo 'rauc 9.9 (fake)'; exit 0; }
 exit 1
 EOF
 chmod +x "${work}/fake-rauc/rauc"
-refuse 'a signer that fails half way' env PATH="${work}/fake-rauc:${PATH}" \
+check env PATH="${work}/fake-rauc:${PATH}" \
   bash -c "$(declare -f sign_s); sign_pki='${sign_pki}' SIGN='${SIGN}' sign_s '${stage}' '${digest}'"
+check test -s "${stage}/out/t.raucb"
+if grep -q fake "${stage}/signing-tools.txt"; then bad 'the sign phase used a rauc from PATH'; else ok 'the sign phase used the system rauc'; fi
+
+# A signer that cannot write leaves nothing in out/.
+fresh fail-sign
+stage="$(check_c "${work}/fail-sign/t.raucb-content" "${digest}" "${work}/fail-sign-stages")"
+chmod 0500 "${stage}/out"
+refuse 'a signer that cannot write its bundle' sign_s "${stage}" "${digest}"
+chmod 0700 "${stage}/out"
 check empty_dir "${stage}/out"
 
 # An image that trusts root B cannot be signed with chain A.
