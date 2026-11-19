@@ -77,6 +77,9 @@ setup_data_persistence() {
   local data_root="/data" data_partlabel
   data_partlabel="$(resolve_partlabel data)"
   local workdir="/opt/ceralive" nm_conn="/etc/NetworkManager/system-connections"
+  # The app layer keeps image-owned copies of CeraUI's working-dir helpers here
+  # (mkosi.images/app/mkosi.postinst.chroot::keep_ceraui_workdir_helpers).
+  local ceraui_helpers="/usr/libexec/ceralive/ceraui-workdir"
 
   log "persisting CeraLive state on ${data_root} (config/logs/wifi/srtla)"
 
@@ -170,6 +173,7 @@ set -euo pipefail
 DATA="${data_root}"
 WORKDIR="${workdir}"
 NM_CONN="${nm_conn}"
+CERAUI_HELPERS="${ceraui_helpers}"
 EOF
   cat >>/usr/local/sbin/ceralive-migrate-data <<'EOF'
 
@@ -260,6 +264,23 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
         mv -f "$DATA/ceralive/.$us.seed" "$DATA/ceralive/$us"
         sync "$DATA/ceralive"
     fi
+    # Programs CeraUI runs from its working dir (captive-portal-window.py). The
+    # bind hides the .deb's copy, so link each one to the image-owned copy the app
+    # layer keeps outside it. A link, not a copy, so that after an OTA the box runs
+    # the helper of its new slot. Absent and dangling entries are (re)linked on
+    # every boot; anything else is left alone: a regular file there was written by
+    # a later CeraUI package upgrade and belongs to the CeraUI that now runs.
+    for f in "$CERAUI_HELPERS"/*; do
+        [ -f "$f" ] || continue
+        dest="$DATA/ceralive/$(basename "$f")"
+        if [ -L "$dest" ] && [ ! -e "$dest" ]; then
+            rm -f "$dest"
+        fi
+        if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+            log "linking $dest to the image copy $f"
+            ln -s "$f" "$dest"
+        fi
+    done
 fi
 if ! mountpoint -q /var/log; then
     cp -a /var/log/. "$DATA/log/" 2>/dev/null || true
