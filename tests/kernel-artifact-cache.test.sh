@@ -106,7 +106,8 @@ cp "${ROOT}/lib/kernel/"*.sh "${KEY_HERE}/kernel/"
 cp "${ROOT}/lib/shared/remote-cache.sh" "${KEY_HERE}/shared/"
 cp "${ROOT}/ci/Dockerfile.kernel" "${WORK}/source/ci/"
 mkdir -p "${WORK}/source/manifests/kernel" "${WORK}/source/mkosi/runtime" "${WORK}/source/mkosi/customize"
-cp "${ROOT}/manifests/kernel/required-symbols.list" "${ROOT}/manifests/kernel/forbidden-symbols.list" "${WORK}/source/manifests/kernel/"
+cp "${ROOT}/manifests/kernel/required-symbols.list" "${ROOT}/manifests/kernel/forbidden-symbols.list" \
+  "${ROOT}/manifests/kernel/rk3588-ramoops.dtsi" "${WORK}/source/manifests/kernel/"
 cp "${ROOT}/manifests/rk3588-bluetooth-firmware-roots.txt" "${WORK}/source/manifests/"
 cp "${ROOT}/mkosi/runtime/ceralive-kernel-boot-staging.sh" "${WORK}/source/mkosi/runtime/"
 cp "${ROOT}/mkosi/customize/bluetooth-firmware.sh" "${WORK}/source/mkosi/customize/"
@@ -115,10 +116,14 @@ HERE="${KEY_HERE}"
 KERNEL_LIB_DIR="${HERE}/kernel"
 KERNEL_BUILDER_DOCKERFILE="${WORK}/source/ci/Dockerfile.kernel"
 SOURCE_KEY="$(kernel_artifact_cache_key)"
+[[ "${SOURCE_KEY}" == "${BASE_KEY}" ]] && ok 'key is the same in a second checkout of the same tree (paths are checkout-relative)' \
+  || bad 'key depends on where the checkout lives'
 for file in "${HERE}/build-kernel.sh" "${HERE}/verify-kernel-config.sh" "${HERE}/verify-boot-artifacts.sh" \
   "${KERNEL_LIB_DIR}/config.sh" "${KERNEL_LIB_DIR}/checkout.sh" \
   "${KERNEL_LIB_DIR}/builder.sh" "${KERNEL_LIB_DIR}/package.sh" \
-  "${KERNEL_LIB_DIR}/artifact-cache.sh" "${KERNEL_LIB_DIR}/only.sh" "${KEY_HERE}/shared/remote-cache.sh" "${KERNEL_BUILDER_DOCKERFILE}" \
+  "${KERNEL_LIB_DIR}/artifact-cache.sh" "${KERNEL_LIB_DIR}/cache-dir.sh" "${KERNEL_LIB_DIR}/only.sh" \
+  "${KERNEL_LIB_DIR}/ramoops.sh" "${PIPELINE_DIR}/manifests/kernel/rk3588-ramoops.dtsi" \
+  "${KEY_HERE}/shared/remote-cache.sh" "${KERNEL_BUILDER_DOCKERFILE}" \
   "${PIPELINE_DIR}/manifests/rk3588-bluetooth-firmware-roots.txt" \
   "${PIPELINE_DIR}/mkosi/customize/bluetooth-firmware.sh"; do
   printf '\n' >>"${file}"
@@ -178,7 +183,7 @@ fi
 [[ -s "${WORK}/warnings" ]] && ok 'corruption is logged' || bad 'corruption was silent'
 kernel_artifact_cache_store "${BASE_KEY}" "${WORK}/built/${kernel_pkg}_${package_version}_${arch}.deb" "${WORK}/built"
 printf '# CONFIG_CACHE_TEST is not set\nCONFIG_CACHE_BAD=y\n' >"${ENTRY}/resolved.config"
-kernel_artifact_cache_manifest "${ENTRY}" "${kernel_pkg}_${package_version}_${arch}.deb"
+kernel_artifact_cache_manifest "${ENTRY}" "${kernel_pkg}_${package_version}_${arch}.deb" "${BASE_KEY}"
 if kernel_artifact_cache_hit "${BASE_KEY}" "${WORK}/staged" "${kernel_pkg}_${package_version}_${arch}.deb" 2>/dev/null; then
   bad 'hash-valid but invalid config was accepted'
 else
@@ -235,7 +240,7 @@ else
 fi
 rm -rf "${ENTRY}"
 printf '# CONFIG_CACHE_TEST is not set\nCONFIG_CACHE_BAD=y\n' >"${REMOTE_ENTRY}/resolved.config"
-kernel_artifact_cache_manifest "${REMOTE_ENTRY}" "${kernel_pkg}_${package_version}_${arch}.deb"
+kernel_artifact_cache_manifest "${REMOTE_ENTRY}" "${kernel_pkg}_${package_version}_${arch}.deb" "${BASE_KEY}"
 if kernel_artifact_cache_hit "${BASE_KEY}" "${WORK}/staged" "${kernel_pkg}_${package_version}_${arch}.deb" 2>/dev/null; then
   bad 'hash-valid remote kernel config bypassed semantic validation'
 else
@@ -247,5 +252,194 @@ requests_before="$(wc -l <"${WORK}/http.log")"
 kernel_artifact_cache_hit "${BASE_KEY}" "${WORK}/staged" "${kernel_pkg}_${package_version}_${arch}.deb" 2>/dev/null
 [[ "$(wc -l <"${WORK}/http.log")" == "${requests_before}" ]] && ok 'remote-disabled kernel lookup does no HTTP' || bad 'remote-disabled kernel lookup contacted HTTP'
 kill "${HTTP_PID}"; wait "${HTTP_PID}" 2>/dev/null || :
+# --- shared kernel cache root (CERALIVE_KERNEL_CACHE_DIR) --------------------
+DEB_NAME="${kernel_pkg}_${package_version}_${arch}.deb"
+source "${ROOT}/lib/paths.sh"
+eval "$(sed -n '/^kernel_artifact_cache_root() {/,/^}/p' "${ROOT}/lib/kernel/artifact-cache.sh")"
+source "${ROOT}/lib/kernel/checkout.sh"
+unset CERALIVE_KERNEL_CACHE_DIR CERALIVE_KERNEL_SRC_MIRROR_DIR
+[[ "$(kernel_artifact_cache_root)" == "${ROOT}/${CERALIVE_REL_MKOSI_CACHE_ROOT}/kernel-artifacts" ]] \
+  && ok 'unset shared root keeps the in-tree artifact cache' || bad 'in-tree default moved'
+export CERALIVE_KERNEL_CACHE_DIR="${WORK}/shared/"
+[[ "$(kernel_artifact_cache_root)" == "${WORK}/shared/kernel-artifacts" ]] \
+  && ok 'shared root holds the artifact cache' || bad "artifact root $(kernel_artifact_cache_root)"
+[[ "$(kernel_src_mirror_dir)" == "${WORK}/shared/kernel-src.git" ]] \
+  && ok 'shared root holds the default source mirror' || bad "mirror $(kernel_src_mirror_dir)"
+CERALIVE_KERNEL_SRC_MIRROR_DIR="${WORK}/elsewhere.git"
+[[ "$(kernel_src_mirror_dir)" == "${WORK}/elsewhere.git" ]] \
+  && ok 'explicit mirror dir still wins over the shared root' || bad 'mirror override lost'
+unset CERALIVE_KERNEL_SRC_MIRROR_DIR
+for bad_dir in relative/cache './cache'; do
+  if (CERALIVE_KERNEL_CACHE_DIR="${bad_dir}"; kernel_artifact_cache_root) >/dev/null 2>&1; then
+    bad "relative shared root '${bad_dir}' accepted"
+  else
+    ok "relative shared root '${bad_dir}' refused"
+  fi
+done
+for shared_case in set unset relative; do
+  case "${shared_case}" in
+    set) env_args=(CERALIVE_KERNEL_CACHE_DIR="${WORK}/plan") ;;
+    unset) env_args=(-u CERALIVE_KERNEL_CACHE_DIR) ;;
+    relative) env_args=(CERALIVE_KERNEL_CACHE_DIR=plan) ;;
+  esac
+  env "${env_args[@]}" DRY_RUN=1 "${ROOT}/build" rk3588 --kernel-only >"${WORK}/plan.log" 2>&1; rc=$?
+  case "${shared_case}" in
+    set)
+      if (( rc == 0 )) && grep -Fq "artifacts ${WORK}/plan/kernel-artifacts " "${WORK}/plan.log" &&
+         grep -Fq "ccache ${WORK}/plan/kernel-ccache" "${WORK}/plan.log" &&
+         grep -Fq "mirror dir ${WORK}/plan/kernel-src.git " "${WORK}/plan.log"; then
+        ok 'real stage plan puts artifacts, ccache and mirror under the shared root'
+      else bad "shared root plan: $(<"${WORK}/plan.log")"; fi ;;
+    unset)
+      if (( rc == 0 )) && grep -Fq "ccache ${ROOT}/mkosi/cache/kernel-ccache" "${WORK}/plan.log" &&
+         grep -Fq "artifacts ${ROOT}/mkosi/cache/kernel-artifacts " "${WORK}/plan.log"; then
+        ok 'real stage plan keeps the in-tree caches without a shared root'
+      else bad "in-tree plan: $(<"${WORK}/plan.log")"; fi ;;
+    relative)
+      if (( rc != 0 )) && grep -Fq 'CERALIVE_KERNEL_CACHE_DIR must be an absolute path' "${WORK}/plan.log" &&
+         ! grep -Fq '=== kernel-build-from-source' "${WORK}/plan.log"; then
+        ok 'real stage refuses a relative shared root before planning any kernel work'
+      else bad "relative plan: $(<"${WORK}/plan.log")"; fi ;;
+  esac
+done
+
+# A second checkout of the same tree hits what the first one stored.
+: >"${WORK}/spy"
+kernel_artifact_cache_store "${BASE_KEY}" "${WORK}/built/${DEB_NAME}" "${WORK}/built"
+SHARED_ENTRY="${WORK}/shared/kernel-artifacts/${BASE_KEY}"
+[[ -f "${SHARED_ENTRY}/manifest.json" ]] && ok 'store publishes into the shared root' || bad 'nothing stored under the shared root'
+PIPELINE_DIR="${WORK}/source"; HERE="${KEY_HERE}"; KERNEL_LIB_DIR="${HERE}/kernel"
+KERNEL_BUILDER_DOCKERFILE="${WORK}/source/ci/Dockerfile.kernel"
+rm -rf "${WORK}/staged-2"; mkdir -p "${WORK}/staged-2"
+if [[ "$(kernel_artifact_cache_key)" == "${BASE_KEY}" ]] &&
+   kernel_artifact_cache_hit "${BASE_KEY}" "${WORK}/staged-2" "${DEB_NAME}" &&
+   cmp -s "${WORK}/staged-2/${DEB_NAME}" "${WORK}/built/${DEB_NAME}"; then
+  ok 'second checkout hits the entry the first checkout stored'
+else
+  bad 'second checkout missed the shared entry'
+fi
+PIPELINE_DIR="${ROOT}"; HERE="${ROOT}/lib"; KERNEL_LIB_DIR="${ROOT}/lib/kernel"
+KERNEL_BUILDER_DOCKERFILE="${ROOT}/ci/Dockerfile.kernel"
+
+python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["key"]==sys.argv[2] and m["format"]=="ceralive-kernel-artifact-cache/2" and m["inputs"]["builder_digest"]==sys.argv[3] and m["inputs"]["dtb_path"]==sys.argv[4]' \
+  "${SHARED_ENTRY}/manifest.json" "${BASE_KEY}" "${builder_digest}" "${dtb_path}" \
+  && ok 'manifest records format, key and key inputs' || bad 'manifest does not bind the key'
+
+# --- fail closed on any key or input mismatch -------------------------------
+reseed() {
+  rm -rf "${SHARED_ENTRY}"
+  kernel_artifact_cache_store "${BASE_KEY}" "${WORK}/built/${DEB_NAME}" "${WORK}/built"
+}
+refused_and_evicted() {
+  local label="$1" key="${2:-${BASE_KEY}}"
+  : >"${WORK}/warnings"
+  rm -rf "${WORK}/staged-3"; mkdir -p "${WORK}/staged-3"
+  if kernel_artifact_cache_hit "${key}" "${WORK}/staged-3" "${DEB_NAME}" 2>/dev/null; then
+    bad "${label}: accepted"
+  elif [[ -e "${WORK}/shared/kernel-artifacts/${key}" || -e "${WORK}/staged-3/${DEB_NAME}" ]]; then
+    bad "${label}: refused but entry kept or bytes staged"
+  elif ! grep -Fq 'failed its key, input, digest or kernel gates' "${WORK}/warnings"; then
+    bad "${label}: refused silently"
+  else
+    ok "${label}: refused, evicted and logged"
+  fi
+}
+old_digest="${builder_digest}"
+builder_digest='sha256:other-builder'
+OTHER_KEY="$(kernel_artifact_cache_key)"
+builder_digest="${old_digest}"
+reseed
+cp -a "${SHARED_ENTRY}" "${WORK}/shared/kernel-artifacts/${OTHER_KEY}"
+builder_digest='sha256:other-builder'
+refused_and_evicted 'entry copied under another key' "${OTHER_KEY}"
+builder_digest="${old_digest}"
+
+reseed
+python3 - "${SHARED_ENTRY}/manifest.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+json.dump({'sha256': m['sha256']}, open(sys.argv[1], 'w'))
+PY
+refused_and_evicted 'format 1 manifest (no key binding)'
+
+reseed
+python3 - "${SHARED_ENTRY}/manifest.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+m['inputs']['builder_digest'] = 'sha256:tampered'
+json.dump(m, open(sys.argv[1], 'w'))
+PY
+refused_and_evicted 'recorded inputs that do not derive the key'
+
+reseed
+python3 - "${SHARED_ENTRY}/manifest.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+m['key'] = 'f' * 64
+json.dump(m, open(sys.argv[1], 'w'))
+PY
+refused_and_evicted 'manifest naming a different key'
+
+# Self-consistent entry for OTHER inputs: intact on its own terms, refused for
+# this build's inputs. Proves --inputs compares, not only re-derives.
+builder_digest='sha256:other-builder'
+kernel_artifact_cache_store "${OTHER_KEY}" "${WORK}/built/${DEB_NAME}" "${WORK}/built"
+builder_digest="${old_digest}"
+OTHER_ENTRY="${WORK}/shared/kernel-artifacts/${OTHER_KEY}"
+if kernel_artifact_cache_intact "${OTHER_ENTRY}" "${DEB_NAME}" "${OTHER_KEY}" &&
+   ! kernel_artifact_cache_intact "${OTHER_ENTRY}" "${DEB_NAME}" "${OTHER_KEY}" --inputs; then
+  ok 'an entry for other inputs is intact on its own but refused for this build'
+else
+  bad 'input comparison does not distinguish builds'
+fi
+rm -rf "${OTHER_ENTRY}"
+if kernel_artifact_cache_hit 'not-a-key' "${WORK}/staged-3" "${DEB_NAME}" 2>/dev/null; then
+  bad 'malformed key accepted'
+else ok 'malformed key refused before any path is built from it'; fi
+
+# --- first writer wins -------------------------------------------------------
+reseed
+mkdir -p "${WORK}/built-b/control"
+cp -a "${WORK}/control/." "${WORK}/built-b/control/"
+sed -i 's/^Description: test$/Description: other bytes/' "${WORK}/built-b/control/DEBIAN/control"
+dpkg-deb --build --root-owner-group "${WORK}/built-b/control" "${WORK}/built-b/${DEB_NAME}" >/dev/null
+cp "${WORK}/built/resolved.config" "${WORK}/built/built-modules.txt" "${WORK}/built-b/"
+: >"${WORK}/warnings"
+kernel_artifact_cache_store "${BASE_KEY}" "${WORK}/built-b/${DEB_NAME}" "${WORK}/built-b"
+if cmp -s "${SHARED_ENTRY}/${DEB_NAME}" "${WORK}/built/${DEB_NAME}" &&
+   grep -Fq 'DIFFERENT deb' "${WORK}/warnings"; then
+  ok 'a second store keeps the first entry and reports the differing deb'
+else
+  bad 'a second store replaced the entry or stayed silent'
+fi
+: >"${WORK}/warnings"
+kernel_artifact_cache_store "${BASE_KEY}" "${WORK}/built/${DEB_NAME}" "${WORK}/built"
+[[ ! -s "${WORK}/warnings" ]] && ok 'an identical second store is quiet' || bad 'identical store warned'
+
+# --- concurrency: parallel builds on one key --------------------------------
+rm -rf "${WORK}/shared/kernel-artifacts"
+pids=()
+for worker in 1 2 3 4 5 6 7 8; do
+  (
+    mkdir -p "${WORK}/race/${worker}"
+    kernel_artifact_cache_store "${BASE_KEY}" "${WORK}/built/${DEB_NAME}" "${WORK}/built"
+    kernel_artifact_cache_hit "${BASE_KEY}" "${WORK}/race/${worker}" "${DEB_NAME}"
+  ) &
+  pids+=("$!")
+done
+race_failures=0
+for pid in "${pids[@]}"; do wait "${pid}" || race_failures=$((race_failures + 1)); done
+race_same=1
+for worker in 1 2 3 4 5 6 7 8; do
+  cmp -s "${WORK}/race/${worker}/${DEB_NAME}" "${WORK}/built/${DEB_NAME}" || race_same=0
+done
+leftovers="$(find "${WORK}/shared/kernel-artifacts" -maxdepth 1 -name '.pending.*' -o -maxdepth 1 -name '.remote.*' | wc -l)"
+if (( race_failures == 0 && race_same == 1 && leftovers == 0 )) &&
+   kernel_artifact_cache_intact "${SHARED_ENTRY}" "${DEB_NAME}" "${BASE_KEY}" --inputs; then
+  ok 'eight concurrent store+hit workers on one key: all staged the same bytes, entry intact, no debris'
+else
+  bad "concurrent workers: ${race_failures} failed, same=${race_same}, leftovers=${leftovers}"
+fi
+unset CERALIVE_KERNEL_CACHE_DIR
 printf 'Kernel artifact cache contract: %s passed, %s failed\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))
