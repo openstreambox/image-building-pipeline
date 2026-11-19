@@ -29,6 +29,8 @@ mkdir -p "${WORK}/bin"
 export KERNEL_TEST_RUNTIME_LOG="${WORK}/runtime.log" KERNEL_TEST_BUILD_INPUT="${WORK}/source-result"
 export CERALIVE_KERNEL_SRC_MIRROR=0 CERALIVE_REMOTE_CACHE=0 CERALIVE_APT_PROXY=off
 export CERALIVE_KERNEL_CACHE_DIR="${WORK}/shared"
+export TMPDIR="${WORK}/tmp"
+mkdir -p "${TMPDIR}"
 kernel_test_builder_stub "${WORK}/bin"
 export PATH="${WORK}/bin:${PATH}"
 
@@ -45,68 +47,129 @@ stage() {
   ) >"${WORK}/stage.log" 2>&1
 }
 compiled() { grep -qxF COMPILE "${KERNEL_TEST_RUNTIME_LOG}"; }
+no_kernel_in() { ! compgen -G "$1/*.deb" >/dev/null; }
+# expect_refusal <label> <message> <mode> <out> [VAR=value ...] [-- released.sh args]
 expect_refusal() {
-  local label="$1" message="$2" mode="$3" out="$4" extra="${5:-}"
-  if (export CERALIVE_KERNEL_PIN="${mode}"; [[ -z "${extra}" ]] || export "${extra?}"; stage "${out}"); then bad "${label}: accepted"
-  elif ! grep -Fq "${message}" "${WORK}/stage.log"; then bad "${label}: wrong guard: $(tail -3 "${WORK}/stage.log")"
+  local label="$1" message="$2" mode="$3" out="$4"; shift 4
+  local -a env_args=() stage_args=()
+  while (( $# )); do
+    if [[ "$1" == -- ]]; then shift; stage_args=("$@"); break; fi
+    env_args+=("$1"); shift
+  done
+  if (export CERALIVE_KERNEL_PIN="${mode}"; for assignment in "${env_args[@]}"; do export "${assignment?}"; done
+      stage "${out}" "${stage_args[@]}"); then bad "${label}: accepted"
+  elif ! grep -Fq -- "${message}" "${WORK}/stage.log"; then bad "${label}: wrong guard: $(grep -E 'ERROR|refused' "${WORK}/stage.log" | tail -3)"
   elif compiled; then bad "${label}: compiled anyway"
+  elif ! no_kernel_in "${out}"; then bad "${label}: a kernel was left in --out"
+  elif compgen -G "${WORK}/.kernel-pin.*" >/dev/null; then bad "${label}: a private staging directory was left behind"
   else ok "${label}"; fi
 }
+commit_repo() {
+  git -C "${repo}" add -A
+  git -C "${repo}" -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false \
+    commit -qm "${1:-fixture}"
+}
 
-expect_refusal 'require with no pin refuses before compiling' 'there is no kernel pin' \
-  require "${WORK}/none"
+expect_refusal 'require with no pin refuses before compiling' 'there is no kernel pin' require "${WORK}/none"
 
-if stage "${WORK}/cold" && compiled && [[ -f "${WORK}/cold/${name}" ]]; then
-  ok 'without a pin the stage compiles as before'
-else bad "cold build: $(tail -5 "${WORK}/stage.log")"; fi
+if stage "${WORK}/plain" && compiled && [[ -f "${WORK}/plain/${name}" ]]; then
+  ok 'without a pin the stage compiles as before (and fills the artifact cache)'
+else bad "plain build: $(tail -5 "${WORK}/stage.log")"; fi
 
-(
-  set -a; eval "$("${repo}/lib/resolve.sh" rock-5b-plus)"; set +a; unset KERNEL_VARIANT
-  cp "${WORK}/cold/kernel-artifact.json" "${WORK}/cold/kernel-artifact.json.orig"
-  bash "${repo}/lib/kernel/released.sh" --board rock-5b-plus --write-pin "${WORK}/cold"
-) >"${WORK}/write.log" 2>&1 || { bad "write pin: $(tail -3 "${WORK}/write.log")"; }
-if python3 - "${pin}" "${WORK}/cold" "${name}" "${repo}" <<'PY'
-import hashlib, json, pathlib, subprocess, sys, yaml
-pin, cold, name, repo = json.load(open(sys.argv[1])), pathlib.Path(sys.argv[2]), sys.argv[3], pathlib.Path(sys.argv[4])
+# --- write: a pin is only ever written from a cold build of committed inputs ---
+if CERALIVE_KERNEL_PIN='write' stage "${WORK}/dirty-write"; then bad 'write accepted uncommitted inputs'
+elif grep -Fq 'needs every kernel input committed' "${WORK}/stage.log" && [[ ! -e "${pin}" ]] && no_kernel_in "${WORK}/dirty-write"; then
+  ok 'write refuses uncommitted inputs and writes no pin'
+else bad "dirty write: $(tail -3 "${WORK}/stage.log")"; fi
+commit_repo 'inputs'
+expect_refusal 'write refuses a caller ccache (the pin must come from a cold build)' '--ccache-dir is refused' \
+  write "${WORK}/write-cc" -- --ccache-dir "${WORK}/warm"
+if CERALIVE_KERNEL_PIN='write' stage "${WORK}/written" && compiled &&
+   grep -Fq 'COLD build for write (CERALIVE_KERNEL_ARTIFACT_CACHE=0, fresh ccache' "${WORK}/stage.log" &&
+   [[ -f "${pin}" && -f "${WORK}/written/${name}" ]] && ! compgen -G "${TMPDIR:-/tmp}/kernel-cold-ccache.*" >/dev/null; then
+  ok 'write compiles cold, writes the pin, stages the kernel and removes its fresh ccache'
+else bad "write: $(tail -5 "${WORK}/stage.log")"; fi
+if python3 - "${pin}" "${WORK}/written" "${name}" "${repo}" <<'PY'
+import hashlib, json, pathlib, re, subprocess, sys, yaml
+pin, built, name, repo = json.load(open(sys.argv[1])), pathlib.Path(sys.argv[2]), sys.argv[3], pathlib.Path(sys.argv[4])
 src = yaml.safe_load((repo / 'manifests/families/rk3588.yaml').read_text())['variants']['edge']['kernel_source']
-assert pin['format'] == 'ceralive-kernel-pin/1'
-assert pin['sha256'][name] == hashlib.sha256((cold / name).read_bytes()).hexdigest()
+assert pin['format'] == 'ceralive-kernel-pin/2'
+assert pin['sha256'][name] == hashlib.sha256((built / name).read_bytes()).hexdigest()
 assert pin['artifact']['deb_sha256'] == pin['sha256'][name] and pin['artifact']['validated_boards'] == []
-assert pin['source']['commit'] == src['commit'] and pin['source']['patches_commit'] == src['patches_commit']
-assert pin['source']['fragments'][0]['path'] == src['defconfig_fragment']
-assert pin['produced_by']['pipeline_commit'] == subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+values, files = pin['inputs']['values'], [f['path'] for f in pin['inputs']['files']]
+assert values['commit'] == src['commit'] and values['patches_commit'] == src['patches_commit']
+assert values['builder_image'] == src['builder_image']
+assert files[0] == src['defconfig_fragment']
+produced = pin['produced_by']
+assert produced['cold'] is True and re.fullmatch(r'sha256:[0-9a-f]{64}', produced['builder_image_id'])
+assert produced['pipeline_commit'] == subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+assert pin['reproduced'] == [] and pin['sources'] == []
 PY
-then ok 'the pin records the bytes, the source inputs, the producer record and the pipeline commit'
+then ok 'the pin records bytes, all inputs, the producer record, the commit, the builder id and cold=true'
 else bad 'pin content wrong'; fi
+# The pin covers the producer fingerprint's own file list, not a second one.
+mapfile -t listed < <(sed -n '/^kernel_input_files() {/,/^}/p' "${repo}/lib/kernel/artifact-cache.sh" \
+  | grep -oE '/[A-Za-z0-9._/-]+\.(sh|dtsi|list|txt)"|Dockerfile' | tr -d '"' | xargs -n1 basename | sort -u)
+missing=()
+for base in "${listed[@]}"; do
+  [[ "${base}" == Dockerfile ]] && base=Dockerfile.kernel
+  jq -e --arg b "${base}" '[.inputs.files[].path | split("/")[-1]] | index($b)' "${pin}" >/dev/null || missing+=("${base}")
+done
+if (( ${#listed[@]} >= 15 && ${#missing[@]} == 0 )); then
+  ok "the pin covers every file of the fingerprint's input list (${#listed[@]})"
+else bad "pin misses fingerprint inputs: ${missing[*]} (listed ${#listed[@]})"; fi
+expect_refusal 'write refuses to replace an existing pin' 'a pin is replaced only by removing it' write "${WORK}/rewrite"
 
+# --- require/auto take the pinned bytes without compiling ----------------------
 if CERALIVE_KERNEL_PIN=require stage "${WORK}/pinned" && ! compiled &&
-   cmp -s "${WORK}/pinned/${name}" "${WORK}/cold/${name}" &&
+   cmp -s "${WORK}/pinned/${name}" "${WORK}/written/${name}" &&
    grep -Fq 'kernel PINNED' "${WORK}/stage.log" &&
-   jq -e --arg d "$(sha256sum "${WORK}/cold/${name}" | cut -d' ' -f1)" \
-     '.deb_sha256 == $d and .validated_boards == []' "${WORK}/pinned/kernel-artifact.json" >/dev/null; then
-  ok 'require mode stages the pinned bytes from the artifact cache without compiling'
+   jq -e --arg d "$(sha256sum "${WORK}/written/${name}" | cut -d' ' -f1)" \
+     '.deb_sha256 == $d and .validated_boards == []' "${WORK}/pinned/kernel-artifact.json" >/dev/null &&
+   ! compgen -G "${WORK}/.kernel-pin.*" >/dev/null; then
+  ok 'require stages the pinned bytes from the artifact cache, without compiling or leftovers'
 else bad "pinned stage: $(tail -5 "${WORK}/stage.log")"; fi
 
-# A producer-code change moves the cache key; the byte-identical kernel stays usable.
-cp "${repo}/lib/kernel/artifact-cache.sh" "${WORK}/ac.orig"
-printf '\n# producer code changed\n' >>"${repo}/lib/kernel/artifact-cache.sh"
-if CERALIVE_KERNEL_PIN=require stage "${WORK}/moved" && ! compiled && cmp -s "${WORK}/moved/${name}" "${WORK}/cold/${name}"; then
-  ok 'a moved cache key does not hide the pinned bytes (lookup is by content)'
-else bad "moved key: $(tail -5 "${WORK}/stage.log")"; fi
-cp "${WORK}/ac.orig" "${repo}/lib/kernel/artifact-cache.sh"
+# --- P1-1: every producer input invalidates the pin ---------------------------
+cp "${pin}" "${WORK}/pin.orig"
+mutate_input() {
+  local label="$1" file="$2" message="$3"
+  cp "${repo}/${file}" "${WORK}/input.orig"
+  printf '\n# changed input\n' >>"${repo}/${file}"
+  expect_refusal "${label}" "${message}" auto "${WORK}/mutated"
+  cp "${WORK}/input.orig" "${repo}/${file}"
+}
+mutate_input 'the ramoops reservation (dtsi) invalidates the pin' manifests/kernel/rk3588-ramoops.dtsi \
+  'input file manifests/kernel/rk3588-ramoops.dtsi'
+mutate_input 'the ramoops injection script invalidates the pin' lib/kernel/ramoops.sh 'input file lib/kernel/ramoops.sh'
+mutate_input 'the builder Dockerfile invalidates the pin' ci/Dockerfile.kernel 'input file ci/Dockerfile.kernel'
+mutate_input 'the producer and its container script invalidate the pin' lib/build-kernel.sh 'input file lib/build-kernel.sh'
+fragment="$(jq -r '.inputs.files[0].path' "${pin}")"
+mutate_input 'changed fragment bytes invalidate the pin' "${fragment}" "input file ${fragment}"
+cp "${repo}/manifests/families/rk3588.yaml" "${WORK}/family.orig"
+sed -i -E '0,/(builder_image: debian:trixie-[0-9]+-slim@sha256:)[0-9a-f]{64}/s//\1'"$(printf '0%.0s' {1..64})"'/' \
+  "${repo}/manifests/families/rk3588.yaml"
+expect_refusal 'a different builder image in the manifest invalidates the pin' 'input builder_image' auto "${WORK}/builder"
+cp "${WORK}/family.orig" "${repo}/manifests/families/rk3588.yaml"
+sed -i -E '0,/patches_commit: [0-9a-f]{40}/s//patches_commit: 0123456789abcdef0123456789abcdef01234567/' \
+  "${repo}/manifests/families/rk3588.yaml"
+expect_refusal 'a different patch commit invalidates the pin' 'input patches_commit' require "${WORK}/patches"
+cp "${WORK}/family.orig" "${repo}/manifests/families/rk3588.yaml"
+jq '.produced_by.cold = false' "${WORK}/pin.orig" >"${pin}"
+expect_refusal 'a pin that does not record a cold build is refused' 'does not record a cold build' require "${WORK}/warm-pin"
+jq '.sha256 |= with_entries(.value = ("0" * 64))' "${WORK}/pin.orig" >"${pin}"
+expect_refusal 'a pin whose record disagrees with its digests is refused' 'embedded kernel-artifact.json' auto "${WORK}/inconsistent"
+cp "${WORK}/pin.orig" "${pin}"
 
-# Tampered cached bytes are never staged, and require mode does not fall back to compiling.
+# --- stores --------------------------------------------------------------------
 entry="$(dirname "$(find "${WORK}/shared/kernel-artifacts" -mindepth 2 -maxdepth 2 -name "${name}" | head -1)")"
 cp "${entry}/${name}" "${WORK}/good.deb"
 printf 'x' >>"${entry}/${name}"
-expect_refusal 'tampered cached deb is refused and require mode does not compile' 'in no trusted store' \
-  require "${WORK}/tampered"
+expect_refusal 'a tampered cached deb is refused and require does not compile' 'in no trusted store' require "${WORK}/tampered"
 cp "${WORK}/good.deb" "${entry}/${name}"
 
-# Published release asset as the store.
-rm -rf "${WORK}/shared/kernel-artifacts"
 mkdir -p "${WORK}/www/good" "${WORK}/www/bad"
-cp "${WORK}/cold/${name}" "${WORK}/cold/resolved.config" "${WORK}/cold/built-modules.txt" "${WORK}/www/good/"
+cp "${WORK}/written/${name}" "${WORK}/written/resolved.config" "${WORK}/written/built-modules.txt" "${WORK}/www/good/"
 cp "${WORK}/www/good/"* "${WORK}/www/bad/"; printf 'x' >>"${WORK}/www/bad/${name}"
 cat >"${WORK}/server.py" <<'PY'
 import functools, http.server, sys
@@ -131,87 +194,86 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 [[ -n "${port}" ]] || { bad 'loopback HTTP fixture did not start'; exit 1; }
-cp "${pin}" "${WORK}/pin.orig"
 jq --arg bad "http://127.0.0.1:${port}/bad" --arg good "http://127.0.0.1:${port}/good" '.sources = [$bad, $good]' \
   "${WORK}/pin.orig" >"${pin}"
-if CERALIVE_KERNEL_PIN=require stage "${WORK}/remote" && ! compiled &&
-   cmp -s "${WORK}/remote/${name}" "${WORK}/cold/${name}" &&
+if CERALIVE_KERNEL_PIN=require CERALIVE_KERNEL_ARTIFACT_CACHE=0 stage "${WORK}/remote" && ! compiled &&
+   cmp -s "${WORK}/remote/${name}" "${WORK}/written/${name}" &&
    grep -Fq 'served bytes that differ from the pin' "${WORK}/stage.log" &&
    grep -Fq "from pinned source http://127.0.0.1:${port}/good" "${WORK}/stage.log"; then
-  ok 'pinned sources: wrong bytes are skipped, the matching source is staged without compiling'
+  ok 'with the cache off only the pinned sources are used: wrong bytes skipped, matching source staged'
 else bad "pinned source: $(tail -5 "${WORK}/stage.log")"; fi
-# Redirects are followed only to HTTPS; the bytes would match, so only the
-# redirect rule can refuse this one.
+expect_refusal 'a fetch timeout that is not a number of seconds is refused' 'CERALIVE_KERNEL_PIN_FETCH_TIMEOUT must be' \
+  require "${WORK}/timeout" CERALIVE_KERNEL_ARTIFACT_CACHE=0 CERALIVE_KERNEL_PIN_FETCH_TIMEOUT=soon
 jq --arg r "http://127.0.0.1:${port}/redirect" '.sources = [$r]' "${WORK}/pin.orig" >"${pin}"
 expect_refusal 'a pinned source that redirects to plain HTTP is not followed' 'in no trusted store' \
-  require "${WORK}/redirect"
-
-# With the artifact cache off, only the pinned sources are consulted. Seed the
-# cache with an ordinary build, then point the pin at a source that has nothing.
-CERALIVE_KERNEL_PIN=0 stage "${WORK}/seed" || bad "seed build: $(tail -3 "${WORK}/stage.log")"
+  require "${WORK}/redirect" CERALIVE_KERNEL_ARTIFACT_CACHE=0
 jq --arg dead "http://127.0.0.1:${port}/missing" '.sources = [$dead]' "${WORK}/pin.orig" >"${pin}"
-if CERALIVE_KERNEL_PIN=require stage "${WORK}/cache-only" && ! compiled &&
-   grep -Fq 'from artifact cache entry' "${WORK}/stage.log"; then
-  ok 'with the artifact cache on, a cached copy satisfies the pin'
-else bad "cache-on: $(tail -3 "${WORK}/stage.log")"; fi
-expect_refusal 'with CERALIVE_KERNEL_ARTIFACT_CACHE=0 only the pinned sources are consulted' 'in no trusted store' \
+expect_refusal 'with the cache off, a cached copy does not satisfy the pin' 'in no trusted store' \
   require "${WORK}/cache-off" CERALIVE_KERNEL_ARTIFACT_CACHE=0
-rm -rf "${WORK}/shared/kernel-artifacts"
 jq '.sources = ["http://example.invalid/kernel"]' "${WORK}/pin.orig" >"${pin}"
-expect_refusal 'a non-HTTPS pin source makes the pin invalid' 'is not an HTTPS URL' \
-  require "${WORK}/http"
+expect_refusal 'a non-HTTPS pin source makes the pin invalid' 'is not an HTTPS URL' require "${WORK}/http"
 cp "${WORK}/pin.orig" "${pin}"
-
-# Provenance: the manifest must ask for exactly the pinned kernel.
-cp "${repo}/manifests/families/rk3588.yaml" "${WORK}/family.orig"
-sed -i -E '0,/patches_commit: [0-9a-f]{40}/s//patches_commit: 0123456789abcdef0123456789abcdef01234567/' "${repo}/manifests/families/rk3588.yaml"
-expect_refusal 'a manifest patch commit other than the pinned one stops the build' 'source.patches_commit' \
-  auto "${WORK}/patches"
-cp "${WORK}/family.orig" "${repo}/manifests/families/rk3588.yaml"
-fragment="$(jq -r '.source.fragments[0].path' "${pin}")"
-cp "${repo}/${fragment}" "${WORK}/fragment.orig"
-printf 'CONFIG_PIN_DRIFT=y\n' >>"${repo}/${fragment}"
-expect_refusal 'changed fragment bytes stop the build' 'source.fragments' \
-  auto "${WORK}/fragment"
-cp "${WORK}/fragment.orig" "${repo}/${fragment}"
-jq '.sha256 |= with_entries(.value = ("0" * 64))' "${WORK}/pin.orig" >"${pin}"
-expect_refusal 'a pin whose embedded record disagrees with its digests is invalid' 'embedded kernel-artifact.json' \
-  auto "${WORK}/inconsistent"
-cp "${WORK}/pin.orig" "${pin}"
-
-# auto with no store holding the bytes: compile, and the result must equal the pin.
 kill "${HTTP_PID}"; wait "${HTTP_PID}" 2>/dev/null || :; HTTP_PID=""
+
+mkdir -p "${WORK}/pins-elsewhere"; cp "${pin}" "${WORK}/pins-elsewhere/"
+expect_refusal 'a production build refuses CERALIVE_KERNEL_PIN_DIR (in-tree pins only)' 'not honoured in production' \
+  require "${WORK}/prod-dir" CERALIVE_BUILD_MODE=production "CERALIVE_KERNEL_PIN_DIR=${WORK}/pins-elsewhere"
+
+# --- auto falls back to a compile that must equal the pin ------------------------
 rm -rf "${WORK}/shared/kernel-artifacts"
 if stage "${WORK}/auto" && compiled && grep -Fq 'reproduced the pin' "${WORK}/stage.log"; then
-  ok 'auto mode compiles when no store has the bytes, and checks the result against the pin'
+  ok 'auto compiles when no store has the bytes, and checks the result against the pin'
 else bad "auto fallback: $(tail -5 "${WORK}/stage.log")"; fi
 
-# verify: the scheduled cold check always compiles and must reproduce the pin.
-if CERALIVE_KERNEL_PIN=verify CERALIVE_KERNEL_ARTIFACT_CACHE=0 stage "${WORK}/verify" && compiled &&
-   grep -Fq 'reproduced the pin' "${WORK}/stage.log"; then
-  ok 'verify mode compiles even with the pinned bytes cached and confirms the pin'
-else bad "verify: $(tail -5 "${WORK}/stage.log")"; fi
+# Different bytes from the same inputs (nondeterminism) never reach --out.
 cp -a "${WORK}/source-result" "${WORK}/other-result"
 dpkg-deb -R "${WORK}/other-result/${name}" "${WORK}/other-tree"
 sed -i 's/^Description: .*/Description: different bytes/' "${WORK}/other-tree/DEBIAN/control"
 dpkg-deb --root-owner-group --build "${WORK}/other-tree" "${WORK}/other-result/${name}" >/dev/null
 jq --arg d "$(sha256sum "${WORK}/other-result/${name}" | cut -d' ' -f1)" '.deb_sha256 = $d' \
   "${WORK}/source-result/kernel-artifact.json" >"${WORK}/other-result/kernel-artifact.json"
-if KERNEL_TEST_BUILD_INPUT="${WORK}/other-result" CERALIVE_KERNEL_PIN=verify CERALIVE_KERNEL_ARTIFACT_CACHE=0 \
-     stage "${WORK}/differs"; then
-  bad 'a compiled kernel that differs from its pin was accepted'
-elif grep -Fq 'is not the pinned kernel' "${WORK}/stage.log"; then
-  ok 'a compiled kernel that differs from its pin stops the build'
-else bad "differs: $(tail -5 "${WORK}/stage.log")"; fi
+rm -rf "${WORK}/shared/kernel-artifacts"
+if KERNEL_TEST_BUILD_INPUT="${WORK}/other-result" stage "${WORK}/auto-differs"; then
+  bad 'auto accepted a compiled kernel that differs from its pin'
+elif grep -Fq 'is not the pinned kernel' "${WORK}/stage.log" && no_kernel_in "${WORK}/auto-differs"; then
+  ok 'auto: a compiled kernel that differs from its pin stops the build and leaves --out without a kernel'
+else bad "auto differs: $(tail -5 "${WORK}/stage.log")"; fi
 
-# 0 ignores the pin entirely (old behaviour), even one that no longer matches.
-jq '.source.commit = "0000000000000000000000000000000000000000"' "${WORK}/pin.orig" >"${pin}"
+# --- P1-2: verify is always cold ---------------------------------------------------
+CERALIVE_KERNEL_PIN=0 stage "${WORK}/seed" >/dev/null 2>&1 || bad 'seed build failed'
+cp "${pin}" "${WORK}/pin.before-verify"
+if CERALIVE_KERNEL_PIN=verify stage "${WORK}/verify" && compiled &&
+   ! grep -Fq 'artifact cache HIT' "${WORK}/stage.log" &&
+   grep -Fq 'COLD build for verify' "${WORK}/stage.log" && grep -Fq 'verified by a cold build' "${WORK}/stage.log" &&
+   jq -e '.cold == true and .compiled == true and .result == "reproduced"' "${WORK}/verify/kernel-pin-verify.json" >/dev/null &&
+   cmp -s "${pin}" "${WORK}/pin.before-verify"; then
+  ok 'verify with no other settings compiles cold although the cache holds the bytes, and records it'
+else bad "verify: $(tail -5 "${WORK}/stage.log")"; fi
+expect_refusal 'verify refuses a caller ccache' '--ccache-dir is refused' verify "${WORK}/verify-cc" -- --ccache-dir "${WORK}/warm"
+if KERNEL_TEST_BUILD_INPUT="${WORK}/other-result" CERALIVE_KERNEL_PIN=verify stage "${WORK}/differs"; then
+  bad 'verify accepted a kernel that differs from its pin'
+elif grep -Fq 'did not reproduce the pin' "${WORK}/stage.log" && no_kernel_in "${WORK}/differs"; then
+  ok 'verify: a differing cold build stops the build and leaves --out without a kernel'
+else bad "verify differs: $(tail -5 "${WORK}/stage.log")"; fi
+jq '.artifact.builder_closure.compiler = "another compiler"' "${WORK}/pin.orig" >"${pin}"
+if CERALIVE_KERNEL_PIN=verify stage "${WORK}/closure"; then bad 'verify accepted a different builder record'
+elif grep -Fq 'record differs from the pin in: builder_closure' "${WORK}/stage.log"; then
+  ok 'verify also compares the builder record (closure, epoch, fingerprint)'
+else bad "verify closure: $(tail -5 "${WORK}/stage.log")"; fi
+cp "${WORK}/pin.orig" "${pin}"
+if CERALIVE_KERNEL_PIN=verify CERALIVE_KERNEL_PIN_RECORD=1 stage "${WORK}/recorded" &&
+   jq -e '(.reproduced | length) == 1 and .reproduced[0].cold == true and .reproduced[0].tree == "clean"' "${pin}" >/dev/null; then
+  ok 'CERALIVE_KERNEL_PIN_RECORD=1 appends the cold run to the pin'
+else bad "record: $(tail -5 "${WORK}/stage.log")"; fi
+cp "${WORK}/pin.orig" "${pin}"
+
+# --- 0 and bad modes -----------------------------------------------------------------
+jq '.inputs.values.commit = "0000000000000000000000000000000000000000"' "${WORK}/pin.orig" >"${pin}"
 if CERALIVE_KERNEL_PIN=0 CERALIVE_KERNEL_ARTIFACT_CACHE=0 stage "${WORK}/off" && compiled && ! grep -Fq 'kernel pin' "${WORK}/stage.log"; then
   ok 'CERALIVE_KERNEL_PIN=0 ignores pins'
 else bad "pin off: $(tail -5 "${WORK}/stage.log")"; fi
 cp "${WORK}/pin.orig" "${pin}"
-expect_refusal 'an unknown pin mode is refused' 'CERALIVE_KERNEL_PIN must be' \
-  yes "${WORK}/mode"
+expect_refusal 'an unknown pin mode is refused' 'CERALIVE_KERNEL_PIN must be' yes "${WORK}/mode"
 
 printf 'Kernel pin contract: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 [[ "${FAIL}" == 0 ]]
