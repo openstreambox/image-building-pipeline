@@ -53,6 +53,7 @@ tests/rk3588-ab-contract.bats	bats	integration	default-bats	real RK3588 A/B disk
 tests/bench-partlabels.bats	bats	unit	default-bats	opt-in bench PARTLABEL overlay and its production no-op
 tests/release-preset.bats	bats	unit	default-bats	release root pin and update-channel preset: validation, forwarding, runtime writer
 tests/fixtures/release-preset-cases.py	tool	support	invoked-by-suite	differential update-preset cases with CeraUI reader verdicts, driven by release-preset.bats
+tests/remote-access.bats	bats	unit	default-bats	opt-in Tailscale BOOT-key enrollment, /data state, seeded SSH keys and key-only sshd
 tests/boot-artifacts.bats	bats	unit	default-bats	/boot completeness and raw ARM64 Image magic on both kernel paths
 tests/kernel-boot-staging.bats	bats	unit	default-bats	shipped staging CLI, package upgrades, board identity and root/tar verifier equivalence
 tests/kernel-only-build.test.sh	shell	integration	default-shell	family kernel-only CLI, atomic outputs, boot and firmware gates, epoch and fingerprint identity

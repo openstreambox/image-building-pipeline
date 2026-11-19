@@ -84,6 +84,7 @@ CERALIVE_POSTINST_MODULES=(
   services.sh
   tls-ssh.sh
   update-preset.sh
+  remote-access.sh
 )
 
 for _ceralive_postinst_module in "${CERALIVE_POSTINST_MODULES[@]}"; do
