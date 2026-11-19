@@ -58,6 +58,7 @@ configure_network_services() {
   setup_rtmp_gateway            # todo 14: pinned MediaMTX LAN ingest relay (RTMP :1935 + SRT :4001 publish/live -> loopback for cerastream)
   setup_ingest_firewall         # todo 14: LAN-ingest ingress firewall (drop :1935/:4001 on WAN/modem uplinks; LAN/hotspot only)
   setup_cellular_clat
+  setup_modem_usbspeed         # RM520N: keep the module on USB 2 (udev-started, once per boot)
   setup_uplink_sharing_carrier  # REQ-USB-020..026: ceralive-share.service carrier + teardown script + CeraUI After=nftables drop-in (NOT enabled; CeraUI drives it)
   setup_power_button
   setup_button_ingress

@@ -392,3 +392,17 @@ setup_cellular_clat() {
   systemctl mask tayga.service
   enable_service ceralive-clat.service
 }
+
+# RM520N USB 2 quirk: udev starts ceralive-modem-usbspeed@<usb device>.service
+# for every added 2c7c:0801 device; nothing is enabled. All three files sit in
+# the admin tier with basenames the modem-support companion never ships
+# (manifests/modem-support-ownership.txt).
+setup_modem_usbspeed() {
+  local src="${CERALIVE_RUNTIME_SRC:?}"
+  local sbin_dir="${MODEM_USBSPEED_SBIN_DIR:-/usr/local/sbin}"
+  local unit_dir="${MODEM_USBSPEED_UNIT_DIR:-/etc/systemd/system}"
+  local rules_dir="${MODEM_USBSPEED_RULES_DIR:-/etc/udev/rules.d}"
+  install -D -m 0755 "${src}/ceralive-modem-usbspeed.py" "${sbin_dir}/ceralive-modem-usbspeed"
+  install -D -m 0644 "${src}/ceralive-modem-usbspeed@.service" "${unit_dir}/ceralive-modem-usbspeed@.service"
+  install -D -m 0644 "${src}/99-ceralive-modem-usbspeed.rules" "${rules_dir}/99-ceralive-modem-usbspeed.rules"
+}
