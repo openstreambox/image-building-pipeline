@@ -252,8 +252,11 @@ main() {
   cache_mode="$(kernel_artifact_cache_mode)"
   shared_cache="$(kernel_shared_cache_dir)" || exit 1
   # --ccache-dir, then the shared kernel cache root, then the in-tree default.
-  # ccache keys on preprocessed source, compiler and flags; the container path
-  # (/src/linux) is the same in every checkout, so objects are shared as well.
+  # The directory actually mounted is a per-builder-image leaf below it (see
+  # kernel_ccache_leaf): ccache's default compiler check stats only the gcc
+  # driver, so one directory must never serve two toolchains. Within one image
+  # the container path (/src/linux) is the same in every checkout, so objects
+  # are shared across checkouts.
   if [[ -z "${ccache_dir}" && -n "${shared_cache}" ]]; then
     ccache_dir="$(kernel_shared_cache_dir "${CERALIVE_REL_KERNEL_CCACHE_DIR}")" || exit 1
   fi
@@ -299,7 +302,7 @@ main() {
     log_info "DRY-RUN would run: make -j${KERNEL_BUILD_JOBS} ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=${local_version} KDEB_PKGVERSION=${package_version} KBUILD_BUILD_TIMESTAMP=@<kernel-commit-epoch> bindeb-pkg"
     log_info "DRY-RUN would stage: ${kernel_pkg}_${package_version}_${arch}.deb -> ${out_dir} (linux-headers-*/linux-libc-dev discarded)"
     log_info "DRY-RUN fetch policy: each pinned fetch runs under timeout ${KERNEL_GIT_TIMEOUT}s, up to ${KERNEL_GIT_ATTEMPTS} attempt(s) in a private attempt dir; a pin mismatch is NEVER retried"
-    log_info "DRY-RUN kernel caches: artifacts $(kernel_artifact_cache_root) (CERALIVE_KERNEL_ARTIFACT_CACHE=${cache_mode}), ccache ${ccache_dir}"
+    log_info "DRY-RUN kernel caches: artifacts $(kernel_artifact_cache_root) (CERALIVE_KERNEL_ARTIFACT_CACHE=${cache_mode}), ccache ${ccache_dir}/<builder image id>"
     log_info "DRY-RUN source mirror: CERALIVE_KERNEL_SRC_MIRROR=$(kernel_src_mirror_mode), mirror dir $(kernel_src_mirror_dir) (a mirror holding ${commit} is cloned locally with no network; the patch series and config are always fetched fresh)"
     log_success "=== DRY-RUN complete: kernel-build plan emitted; no network, container or build touched ==="
     return 0
@@ -315,6 +318,13 @@ main() {
 
   local builder_digest cache_key="" input_fingerprint builder_packages builder_compiler
   local deb_name="${kernel_pkg}_${package_version}_${arch}.deb"
+  builder_digest="$("${runtime}" image inspect --format '{{.Id}}' "${KERNEL_BUILDER_IMAGE_TAG}")" \
+    || die "cannot inspect kernel builder image identity"
+  [[ -n "${builder_digest}" ]] || die "kernel builder image has no identity"
+  ccache_dir="$(kernel_ccache_leaf "${ccache_dir}" "${builder_digest}")" \
+    || die "kernel builder image id '${builder_digest}' is not a sha256 digest"
+  local ccache_owner=""
+  ccache_owner="$(kernel_ccache_owner "${runtime}")"
 
   local work
   work="$(mktemp -d)"
@@ -323,7 +333,7 @@ main() {
   install -d -m 0755 "${work}/out" "${work}/src" "${out_dir}"
 
   install -d -m 0755 "${ccache_dir}"
-  log_info "ccache: ${ccache_dir}"
+  log_info "ccache: ${ccache_dir} (one directory per builder image)"
 
   # The persistent kernel-source mirror, prepared (and locked) HOST-side, then
   # mounted READ-ONLY so the container can only read it. See lib/kernel/checkout.sh.
@@ -394,6 +404,10 @@ main() {
 "'
       export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
       export KBUILD_BUILD_USER=ceralive KBUILD_BUILD_HOST=ceralive-builder
+      # A rootful daemon writes ccache objects as uid 0; hand them back to the
+      # invoking user on every exit so the shared directory stays theirs.
+      ccache_handback() { chown -R "${CCACHE_OWNER}" /ccache 2>/dev/null || :; }
+      if [ -n "${CCACHE_OWNER:-}" ]; then trap ccache_handback EXIT; fi
 
       # KERNEL_SRC_MIRROR is the ONLY fetch here that gets one: the patch series
       # and the kernel config below deliberately stay fresh network fetches.
@@ -552,6 +566,7 @@ main() {
     -e "PACKAGE_VERSION=${package_version}" \
     -e "KERNEL_PACKAGE=${kernel_pkg}" \
     -e "BUILD_JOBS=${KERNEL_BUILD_JOBS}" \
+    -e "CCACHE_OWNER=${ccache_owner}" \
     -e "CERALIVE_KERNEL_GIT_ATTEMPTS=${KERNEL_GIT_ATTEMPTS}" \
     -e "CERALIVE_KERNEL_GIT_TIMEOUT=${KERNEL_GIT_TIMEOUT}" \
     -e "CERALIVE_KERNEL_GIT_BACKOFF=${KERNEL_GIT_BACKOFF}" \
@@ -583,9 +598,6 @@ main() {
   [[ -n "${builder_compiler}" ]] || die "empty kernel builder compiler identity"
   input_fingerprint="$(kernel_input_fingerprint)"
   if [[ "${cache_mode}" == 'auto' ]]; then
-    builder_digest="$("${runtime}" image inspect --format '{{.Id}}' "${KERNEL_BUILDER_IMAGE_TAG}")" \
-      || die "cannot inspect kernel builder image identity"
-    [[ -n "${builder_digest}" ]] || die "kernel builder image has no identity"
     cache_key="$(kernel_artifact_cache_key)"
     if kernel_artifact_cache_hit "${cache_key}" "${out_dir}" "${deb_name}"; then
       kernel_artifact_identity "${out_dir}" "${out_dir}/${deb_name}"
@@ -607,13 +619,20 @@ main() {
   kernel_artifact_verify_config "${work}/out/resolved.config" \
     || die "built kernel configuration failed survival/closure validation"
 
+  # Store BEFORE staging: a second, different deb for the same key stops a
+  # production build here, so neither deb is staged.
+  if [[ "${cache_mode}" == 'auto' ]]; then
+    local store_rc=0
+    kernel_artifact_cache_store "${cache_key}" "${built[0]}" "${work}/out" || store_rc=$?
+    if (( store_rc == 3 )) && kernel_artifact_cache_build_strict; then
+      die "kernel build is not reproducible: key ${cache_key} already holds a different deb (digests above); production builds stage neither"
+    fi
+  fi
+
   "${MKOSI_PACKAGE_STAGING_SH:-${HERE}/stage-mkosi-package.sh}" "${built[0]}" "${out_dir}"
   install -m 0644 "${work}/out/resolved.config" "${out_dir}/resolved.config"
   install -m 0644 "${work}/out/built-modules.txt" "${out_dir}/built-modules.txt"
   kernel_artifact_identity "${out_dir}" "${built[0]}"
-  if [[ "${cache_mode}" == 'auto' ]]; then
-    kernel_artifact_cache_store "${cache_key}" "${built[0]}" "${work}/out"
-  fi
   log_success "kernel-build-from-source: staged $(basename "${built[0]}") -> ${out_dir}"
   log_success "kernel-build-from-source: retained resolved.config + built-modules.txt -> ${out_dir}"
 }

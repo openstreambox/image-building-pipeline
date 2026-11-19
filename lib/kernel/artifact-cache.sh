@@ -17,6 +17,7 @@ kernel_artifact_cache_root() {
   local shared
   shared="$(kernel_shared_cache_dir)" || return 1
   if [[ -n "${shared}" ]]; then
+    kernel_cache_dir_trusted "${shared}/kernel-artifacts" || return 1
     printf '%s/kernel-artifacts' "${shared}"
   else
     printf '%s/%s' "${PIPELINE_DIR}" "${CERALIVE_REL_MKOSI_CACHE_ROOT}/kernel-artifacts"
@@ -207,6 +208,40 @@ PY
   return "${rc}"
 }
 
+# Evicted entries keep their evidence: an entry in the current format that failed
+# its key, input, digest or kernel gates moves to .quarantine/ (newest eight
+# kept). Older-format or incomplete entries carry nothing worth keeping and are
+# deleted. Called with the entry's key lock held.
+KERNEL_ARTIFACT_QUARANTINE_KEEP=8
+kernel_artifact_cache_evict() {
+  local root="$1" key="$2" entry="$1/$2" format="" dest="" old
+  format="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("format",""))' \
+    "${entry}/manifest.json" 2>/dev/null)" || format=""
+  if [[ "${format}" == "${KERNEL_ARTIFACT_CACHE_FORMAT}" ]] && mkdir -p "${root}/.quarantine" &&
+     dest="$(mktemp -d "${root}/.quarantine/${key}.$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"; then
+    # rename(2) replaces the empty placeholder atomically.
+    if mv -T -- "${entry}" "${dest}"; then
+      touch -- "${dest}" || :
+      log_warn "kernel artifact cache entry ${key} quarantined: ${dest}"
+      while read -r old; do
+        rm -rf -- "${old}"
+      done < <(find "${root}/.quarantine" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
+                 | sort -rn | tail -n +$((KERNEL_ARTIFACT_QUARANTINE_KEEP + 1)) | cut -d' ' -f2-)
+      return 0
+    fi
+    rmdir -- "${dest}" 2>/dev/null || :
+  fi
+  rm -rf -- "${entry}"
+}
+
+# Interrupted stores and remote fills leave .pending.*/.remote.* directories
+# (a whole kernel each). Anything older than six hours is not in flight.
+kernel_artifact_cache_sweep() {
+  local root="$1"
+  find "${root}" -mindepth 1 -maxdepth 1 -type d \( -name '.pending.*' -o -name '.remote.*' \) \
+    -mmin +360 -exec rm -rf -- {} + 2>/dev/null || :
+}
+
 kernel_artifact_cache_remote_fill() {
   local key="$1" deb_name="$2" root entry tmp base file rc=0
   [[ "${DRY_RUN:-0}" != 1 ]] || return 1
@@ -266,7 +301,7 @@ kernel_artifact_cache_hit() {
        ! (validate_built_kernel_deb "${entry}/${deb_name}" "${kernel_pkg}" "${package_version}" "${arch}" "${dtb_path}" &&
           kernel_artifact_verify_config "${entry}/resolved.config"); then
       log_warn "kernel artifact cache entry ${entry} failed its key, input, digest or kernel gates — evicted, rebuilding"
-      rm -rf -- "${entry}"
+      kernel_artifact_cache_evict "${root}" "${key}"
       exit 1
     fi
     "${MKOSI_PACKAGE_STAGING_SH:-${HERE}/stage-mkosi-package.sh}" "${entry}/${deb_name}" "${out}" || exit 1
@@ -283,40 +318,61 @@ kernel_artifact_cache_hit() {
   log_info "kernel artifact cache HIT ${key}"
 }
 
+# kernel_artifact_cache_build_strict — whether a second, different deb for one
+# key stops the build. Production builds stop; development builds warn.
+kernel_artifact_cache_build_strict() {
+  [[ "${CERALIVE_BUILD_MODE:-}" == production ]]
+}
+
 # First intact writer wins. Two builds of one key can run at once on a shared
 # root; the later one keeps the published entry rather than swapping it under a
-# reader, and says so loudly if its own deb differs (the build is then not
-# reproducible for these inputs).
+# reader. If its own deb differs (nondeterminism, or a poisoned ccache object),
+# it returns 3: the stage then refuses to ship in production and warns with
+# both digests in development. Every other failure only skips the store.
 kernel_artifact_cache_store() {
-  local key="$1" deb="$2" built_dir="$3" root entry tmp deb_name
+  local key="$1" deb="$2" built_dir="$3" root entry tmp deb_name rc=0
   [[ "${key}" =~ ^[0-9a-f]{64}$ ]] || return 0
   root="$(kernel_artifact_cache_root)" || return 0
   entry="${root}/${key}"
   deb_name="$(basename "${deb}")"
   mkdir -p "${root}/.locks" || return 0
+  kernel_artifact_cache_sweep "${root}"
   (
-    flock -w 3600 9 || exit 0
+    flock -w 3600 9 || exit 1
     if [[ -d "${entry}" ]] && kernel_artifact_cache_intact "${entry}" "${deb_name}" "${key}" --inputs; then
       if cmp -s -- "${deb}" "${entry}/${deb_name}"; then
         log_info "kernel artifact cache already holds ${key} with the same deb"
-      else
-        log_warn "kernel artifact cache already holds ${key} with a DIFFERENT deb ($(sha256sum "${entry}/${deb_name}" | cut -d' ' -f1) cached, $(sha256sum "${deb}" | cut -d' ' -f1) built); keeping the first. This kernel build is not reproducible for these inputs."
+        exit 0
       fi
+      log_warn "kernel artifact cache already holds ${key} with a DIFFERENT deb ($(sha256sum "${entry}/${deb_name}" | cut -d' ' -f1) cached, $(sha256sum "${deb}" | cut -d' ' -f1) built); keeping the first. This kernel build is not reproducible for these inputs."
+      exit 3
+    fi
+    # The key is recomputed from the inputs as they are NOW. If a host-side
+    # input changed during the build, the deb belongs to neither key: skip it.
+    if [[ "$(kernel_artifact_cache_key)" != "${key}" ]]; then
+      log_warn "kernel artifact cache: build inputs changed during the build (key ${key} no longer derives); not stored"
       exit 0
     fi
-    tmp="$(mktemp -d "${root}/.pending.XXXXXXXX")" || exit 0
+    tmp="$(mktemp -d "${root}/.pending.XXXXXXXX")" || exit 1
     if install -m 0644 "${deb}" "${tmp}/${deb_name}" &&
        install -m 0644 "${built_dir}/resolved.config" "${tmp}/resolved.config" &&
        install -m 0644 "${built_dir}/built-modules.txt" "${tmp}/built-modules.txt" &&
        kernel_artifact_cache_manifest "${tmp}" "${deb_name}" "${key}"; then
-      rm -rf -- "${entry}"
+      [[ ! -e "${entry}" ]] || kernel_artifact_cache_evict "${root}" "${key}"
       if mv -T -- "${tmp}" "${entry}"; then
         log_info "kernel artifact cache STORE ${key} -> ${root}"
       else
         rm -rf -- "${tmp}"
+        exit 1
       fi
     else
       rm -rf -- "${tmp}"
+      exit 1
     fi
-  ) 9>"${root}/.locks/${key}.lock" || log_warn "kernel artifact cache store unavailable; built output remains staged"
+  ) 9>"${root}/.locks/${key}.lock" || rc=$?
+  case "${rc}" in
+    0) return 0 ;;
+    3) return 3 ;;
+    *) log_warn "kernel artifact cache store unavailable; the built output is unaffected"; return 0 ;;
+  esac
 }
