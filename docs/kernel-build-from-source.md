@@ -931,7 +931,10 @@ asks for a different kernel than the pinned one. The pinned bytes are then taken
 from a trusted store without compiling: first the kernel artifact cache (any
 entry whose manifest records the pinned digests, so a producer-code change that
 moved the cache key does not hide a byte-identical kernel), then each base URL
-in the pin's `sources` (HTTPS only; `<base>/<file>` for the three files). Every
+in the pin's `sources` (HTTPS only, redirects only to HTTPS, so a release-asset
+URL works; `<base>/<file>` for the three files). With
+`CERALIVE_KERNEL_ARTIFACT_CACHE=0` the cache is skipped and only the sources
+are consulted. Every
 candidate is re-hashed against the pin and passes the same four-axis deb and
 Kconfig gates as a fresh build. The stage writes the pinned `kernel-artifact.json`
 with `validated_boards` emptied, so the board gates run as for a build.

@@ -46,8 +46,8 @@ stage() {
 }
 compiled() { grep -qxF COMPILE "${KERNEL_TEST_RUNTIME_LOG}"; }
 expect_refusal() {
-  local label="$1" message="$2" mode="$3" out="$4"
-  if (export CERALIVE_KERNEL_PIN="${mode}"; stage "${out}"); then bad "${label}: accepted"
+  local label="$1" message="$2" mode="$3" out="$4" extra="${5:-}"
+  if (export CERALIVE_KERNEL_PIN="${mode}"; [[ -z "${extra}" ]] || export "${extra?}"; stage "${out}"); then bad "${label}: accepted"
   elif ! grep -Fq "${message}" "${WORK}/stage.log"; then bad "${label}: wrong guard: $(tail -3 "${WORK}/stage.log")"
   elif compiled; then bad "${label}: compiled anyway"
   else ok "${label}"; fi
@@ -108,7 +108,21 @@ rm -rf "${WORK}/shared/kernel-artifacts"
 mkdir -p "${WORK}/www/good" "${WORK}/www/bad"
 cp "${WORK}/cold/${name}" "${WORK}/cold/resolved.config" "${WORK}/cold/built-modules.txt" "${WORK}/www/good/"
 cp "${WORK}/www/good/"* "${WORK}/www/bad/"; printf 'x' >>"${WORK}/www/bad/${name}"
-python3 -u -m http.server --bind 127.0.0.1 0 --directory "${WORK}/www" >"${WORK}/http.log" 2>&1 &
+cat >"${WORK}/server.py" <<'PY'
+import functools, http.server, sys
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith('/redirect/'):  # plain-HTTP redirect to the good copy
+            self.send_response(302)
+            self.send_header('Location', '/good/' + self.path.split('/', 2)[2])
+            self.end_headers()
+            return
+        super().do_GET()
+server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(Handler, directory=sys.argv[1]))
+print(f'Serving HTTP on 127.0.0.1 port {server.server_port}', flush=True)
+server.serve_forever()
+PY
+python3 -u "${WORK}/server.py" "${WORK}/www" >"${WORK}/http.log" 2>&1 &
 HTTP_PID=$!
 port=""
 for _ in $(seq 1 50); do
@@ -126,6 +140,23 @@ if CERALIVE_KERNEL_PIN=require stage "${WORK}/remote" && ! compiled &&
    grep -Fq "from pinned source http://127.0.0.1:${port}/good" "${WORK}/stage.log"; then
   ok 'pinned sources: wrong bytes are skipped, the matching source is staged without compiling'
 else bad "pinned source: $(tail -5 "${WORK}/stage.log")"; fi
+# Redirects are followed only to HTTPS; the bytes would match, so only the
+# redirect rule can refuse this one.
+jq --arg r "http://127.0.0.1:${port}/redirect" '.sources = [$r]' "${WORK}/pin.orig" >"${pin}"
+expect_refusal 'a pinned source that redirects to plain HTTP is not followed' 'in no trusted store' \
+  require "${WORK}/redirect"
+
+# With the artifact cache off, only the pinned sources are consulted. Seed the
+# cache with an ordinary build, then point the pin at a source that has nothing.
+CERALIVE_KERNEL_PIN=0 stage "${WORK}/seed" || bad "seed build: $(tail -3 "${WORK}/stage.log")"
+jq --arg dead "http://127.0.0.1:${port}/missing" '.sources = [$dead]' "${WORK}/pin.orig" >"${pin}"
+if CERALIVE_KERNEL_PIN=require stage "${WORK}/cache-only" && ! compiled &&
+   grep -Fq 'from artifact cache entry' "${WORK}/stage.log"; then
+  ok 'with the artifact cache on, a cached copy satisfies the pin'
+else bad "cache-on: $(tail -3 "${WORK}/stage.log")"; fi
+expect_refusal 'with CERALIVE_KERNEL_ARTIFACT_CACHE=0 only the pinned sources are consulted' 'in no trusted store' \
+  require "${WORK}/cache-off" CERALIVE_KERNEL_ARTIFACT_CACHE=0
+rm -rf "${WORK}/shared/kernel-artifacts"
 jq '.sources = ["http://example.invalid/kernel"]' "${WORK}/pin.orig" >"${pin}"
 expect_refusal 'a non-HTTPS pin source makes the pin invalid' 'is not an HTTPS URL' \
   require "${WORK}/http"
