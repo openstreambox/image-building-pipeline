@@ -156,7 +156,13 @@ for fragment in ${KERNEL_SOURCE_DEFCONFIG_FRAGMENT:-${KERNEL_SOURCE_DEFCONFIG_FR
   fragments+=("${root}/${fragment}")
 done
 (( ${#fragments[@]} > 0 )) || die 'kernel config declaration missing'
-for entry in "${root}/mkosi/cache/kernel-artifacts/"[0-9a-f]*; do
+# Upload walks every entry of the checkout's own cache, which only this run's
+# builds wrote. A host-wide shared root holds other boards' and other producer
+# revisions' entries, so it is refused here rather than filtered.
+[[ -z "${CERALIVE_KERNEL_CACHE_DIR:-}" ]] \
+  || die 'CERALIVE_KERNEL_CACHE_DIR is a host-wide cache; unset it for the CI cache upload'
+kernel_root="$(kernel_artifact_cache_root)" || die 'kernel artifact cache root invalid'
+for entry in "${kernel_root}/"[0-9a-f]*; do
   [[ -d "${entry}" ]] || continue
   key="$(basename "${entry}")"
   [[ "${key}" =~ ^[0-9a-f]{64}$ ]] || continue
@@ -165,7 +171,7 @@ for entry in "${root}/mkosi/cache/kernel-artifacts/"[0-9a-f]*; do
   staged="${staging}/kernel-build/${deb_name}"
   [[ -f "${staged}" ]] || die 'built kernel not staged'
   cmp -s "${entry}/${deb_name}" "${staged}" || die 'kernel cache differs from verified staged build'
-  kernel_artifact_cache_intact "${entry}" "${deb_name}" || die 'kernel cache manifest invalid'
+  kernel_artifact_cache_intact "${entry}" "${deb_name}" "${key}" || die 'kernel cache manifest invalid'
   validate_built_kernel_deb "${entry}/${deb_name}" "${kernel_pkg}" "${package_version}" "${arch}" "${dtb_path}" \
     || die 'kernel deb failed four-axis validation'
   kernel_artifact_verify_config "${entry}/resolved.config" || die 'kernel config closure failed'

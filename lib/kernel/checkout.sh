@@ -165,8 +165,17 @@ kernel_src_mirror_lock_timeout() {
   printf '%s' "${CERALIVE_KERNEL_SRC_MIRROR_LOCK_TIMEOUT:-3600}"
 }
 
+# shellcheck source=cache-dir.sh
+source "$(dirname "${BASH_SOURCE[0]}")/cache-dir.sh"
+
 kernel_src_mirror_dir() {
-  printf '%s' "${CERALIVE_KERNEL_SRC_MIRROR_DIR:-${PIPELINE_DIR}/${CERALIVE_REL_KERNEL_SRC_MIRROR_DIR}}"
+  local shared
+  if [[ -n "${CERALIVE_KERNEL_SRC_MIRROR_DIR:-}" ]]; then
+    printf '%s' "${CERALIVE_KERNEL_SRC_MIRROR_DIR}"
+    return 0
+  fi
+  shared="$(kernel_shared_cache_dir "${CERALIVE_REL_KERNEL_SRC_MIRROR_DIR}")" || return 1
+  printf '%s' "${shared:-${PIPELINE_DIR}/${CERALIVE_REL_KERNEL_SRC_MIRROR_DIR}}"
 }
 
 # Published by kernel_src_mirror_prepare instead of echoed, because the caller

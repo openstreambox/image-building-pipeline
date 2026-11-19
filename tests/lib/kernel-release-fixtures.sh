@@ -134,7 +134,7 @@ with open(os.environ['KERNEL_TEST_RUNTIME_LOG'], 'a') as log:
 if args[:1] == ['info']:
     print('Offline native fixture')
 elif args[:2] == ['image', 'inspect']:
-    print('sha256:fixture')
+    print('sha256:' + 'f' * 64)
 elif args[:1] == ['run']:
     if 'dpkg-query' in args:
         print('gcc-aarch64-linux-gnu=14.2 arm64')

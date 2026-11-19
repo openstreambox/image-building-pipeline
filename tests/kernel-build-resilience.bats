@@ -562,6 +562,12 @@ container_script_body() {
   [ "$status" -eq 0 ]
   grep -q 'make olddefconfig' "$WORK/assembled.sh"
   grep -q 'fetch_pinned_tree_once' "$WORK/assembled.sh"
+  # A single quote inside the literal ends the host-side quoting, and whatever
+  # follows is expanded on the HOST (an empty CCACHE_OWNER, under set -u a crash)
+  # while the script still parses. Container variables must arrive unexpanded.
+  run grep -c "'" <<<"$literal"
+  [ "$output" = "0" ]
+  grep -Fq 'ccache_handback() { chown -R "${CCACHE_OWNER}" /ccache' "$WORK/assembled.sh"
 }
 
 @test "wiring: the retry knobs reach the container" {

@@ -545,11 +545,43 @@ fragment content in defconfig mode), output variant/identity, build timestamp,
 actual builder image identity, Dockerfile and kernel build/verifier script bytes;
 mtimes never participate. Every hit verifies the manifest's three SHA-256 values,
 the package identity and board DTB, and the config-survival/required/forbidden
-symbol checks. A corrupt or invalid entry is deleted and rebuilt. `=0` disables
-lookup and store; other values are rejected. The per-key flock protects both
-copy-out and atomic publication. `tests/kernel-artifact-cache.test.sh` pins the
-offline contract; a runner cache-hit time remains unmeasured because the current
-audit workflow deletes `mkosi/cache` before and after every run.
+symbol checks. Each entry's `manifest.json` (format
+`ceralive-kernel-artifact-cache/2`) also records its key and the three values the
+key derives from (input fingerprint, builder image id, board DTB path). A hit is
+refused when the recorded key is not the requested one, when the recorded inputs
+do not derive it, or when they are not this build's inputs, so an entry renamed
+or copied under another key, or left by an older format, is never staged. A
+refused entry is evicted and the kernel rebuilt: a current-format entry moves to
+`.quarantine/` (the newest eight are kept) as evidence, an older-format or
+incomplete one is deleted. `=0` disables lookup and store; other values are
+rejected. The per-key flock protects copy-out and atomic publication; the first
+intact entry for a key wins. A later build that produced a different deb for the
+same key is not reproducible: a `CERALIVE_BUILD_MODE=production` build stops
+before staging either deb, other builds keep the first entry and log both
+digests. A store whose inputs changed during the build (the key no longer
+derives) is skipped with a warning, and `.pending.*`/`.remote.*` directories
+left by interrupted stores are swept after six hours.
+`tests/kernel-artifact-cache.test.sh` pins the offline contract; a runner
+cache-hit time remains unmeasured because the current audit workflow deletes
+`mkosi/cache` before and after every run.
+
+**Shared across checkouts.** `CERALIVE_KERNEL_CACHE_DIR=<absolute dir>` moves the
+artifact cache, the ccache and the default source mirror out of the checkout, to
+`kernel-artifacts/`, `kernel-ccache/` and the mirror leaf under that directory,
+so every checkout or worktree on one host reuses them. Unset keeps the in-tree
+paths. The root and `kernel-artifacts/` must be owned by the invoking user and
+not group or other writable, and the path must be absolute without `:` or `,`;
+anything else is refused before any kernel work starts. The key uses
+checkout-relative paths, so two checkouts of the same tree compute the same key.
+`--ccache-dir` and `CERALIVE_KERNEL_SRC_MIRROR_DIR` still win.
+
+The ccache is mounted from a per-builder-image leaf, `<ccache dir>/<image id>`.
+ccache's default compiler check stats only the gcc driver, not the assembler or
+linker, so one directory never serves two toolchains; within one image the
+container always compiles in `/src/linux`, so checkouts share objects. Under a
+rootful Docker daemon the container hands `/ccache` back to the invoking user
+on exit. A cold build is `CERALIVE_KERNEL_ARTIFACT_CACHE=0` with a fresh
+`--ccache-dir`; it must produce the same deb as a cache hit.
 
 **Validated, not assumed.** Before staging, the built `.deb` is checked on four
 axes against the manifest: control `Package:`, control `Version:`, control
