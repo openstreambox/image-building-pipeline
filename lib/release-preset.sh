@@ -27,6 +27,9 @@
 # A preset points boxes at an update channel, so it is accepted only in
 # production mode and only together with the root pin: an image can never
 # carry a channel preset while trusting a development or unexpected root.
+# A fork release (CERALIVE_FORK_RELEASE=1) builds in development mode, because
+# production mode takes first-party packages and the kernel from apt.ceralive.tv
+# only; there the pin is mandatory and may not name the development root.
 #
 # Usage (sourced by orchestrate.sh after rauc_pki_resolve):
 #   release_preset_resolve   # exports CERALIVE_UPDATE_PRESET_{SETTINGS,CHANNEL}_B64
@@ -182,14 +185,35 @@ release_preset_ceraui_check() {
     || { release_preset_die "CeraUI's own loader refuses this preset"; return 1; }
 }
 
+# A fork release ships its own first-party packages and a source-built kernel,
+# which production mode refuses (it takes both from apt.ceralive.tv only). Such a
+# build runs in development mode with CERALIVE_FORK_RELEASE=1, and the root pin
+# carries the release-keyring guarantee instead: it is mandatory, and it may not
+# name the repository's development root.
+release_preset_check_fork_release() {
+  local expected="$1" here dev_root
+  [[ -n "${expected}" ]] \
+    || { release_preset_die "CERALIVE_FORK_RELEASE=1 needs CERALIVE_EXPECT_RAUC_ROOT_SHA256"; return 1; }
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  dev_root="${here}/../.dev-keys/root-ca.pem"
+  if [[ -s "${dev_root}" ]] \
+    && [[ "$(openssl x509 -in "${dev_root}" -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)" == "${expected,,}" ]]; then
+    release_preset_die "CERALIVE_FORK_RELEASE=1 refuses a pin on the development root (${dev_root})"
+    return 1
+  fi
+}
+
 release_preset_resolve() {
   local mode="${CERALIVE_BUILD_MODE:-development}" dir="${CERALIVE_UPDATE_PRESET_DIR:-}"
   local expected="${CERALIVE_EXPECT_RAUC_ROOT_SHA256:-}"
   CERALIVE_UPDATE_PRESET_SETTINGS_B64=""
   CERALIVE_UPDATE_PRESET_CHANNEL_B64=""
   if [[ -n "${dir}" || -n "${expected}" ]]; then
-    [[ "${mode}" == production ]] \
-      || { release_preset_die "a release root pin or update preset needs CERALIVE_BUILD_MODE=production"; return 1; }
+    if [[ "${mode}" != production ]]; then
+      [[ "${mode}" == development && "${CERALIVE_FORK_RELEASE:-}" == 1 ]] \
+        || { release_preset_die "a release root pin or update preset needs CERALIVE_BUILD_MODE=production (or CERALIVE_FORK_RELEASE=1)"; return 1; }
+      release_preset_check_fork_release "${expected}" || return 1
+    fi
   fi
   if [[ -n "${dir}" && -z "${expected}" ]]; then
     release_preset_die "an update preset needs CERALIVE_EXPECT_RAUC_ROOT_SHA256 (pin the root the channel is signed under)"
