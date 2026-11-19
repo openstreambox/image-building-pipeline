@@ -10,10 +10,13 @@ source_dir="${SRCDIR:-${CHROOT_SRCDIR:-}}"
 : "${APT_SUITE_UPDATES:?updates suite must be forwarded by orchestrator}"
 : "${APT_SUITE_SECURITY:?security suite must be forwarded by orchestrator}"
 source "${source_dir}/lib/fetch-debs-auth.sh"
-source "${source_dir}/lib/fetch/index.sh"
 log_error() { printf 'packages lock: %s\n' "$*" >&2; }
 
-receipts=/usr/lib/ceralive/build-lock
+# The tree whose packages are captured. mkosi runs this script inside that tree
+# (mkosi-chroot), so this is empty there and every path below is the chroot's
+# own. tests/packages-lock-capture.test.sh points it at a fixture tree.
+root="${CERALIVE_LOCK_CAPTURE_ROOT:-}"
+receipts="$root/usr/lib/ceralive/build-lock"
 mkdir -p "$receipts"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -34,7 +37,7 @@ shopt -s nullglob
 # per-board/per-privilege-domain leaf; the <cache_key> prefix is globbed rather
 # than hardcoded so a future mkosi renaming it does not silently defeat this
 # check.
-apt_lists_dirs=(/var/lib/apt/lists)
+apt_lists_dirs=("$root/var/lib/apt/lists")
 if [[ -n "${CERALIVE_MKOSI_CACHE_DIR:-}" ]]; then
   apt_lists_dirs+=("${source_dir}/${CERALIVE_MKOSI_CACHE_DIR}"/*.metadata.cache/lib/apt/lists)
 fi
@@ -92,16 +95,44 @@ mv "$index_dedup" "$index"
 excluded_marker="$receipts/excluded.tsv"
 : >>"$excluded_marker"
 
+output="$receipts/$layer.jsonl"
+# A layer's OWN receipt from an earlier run of this script is not "previously
+# accounted for": a second run would then skip every package it verified and
+# leave the receipt empty. mkosi used to run base/mkosi.finalize twice (see
+# tests/mkosi-contract.bats), which shipped an empty base.jsonl and made the
+# platform layer re-verify all of base. Only OTHER layers' receipts count, so a
+# re-run re-verifies and writes the same rows again.
 previous="$work/previous"
 : >"$previous"
 for receipt in "$receipts"/*.jsonl; do
-  [[ -f "$receipt" ]] || continue
+  [[ -f "$receipt" && "$receipt" != "$output" ]] || continue
   awk -F'"' '{print $4 "\t" $8 "\t" $12}' "$receipt" >>"$previous"
 done
 cat "$excluded_marker" >>"$previous"
-output="$receipts/$layer.jsonl"
+declare -A accounted=()
+while IFS= read -r line || [[ -n "$line" ]]; do
+  accounted["$line"]=1
+done <"$previous"
 : >"$output"
-dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\t${Status}\n' >"$work/status"
+dpkg-query --admindir="$root/var/lib/dpkg" -W -f='${Package}\t${Version}\t${Architecture}\t${Status}\n' >"$work/status"
+
+# Resolve every installed package against the index in ONE pass
+# (auth_lookup_packages: same exactly-one-stanza rule as auth_lookup_package).
+# Looking each package up separately re-read the ~75 MB index once per package,
+# about 9 s each under qemu-user and most of the build's mkosi time. Packages
+# without exactly one verified stanza get no row and fail in the loop below.
+awk -F'\t' '$4 ~ / ok installed$/ {print $1 "\t" $2 "\t" $3}' "$work/status" >"$work/wanted"
+declare -A resolved=()
+if [[ -s "$index" ]]; then
+  auth_lookup_packages "$index" "$work/wanted" >"$work/resolved" || {
+    log_error "$layer: could not read the verified Debian Packages index"
+    exit 1
+  }
+  while IFS=$'\t' read -r r_name r_version r_arch r_row; do
+    resolved["$r_name"$'\t'"$r_version"$'\t'"$r_arch"]="$r_row"
+  done <"$work/resolved"
+fi
+
 while IFS=$'\t' read -r name version arch status; do
   [[ "$status" == *' ok installed' ]] || continue
   skip=0
@@ -112,15 +143,14 @@ while IFS=$'\t' read -r name version arch status; do
     printf '%s\t%s\t%s\n' "$name" "$version" "$arch" >>"$excluded_marker"
     continue
   fi
-  if awk -F'\t' -v n="$name" -v v="$version" -v a="$arch" \
-      '$1==n && $2==v && $3==a {found=1} END {exit !found}' "$previous"; then
-    continue
-  fi
-  row="$(index_lookup_optional "$index" "$name" "$version" "$arch")" || {
+  key="$name"$'\t'"$version"$'\t'"$arch"
+  [[ -z "${accounted[$key]+x}" ]] || continue
+  [[ -s "$index" ]] || log_error "$layer: verified Debian Packages index is missing or empty: $index"
+  [[ -n "${resolved[$key]+x}" ]] || {
     log_error "$layer: newly installed $name=$version/$arch has no verified Debian Packages SHA256"
     exit 1
   }
-  IFS=$'\t' read -r _filename sha resolved_version <<<"$row"
+  IFS=$'\t' read -r _filename sha resolved_version <<<"${resolved[$key]}"
   [[ "$resolved_version" == "$version" && "$sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
   printf '{"name":"%s","version":"%s","arch":"%s","origin":"debian","sha256":"%s"}\n' \
     "$name" "$version" "$arch" "$sha" >>"$output"

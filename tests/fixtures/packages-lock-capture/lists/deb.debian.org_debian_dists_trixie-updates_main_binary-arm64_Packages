@@ -1,0 +1,39 @@
+Package: tzdata
+Version: 2026f-0+deb13u1
+Installed-Size: 1360
+Maintainer: GNU Libc Maintainers <debian-glibc@lists.debian.org>
+Architecture: all
+Replaces: tzdata-legacy (= 2023c-8), tzdata-legacy (= 2023c-9)
+Provides: tzdata-trixie
+Depends: debconf (>= 0.5) | debconf-2.0
+Breaks: tzdata-legacy (= 2023c-8), tzdata-legacy (= 2023c-9)
+Description: time zone and daylight-saving time data
+Multi-Arch: foreign
+Homepage: https://www.iana.org/time-zones
+Description-md5: a77a3cc9a67658dd7cfdc6547391b8f8
+Tag: role::app-data, use::timekeeping
+Section: localization
+Priority: required
+Filename: pool/main/t/tzdata/tzdata_2026f-0+deb13u1_all.deb
+Size: 267528
+SHA256: 2c1c561091402883430d0d47c57a3c0aa00b44afc8a6239265065a87211a5c11
+
+Package: tzdata-legacy
+Source: tzdata
+Version: 2026f-0+deb13u1
+Installed-Size: 1254
+Maintainer: GNU Libc Maintainers <debian-glibc@lists.debian.org>
+Architecture: all
+Replaces: tzdata (<< 2024b-3~), tzdata-bookworm, tzdata-bullseye
+Depends: tzdata
+Conflicts: tzdata-bookworm, tzdata-bullseye
+Breaks: tzdata (<< 2024b-3~)
+Description: time zone data for TAI minus ten seconds
+Multi-Arch: foreign
+Homepage: https://www.iana.org/time-zones
+Description-md5: e9abab063129c60dae9d14447e549234
+Section: localization
+Priority: optional
+Filename: pool/main/t/tzdata/tzdata-legacy_2026f-0+deb13u1_all.deb
+Size: 186704
+SHA256: 92bb8f5ee8f87e6ee641ec3b24876d2d83b64dd1d7fe864b1cceac4cea7f1549
