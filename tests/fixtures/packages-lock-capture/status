@@ -1,0 +1,338 @@
+Package: apt
+Status: install ok installed
+Priority: required
+Section: admin
+Installed-Size: 4913
+Maintainer: APT Development Team <deity@lists.debian.org>
+Architecture: arm64
+Version: 3.0.4
+Replaces: apt-transport-https (<< 1.5~alpha4~), apt-utils (<< 1.3~exp2~)
+Provides: apt-transport-https (= 3.0.4)
+Depends: base-passwd (>= 3.6.1) | adduser, sqv (>= 1.3.0), libapt-pkg7.0 (>= 3.0.4), debian-archive-keyring, libc6 (>= 2.38), libgcc-s1 (>= 3.0), libseccomp2 (>= 2.4.2), libssl3t64 (>= 3.0.0), libstdc++6 (>= 13.1), libsystemd0
+Recommends: ca-certificates
+Suggests: apt-doc, aptitude | synaptic | wajig, dpkg-dev (>= 1.17.2), gnupg | gnupg2 | gnupg1, powermgmt-base
+Breaks: apt-transport-https (<< 1.5~alpha4~), apt-utils (<< 1.3~exp2~), aptitude (<< 0.8.10)
+Conflicts: apt-verify, libnettle8 (<< 3.9.1-2.2~)
+Conffiles:
+ /etc/apt/apt.conf.d/01autoremove 879455db9b938ce287b23383629aedce
+ /etc/cron.daily/apt-compat 1400ab07a4a2905b04c33e3e93d42b7b
+ /etc/logrotate.d/apt 179f2ed4f85cbaca12fa3d69c2a4a1c3
+Description: commandline package manager
+ This package provides commandline tools for searching and
+ managing as well as querying information about packages
+ as a low-level access to all features of the libapt-pkg library.
+ .
+ These include:
+  * apt-get for retrieval of packages and information about them
+    from authenticated sources and for installation, upgrade and
+    removal of packages together with their dependencies
+  * apt-cache for querying available information about installed
+    as well as installable packages
+  * apt-cdrom to use removable media as a source for packages
+  * apt-config as an interface to the configuration settings
+  * apt-extracttemplates is used by debconf to prompt for configuration
+    questions before installation.
+
+Package: base-files
+Essential: yes
+Status: install ok installed
+Priority: required
+Section: admin
+Installed-Size: 498
+Maintainer: Santiago Vila <sanvila@debian.org>
+Architecture: arm64
+Multi-Arch: foreign
+Version: 13.8+deb13u7
+Replaces: base, dpkg (<= 1.15.0), miscutils
+Provides: base, usr-is-merged
+Pre-Depends: awk
+Breaks: debian-security-support (<< 2019.04.25), initscripts (<< 2.88dsf-13.3), sendfile (<< 2.1b.20080616-5.2~)
+Conffiles:
+ /etc/debian_version 5243b35d3894c513d1189360c303199a
+ /etc/dpkg/origins/debian c47b6815f67ad1aeccb0d4529bd0b990
+ /etc/host.conf 4eb63731c9f5e30903ac4fc07a7fe3d6
+ /etc/issue d0c7919a5e2641d60400de08201a49e2
+ /etc/issue.net 37827eb4e7d268f39255c01fc49b009e
+ /etc/update-motd.d/10-uname 9e1b832b7b06f566156e7c9e0548247b
+Description: Debian base system miscellaneous files
+ This package contains the basic filesystem hierarchy of a Debian system, and
+ several important miscellaneous files, such as /etc/debian_version,
+ /etc/host.conf, /etc/issue, /etc/motd, /etc/profile, and others,
+ and the text of several common licenses in use on Debian systems.
+
+Package: bash
+Essential: yes
+Status: install ok installed
+Priority: required
+Section: shells
+Installed-Size: 7359
+Maintainer: Matthias Klose <doko@debian.org>
+Architecture: arm64
+Multi-Arch: foreign
+Source: bash (5.2.37-2)
+Version: 5.2.37-2+b10
+Depends: base-files (>= 2.1.12), debianutils (>= 5.6-0.1)
+Pre-Depends: libc6 (>= 2.38), libtinfo6 (>= 6)
+Recommends: bash-completion
+Suggests: bash-doc
+Conffiles:
+ /etc/bash.bashrc 72d453119aaa1e96c7c8a7a8fedcf582
+ /etc/skel/.bash_logout 22bfb8c1dd94b5f3813a2b25da67463f
+ /etc/skel/.bashrc ee35a240758f374832e809ae0ea4883a
+ /etc/skel/.profile f4e81ade7d6f9fb342541152d08e7a97
+Description: GNU Bourne Again SHell
+ Bash is an sh-compatible command language interpreter that executes
+ commands read from the standard input or from a file.  Bash also
+ incorporates useful features from the Korn and C shells (ksh and csh).
+ .
+ Bash is ultimately intended to be a conformant implementation of the
+ IEEE POSIX Shell and Tools specification (IEEE Working Group 1003.2).
+ .
+ The Programmable Completion Code, by Ian Macdonald, is now found in
+ the bash-completion package.
+Homepage: http://tiswww.case.edu/php/chet/bash/bashtop.html
+
+Package: bsdutils
+Essential: yes
+Status: install ok installed
+Priority: required
+Section: utils
+Installed-Size: 553
+Maintainer: Chris Hofstaedtler <zeha@debian.org>
+Architecture: arm64
+Multi-Arch: foreign
+Source: util-linux (2.41.5-0+deb13u1)
+Version: 1:2.41.5-0+deb13u1
+Pre-Depends: libc6 (>= 2.38), libsystemd0 (>= 254)
+Recommends: bsdextrautils
+Description: basic utilities from 4.4BSD-Lite
+ This package contains the bare minimum of BSD utilities needed for a Debian
+ system: logger, renice, script, scriptlive, scriptreplay and wall. The
+ remaining standard BSD utilities are provided by bsdextrautils.
+Homepage: https://github.com/util-linux/util-linux
+
+Package: ca-certificates
+Status: install ok installed
+Priority: standard
+Section: misc
+Installed-Size: 387
+Maintainer: Julien Cristau <jcristau@debian.org>
+Architecture: all
+Multi-Arch: foreign
+Version: 20250419+deb13u1
+Depends: openssl (>= 1.1.1), debconf (>= 0.5) | debconf-2.0
+Breaks: ca-certificates-java (<< 20121112+nmu1)
+Enhances: openssl
+Description: Common CA certificates
+ Contains the certificate authorities shipped with Mozilla's browser to allow
+ SSL-based applications to check for the authenticity of SSL connections.
+ .
+ Please note that Debian can neither confirm nor deny whether the
+ certificate authorities whose certificates are included in this package
+ have in any way been audited for trustworthiness or RFC 3647 compliance.
+ Full responsibility to assess them belongs to the local system
+ administrator.
+
+Package: dnsmasq-base
+Status: install ok installed
+Priority: optional
+Section: net
+Installed-Size: 1153
+Maintainer: Simon Kelley <simon@thekelleys.org.uk>
+Architecture: arm64
+Multi-Arch: foreign
+Source: dnsmasq
+Version: 2.91-1+deb13u2
+Replaces: dnsmasq (<< 2.63-1~), dnsmasq-base
+Provides: dnsmasq-base
+Depends: passwd, libc6 (>= 2.38), libdbus-1-3 (>= 1.10), libgmp10 (>= 2:6.3.0+dfsg), libhogweed6t64 (>= 2.4-3), libidn2-0 (>= 2.0.0), libnetfilter-conntrack3 (>= 1.0.1), libnettle8t64 (>= 2.4-3), libnftables1 (>= 1.0.2)
+Recommends: dns-root-data
+Breaks: dnsmasq (<< 2.63-1~)
+Conflicts: dnsmasq-base-lua
+Description: Small caching DNS proxy and DHCP/TFTP server - executable
+ This package contains the dnsmasq executable and documentation, but
+ not the infrastructure required to run it as a system daemon. For
+ that, install the dnsmasq package.
+Homepage: https://www.thekelleys.org.uk/dnsmasq/doc.html
+
+Package: libapt-pkg7.0
+Status: install ok installed
+Priority: optional
+Section: libs
+Installed-Size: 3644
+Maintainer: APT Development Team <deity@lists.debian.org>
+Architecture: arm64
+Multi-Arch: same
+Source: apt
+Version: 3.0.4
+Provides: libapt-pkg (= 3.0.4)
+Depends: libbz2-1.0, libc6 (>= 2.38), libgcc-s1 (>= 3.0), liblz4-1 (>= 0.0~r127), liblzma5 (>= 5.1.1alpha+20120614), libssl3t64 (>= 3.0.0), libstdc++6 (>= 14), libsystemd0 (>= 221), libudev1 (>= 183), libxxhash0 (>= 0.8), libzstd1 (>= 1.5.5), zlib1g (>= 1:1.2.2.3)
+Recommends: apt (>= 3.0.4)
+Breaks: appstream (<< 0.9.0-3~), apt (<< 1.6~), aptitude (<< 0.8.9), dpkg (<< 1.20.8), libapt-inst1.5 (<< 0.9.9~)
+Conflicts: libnettle8 (<< 3.9.1-2.2~)
+Description: package management runtime library
+ This library provides the common functionality for searching and
+ managing packages as well as information about packages.
+ Higher-level package managers can depend upon this library.
+ .
+ This includes:
+  * retrieval of information about packages from multiple sources
+  * retrieval of packages and all dependent packages
+    needed to satisfy a request either through an internal
+    solver or by interfacing with an external one
+  * authenticating the sources and validating the retrieved data
+  * installation and removal of packages in the system
+  * providing different transports to retrieve data over cdrom and
+    http(s) as well as an interface to add more transports like
+    tor+http(s) (apt-transport-tor).
+
+Package: libavcodec61
+Status: install ok installed
+Priority: optional
+Section: libs
+Installed-Size: 14200
+Maintainer: Debian Multimedia Maintainers <debian-multimedia@lists.debian.org>
+Architecture: arm64
+Multi-Arch: same
+Source: ffmpeg
+Version: 7:7.1.5-0+deb13u1
+Depends: libaom3 (>= 3.2.0), libavutil59 (= 7:7.1.5-0+deb13u1), libc6 (>= 2.35), libcairo2 (>= 1.2.4), libcodec2-1.2 (>= 1.2.0), libdav1d7 (>= 1.1.0), libglib2.0-0t64 (>= 2.12.0), libgsm1 (>= 1.0.18), libjxl0.11 (>= 0.8.0), liblzma5 (>= 5.1.1alpha+20120614), libmp3lame0 (>= 3.100), libopenjp2-7 (>= 2.0.0), libopus0 (>= 1.1), librav1e0.7 (>= 0.5.1), librsvg2-2 (>= 2.52.5), libshine3 (>= 3.1.0), libsnappy1v5 (>= 1.2.2), libspeex1 (>= 1.2~), libsvtav1enc2 (>= 2.2.1), libswresample5 (>= 7:7.1.5), libtheoradec1 (>= 1.0), libtheoraenc1 (>= 1.0), libtwolame0 (>= 0.3.10), libva2 (>= 2.9.0), libvorbis0a (>= 1.1.2), libvorbisenc2 (>= 1.1.2), libvpx9 (>= 1.12.0), libwebp7 (>= 1.5.0), libwebpmux3 (>= 1.5.0), libx264-164 (>= 2:0.164.3108+git31e19f9), libx265-215 (>= 4.1), libxvidcore4 (>= 1.2.2), libzvbi0t64 (>= 0.2.35), zlib1g (>= 1:1.2.0)
+Suggests: libcuda1, libnvcuvid1, libnvidia-encode1
+Description: FFmpeg library with de/encoders for audio/video codecs - runtime files
+ FFmpeg is the leading multimedia framework, able to decode, encode, transcode,
+ mux, demux, stream, filter and play pretty much anything that humans and
+ machines have created. It supports the most obscure ancient formats up to the
+ cutting edge.
+ .
+ This library provides a generic encoding/decoding framework and
+ contains multiple decoders and encoders for audio, video and subtitle streams,
+ and several bitstream filters.
+ .
+ The shared architecture provides various services ranging from bit stream I/O
+ to DSP optimizations, and makes it suitable for implementing robust and fast
+ codecs as well as for experimentation.
+ .
+ This package contains the runtime files.
+Homepage: https://ffmpeg.org/
+
+Package: libc6
+Status: install ok installed
+Priority: optional
+Section: libs
+Installed-Size: 23769
+Maintainer: GNU Libc Maintainers <debian-glibc@lists.debian.org>
+Architecture: arm64
+Multi-Arch: same
+Source: glibc
+Version: 2.41-12+deb13u4
+Depends: libgcc-s1
+Recommends: libidn2-0 (>= 2.0.5~)
+Suggests: glibc-doc, debconf | debconf-2.0, libc-l10n, locales, libnss-nis, libnss-nisplus
+Breaks: base-files (<< 13.3~), chrony (<< 4.2-3~), dhcpcd (<< 1:10.1.0-7~), fakechroot (<< 2.19-3.5), firefox (<< 91~), firefox-esr (<< 91~), gnumach-image-1.8-486 (<< 2:1.8+git20210923~), gnumach-image-1.8-486-dbg (<< 2:1.8+git20210923~), gnumach-image-1.8-xen-486 (<< 2:1.8+git20210923~), gnumach-image-1.8-xen-486-dbg (<< 2:1.8+git20210923~), hurd (<< 1:0.9.git20220301-2), libamdhip64-5 (<< 5.7.1-5+b1), libhiprtc-builtins5 (<< 5.7.1-5+b1), librccl1 (<< 5.4.3-3+b1), libswupdate0.1 (<< 2024.12.1+dfsg-1+b3), locales (<< 2.41), locales-all (<< 2.41), lua-swupdate (<< 2024.12.1+dfsg-1+b3), nscd (<< 2.41), pd-scaf (<< 1:0.14.1+darcs20180201-6+b4), postgresql-15-pllua (<< 1:2.0.12-4), postgresql-17-pllua (<< 1:2.0.12-3+b2), python3-iptables (<< 1.0.0-2), python3-mrgingham (<< 1.25-1), python3-onnxruntime (<< 1.20.1+dfsg-2~), sysvinit (<< 3.09-2~), sysvinit-core (<< 3.09-2~), tinydns (<< 1:1.05-14), uwsgi-plugin-pypy3 (<< 0.0.2+b1), valgrind (<< 1:3.19.0-1~)
+Conffiles:
+ /etc/ld.so.conf.d/aarch64-linux-gnu.conf da8a2db277c6c69cad56b6c778193e40
+Description: GNU C Library: Shared libraries
+ Contains the standard libraries that are used by nearly all programs on
+ the system. This package includes shared versions of the standard C library
+ and the standard math library, as well as many others.
+Homepage: https://www.gnu.org/software/libc/libc.html
+
+Package: libcap2
+Status: install ok installed
+Priority: optional
+Section: libs
+Installed-Size: 160
+Maintainer: Christian Kastner <ckk@debian.org>
+Architecture: arm64
+Multi-Arch: same
+Source: libcap2 (1:2.75-10+deb13u1)
+Version: 1:2.75-10+deb13u1+b3
+Depends: libc6 (>= 2.38)
+Description: POSIX 1003.1e capabilities (library)
+ Libcap implements the user-space interfaces to the POSIX 1003.1e capabilities
+ available in Linux kernels. These capabilities are a partitioning of the all
+ powerful root privilege into a set of distinct privileges.
+ .
+ This package contains the shared library.
+Homepage: https://sites.google.com/site/fullycapable/
+
+Package: libgdk-pixbuf2.0-common
+Status: install ok installed
+Priority: optional
+Section: libs
+Installed-Size: 2552
+Maintainer: Debian GNOME Maintainers <pkg-gnome-maintainers@lists.alioth.debian.org>
+Architecture: all
+Multi-Arch: foreign
+Source: gdk-pixbuf
+Version: 2.42.12+dfsg-4+deb13u1
+Description: GDK Pixbuf library - data files
+ This package contains the common files and translations for the GDK
+ Pixbuf library.
+Homepage: https://www.gtk.org/
+
+Package: mawk
+Status: install ok installed
+Priority: required
+Section: interpreters
+Installed-Size: 320
+Maintainer: Boyuan Yang <byang@debian.org>
+Architecture: arm64
+Multi-Arch: foreign
+Version: 1.3.4.20250131-1
+Provides: awk
+Depends: libc6 (>= 2.38)
+Description: Pattern scanning and text processing language
+ Mawk is an interpreter for the AWK Programming Language. The AWK
+ language is useful for manipulation of data files, text retrieval and
+ processing, and for prototyping and experimenting with algorithms. Mawk
+ is a new awk meaning it implements the AWK language as defined in Aho,
+ Kernighan and Weinberger, The AWK Programming Language, Addison-Wesley
+ Publishing, 1988. (Hereafter referred to as the AWK book.) Mawk conforms
+ to the POSIX 1003.2 (draft 11.3) definition of the AWK language
+ which contains a few features not described in the AWK book, and mawk
+ provides a small number of extensions.
+ .
+ Mawk is smaller and much faster than gawk. It has some compile-time
+ limits such as NF = 32767 and sprintf buffer = 1020.
+Homepage: https://invisible-island.net/mawk/
+
+Package: tzdata
+Status: install ok installed
+Priority: required
+Section: localization
+Installed-Size: 1360
+Maintainer: GNU Libc Maintainers <debian-glibc@lists.debian.org>
+Architecture: all
+Multi-Arch: foreign
+Version: 2026f-0+deb13u1
+Replaces: tzdata-legacy (= 2023c-8), tzdata-legacy (= 2023c-9)
+Provides: tzdata-trixie
+Depends: debconf (>= 0.5) | debconf-2.0
+Breaks: tzdata-legacy (= 2023c-8), tzdata-legacy (= 2023c-9)
+Description: time zone and daylight-saving time data
+ This package contains data required for the implementation of
+ standard local time for many representative locations around the
+ globe. It is updated periodically to reflect changes made by
+ political bodies to time zone boundaries, UTC offsets, and
+ daylight-saving rules.
+Homepage: https://www.iana.org/time-zones
+
+Package: zlib1g
+Status: install ok installed
+Priority: required
+Section: libs
+Installed-Size: 180
+Maintainer: Mark Brown <broonie@debian.org>
+Architecture: arm64
+Multi-Arch: same
+Source: zlib
+Version: 1:1.3.dfsg+really1.3.1-1+deb13u1
+Provides: libz1
+Depends: libc6 (>= 2.17)
+Breaks: libxml2 (<< 2.7.6.dfsg-2), texlive-binaries (<< 2023.20230311.66589-8)
+Conflicts: zlib1 (<= 1:1.0.4-7)
+Description: compression library - runtime
+ zlib is a library implementing the deflate compression method found
+ in gzip and PKZIP.  This package includes the shared library.
+Homepage: http://zlib.net/

@@ -61,6 +61,73 @@ auth_lookup_package() {
   printf '%s\n' "${rows}"
 }
 
+# auth_lookup_packages <index> <wanted.tsv> — auth_lookup_package for many
+# packages in ONE pass over the index. <wanted.tsv> holds one
+# "package<TAB>version<TAB>arch" line per lookup. For every line whose lookup
+# auth_lookup_package would answer, this prints
+# "package<TAB>version<TAB>arch<TAB>filename<TAB>sha256<TAB>version", in the
+# order of <wanted.tsv>. The matching rule is the same: same name, the exact
+# version, the wanted arch or Architecture: all, a Filename and a SHA256, and
+# EXACTLY ONE such stanza. No match or more than one prints nothing for that
+# line, so a caller fails closed on a missing row. One difference: an empty
+# version never matches here (auth_lookup_package would accept any version).
+#
+# Why: a per-package scan re-reads the whole Debian index for every installed
+# package, which under qemu-user costs about 9 s per package.
+auth_lookup_packages() {
+  local index="$1" wanted="$2"
+  awk -v wanted="${wanted}" '
+    BEGIN {
+      FS = "\t"
+      while ((rc = (getline line < wanted)) > 0) {
+        split(line, w, "\t")
+        n_wanted++
+        order[n_wanted] = w[1] SUBSEP w[2] SUBSEP w[3]
+        if (w[2] == "") continue
+        want[order[n_wanted]] = 1
+        if (w[3] != "all" && !((w[1] SUBSEP w[2] SUBSEP w[3]) in seen_arch)) {
+          seen_arch[w[1] SUBSEP w[2] SUBSEP w[3]] = 1
+          arches[w[1] SUBSEP w[2]] = arches[w[1] SUBSEP w[2]] " " w[3]
+        }
+      }
+      if (rc < 0) { print "cannot read " wanted > "/dev/stderr"; failed = 1; exit 2 }
+      close(wanted)
+      RS = ""; FS = "\n"
+    }
+    {
+      pkg = ""; ver = ""; a = ""; filename = ""; sha = ""
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^Package: /) pkg = substr($i, 10)
+        else if ($i ~ /^Version: /) ver = substr($i, 10)
+        else if ($i ~ /^Architecture: /) a = substr($i, 15)
+        else if ($i ~ /^Filename: /) filename = substr($i, 11)
+        else if ($i ~ /^SHA256: /) sha = substr($i, 9)
+      }
+      if (filename == "" || sha == "") next
+      row = filename "\t" sha "\t" ver
+      key = pkg SUBSEP ver SUBSEP a
+      if (key in want) { count[key]++; found[key] = row }
+      if (a == "all" && ((pkg SUBSEP ver) in arches)) {
+        n = split(arches[pkg SUBSEP ver], list, " ")
+        for (j = 1; j <= n; j++) {
+          key = pkg SUBSEP ver SUBSEP list[j]
+          count[key]++; found[key] = row
+        }
+      }
+    }
+    END {
+      if (failed) exit 2
+      for (i = 1; i <= n_wanted; i++) {
+        key = order[i]
+        if ((key in count) && count[key] == 1) {
+          split(key, k, SUBSEP)
+          printf "%s\t%s\t%s\t%s\n", k[1], k[2], k[3], found[key]
+        }
+      }
+    }
+  ' "${index}"
+}
+
 auth_release_has_identity() {
   local release="$1" suite="$2" component="$3" arch="$4"
   awk -v want_suite="${suite}" -v want_component="${component}" -v want_arch="${arch}" '

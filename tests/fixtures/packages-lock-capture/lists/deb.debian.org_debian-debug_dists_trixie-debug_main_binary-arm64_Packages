@@ -1,0 +1,33 @@
+Package: apt-dbgsym
+Source: apt
+Version: 3.0.3
+Installed-Size: 10161
+Maintainer: APT Development Team <deity@lists.debian.org>
+Architecture: arm64
+Depends: apt (= 3.0.3)
+Description: debug symbols for apt
+Auto-Built-Package: debug-symbols
+Build-Ids: 00abf5513b7745888e51ac748dd22ecec5b4bff5 0bbb75bfd902a1ce028bd915a847182ec6c26667 222914b1c3ae70f590d8f0e02115f10212614ae5 3d57f4ede54c8a848e69a7d8fd241fd9b99400b4 472d174e1db7bb72efedd802ed6fadbaa0346b5a 5040b50ad687e30851f2fdd2a0706c542caea729 59e11358edb1b549b4679a27b33d4ce28dd0e4d2 5d0cfd51daf9b4ca9e419dcb906f01ff09d4c60d 6ced795aacc31c71a2dc643805d486c7c44cba08 896c78ff1e32970e8229839d4a3283ec8fb93646 96805b31538478887093de37fcee81e3d46bfa51 99dd19fa5217ce7b8fed5b71e8a2a1a9dff9b76d acd937ad1b7b3f6793e2b6618166e15ba40fee67 b055f3b115142cee3bc11677d899dc5a226f19a4 b64754e95c5cb1a990a969c71add8f6434d1b0d6 cf5578d4689dc76e02e90cff163b03a9e1b2a5ab f2e38c574e0251d3195cb1600c041384d1e41f6d fdf3297bccc62cccf9382b6253d8ea94f5f4d1a1 fff5c2e4da0aa3a8d489ba8f0696fbd25a7bff4b
+Description-md5: a02b2b72ed7324efe02de7323b48ea17
+Section: debug
+Priority: optional
+Filename: pool/main/a/apt/apt-dbgsym_3.0.3_arm64.deb
+Size: 8735708
+SHA256: b05df2650cc6ab49a568b62321bca4c14cebba650df211bf39e308129b8b00fa
+
+Package: mawk-dbgsym
+Source: mawk
+Version: 1.3.4.20250131-1
+Installed-Size: 370
+Maintainer: Boyuan Yang <byang@debian.org>
+Architecture: arm64
+Depends: mawk (= 1.3.4.20250131-1)
+Description: debug symbols for mawk
+Auto-Built-Package: debug-symbols
+Build-Ids: 07249648e1e0ef71e8e218b7af819b9d6880395d
+Description-md5: ec32c5ba0ced817acd90e773dd4000e1
+Section: debug
+Priority: optional
+Filename: pool/main/m/mawk/mawk-dbgsym_1.3.4.20250131-1_arm64.deb
+Size: 182856
+SHA256: c9a87fae135882bae4f3644c1516ff9280e8543c8775f71c91fade95cc1abd76
