@@ -186,6 +186,7 @@ check grep -qx "pipeline_commit=$(git -C "${repo}" rev-parse HEAD)" "${work}/ok/
 check grep -qx "bundle_sha256=$(sha256sum <"${work}/ok/t.raucb" | cut -c1-64)" "${work}/ok/t.raucb.signing"
 check grep -q '^rauc=rauc [0-9]' "${work}/ok/t.raucb.signing"
 check grep -q '^mksquashfs=mksquashfs version [0-9]' "${work}/ok/t.raucb.signing"
+check test "$(stat -c %a "${work}/ok/t.raucb" "${work}/ok/t.raucb.sha256" "${work}/ok/t.raucb.signing" | sort -u)" = 644
 check grep -Fxq 'unset RAUC_BUNDLE_MKSQUASHFS_ARGS' "${SIGN}"
 if grep -Eq '(docker|podman) ' "${SIGN}"; then bad 'the signing step runs a container'; else ok 'the signing step runs no container'; fi
 
