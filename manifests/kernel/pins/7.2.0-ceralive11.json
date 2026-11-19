@@ -381,7 +381,18 @@
     "date": "2026-11-19T19:49:52Z",
     "pipeline_commit": "d1843b004d6b68e19937c406855d39f2a2d8ea6d"
   },
-  "reproduced": [],
+  "reproduced": [
+    {
+      "builder_image_id": "sha256:a99b12beb3f509a7cc110725f892a20510cb2dc505b9927cae96eef7127c7bac",
+      "cold": true,
+      "compiled": true,
+      "date": "2026-11-19T20:12:52Z",
+      "deb_sha256": "bb38f2c67e6aea4d45cc144060f7316871d5ce23b77ff5552333a33ffdfe32a2",
+      "pipeline_commit": "a9876ac10611499598320d567c467546989e4ce7",
+      "result": "reproduced",
+      "tree": "clean"
+    }
+  ],
   "sha256": {
     "built-modules.txt": "f546c8f87b465b76f29e603d673995b4486e051de6cee35d0204427c8ffce71e",
     "linux-image-7.2.0-ceralive-rk3588_7.2.0-ceralive11_arm64.deb": "bb38f2c67e6aea4d45cc144060f7316871d5ce23b77ff5552333a33ffdfe32a2",
