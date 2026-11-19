@@ -1,0 +1,326 @@
+Package: apt
+Version: 3.0.3
+Installed-Size: 4912
+Maintainer: APT Development Team <deity@lists.debian.org>
+Architecture: arm64
+Replaces: apt-transport-https (<< 1.5~alpha4~), apt-utils (<< 1.3~exp2~)
+Provides: apt-transport-https (= 3.0.3)
+Depends: base-passwd (>= 3.6.1) | adduser, sqv (>= 1.3.0), libapt-pkg7.0 (>= 3.0.3), debian-archive-keyring, libc6 (>= 2.38), libgcc-s1 (>= 3.0), libseccomp2 (>= 2.4.2), libssl3t64 (>= 3.0.0), libstdc++6 (>= 13.1), libsystemd0
+Recommends: ca-certificates
+Suggests: apt-doc, aptitude | synaptic | wajig, dpkg-dev (>= 1.17.2), gnupg | gnupg2 | gnupg1, powermgmt-base
+Conflicts: apt-verify, libnettle8 (<< 3.9.1-2.2~)
+Breaks: apt-transport-https (<< 1.5~alpha4~), apt-utils (<< 1.3~exp2~), aptitude (<< 0.8.10)
+Description: commandline package manager
+Description-md5: 6b534aaa75feaadaa911a5a6e81b66b2
+Tag: admin::package-management, devel::lang:ruby, hardware::storage,
+ hardware::storage:cd, implemented-in::c++, implemented-in::perl,
+ implemented-in::ruby, interface::commandline, network::client,
+ protocol::ftp, protocol::http, protocol::ipv6, role::program,
+ scope::application, scope::utility, suite::debian, use::downloading,
+ use::organizing, use::playing, use::searching, works-with-format::html,
+ works-with::audio, works-with::software:package, works-with::text
+Section: admin
+Priority: required
+Filename: pool/main/a/apt/apt_3.0.3_arm64.deb
+Size: 1361960
+MD5sum: 5371ac3167816a5489f7cc3c6b2e1572
+SHA256: 9d88b95c6a6c9880b1bb40aebe7df3b34a0a160a9430d76fac496512a4cf69a6
+
+Package: libapt-pkg7.0
+Source: apt
+Version: 3.0.3
+Installed-Size: 3643
+Maintainer: APT Development Team <deity@lists.debian.org>
+Architecture: arm64
+Provides: libapt-pkg (= 3.0.3)
+Depends: libbz2-1.0, libc6 (>= 2.38), libgcc-s1 (>= 3.0), liblz4-1 (>= 0.0~r127), liblzma5 (>= 5.1.1alpha+20120614), libssl3t64 (>= 3.0.0), libstdc++6 (>= 14), libsystemd0 (>= 221), libudev1 (>= 183), libxxhash0 (>= 0.8), libzstd1 (>= 1.5.5), zlib1g (>= 1:1.2.2.3)
+Recommends: apt (>= 3.0.3)
+Conflicts: libnettle8 (<< 3.9.1-2.2~)
+Breaks: appstream (<< 0.9.0-3~), apt (<< 1.6~), aptitude (<< 0.8.9), dpkg (<< 1.20.8), libapt-inst1.5 (<< 0.9.9~)
+Description: package management runtime library
+Multi-Arch: same
+Description-md5: 1e225d7f6cafc33f74a452fd5c53755e
+Section: libs
+Priority: optional
+Filename: pool/main/a/apt/libapt-pkg7.0_3.0.3_arm64.deb
+Size: 978112
+MD5sum: 4a0492db883585ee6729796b4c4a6e64
+SHA256: c5aea30677a9c7a56edc92fcba3361f5e8cb31d5cdfedf72fc9d8e4fba150bda
+
+Package: base-files
+Version: 13.8+deb13u7
+Essential: yes
+Installed-Size: 498
+Maintainer: Santiago Vila <sanvila@debian.org>
+Architecture: arm64
+Replaces: base, dpkg (<= 1.15.0), miscutils
+Provides: base, usr-is-merged
+Pre-Depends: awk
+Breaks: debian-security-support (<< 2019.04.25), initscripts (<< 2.88dsf-13.3), sendfile (<< 2.1b.20080616-5.2~)
+Description: Debian base system miscellaneous files
+Multi-Arch: foreign
+Description-md5: 6d16337f57b84c4747f56438355b2395
+Tag: admin::configuring, admin::filesystem, admin::install, admin::login,
+ role::app-data, suite::debian
+Section: admin
+Priority: required
+Filename: pool/main/b/base-files/base-files_13.8+deb13u7_arm64.deb
+Size: 88244
+MD5sum: 06f89b26a1368241bc4abfe0149d03cf
+SHA256: 5330362213dc8b9327a56383104235c269797d5db2fd8688f535298d4c44e4d2
+
+Package: bash
+Source: bash (5.2.37-2)
+Version: 5.2.37-2+b10
+Essential: yes
+Installed-Size: 7359
+Maintainer: Matthias Klose <doko@debian.org>
+Architecture: arm64
+Depends: base-files (>= 2.1.12), debianutils (>= 5.6-0.1)
+Pre-Depends: libc6 (>= 2.38), libtinfo6 (>= 6)
+Recommends: bash-completion
+Suggests: bash-doc
+Description: GNU Bourne Again SHell
+Multi-Arch: foreign
+Homepage: http://tiswww.case.edu/php/chet/bash/bashtop.html
+Description-md5: 3522aa7b4374048d6450e348a5bb45d9
+Tag: admin::TODO, devel::TODO, devel::interpreter, implemented-in::c,
+ interface::shell, interface::text-mode, role::program,
+ scope::application, suite::gnu, uitoolkit::ncurses
+Section: shells
+Priority: required
+Filename: pool/main/b/bash/bash_5.2.37-2+b10_arm64.deb
+Size: 1456340
+MD5sum: c53712fc129927eb5dc7ad53155930db
+SHA256: 9e2d2b3646b250f53be79b6128d9cff5e99cc5ff4a8c84e58efab59ad9bb0ddc
+
+Package: ca-certificates
+Version: 20250419
+Installed-Size: 390
+Maintainer: Julien Cristau <jcristau@debian.org>
+Architecture: all
+Depends: openssl (>= 1.1.1), debconf (>= 0.5) | debconf-2.0
+Enhances: openssl
+Breaks: ca-certificates-java (<< 20121112+nmu1)
+Description: Common CA certificates
+Multi-Arch: foreign
+Description-md5: e867d2a359bea1800b5bff209fc65bd1
+Tag: protocol::ssl, role::app-data, security::authentication
+Section: misc
+Priority: standard
+Filename: pool/main/c/ca-certificates/ca-certificates_20250419_all.deb
+Size: 161704
+MD5sum: ea04777e0779a9e36b0a13bac0e61b4b
+SHA256: ef590f89563aa4b46c8260d49d1cea0fc1b181d19e8df3782694706adf05c184
+
+Package: dnsmasq-base
+Source: dnsmasq
+Version: 2.91-1+deb13u2
+Installed-Size: 1153
+Maintainer: Simon Kelley <simon@thekelleys.org.uk>
+Architecture: arm64
+Replaces: dnsmasq (<< 2.63-1~), dnsmasq-base
+Provides: dnsmasq-base
+Depends: passwd, libc6 (>= 2.38), libdbus-1-3 (>= 1.10), libgmp10 (>= 2:6.3.0+dfsg), libhogweed6t64 (>= 2.4-3), libidn2-0 (>= 2.0.0), libnetfilter-conntrack3 (>= 1.0.1), libnettle8t64 (>= 2.4-3), libnftables1 (>= 1.0.2)
+Recommends: dns-root-data
+Conflicts: dnsmasq-base-lua
+Breaks: dnsmasq (<< 2.63-1~)
+Description: Small caching DNS proxy and DHCP/TFTP server - executable
+Multi-Arch: foreign
+Homepage: https://www.thekelleys.org.uk/dnsmasq/doc.html
+Description-md5: ddc8fa1338def4dac026d945c9533b88
+Tag: admin::boot, admin::configuring, implemented-in::c, interface::daemon,
+ network::server, protocol::dhcp, protocol::dns, protocol::tftp,
+ role::program, scope::utility, use::proxying
+Section: net
+Priority: optional
+Filename: pool/main/d/dnsmasq/dnsmasq-base_2.91-1+deb13u2_arm64.deb
+Size: 483428
+MD5sum: 6b937e1d4dedcaafce4d51543af62abd
+SHA256: 9dd677936f718aeb7afc30d064c7116a7057257f94a522e5ce22f36d1834e5e4
+
+Package: libavcodec61
+Source: ffmpeg
+Version: 7:7.1.5-0+deb13u1
+Installed-Size: 14200
+Maintainer: Debian Multimedia Maintainers <debian-multimedia@lists.debian.org>
+Architecture: arm64
+Depends: libaom3 (>= 3.2.0), libavutil59 (= 7:7.1.5-0+deb13u1), libc6 (>= 2.35), libcairo2 (>= 1.2.4), libcodec2-1.2 (>= 1.2.0), libdav1d7 (>= 1.1.0), libglib2.0-0t64 (>= 2.12.0), libgsm1 (>= 1.0.18), libjxl0.11 (>= 0.8.0), liblzma5 (>= 5.1.1alpha+20120614), libmp3lame0 (>= 3.100), libopenjp2-7 (>= 2.0.0), libopus0 (>= 1.1), librav1e0.7 (>= 0.5.1), librsvg2-2 (>= 2.52.5), libshine3 (>= 3.1.0), libsnappy1v5 (>= 1.2.2), libspeex1 (>= 1.2~), libsvtav1enc2 (>= 2.2.1), libswresample5 (>= 7:7.1.5), libtheoradec1 (>= 1.0), libtheoraenc1 (>= 1.0), libtwolame0 (>= 0.3.10), libva2 (>= 2.9.0), libvorbis0a (>= 1.1.2), libvorbisenc2 (>= 1.1.2), libvpx9 (>= 1.12.0), libwebp7 (>= 1.5.0), libwebpmux3 (>= 1.5.0), libx264-164 (>= 2:0.164.3108+git31e19f9), libx265-215 (>= 4.1), libxvidcore4 (>= 1.2.2), libzvbi0t64 (>= 0.2.35), zlib1g (>= 1:1.2.0)
+Suggests: libcuda1, libnvcuvid1, libnvidia-encode1
+Description: FFmpeg library with de/encoders for audio/video codecs - runtime files
+Multi-Arch: same
+Homepage: https://ffmpeg.org/
+Description-md5: b6405aed870af39811ea887203c50393
+Section: libs
+Priority: optional
+Filename: pool/main/f/ffmpeg/libavcodec61_7.1.5-0+deb13u1_arm64.deb
+Size: 5394940
+MD5sum: bb526d34f2ad5727561067fa98ddd9c0
+SHA256: dca58c157a2a0434b4c371b14b52f7922625147453b3d3cc165a2bb08157b31d
+
+Package: libgdk-pixbuf2.0-common
+Source: gdk-pixbuf
+Version: 2.42.12+dfsg-4+deb13u1
+Installed-Size: 2552
+Maintainer: Debian GNOME Maintainers <pkg-gnome-maintainers@lists.alioth.debian.org>
+Architecture: all
+Description: GDK Pixbuf library - data files
+Multi-Arch: foreign
+Homepage: https://www.gtk.org/
+Description-md5: cd3fff9d184ca859b9cd83a1a6a9e258
+Tag: role::shared-lib
+Section: libs
+Priority: optional
+Filename: pool/main/g/gdk-pixbuf/libgdk-pixbuf2.0-common_2.42.12+dfsg-4+deb13u1_all.deb
+Size: 311852
+MD5sum: 4a155847d916d6db4bb869eb468341ed
+SHA256: 9f0c64e33cf5bb3226a5a6ddf630dd76530596e476e6b47a8b27da444ff43a03
+
+Package: libc6
+Source: glibc
+Version: 2.41-12+deb13u4
+Installed-Size: 23769
+Maintainer: GNU Libc Maintainers <debian-glibc@lists.debian.org>
+Architecture: arm64
+Depends: libgcc-s1
+Recommends: libidn2-0 (>= 2.0.5~)
+Suggests: glibc-doc, debconf | debconf-2.0, libc-l10n, locales, libnss-nis, libnss-nisplus
+Breaks: base-files (<< 13.3~), chrony (<< 4.2-3~), dhcpcd (<< 1:10.1.0-7~), fakechroot (<< 2.19-3.5), firefox (<< 91~), firefox-esr (<< 91~), gnumach-image-1.8-486 (<< 2:1.8+git20210923~), gnumach-image-1.8-486-dbg (<< 2:1.8+git20210923~), gnumach-image-1.8-xen-486 (<< 2:1.8+git20210923~), gnumach-image-1.8-xen-486-dbg (<< 2:1.8+git20210923~), hurd (<< 1:0.9.git20220301-2), libamdhip64-5 (<< 5.7.1-5+b1), libhiprtc-builtins5 (<< 5.7.1-5+b1), librccl1 (<< 5.4.3-3+b1), libswupdate0.1 (<< 2024.12.1+dfsg-1+b3), locales (<< 2.41), locales-all (<< 2.41), lua-swupdate (<< 2024.12.1+dfsg-1+b3), nscd (<< 2.41), pd-scaf (<< 1:0.14.1+darcs20180201-6+b4), postgresql-15-pllua (<< 1:2.0.12-4), postgresql-17-pllua (<< 1:2.0.12-3+b2), python3-iptables (<< 1.0.0-2), python3-mrgingham (<< 1.25-1), python3-onnxruntime (<< 1.20.1+dfsg-2~), sysvinit (<< 3.09-2~), sysvinit-core (<< 3.09-2~), tinydns (<< 1:1.05-14), uwsgi-plugin-pypy3 (<< 0.0.2+b1), valgrind (<< 1:3.19.0-1~)
+Description: GNU C Library: Shared libraries
+Multi-Arch: same
+Homepage: https://www.gnu.org/software/libc/libc.html
+Description-md5: fc3001b0b90a1c8e6690b283a619d57f
+Tag: role::shared-lib
+Section: libs
+Priority: optional
+Filename: pool/main/g/glibc/libc6_2.41-12+deb13u4_arm64.deb
+Size: 2483572
+MD5sum: 52dfbf15cfc7959c048a3a01d8742c48
+SHA256: 8784eda966b189c777a384dac5ce009e8fc9b52d006926c5a013e7fa8aa688cc
+
+Package: libcap2
+Source: libcap2 (1:2.75-10+deb13u1)
+Version: 1:2.75-10+deb13u1+b3
+Installed-Size: 160
+Maintainer: Christian Kastner <ckk@debian.org>
+Architecture: arm64
+Depends: libc6 (>= 2.38)
+Description: POSIX 1003.1e capabilities (library)
+Multi-Arch: same
+Homepage: https://sites.google.com/site/fullycapable/
+Description-md5: cd474c07928607f123b20712016d716e
+Tag: role::shared-lib
+Section: libs
+Priority: optional
+Filename: pool/main/libc/libcap2/libcap2_2.75-10+deb13u1+b3_arm64.deb
+Size: 28568
+MD5sum: 1a23716abe7748d5f71388bb29a17bef
+SHA256: 863aa5b9cdf6f80010b48982d4639126b09a89eeef2c0c5c7be226297c811581
+
+Package: mawk
+Version: 1.3.4.20250131-1
+Installed-Size: 320
+Maintainer: Boyuan Yang <byang@debian.org>
+Architecture: arm64
+Provides: awk
+Depends: libc6 (>= 2.38)
+Description: Pattern scanning and text processing language
+Multi-Arch: foreign
+Homepage: https://invisible-island.net/mawk/
+Description-md5: 05965bfcd1a2333e963d9f1945d161fc
+Tag: devel::interpreter, implemented-in::c, interface::commandline,
+ role::program, scope::utility, use::filtering, use::scanning,
+ works-with::text
+Section: interpreters
+Priority: required
+Filename: pool/main/m/mawk/mawk_1.3.4.20250131-1_arm64.deb
+Size: 133820
+MD5sum: 47cd68bdaf2ade91f27a2fc1ffd9c313
+SHA256: 0ab946ff4b8a34d93f81727957612f290c86cd0db39e849dc0ae5e3f3a9563d6
+
+Package: tzdata
+Version: 2026c-0+deb13u1
+Installed-Size: 1358
+Maintainer: GNU Libc Maintainers <debian-glibc@lists.debian.org>
+Architecture: all
+Replaces: tzdata-legacy (= 2023c-8), tzdata-legacy (= 2023c-9)
+Provides: tzdata-trixie
+Depends: debconf (>= 0.5) | debconf-2.0
+Breaks: tzdata-legacy (= 2023c-8), tzdata-legacy (= 2023c-9)
+Description: time zone and daylight-saving time data
+Multi-Arch: foreign
+Homepage: https://www.iana.org/time-zones
+Description-md5: a77a3cc9a67658dd7cfdc6547391b8f8
+Tag: role::app-data, use::timekeeping
+Section: localization
+Priority: required
+Filename: pool/main/t/tzdata/tzdata_2026c-0+deb13u1_all.deb
+Size: 264156
+MD5sum: 57b7a59698976d6c0e7e769a049eb3fe
+SHA256: 813b9bbbe14ccda2b24617b8bade0ade4d745957e75921766c153d249886bd4c
+
+Package: tzdata-legacy
+Source: tzdata
+Version: 2026c-0+deb13u1
+Installed-Size: 1251
+Maintainer: GNU Libc Maintainers <debian-glibc@lists.debian.org>
+Architecture: all
+Replaces: tzdata (<< 2024b-3~), tzdata-bookworm, tzdata-bullseye
+Depends: tzdata
+Conflicts: tzdata-bookworm, tzdata-bullseye
+Breaks: tzdata (<< 2024b-3~)
+Description: time zone data for TAI minus ten seconds
+Multi-Arch: foreign
+Homepage: https://www.iana.org/time-zones
+Description-md5: e9abab063129c60dae9d14447e549234
+Section: localization
+Priority: optional
+Filename: pool/main/t/tzdata/tzdata-legacy_2026c-0+deb13u1_all.deb
+Size: 183544
+MD5sum: 54247372c2addd21b2022da74457043c
+SHA256: 2779c2f5e9582fb501c592ec44d1d4421e0add97d25631926673be817a221028
+
+Package: bsdutils
+Source: util-linux (2.41.5-0+deb13u1)
+Version: 1:2.41.5-0+deb13u1
+Essential: yes
+Installed-Size: 553
+Maintainer: Chris Hofstaedtler <zeha@debian.org>
+Architecture: arm64
+Pre-Depends: libc6 (>= 2.38), libsystemd0 (>= 254)
+Recommends: bsdextrautils
+Description: basic utilities from 4.4BSD-Lite
+Multi-Arch: foreign
+Homepage: https://github.com/util-linux/util-linux
+Description-md5: 07a52b485dd8e72c97ccec74c54564a0
+Tag: admin::logging, implemented-in::c, interface::commandline,
+ role::program, scope::utility, suite::bsd,
+ works-with::software:running, works-with::text
+Section: utils
+Priority: required
+Filename: pool/main/u/util-linux/bsdutils_2.41.5-0+deb13u1_arm64.deb
+Size: 109000
+MD5sum: 160cd91cacfb6ac308a9d335805e21c1
+SHA256: 9afcc3e049a66d7f703d092f845c800b767fb9afe9e681e1483eec163aadcb18
+
+Package: zlib1g
+Source: zlib (1:1.3.dfsg+really1.3.1-1)
+Version: 1:1.3.dfsg+really1.3.1-1+b1
+Installed-Size: 181
+Maintainer: Mark Brown <broonie@debian.org>
+Architecture: arm64
+Provides: libz1
+Depends: libc6 (>= 2.17)
+Conflicts: zlib1 (<= 1:1.0.4-7)
+Breaks: libxml2 (<< 2.7.6.dfsg-2), texlive-binaries (<< 2023.20230311.66589-8)
+Description: compression library - runtime
+Multi-Arch: same
+Homepage: http://zlib.net/
+Description-md5: 567f396aeeb2b2b63295099aed237057
+Tag: role::shared-lib
+Section: libs
+Priority: optional
+Filename: pool/main/z/zlib/zlib1g_1.3.dfsg+really1.3.1-1+b1_arm64.deb
+Size: 85116
+MD5sum: 47323069c3fef2f10ccdff2be39964f1
+SHA256: 209aa5cf671e97b9eb0410844fa6df4cae2e75b0c72e7802ab6c8ece13e6ddef

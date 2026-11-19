@@ -87,6 +87,16 @@ tests/fetch-retry-flags.test.sh	shell	unit	default-shell	all build curl retry fl
 tests/fetch-debs-apt-sandbox.test.sh	shell	integration	default-shell	real apt-get against a signed fixture repo, privileged and unprivileged
 tests/debcache.test.sh	shell	integration	default-shell	verified .deb cache: hit/miss/corrupt/eviction plus live concurrency legs
 tests/packages-lock.test.sh	shell	integration	default-shell	verified apt/fetch/generated receipts, source-built kernel and unaccounted-package refusal
+tests/packages-lock-capture.test.sh	shell	integration	default-shell	single-pass Debian receipt lookup matches the per-package lookup on real and edge-case stanzas and reads the index a fixed number of times; re-run, layering, inherited-receipt conflicts, no partial receipts and fail-closed capture
+tests/fixtures/packages-lock-capture/lists/deb.debian.org_debian-debug_dists_trixie-debug_InRelease	fixture	support	not-executed	real trixie arm64 stanzas (or Release headers) read by packages-lock-capture.test.sh
+tests/fixtures/packages-lock-capture/lists/deb.debian.org_debian-debug_dists_trixie-debug_main_binary-arm64_Packages	fixture	support	not-executed	real trixie arm64 stanzas (or Release headers) read by packages-lock-capture.test.sh
+tests/fixtures/packages-lock-capture/lists/deb.debian.org_debian-security_dists_trixie-security_InRelease	fixture	support	not-executed	real trixie arm64 stanzas (or Release headers) read by packages-lock-capture.test.sh
+tests/fixtures/packages-lock-capture/lists/deb.debian.org_debian-security_dists_trixie-security_main_binary-arm64_Packages	fixture	support	not-executed	real trixie arm64 stanzas (or Release headers) read by packages-lock-capture.test.sh
+tests/fixtures/packages-lock-capture/lists/deb.debian.org_debian_dists_trixie-updates_InRelease	fixture	support	not-executed	real trixie arm64 stanzas (or Release headers) read by packages-lock-capture.test.sh
+tests/fixtures/packages-lock-capture/lists/deb.debian.org_debian_dists_trixie-updates_main_binary-arm64_Packages	fixture	support	not-executed	real trixie arm64 stanzas (or Release headers) read by packages-lock-capture.test.sh
+tests/fixtures/packages-lock-capture/lists/deb.debian.org_debian_dists_trixie_InRelease	fixture	support	not-executed	real trixie arm64 stanzas (or Release headers) read by packages-lock-capture.test.sh
+tests/fixtures/packages-lock-capture/lists/deb.debian.org_debian_dists_trixie_main_binary-arm64_Packages	fixture	support	not-executed	real trixie arm64 stanzas (or Release headers) read by packages-lock-capture.test.sh
+tests/fixtures/packages-lock-capture/status	fixture	support	not-executed	real dpkg status stanzas of a built image, read by packages-lock-capture.test.sh
 tests/bsp-auth-contract.test.sh	shell	integration	default-shell	Armbian archive-key set, InRelease identity, per-package SHA-256
 tests/firmware-content.test.sh	shell	unit	default-shell	strict full-firmware archive pin and authenticated-index lockstep
 tests/bsp-package-resolution.test.sh	shell	unit	default-shell	exact BSP package/version resolution and fail-closed misses

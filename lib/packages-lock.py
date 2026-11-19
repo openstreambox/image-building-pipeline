@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import email.utils
 import hashlib
 import json
 import pathlib
@@ -41,7 +42,7 @@ def merge(
     patches_commit: str,
 ) -> None:
     receipts: dict[tuple[str, str, str], dict[str, str]] = {}
-    dates: dict[str, str] = {}
+    layer_dates: dict[str, dict[str, set[str]]] = {}
     receipt_dirs = (root / "usr/lib/ceralive/build-lock", staging / "packages-lock")
     for directory in receipt_dirs:
         if not directory.is_dir():
@@ -61,10 +62,31 @@ def merge(
         for file in sorted(directory.glob("*.dates")):
             for line in file.read_text().splitlines():
                 suite, date = line.split("\t", 1)
-                dates[suite] = date
+                layer_dates.setdefault(file.stem, {}).setdefault(suite, set()).add(date)
 
-    if not dates:
+    # A layer can read several copies of one suite's index (its own apt lists
+    # and mkosi's metadata cache), and layers run minutes apart, so one suite
+    # can carry several Release dates. Keep all of them per layer, and report
+    # the newest per suite as the overall archive state.
+    if not layer_dates:
         raise LockError("no authenticated Debian Release dates were captured")
+    parsed: dict[str, float] = {}
+    for suites in layer_dates.values():
+        for suite_dates in suites.values():
+            for date in suite_dates:
+                try:
+                    parsed[date] = email.utils.parsedate_to_datetime(date).timestamp()
+                except (TypeError, ValueError) as exc:
+                    raise LockError(f"unparseable Release date {date!r}") from exc
+    dates: dict[str, str] = {}
+    by_layer: dict[str, dict[str, list[str]]] = {}
+    for layer, suites in sorted(layer_dates.items()):
+        by_layer[layer] = {}
+        for suite, suite_dates in sorted(suites.items()):
+            ordered = sorted(suite_dates, key=lambda date: (parsed[date], date))
+            by_layer[layer][suite] = ordered
+            if suite not in dates or parsed[ordered[-1]] > parsed[dates[suite]]:
+                dates[suite] = ordered[-1]
     if not epoch.isdecimal():
         raise LockError("invalid SOURCE_DATE_EPOCH")
 
@@ -136,6 +158,7 @@ def merge(
         json.dumps(
             {
                 "debian_release_dates": dates,
+                "debian_release_dates_by_layer": by_layer,
                 "built_at": built_at,
                 "source_date_epoch": int(epoch),
                 "packages": sorted(packages, key=lambda row: (row["name"], row["arch"])),

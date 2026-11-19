@@ -10,13 +10,16 @@ source_dir="${SRCDIR:-${CHROOT_SRCDIR:-}}"
 : "${APT_SUITE_UPDATES:?updates suite must be forwarded by orchestrator}"
 : "${APT_SUITE_SECURITY:?security suite must be forwarded by orchestrator}"
 source "${source_dir}/lib/fetch-debs-auth.sh"
-source "${source_dir}/lib/fetch/index.sh"
 log_error() { printf 'packages lock: %s\n' "$*" >&2; }
 
-receipts=/usr/lib/ceralive/build-lock
+# The tree whose packages are captured. mkosi runs this script inside that tree
+# (mkosi-chroot), so this is empty there and every path below is the chroot's
+# own. tests/packages-lock-capture.test.sh points it at a fixture tree.
+root="${CERALIVE_LOCK_CAPTURE_ROOT:-}"
+receipts="$root/usr/lib/ceralive/build-lock"
 mkdir -p "$receipts"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "$work"; rm -f "$receipts/.publish.tmp"' EXIT
 index="$work/Packages"
 : >"$index"
 shopt -s nullglob
@@ -34,7 +37,7 @@ shopt -s nullglob
 # per-board/per-privilege-domain leaf; the <cache_key> prefix is globbed rather
 # than hardcoded so a future mkosi renaming it does not silently defeat this
 # check.
-apt_lists_dirs=(/var/lib/apt/lists)
+apt_lists_dirs=("$root/var/lib/apt/lists")
 if [[ -n "${CERALIVE_MKOSI_CACHE_DIR:-}" ]]; then
   apt_lists_dirs+=("${source_dir}/${CERALIVE_MKOSI_CACHE_DIR}"/*.metadata.cache/lib/apt/lists)
 fi
@@ -90,18 +93,71 @@ mv "$index_dedup" "$index"
 # .jsonl receipts. It ships in the same directory the .jsonl receipts already
 # do; packages-lock.py only globs *.jsonl, so this file is inert to it.
 excluded_marker="$receipts/excluded.tsv"
-: >>"$excluded_marker"
+output="$receipts/$layer.jsonl"
+dates="$receipts/$layer.dates"
 
+# Everything this run writes goes to $work first and replaces the published
+# files only after the whole capture succeeded, so a failed run leaves the
+# receipts as they were rather than a half-written layer.
+new_output="$work/$layer.jsonl"
+new_dates="$work/$layer.dates"
+new_excluded="$work/excluded.tsv"
+: >"$new_output"
+: >"$new_dates"
+if [[ -f "$excluded_marker" ]]; then cp "$excluded_marker" "$new_excluded"; else : >"$new_excluded"; fi
+
+# A layer's OWN receipt from an earlier run of this script is not "previously
+# accounted for": a second run would then skip every package it verified and
+# leave the receipt empty. mkosi used to run base/mkosi.finalize twice (see
+# tests/mkosi-contract.bats), which shipped an empty base.jsonl and made the
+# platform layer re-verify all of base. Only OTHER layers' receipts count, so a
+# re-run re-verifies and writes the same rows again.
+#
+# accounted[name<TAB>version<TAB>arch] is the SHA256 an earlier layer recorded,
+# or "-" for a package excluded as BSP/first-party (verified elsewhere).
 previous="$work/previous"
 : >"$previous"
 for receipt in "$receipts"/*.jsonl; do
-  [[ -f "$receipt" ]] || continue
-  awk -F'"' '{print $4 "\t" $8 "\t" $12}' "$receipt" >>"$previous"
+  [[ -f "$receipt" && "$receipt" != "$output" ]] || continue
+  awk -F'"' '{print $4 "\t" $8 "\t" $12 "\t" $20}' "$receipt" >>"$previous"
 done
-cat "$excluded_marker" >>"$previous"
-output="$receipts/$layer.jsonl"
-: >"$output"
-dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\t${Status}\n' >"$work/status"
+awk -F'\t' 'NF {print $1 "\t" $2 "\t" $3 "\t-"}' "$new_excluded" >>"$previous"
+declare -A accounted=()
+while IFS= read -r line || [[ -n "$line" ]]; do
+  key="${line%$'\t'*}"
+  sha="${line##*$'\t'}"
+  if [[ -n "${accounted[$key]+x}" && "${accounted[$key]}" != "$sha" && "${accounted[$key]}" != - && "$sha" != - ]]; then
+    accounted["$key"]="!conflict"
+  elif [[ -z "${accounted[$key]+x}" || "${accounted[$key]}" == - ]]; then
+    accounted["$key"]="$sha"
+  fi
+done <"$previous"
+dpkg-query --admindir="$root/var/lib/dpkg" -W -f='${Package}\t${Version}\t${Architecture}\t${Status}\n' >"$work/status"
+
+# Resolve every installed package against the index in ONE pass
+# (auth_lookup_packages: same stanza rule as auth_lookup_package). Looking each
+# package up separately re-read the ~75 MB index once per package, about 9 s
+# each under qemu-user and most of the build's mkosi time.
+#
+# --all returns every matching stanza, so this pass also yields every SHA256
+# the index lists for a package an earlier layer already recorded. A package
+# needs exactly one stanza to get a receipt; a recorded package must not be
+# listed with any other SHA256 (a mirror that no longer lists it is fine).
+awk -F'\t' '$4 ~ / ok installed$/ {print $1 "\t" $2 "\t" $3}' "$work/status" >"$work/wanted"
+declare -A resolved=() digests=() matches=()
+if [[ -s "$index" ]]; then
+  auth_lookup_packages --all "$index" "$work/wanted" >"$work/resolved" || {
+    log_error "$layer: could not read the verified Debian Packages index"
+    exit 1
+  }
+  while IFS=$'\t' read -r r_name r_version r_arch r_filename r_sha r_resolved; do
+    key="$r_name"$'\t'"$r_version"$'\t'"$r_arch"
+    matches["$key"]=$(( ${matches[$key]:-0} + 1 ))
+    digests["$key"]+=" $r_sha"
+    resolved["$key"]="$r_filename"$'\t'"$r_sha"$'\t'"$r_resolved"
+  done <"$work/resolved"
+fi
+
 while IFS=$'\t' read -r name version arch status; do
   [[ "$status" == *' ok installed' ]] || continue
   skip=0
@@ -109,25 +165,35 @@ while IFS=$'\t' read -r name version arch status; do
     [[ "$name" != "$excluded" ]] || skip=1
   done
   if (( skip == 1 )); then
-    printf '%s\t%s\t%s\n' "$name" "$version" "$arch" >>"$excluded_marker"
+    printf '%s\t%s\t%s\n' "$name" "$version" "$arch" >>"$new_excluded"
     continue
   fi
-  if awk -F'\t' -v n="$name" -v v="$version" -v a="$arch" \
-      '$1==n && $2==v && $3==a {found=1} END {exit !found}' "$previous"; then
+  key="$name"$'\t'"$version"$'\t'"$arch"
+  if [[ -n "${accounted[$key]+x}" ]]; then
+    recorded="${accounted[$key]}"
+    [[ "$recorded" != - ]] || continue
+    for listed in ${digests[$key]:-}; do
+      [[ "$recorded" != "!conflict" && "$listed" == "$recorded" ]] && continue
+      log_error "$layer: $name=$version/$arch was recorded by an earlier layer with SHA256 $recorded, but the verified index lists $listed"
+      exit 1
+    done
+    [[ "$recorded" != "!conflict" ]] || {
+      log_error "$layer: earlier layers recorded $name=$version/$arch with different SHA256s"
+      exit 1
+    }
     continue
   fi
-  row="$(index_lookup_optional "$index" "$name" "$version" "$arch")" || {
+  [[ -s "$index" ]] || log_error "$layer: verified Debian Packages index is missing or empty: $index"
+  [[ "${matches[$key]:-0}" -eq 1 ]] || {
     log_error "$layer: newly installed $name=$version/$arch has no verified Debian Packages SHA256"
     exit 1
   }
-  IFS=$'\t' read -r _filename sha resolved_version <<<"$row"
+  IFS=$'\t' read -r _filename sha resolved_version <<<"${resolved[$key]}"
   [[ "$resolved_version" == "$version" && "$sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
   printf '{"name":"%s","version":"%s","arch":"%s","origin":"debian","sha256":"%s"}\n' \
-    "$name" "$version" "$arch" "$sha" >>"$output"
+    "$name" "$version" "$arch" "$sha" >>"$new_output"
 done < "$work/status"
 
-dates="$receipts/$layer.dates"
-: >"$dates"
 for apt_lists_dir in "${apt_lists_dirs[@]}"; do
   for release in "${apt_lists_dir}"/*deb.debian.org*_InRelease; do
     [[ -f "$release" ]] || continue
@@ -139,6 +205,13 @@ for apt_lists_dir in "${apt_lists_dirs[@]}"; do
     esac
     date="$(awk '/^Date: / {sub(/^Date: /, ""); print; exit}' "$release")"
     [[ -n "$date" ]] || { log_error "$layer: missing Release Date for $suite"; exit 1; }
-    printf '%s\t%s\n' "$suite" "$date" >>"$dates"
+    printf '%s\t%s\n' "$suite" "$date" >>"$new_dates"
   done
+done
+
+# Publish: each file is renamed into place inside the receipt directory.
+for published in "$excluded_marker:$new_excluded" "$dates:$new_dates" "$output:$new_output"; do
+  target="${published%%:*}"
+  cp "${published#*:}" "$receipts/.publish.tmp"
+  mv -f "$receipts/.publish.tmp" "$target"
 done

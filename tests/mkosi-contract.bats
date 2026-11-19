@@ -84,11 +84,110 @@ sectioned_keys() {
   }
 }
 
-@test "mkosi-contract: base and platform declare FinalizeScripts=mkosi.finalize" {
-  grep -Fxq 'FinalizeScripts=mkosi.finalize' "$MKOSI_DIR/mkosi.images/base/mkosi.conf"
-  grep -Fxq 'FinalizeScripts=mkosi.finalize' "$MKOSI_DIR/mkosi.images/platform/mkosi.conf"
-  [ -x "$MKOSI_DIR/mkosi.images/base/mkosi.finalize" ] || [ -f "$MKOSI_DIR/mkosi.images/base/mkosi.finalize" ]
-  [ -f "$MKOSI_DIR/mkosi.images/platform/mkosi.finalize" ]
+@test "mkosi-contract: base and platform ship an executable mkosi.finalize" {
+  # mkosi runs a sub-image's mkosi.finalize because of its NAME (the
+  # finalize/finalize.chroot path suffixes), so the file being there and
+  # executable is what makes it run.
+  [ -x "$MKOSI_DIR/mkosi.images/base/mkosi.finalize" ]
+  [ -x "$MKOSI_DIR/mkosi.images/platform/mkosi.finalize" ]
+}
+
+# mkosi adds mkosi.<suffix> from a config's directory to the matching script
+# list on its own, then appends whatever the config lists explicitly, without
+# removing duplicates. FinalizeScripts=mkosi.finalize next to an mkosi.finalize
+# therefore ran the script twice on every build. For base that second run of
+# packages-lock-capture.sh emptied base.jsonl and pushed all 114 base packages
+# onto the platform layer's re-check. The suffix table is the pinned mkosi's
+# (config.py, path_suffixes of each *Scripts= setting).
+#
+# scripts_listed_and_found_by_name <mkosi.conf>... prints
+# "<conf>:<Setting>=<entry>" for every script a config lists that mkosi already
+# adds by name from the same directory.
+scripts_listed_and_found_by_name() {
+  local f dir key value entry base
+  local -a entries
+  local -A suffixes=(
+    [ConfigureScripts]="configure"
+    [SyncScripts]="sync"
+    [PrepareScripts]="prepare prepare.chroot"
+    [BuildScripts]="build build.chroot"
+    [PostInstallationScripts]="postinst postinst.chroot"
+    [FinalizeScripts]="finalize finalize.chroot"
+    [PostOutputScripts]="postoutput"
+    [CleanScripts]="clean"
+  )
+  for f in "$@"; do
+    dir="$(dirname "$f")"
+    while IFS='=' read -r key value; do
+      [[ -n "${suffixes[$key]+x}" ]] || continue
+      IFS=',' read -ra entries <<<"$value"
+      for entry in "${entries[@]}"; do
+        entry="${entry//[[:space:]]/}"
+        for base in ${suffixes[$key]}; do
+          if [[ "$entry" == "mkosi.$base" && -e "$dir/mkosi.$base" ]]; then
+            printf '%s:%s=%s\n' "$f" "$key" "$entry"
+          fi
+        done
+      done
+    done < <(grep -E '^[A-Za-z]+=' "$f")
+  done
+}
+
+@test "mkosi-contract: no mkosi.conf lists a script mkosi already picks up by name" {
+  local -a configs=()
+  local f
+  while read -r f; do configs+=("$PIPELINE_DIR/$f"); done < <(all_mkosi_configs)
+  run scripts_listed_and_found_by_name "${configs[@]}"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ] || {
+    echo "listed AND picked up by name, so mkosi runs it twice: $output" >&2
+    return 1
+  }
+
+  # Negative control: the exact shape that ran base/mkosi.finalize twice.
+  local fake="$BATS_TEST_TMPDIR/fake-image"
+  mkdir -p "$fake"
+  printf '[Content]\nFinalizeScripts=mkosi.finalize\nPostInstallationScripts=other.sh, mkosi.postinst.chroot\n' >"$fake/mkosi.conf"
+  : >"$fake/mkosi.finalize"
+  : >"$fake/mkosi.postinst.chroot"
+  run scripts_listed_and_found_by_name "$fake/mkosi.conf"
+  [ "${lines[0]}" = "$fake/mkosi.conf:FinalizeScripts=mkosi.finalize" ]
+  [ "${lines[1]}" = "$fake/mkosi.conf:PostInstallationScripts=mkosi.postinst.chroot" ]
+  [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "mkosi-contract: the pinned mkosi runs each layer's scripts exactly once" {
+  command -v mkosi >/dev/null 2>&1 || skip "mkosi not on PATH (canonical build is containerized)"
+  local have
+  have="$(mkosi --version 2>/dev/null | awk '{print $NF}')"
+  [ "$have" = "$VERSION_PIN" ] || skip "host mkosi $have != pinned $VERSION_PIN"
+
+  local out="$BATS_TEST_TMPDIR/summary.json"
+  run env BOARD_ID=contract bash -c \
+    "cd '$MKOSI_DIR' && mkosi --architecture=arm64 --json summary >'$out' 2>/dev/null"
+  [ "$status" -eq 0 ]
+  run python3 - "$out" <<'PY'
+import json
+import sys
+
+images = {image["Image"]: image for image in json.load(open(sys.argv[1]))["Images"]}
+problems = []
+for name, image in images.items():
+    for setting in ("PrepareScripts", "BuildScripts", "PostInstallationScripts",
+                    "FinalizeScripts", "PostOutputScripts", "CleanScripts",
+                    "SyncScripts", "ConfigureScripts"):
+        scripts = [str(p) for p in image.get(setting) or []]
+        if len(scripts) != len(set(scripts)):
+            problems.append(f"{name} {setting}: {scripts}")
+# Non-vacuity: the two finalize scripts are still there, once each.
+for name in ("base", "platform"):
+    finalize = [p for p in images[name]["FinalizeScripts"] if str(p).endswith("/mkosi.finalize")]
+    if len(finalize) != 1:
+        problems.append(f"{name} FinalizeScripts: expected one mkosi.finalize, got {finalize}")
+print("\n".join(problems))
+sys.exit(1 if problems else 0)
+PY
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
 }
 
 @test "mkosi-contract: RepartDirectories is declared in [Output], never [Content]" {
