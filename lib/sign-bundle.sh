@@ -237,9 +237,9 @@ sign-check() {
   head="$(GIT_MASTER=1 git -C "${PIPELINE_DIR}" rev-parse HEAD 2>/dev/null)" || head=""
   [[ "${head}" == "${D_COMMIT}" ]] \
     || die "this checkout is at ${head:-no commit}, the build ran ${D_COMMIT}: sign from a fresh clone at that commit"
-  BOARD_ID="${D_BOARD}" write_manifest "${stage}/manifest.expected" "${D_COMPAT}" "${D_VERSION}"
+  BOARD_ID="${D_BOARD}" write_manifest "${stage}/manifest.expected" "${D_COMPAT}" "${D_VERSION}" "${D_COMMIT}"
   cmp -s "${stage}/manifest.expected" "${stage}/content/manifest.raucm" \
-    || die "manifest.raucm is not the verity manifest this pipeline writes for ${D_BOARD} ${D_COMPAT} ${D_VERSION}"
+    || die "manifest.raucm is not the verity manifest this pipeline writes for ${D_BOARD} ${D_COMPAT} ${D_VERSION} ${D_COMMIT}"
   rm -f "${stage}/manifest.expected"
   if [[ "${D_BOARD}" == rock-5b-plus || -e "${stage}/content/layout-check" ]]; then
     [[ "${D_BOARD}" == rock-5b-plus ]] || die "unexpected install hook for board ${D_BOARD}"

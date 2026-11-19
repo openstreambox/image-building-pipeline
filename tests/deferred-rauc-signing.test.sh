@@ -178,6 +178,10 @@ check test -s "${work}/ok/t.raucb"
 check test ! -e "${stage}"
 check test "$(cut -c1-64 "${work}/ok/t.raucb.sha256")" = "$(sha256sum <"${work}/ok/t.raucb" | cut -c1-64)"
 check rauc info -C keyring:check-purpose=codesign --keyring="${keys_a}/root-ca.pem" "${work}/ok/t.raucb"
+# The manifest's [update] build field carries the pipeline commit (the version
+# may be a CalVer that does not name it).
+check test "$(rauc info --output-format=json-2 --keyring="${keys_a}/root-ca.pem" "${work}/ok/t.raucb" 2>/dev/null \
+  | python3 -Ic 'import json,sys; print(json.load(sys.stdin)["update"]["build"])')" = "$(git -C "${repo}" rev-parse HEAD)"
 refuse 'rauc info of the signed bundle under another root' \
   rauc info --keyring="${keys_b}/root-ca.pem" "${work}/ok/t.raucb"
 refuse 'the pseudo-file entry in the signed squashfs' unsquashfs -cat "${work}/ok/t.raucb" leak
@@ -265,6 +269,10 @@ refuse_check 'a non-verity manifest, even with a matching descriptor' plain "$(r
 fresh hook
 printf 'exit 0\n' >>"${work}/hook/t.raucb-content/layout-check"
 refuse_check 'a changed install hook, even with a matching descriptor' hook "$(rewrite hook layout-check)"
+
+fresh build-field
+sed -i "s/^build=.*/build=$(printf 'b%.0s' {1..40})/" "${work}/build-field/t.raucb-content/manifest.raucm"
+refuse_check 'a manifest build field other than the build commit' build-field "$(rewrite build-field manifest.raucm)"
 
 fresh commit
 refuse_check 'a build commit other than this checkout' commit \
