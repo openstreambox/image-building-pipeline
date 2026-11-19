@@ -398,5 +398,7 @@
     "linux-image-7.2.0-ceralive-rk3588_7.2.0-ceralive11_arm64.deb": "bb38f2c67e6aea4d45cc144060f7316871d5ce23b77ff5552333a33ffdfe32a2",
     "resolved.config": "d95f35fdff3eaf0e6318cdcaaa85d2efa916b822f1967ede96d15caa6ee3ee04"
   },
-  "sources": []
+  "sources": [
+    "https://github.com/openstreambox/image-building-pipeline/releases/download/kernel-7.2.0-ceralive11"
+  ]
 }
