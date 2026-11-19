@@ -916,45 +916,58 @@ non-Image payload (fatal), and a re-run (idempotent).
 ## SHA-pinned kernel reuse
 
 A kernel that was built once from pinned inputs does not need to be compiled
-again for every image. `manifests/kernel/pins/<package_version>.json` pins the
-exact bytes of one build (sha256 of the `.deb`, `resolved.config` and
-`built-modules.txt`), the source inputs that produced them (kernel URL, tag and
-commit, patch URL, commit and series, config mode, base and fragment or config
-file digests, package, release, local version, arch), the producer's
-own `kernel-artifact.json` record and the pipeline commit that wrote the pin.
-`lib/kernel/released.sh` handles pins through `lib/kernel/pinned.sh`; neither
-file is a producer input, so adding pins never changes a kernel's fingerprint.
+again for every image. `manifests/kernel/pins/<package_version>.json`
+(format `ceralive-kernel-pin/2`) pins the exact bytes of one cold build (sha256
+of the `.deb`, `resolved.config` and `built-modules.txt`) and every input that
+build used. The inputs are the producer fingerprint's own lists,
+`kernel_input_values` and `kernel_input_files` in `lib/kernel/artifact-cache.sh`:
+the manifest's source, patch, config and builder pins, the variant, package and
+release names, and every input file by path and digest (config fragments, the
+ramoops script and reservation, the builder Dockerfile, the producer scripts
+including the container build script, the verifiers and symbol lists). A new
+producer input therefore reaches the cache key and the pin together. The three
+values only known inside the builder (package closure, compiler banner, kernel
+commit epoch) are in the pinned `kernel-artifact.json` record and are compared
+by `verify`. The pin also records the pipeline commit, the builder image id and
+that the build was cold. `lib/kernel/released.sh` handles pins through
+`lib/kernel/pinned.sh`; neither file is a producer input.
 
-At `[2b/9]`, when a pin exists for the manifest's `package_version`, its source
-block must equal the manifest's current inputs, or the build stops: the manifest
-asks for a different kernel than the pinned one. The pinned bytes are then taken
-from a trusted store without compiling: first the kernel artifact cache (any
-entry whose manifest records the pinned digests, so a producer-code change that
-moved the cache key does not hide a byte-identical kernel), then each base URL
-in the pin's `sources` (HTTPS only, redirects only to HTTPS, so a release-asset
-URL works; `<base>/<file>` for the three files). With
-`CERALIVE_KERNEL_ARTIFACT_CACHE=0` the cache is skipped and only the sources
-are consulted. Every
-candidate is re-hashed against the pin and passes the same four-axis deb and
-Kconfig gates as a fresh build. The stage writes the pinned `kernel-artifact.json`
-with `validated_boards` emptied, so the board gates run as for a build.
+At `[2b/9]`, when a pin exists for the manifest's `package_version`, the
+current inputs must equal the pinned ones, or the build stops: the tree asks
+for a different kernel than the pinned one. Any change to a producer input,
+including producer code, therefore needs a new pin from a new cold build. The
+pinned bytes are then taken from a trusted store without compiling: first the
+kernel artifact cache, looked up by content (skipped with
+`CERALIVE_KERNEL_ARTIFACT_CACHE=0`), then each base URL in the pin's `sources`
+(HTTPS only, redirects only to HTTPS, so a release-asset URL works;
+`<base>/<file>` for the three files; `CERALIVE_KERNEL_PIN_FETCH_TIMEOUT` seconds
+per file, default 1800). Every candidate is re-hashed against the pin and passes
+the same four-axis deb and Kconfig gates as a fresh build. Pin paths build or
+stage into a private directory and publish into `--out` only after the checks,
+so `--out` never holds a kernel that differs from its pin. A production build
+refuses `CERALIVE_KERNEL_PIN_DIR` and uses the in-tree pin.
 
 `CERALIVE_KERNEL_PIN` selects the policy:
 
 - `auto` (default): stage the pinned bytes; if no store has them, compile and
   stop unless the result equals the pin.
 - `require`: release builds. Stage the pinned bytes or stop; never compile.
-- `verify`: the periodic proof that the kernel still builds. Always compile and
-  stop unless the result equals the pin. Run it cold:
-  `CERALIVE_KERNEL_PIN=verify CERALIVE_KERNEL_ARTIFACT_CACHE=0
-  CERALIVE_KERNEL_CACHE_DIR=<empty dir> ./build <family> --kernel-only`.
+- `verify`: the periodic proof that the kernel still builds. Always a cold
+  compile (the artifact cache is switched off and a fresh ccache is used; a
+  `--ccache-dir` is refused), which must reproduce the pinned bytes and the
+  pinned builder record. It writes `kernel-pin-verify.json` next to the kernel;
+  `CERALIVE_KERNEL_PIN_RECORD=1` also appends the run to the pin's `reproduced`
+  list (committed inputs only). Example:
+  `CERALIVE_KERNEL_PIN=verify ./build rk3588 --kernel-only`.
+- `write`: create the pin. Refuses an existing pin and any uncommitted or
+  modified input, then compiles cold and writes the pin from that build.
+  `CERALIVE_KERNEL_PIN_SOURCES` (space-separated HTTPS base URLs) fills
+  `sources`. Commit the pin together with a second cold `verify` run recorded
+  in `reproduced`.
 - `0`: ignore pins.
 
-To pin a kernel, build it cold with `--kernel-only`, then run
-`lib/kernel/released.sh --board <board> --write-pin <kernel-only output dir>
-[--pin-source <https base URL>]...` in the resolved manifest environment and
-commit the JSON. `tests/kernel-pin.test.sh` runs these paths through the real
-entrypoint with only the compiler boundary stubbed.
+`tests/kernel-pin.test.sh` runs these paths through the real entrypoint with
+only the compiler boundary stubbed.
 
 ## Released kernel reuse [EXISTS]
 
