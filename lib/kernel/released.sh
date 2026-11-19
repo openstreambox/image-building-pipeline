@@ -2,6 +2,8 @@
 # Release admission/reuse entrypoint around the byte-frozen kernel producer.
 # shellcheck shell=bash
 # shellcheck disable=SC2154
+# shellcheck source=pinned.sh
+source "$(dirname "${BASH_SOURCE[0]}")/pinned.sh"
 
 kernel_fingerprint_from() (
   local metadata="$1" recorded_base
@@ -66,8 +68,8 @@ PY
 )
 
 kernel_release_main() {
-  local board="" out_dir="" fingerprint_from="" reuse_deb=""
-  local -a producer_args=()
+  local board="" out_dir="" fingerprint_from="" reuse_deb="" write_pin=""
+  local -a producer_args=() pin_sources=()
   while (( $# )); do
     case "$1" in
       --board) board="${2:-}"; producer_args+=("$1" "${2:-}"); shift 2 ;;
@@ -75,12 +77,14 @@ kernel_release_main() {
       --ccache-dir) producer_args+=("$1" "${2:-}"); shift 2 ;;
       --fingerprint-from) fingerprint_from="${2:-}"; shift 2 ;;
       --reuse-deb) reuse_deb="${2:-}"; shift 2 ;;
+      --write-pin) write_pin="${2:-}"; shift 2 ;;
+      --pin-source) pin_sources+=("${2:-}"); shift 2 ;;
       -h|--help) usage; return 0 ;;
       *) die "unknown kernel release argument: $1" ;;
     esac
   done
   [[ -n "${board}" ]] || die "--board is required"
-  [[ -n "${out_dir}${fingerprint_from}" ]] || die "--out is required"
+  [[ -n "${out_dir}${fingerprint_from}${write_pin}" ]] || die "--out is required"
 
   # Mirror the producer's dynamic input frame without editing its hashed bytes.
   local git_url="${KERNEL_SOURCE_GIT_URL:-}" tag="${KERNEL_SOURCE_TAG:-}"
@@ -110,12 +114,42 @@ kernel_release_main() {
     kernel_reuse_released "${reuse_deb}" "${out_dir}" "${board}"
     return $?
   fi
+  local pin_mode pin_file
+  pin_mode="$(kernel_pin_mode)" || exit 1
+  pin_file="$(kernel_pin_file)"
+  if [[ -n "${write_pin}" ]]; then
+    kernel_pin_write "${write_pin}" "${pin_file}" "${pin_sources[@]}" \
+      || die "cannot write kernel pin ${pin_file} from ${write_pin}"
+    log_success "kernel pin written: ${pin_file}"
+    return 0
+  fi
   if [[ "${DRY_RUN:-0}" != 1 && "${kernel_pkg}" != *-test ]]; then
     python3 "${PIPELINE_DIR}/ci/check-kernel-version-monotonic.py" \
       --published --board "${board}" --version "${package_version}" \
       || die "bump package_version: unpublished local builds must exceed released kernels"
   fi
+  if [[ "${pin_mode}" == 0 || ! -f "${pin_file}" ]]; then
+    [[ "${pin_mode}" != require ]] \
+      || die "CERALIVE_KERNEL_PIN=require but there is no kernel pin ${pin_file}"
+    main "${producer_args[@]}"
+    return
+  fi
+  kernel_pin_check "${pin_file}" \
+    || die "the manifest's kernel inputs differ from the pin ${pin_file}; build cold with CERALIVE_KERNEL_PIN=0 and re-pin, or restore the pinned inputs"
+  if [[ "${DRY_RUN:-0}" == 1 ]]; then
+    log_info "DRY-RUN kernel pin: ${pin_file} matches the manifest (CERALIVE_KERNEL_PIN=${pin_mode}); $( [[ "${pin_mode}" == verify ]] && printf 'would compile and compare' || printf 'would stage the pinned bytes from the artifact cache or the pinned sources' )"
+    main "${producer_args[@]}"
+    return
+  fi
+  if [[ "${pin_mode}" != verify ]] && kernel_pin_stage "${pin_file}" "${out_dir}"; then
+    return 0
+  fi
+  [[ "${pin_mode}" != require ]] \
+    || die "CERALIVE_KERNEL_PIN=require: the pinned kernel ${pin_file} is in no trusted store; refusing to compile"
+  log_info "kernel pin: $( [[ "${pin_mode}" == verify ]] && printf 'verify mode' || printf 'pinned bytes not found in any trusted store' ); compiling and comparing with ${pin_file}"
   main "${producer_args[@]}"
+  kernel_pin_compare "${out_dir}" "${pin_file}" \
+    || die "the compiled kernel is not the pinned kernel (${pin_file}); not staging a kernel that differs from its pin"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
