@@ -29,7 +29,8 @@
 # carry a channel preset while trusting a development or unexpected root.
 # A fork release (CERALIVE_FORK_RELEASE=1) builds in development mode, because
 # production mode takes first-party packages and the kernel from apt.ceralive.tv
-# only; there the pin is mandatory and may not name the development root.
+# only; the flag then requires the pin and the preset, and the pin may not name
+# the development root.
 #
 # Usage (sourced by orchestrate.sh after rauc_pki_resolve):
 #   release_preset_resolve   # exports CERALIVE_UPDATE_PRESET_{SETTINGS,CHANNEL}_B64
@@ -208,12 +209,17 @@ release_preset_resolve() {
   local expected="${CERALIVE_EXPECT_RAUC_ROOT_SHA256:-}"
   CERALIVE_UPDATE_PRESET_SETTINGS_B64=""
   CERALIVE_UPDATE_PRESET_CHANNEL_B64=""
-  if [[ -n "${dir}" || -n "${expected}" ]]; then
-    if [[ "${mode}" != production ]]; then
-      [[ "${mode}" == development && "${CERALIVE_FORK_RELEASE:-}" == 1 ]] \
-        || { release_preset_die "a release root pin or update preset needs CERALIVE_BUILD_MODE=production (or CERALIVE_FORK_RELEASE=1)"; return 1; }
-      release_preset_check_fork_release "${expected}" || return 1
-    fi
+  # The flag is checked on its own: a fork release without its pin and preset
+  # would otherwise build quietly on the development keys.
+  if [[ -n "${CERALIVE_FORK_RELEASE:-}" ]]; then
+    [[ "${CERALIVE_FORK_RELEASE}" == 1 && "${mode}" == development ]] \
+      || { release_preset_die "CERALIVE_FORK_RELEASE must be 1 and needs CERALIVE_BUILD_MODE=development"; return 1; }
+    [[ -n "${dir}" ]] \
+      || { release_preset_die "CERALIVE_FORK_RELEASE=1 needs CERALIVE_UPDATE_PRESET_DIR"; return 1; }
+    release_preset_check_fork_release "${expected}" || return 1
+  elif [[ ( -n "${dir}" || -n "${expected}" ) && "${mode}" != production ]]; then
+    release_preset_die "a release root pin or update preset needs CERALIVE_BUILD_MODE=production (or CERALIVE_FORK_RELEASE=1)"
+    return 1
   fi
   if [[ -n "${dir}" && -z "${expected}" ]]; then
     release_preset_die "an update preset needs CERALIVE_EXPECT_RAUC_ROOT_SHA256 (pin the root the channel is signed under)"

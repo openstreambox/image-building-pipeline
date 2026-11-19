@@ -5,8 +5,9 @@
 #
 # Proves, offline and with throwaway certificates generated per run:
 #   * an unflagged build is unchanged: no pin, no preset, empty payloads;
-#   * a fork release (CERALIVE_FORK_RELEASE=1, development mode) needs the pin
-#     and refuses a pin on the repository's development root;
+#   * a fork release (CERALIVE_FORK_RELEASE=1, development mode only) needs the
+#     pin and the preset, even alone or with an empty pin, and refuses a pin on
+#     the repository's development root;
 #   * a preset is refused outside production, without a root pin, with a
 #     keyring that is not exactly the pinned root, or with a file that the
 #     updater's strict schema would refuse;
@@ -87,16 +88,39 @@ resolve() { # env assignments..., then runs release_preset_resolve and prints th
     CERALIVE_UPDATE_PRESET_DIR="$T/preset"
   [ "$status" -ne 0 ]
   [[ "$output" == *"needs CERALIVE_EXPECT_RAUC_ROOT_SHA256"* ]]
-  # Any other flag value is refused.
+  # Any other flag value is refused, with or without a pin.
   resolve CERALIVE_BUILD_MODE=development CERALIVE_FORK_RELEASE=yes RAUC_KEYRING_FILE="$T/root.pem" \
     CERALIVE_EXPECT_RAUC_ROOT_SHA256="$ROOT_SHA"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"needs CERALIVE_BUILD_MODE=production"* ]]
+  [[ "$output" == *"must be 1"* ]]
+  resolve CERALIVE_BUILD_MODE=development CERALIVE_FORK_RELEASE=yes RAUC_KEYRING_FILE="$T/root.pem"
+  [ "$status" -ne 0 ]
+  # The pin without a preset is refused too.
+  resolve CERALIVE_BUILD_MODE=development CERALIVE_FORK_RELEASE=1 RAUC_KEYRING_FILE="$T/root.pem" \
+    CERALIVE_EXPECT_RAUC_ROOT_SHA256="$ROOT_SHA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"needs CERALIVE_UPDATE_PRESET_DIR"* ]]
+  # The flag only belongs to development mode.
+  resolve CERALIVE_BUILD_MODE=production CERALIVE_FORK_RELEASE=1 RAUC_KEYRING_FILE="$T/root.pem" \
+    CERALIVE_EXPECT_RAUC_ROOT_SHA256="$ROOT_SHA" CERALIVE_UPDATE_PRESET_DIR="$T/preset"
+  [ "$status" -ne 0 ]
   # The keyring still has to be exactly the pinned root.
-  resolve CERALIVE_BUILD_MODE=development CERALIVE_FORK_RELEASE=1 RAUC_KEYRING_FILE="$T/other.pem" \
+  resolve CERALIVE_BUILD_MODE=development CERALIVE_FORK_RELEASE=1 RAUC_KEYRING_FILE="$T/other.pem" CERALIVE_UPDATE_PRESET_DIR="$T/preset" \
     CERALIVE_EXPECT_RAUC_ROOT_SHA256="$ROOT_SHA"
   [ "$status" -ne 0 ]
   [[ "$output" == *"is not the expected release root"* ]]
+}
+
+@test "a fork release flag alone, or with an empty pin, never builds on the development keys" {
+  resolve CERALIVE_BUILD_MODE=development CERALIVE_FORK_RELEASE=1 RAUC_KEYRING_FILE="$T/root.pem"
+  [ "$status" -ne 0 ]
+  resolve CERALIVE_BUILD_MODE=development CERALIVE_FORK_RELEASE=1 RAUC_KEYRING_FILE="$T/root.pem" \
+    CERALIVE_EXPECT_RAUC_ROOT_SHA256=
+  [ "$status" -ne 0 ]
+  resolve CERALIVE_BUILD_MODE=development CERALIVE_FORK_RELEASE=1 RAUC_KEYRING_FILE="$T/root.pem" \
+    CERALIVE_EXPECT_RAUC_ROOT_SHA256= CERALIVE_UPDATE_PRESET_DIR="$T/preset"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"needs CERALIVE_EXPECT_RAUC_ROOT_SHA256"* ]]
 }
 
 @test "a fork release refuses a pin on the repository's development root" {
@@ -104,11 +128,11 @@ resolve() { # env assignments..., then runs release_preset_resolve and prints th
   [ -s "$dev" ] || skip "no development PKI generated in this checkout"
   dev_sha="$(openssl x509 -in "$dev" -outform DER | sha256sum | cut -d' ' -f1)"
   resolve CERALIVE_BUILD_MODE=development CERALIVE_FORK_RELEASE=1 RAUC_KEYRING_FILE="$dev" \
-    CERALIVE_EXPECT_RAUC_ROOT_SHA256="$dev_sha"
+    CERALIVE_EXPECT_RAUC_ROOT_SHA256="$dev_sha" CERALIVE_UPDATE_PRESET_DIR="$T/preset"
   [ "$status" -ne 0 ]
   [[ "$output" == *"refuses a pin on the development root"* ]]
   resolve CERALIVE_BUILD_MODE=development CERALIVE_FORK_RELEASE=1 RAUC_KEYRING_FILE="$dev" \
-    CERALIVE_EXPECT_RAUC_ROOT_SHA256="${dev_sha^^}"
+    CERALIVE_EXPECT_RAUC_ROOT_SHA256="${dev_sha^^}" CERALIVE_UPDATE_PRESET_DIR="$T/preset"
   [ "$status" -ne 0 ]
 }
 
