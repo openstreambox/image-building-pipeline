@@ -148,6 +148,39 @@ assert row == {'name':'linux-image-test', 'version':'1', 'arch':'arm64',
                'origin':'ceralive-kernel', 'sha256':sys.argv[2]}
 assert row['sha256'] != sys.argv[3], 'stale source-built bytes must not replace the APT digest'
 PY
+# Release dates: a layer lists its own apt lists first and mkosi's older
+# metadata cache after them, and layers run at different times. The lock keeps
+# every date per layer and reports the NEWEST per suite, not whichever line came
+# last (which used to be the cache's older date).
+printf 'trixie\tWed, 23 Sep 2026 00:00:00 UTC\ntrixie-security\tWed, 23 Sep 2026 05:30:00 UTC\ntrixie\tWed, 23 Sep 2026 00:00:00 UTC\ntrixie-security\tWed, 23 Sep 2026 01:00:00 UTC\n' \
+  >"$root/usr/lib/ceralive/build-lock/runtime.dates"
+printf 'trixie\tWed, 23 Sep 2026 00:00:00 UTC\ntrixie-security\tTue, 22 Sep 2026 23:00:00 UTC\n' \
+  >"$root/usr/lib/ceralive/build-lock/base.dates"
+check python3 "$HERE/lib/packages-lock.py" merge "${args[@]}"
+check python3 - "${args[2]}" <<'PY'
+import json, sys
+lock = json.load(open(sys.argv[1]))
+assert lock['debian_release_dates'] == {
+    'trixie': 'Wed, 23 Sep 2026 00:00:00 UTC',
+    'trixie-security': 'Wed, 23 Sep 2026 05:30:00 UTC',
+}, lock['debian_release_dates']
+assert lock['debian_release_dates_by_layer'] == {
+    'base': {'trixie': ['Wed, 23 Sep 2026 00:00:00 UTC'],
+             'trixie-security': ['Tue, 22 Sep 2026 23:00:00 UTC']},
+    'runtime': {'trixie': ['Wed, 23 Sep 2026 00:00:00 UTC'],
+                'trixie-security': ['Wed, 23 Sep 2026 01:00:00 UTC', 'Wed, 23 Sep 2026 05:30:00 UTC']},
+}, lock['debian_release_dates_by_layer']
+PY
+cp "$root/usr/lib/ceralive/build-lock/base.dates" "$work/base.dates.saved"
+printf 'trixie\tnot a date\n' >"$root/usr/lib/ceralive/build-lock/base.dates"
+if python3 "$HERE/lib/packages-lock.py" merge "${args[@]}" >"$work/error" 2>&1; then
+  bad 'unparseable Release date was accepted'
+else
+  ok 'unparseable Release date refused'
+fi
+check grep -q 'unparseable Release date' "$work/error"
+cp "$work/base.dates.saved" "$root/usr/lib/ceralive/build-lock/base.dates"
+
 printf 'Package: genuinely-unaccounted\nStatus: install ok installed\nArchitecture: arm64\nVersion: 9\n\n' >>"$root/var/lib/dpkg/status"
 if python3 "$HERE/lib/packages-lock.py" merge "${args[@]}" >"$work/error" 2>&1; then
   bad 'novel unaccounted package was accepted'
