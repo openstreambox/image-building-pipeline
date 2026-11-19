@@ -24,21 +24,31 @@ kernel_artifact_cache_root() {
   fi
 }
 
-kernel_input_fingerprint() {
+# The producer's inputs, defined ONCE. The cache key (below) and the kernel pin
+# check (lib/kernel/pinned.sh) both read these two lists, so a new input cannot
+# reach one and miss the other.
+#
+# kernel_input_values — NUL-separated name/value pairs for every scalar input
+# that is known before the builder container runs. The three that are only known
+# inside it (builder package closure, compiler banner, kernel commit epoch) are
+# added by the fingerprint itself.
+kernel_input_values() {
+  printf '%s\0' \
+    git_url "${git_url}" tag "${tag}" commit "${commit}" \
+    patches_git_url "${patches_url}" patches_commit "${patches_commit}" \
+    patches_series "${patches_series}" config_mode "${config_mode}" \
+    defconfig_base "${defconfig_base}" config_git_url "${config_git_url}" \
+    config_commit "${config_commit}" config_path "${config_path}" \
+    builder_image "${builder_image}" variant "${KERNEL_VARIANT:-default}" \
+    arch "${arch}" package "${kernel_pkg}" kernel_release "${kernel_release}" \
+    local_version "${local_version}" package_version "${package_version}"
+}
+
+# kernel_input_files — every file the producer's output depends on, one path per
+# line: the config fragments in merge order, then the fixed set.
+kernel_input_files() {
   local file
-  {
-    printf '%s\0' 'kernel-input-v2' "${git_url}" "${tag}" "${commit}" \
-      "${patches_url}" "${patches_commit}" "${patches_series}" \
-      "${config_mode}" "${defconfig_base}" "${config_git_url}" \
-      "${config_commit}" "${config_path}" "${builder_image}" \
-      "${builder_packages}" "${builder_compiler}" "${KERNEL_VARIANT:-default}" "${arch}" \
-      "${kernel_pkg}" "${kernel_release}" "${local_version}" \
-      "${package_version}" "${epoch}"
-    for file in "${fragments[@]}"; do
-      printf '%s\0' "${file#"${PIPELINE_DIR}/"}"
-      sha256sum "${file}" | cut -d' ' -f1
-    done
-    for file in "${absent_list:-}" \
+  for file in "${fragments[@]}" "${absent_list:-}" \
       "${HERE}/build-kernel.sh" "${KERNEL_LIB_DIR}/config.sh" \
       "${KERNEL_LIB_DIR}/checkout.sh" "${KERNEL_LIB_DIR}/builder.sh" \
       "${KERNEL_LIB_DIR}/package.sh" "${KERNEL_LIB_DIR}/artifact-cache.sh" \
@@ -55,10 +65,21 @@ kernel_input_fingerprint() {
       "${PIPELINE_DIR}/manifests/kernel/required-symbols.list" \
       "${PIPELINE_DIR}/manifests/kernel/forbidden-symbols.list" \
       "${KERNEL_BUILDER_DOCKERFILE}"; do
-      [[ -n "${file}" ]] || continue
+    [[ -n "${file}" ]] && printf '%s\n' "${file}"
+  done
+}
+
+kernel_input_fingerprint() {
+  local file
+  {
+    printf '%s\0' 'kernel-input-v3'
+    kernel_input_values
+    printf '%s\0' builder_packages "${builder_packages}" builder_compiler "${builder_compiler}" \
+      epoch "${epoch}"
+    while IFS= read -r file; do
       printf '%s\0' "${file#"${PIPELINE_DIR}/"}"
       sha256sum "${file}" | cut -d' ' -f1
-    done
+    done < <(kernel_input_files)
   } | sha256sum | cut -d' ' -f1
 }
 kernel_artifact_cache_key() {

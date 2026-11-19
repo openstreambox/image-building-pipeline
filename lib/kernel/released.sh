@@ -2,6 +2,8 @@
 # Release admission/reuse entrypoint around the byte-frozen kernel producer.
 # shellcheck shell=bash
 # shellcheck disable=SC2154
+# shellcheck source=pinned.sh
+source "$(dirname "${BASH_SOURCE[0]}")/pinned.sh"
 
 kernel_fingerprint_from() (
   local metadata="$1" recorded_base
@@ -65,14 +67,28 @@ PY
   log_success "reused authenticated APT kernel ${kernel_pkg}=${package_version}; no compilation"
 )
 
+# kernel_pin_cold_build <dir> — the producer, cold: no artifact cache, a fresh
+# ccache that is removed afterwards. A caller-supplied ccache would make the
+# proof warm, so it is refused.
+# The producer runs in a subshell so that its die/exit returns here and the
+# caller can remove its private directories.
+kernel_pin_cold_build() {
+  local out="$1" ccache rc=0
+  ccache="$(mktemp -d "${TMPDIR:-/tmp}/kernel-cold-ccache.XXXXXXXX")" || return 1
+  log_info "kernel pin: COLD build for ${pin_mode} (CERALIVE_KERNEL_ARTIFACT_CACHE=0, fresh ccache ${ccache})"
+  ( CERALIVE_KERNEL_ARTIFACT_CACHE=0 main --board "${board}" --out "${out}" --ccache-dir "${ccache}" ) || rc=$?
+  rm -rf -- "${ccache}" || log_warn "could not remove the cold ccache ${ccache}"
+  return "${rc}"
+}
+
 kernel_release_main() {
-  local board="" out_dir="" fingerprint_from="" reuse_deb=""
+  local board="" out_dir="" fingerprint_from="" reuse_deb="" ccache_arg=""
   local -a producer_args=()
   while (( $# )); do
     case "$1" in
       --board) board="${2:-}"; producer_args+=("$1" "${2:-}"); shift 2 ;;
       --out) out_dir="${2:-}"; producer_args+=("$1" "${2:-}"); shift 2 ;;
-      --ccache-dir) producer_args+=("$1" "${2:-}"); shift 2 ;;
+      --ccache-dir) ccache_arg="${2:-}"; producer_args+=("$1" "${2:-}"); shift 2 ;;
       --fingerprint-from) fingerprint_from="${2:-}"; shift 2 ;;
       --reuse-deb) reuse_deb="${2:-}"; shift 2 ;;
       -h|--help) usage; return 0 ;;
@@ -110,12 +126,86 @@ kernel_release_main() {
     kernel_reuse_released "${reuse_deb}" "${out_dir}" "${board}"
     return $?
   fi
+  local pin_mode pin_file
+  pin_mode="$(kernel_pin_mode)" || exit 1
+  pin_file="$(kernel_pin_file)" || exit 1
   if [[ "${DRY_RUN:-0}" != 1 && "${kernel_pkg}" != *-test ]]; then
     python3 "${PIPELINE_DIR}/ci/check-kernel-version-monotonic.py" \
       --published --board "${board}" --version "${package_version}" \
       || die "bump package_version: unpublished local builds must exceed released kernels"
   fi
-  main "${producer_args[@]}"
+  if [[ "${pin_mode}" == 0 || ( "${pin_mode}" == auto && ! -f "${pin_file}" ) ]]; then
+    main "${producer_args[@]}"
+    return
+  fi
+  case "${pin_mode}" in
+    require|verify) [[ -f "${pin_file}" ]] || die "CERALIVE_KERNEL_PIN=${pin_mode} but there is no kernel pin ${pin_file}" ;;
+    write) [[ ! -e "${pin_file}" ]] || die "CERALIVE_KERNEL_PIN=write: ${pin_file} exists; a pin is replaced only by removing it in a reviewed change" ;;
+  esac
+  if [[ "${pin_mode}" == verify || "${pin_mode}" == write ]]; then
+    [[ -z "${ccache_arg}" ]] \
+      || die "CERALIVE_KERNEL_PIN=${pin_mode} builds cold with a fresh ccache; --ccache-dir is refused"
+  fi
+  if [[ "${pin_mode}" == write && "${DRY_RUN:-0}" != 1 ]]; then
+    kernel_pin_tree_clean || die "CERALIVE_KERNEL_PIN=write needs a clean, fully committed checkout"
+  fi
+  if [[ "${pin_mode}" == write || "${CERALIVE_BUILD_MODE:-}" == production ]]; then
+    kernel_pin_manifest_check "${board}" \
+      || die "KERNEL_SOURCE_* differs from the committed manifest; a pin is written and a release is built from the manifest only"
+  fi
+  if [[ "${pin_mode}" != write ]]; then
+    local -a check_args=()
+    [[ "${pin_mode}" != verify ]] || check_args=(--no-reproduction)
+    kernel_pin_check "${pin_file}" "${check_args[@]}" \
+      || die "the kernel inputs differ from the pin ${pin_file}; restore the pinned inputs, or remove the pin and write a new one with CERALIVE_KERNEL_PIN=write"
+  fi
+  if [[ "${DRY_RUN:-0}" == 1 ]]; then
+    log_info "DRY-RUN kernel pin: CERALIVE_KERNEL_PIN=${pin_mode}, pin ${pin_file}"
+    main "${producer_args[@]}"
+    return
+  fi
+
+  # Every pin path builds or stages into a private directory and publishes into
+  # --out only after the pin checks pass, so --out never holds a kernel that
+  # differs from its pin.
+  local staged
+  install -d -m 0755 "${out_dir}" || die "cannot create ${out_dir}"
+  staged="$(mktemp -d "$(dirname "${out_dir}")/.kernel-pin.XXXXXXXX")" || die "cannot create a staging directory"
+  case "${pin_mode}" in
+    require|auto)
+      if kernel_pin_stage "${pin_file}" "${staged}"; then
+        kernel_pin_publish "${staged}" "${out_dir}" || die "cannot publish the pinned kernel into ${out_dir}"
+        return 0
+      fi
+      if [[ "${pin_mode}" == require ]]; then
+        rm -rf -- "${staged}"
+        die "CERALIVE_KERNEL_PIN=require: the pinned kernel ${pin_file} is in no trusted store; refusing to compile"
+      fi
+      log_info "kernel pin: pinned bytes not found in any trusted store; compiling and comparing with ${pin_file}"
+      ( main --board "${board}" --out "${staged}" ${ccache_arg:+--ccache-dir "${ccache_arg}"} ) \
+        || { rm -rf -- "${staged}"; die "kernel build failed for board '${board}'"; }
+      kernel_pin_compare "${staged}" "${pin_file}" \
+        || { rm -rf -- "${staged}"; die "the compiled kernel is not the pinned kernel (${pin_file}); nothing staged"; }
+      ;;
+    verify|write)
+      kernel_pin_cold_build "${staged}" \
+        || { rm -rf -- "${staged}"; die "the cold kernel build failed for board '${board}'"; }
+      if [[ "${pin_mode}" == write ]]; then
+        kernel_pin_tree_clean \
+          || { rm -rf -- "${staged}"; die "CERALIVE_KERNEL_PIN=write: the checkout changed during the build"; }
+        kernel_pin_write "${staged}" "${pin_file}" \
+          || { rm -rf -- "${staged}"; die "cannot write kernel pin ${pin_file}"; }
+        log_success "kernel pin written from a cold build: ${pin_file}"
+      else
+        kernel_pin_compare "${staged}" "${pin_file}" --record \
+          || { rm -rf -- "${staged}"; die "the cold build did not reproduce the pin ${pin_file}; nothing staged"; }
+        kernel_pin_verify_record "${staged}" "${pin_file}" \
+          || { rm -rf -- "${staged}"; die "cannot record the verify run"; }
+        log_success "kernel pin verified by a cold build: ${pin_file}"
+      fi
+      ;;
+  esac
+  kernel_pin_publish "${staged}" "${out_dir}" || die "cannot publish the kernel into ${out_dir}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
