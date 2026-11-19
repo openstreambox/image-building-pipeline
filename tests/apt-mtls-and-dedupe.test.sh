@@ -99,9 +99,14 @@ grep -Fqx 'source "${HERE}/disk/slot-image.sh"' "${BUNDLE_BUILDER}" \
   || fail "verity bundle no longer sources the shared slot-image producer"
 grep -Fqx 'source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/slot-image.sh"' "${FACTORY_SLOT}" \
   || fail "factory slot no longer sources the same slot-image producer"
-bundle_build="$(extract_fn build-bundle "${BUNDLE_BUILDER}")"
+# Inline and deferred signing share one content writer, bundle_fill_content.
+bundle_build="$(extract_fn bundle_fill_content "${BUNDLE_BUILDER}")"
 factory_build="$(extract_fn populate_rootfs_slot "${FACTORY_SLOT}")"
 [[ -n "${bundle_build}" && -n "${factory_build}" ]] || fail 'could not extract the two slot-image callers'
+for bundle_caller in build-bundle bundle-prepare; do
+  grep -Fq 'bundle_fill_content "${rootfs_tree}"' <<<"$(extract_fn "${bundle_caller}" "${BUNDLE_BUILDER}")" \
+    || fail "${bundle_caller} no longer writes its content through bundle_fill_content"
+done
 grep -Fq 'SLOT_IMAGE_LABEL=rootfs make_slot_image "${rootfs_tree}" "${content}/rootfs.ext4"' <<<"${bundle_build}" \
   || fail 'verity bundle no longer passes its rootfs tree to the shared slot-image producer'
 grep -Fq 'SLOT_IMAGE_LABEL="${slot_label}" make_slot_image "${rootfs_tree}" "${rootfs_img}"' <<<"${factory_build}" \

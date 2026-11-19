@@ -653,6 +653,64 @@ board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`) and a
   exception are documented in [the README](../README.md#reproducible-builds).
   Never substitute a plain-format OpenSSL bundle to claim determinism.
 
+### Deferred signing (`CERALIVE_RAUC_SIGNING=deferred`, `sign-bundle.sh`)
+
+By default (`inline`) the build signs the bundle itself, so the signing PKI has
+to be available for the whole run, while package scripts, mkosi and qemu run in
+a privileged container. `CERALIVE_RAUC_SIGNING=deferred` splits that:
+
+1. **The build gets the public root only.** `rauc_keyring_resolve` takes
+   `RAUC_KEYRING_FILE` (explicit in production; `.dev-keys/root-ca.pem` in
+   development), requires it to be exactly one canonical PEM certificate, and
+   refuses any `CERALIVE_RAUC_PKI_DIR`. Stage 8 runs `build-bundle.sh prepare`,
+   which writes the content `rauc bundle` will sign, unsigned:
+   `<ts>.raucb-content/` (`rootfs.ext4`, `manifest.raucm`, `layout-check` on
+   RK3588), a descriptor `<ts>.raucb-content.json` (pipeline commit,
+   compatible, version, `SOURCE_DATE_EPOCH`, the root read back from the slot
+   image's `/etc/rauc/ceralive-keyring.pem`, and the size, mode and SHA-256 of
+   every file) and its digest in `<ts>.raucb-content.json.sha256`. Record the
+   digest and the commit with the build's other outputs. A production or fork
+   release build refuses to prepare from a pipeline tree with tracked changes.
+2. **Sign from a fresh clone, never from the build tree.** The privileged build
+   container mounts the pipeline tree read-write, and the signing scripts run
+   while the key is unlocked. Clone the recorded commit after the build (with
+   `transfer.fsckObjects`), check `HEAD`, and run `lib/sign-bundle.sh` from
+   there. `check` refuses a checkout whose `HEAD` is not the descriptor's
+   `pipeline_commit`.
+3. **Three phases; only `sign` needs the key.**
+   - `check --content <ts>.raucb-content --expect <digest>
+     [--expect-root-sha256 <root>]` (no key) reads the descriptor once, checks
+     it against the digest and copies it into a private 0700 stage (under
+     `TMPDIR`); later phases use only that copy. It copies the content in without
+     following symlinks and verifies the copy (exact set of regular files, size,
+     mode, SHA-256), requires `manifest.raucm` and the install hook to be exactly
+     what this checkout writes, and requires the slot image's keyring to be one
+     root equal to the descriptor's and `--expect-root-sha256`. Prints the stage.
+   - `sign --stage <stage> --expect <digest>` (signing PKI in the environment)
+     re-hashes the stage, requires the signer root to be the image's root, and
+     signs with the host's `rauc` (1.15 or newer) into the stage's empty `out/`,
+     under the build's `SOURCE_DATE_EPOCH` and umask 022. It ignores
+     `RAUC_BUNDLE_MKSQUASHFS_ARGS` and takes `rauc`, `mksquashfs` and `openssl`
+     only from the root-owned system directories (`/usr/local/{s,}bin`,
+     `/usr/{s,}bin`, `/{s,}bin`). No container is involved, so the key stays in
+     the caller's process scope.
+   - `finish --stage <stage> --expect <digest> --out <ts>.raucb` (no key)
+     verifies on the host: `rauc info` under the root read from the image, with
+     the device's default purpose and with codesign; compatible, version,
+     `verity`, adaptive mode and rootfs checksum/size in the signed manifest;
+     the squashfs lists exactly `manifest.raucm`, `rootfs.ext4`,
+     `rootfs.ext4.block-hash-index` (and `layout-check`); `rootfs.ext4` and the
+     hook read back from the squashfs hash to the descriptor. Only then is the
+     bundle copied to `--out`, with `<ts>.raucb.signing` beside it: bundle and
+     descriptor digests, pipeline commit, root, signer, and the `rauc` and
+     `mksquashfs` versions and paths that made it.
+
+   A failure in `sign` or `finish` removes the bundle. Signing with the host's
+   `rauc` and `squashfs-tools` keeps the bundle format, verity and the signer
+   chain; its squashfs is byte-identical to an inline build with the same
+   tools (`tests/deferred-rauc-signing.test.sh`), not necessarily to one made
+   in the builder container with a different `squashfs-tools`.
+
 The RAUC signing PKI itself (root/intermediate/leaf tiers, validity, and how a
 leaf or intermediate rotates through the channel without a reflash) is a
 **separate** rotation procedure from the apt credentials in §7 — see
