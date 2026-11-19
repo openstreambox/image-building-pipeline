@@ -74,37 +74,10 @@ EOF
   fi
 }
 
-bundle_container_runtime() {
-  if command -v docker >/dev/null 2>&1; then printf 'docker\n'
-  elif command -v podman >/dev/null 2>&1; then printf 'podman\n'
-  else die "no container runtime for canonical RAUC bundle build"; fi
-}
-
-# The signing half of the container script, shared by the online builder path
-# and the offline signer image. $1 = bundle name, $2 = optional JSON info name.
-# shellcheck disable=SC2016 # Expanded inside the container.
-RAUC_CONTAINER_SIGN_SCRIPT='
-        extra=()
-        [[ -n "${RAUC_BUNDLE_MKSQUASHFS_ARGS:-}" ]] && extra=("--mksquashfs-args=${RAUC_BUNDLE_MKSQUASHFS_ARGS}")
-        rauc bundle --cert=/pki/leaf-signing.pem --key=/pki/leaf-signing.key \
-          --intermediate=/pki/chain.pem "${extra[@]}" /bundle "/out/$1"
-        rauc info -C keyring:check-purpose=codesign \
-          --keyring=/pki/root-ca.pem "/out/$1"
-        if [[ -n "${2:-}" ]]; then
-          rauc info -C keyring:check-purpose=codesign --output-format=json-2 \
-            --keyring=/pki/root-ca.pem "/out/$1" >"/out/$2"
-        fi
-'
-
 # The canonical build already has the builder image; direct/native callers use
 # their local RAUC. Verification uses the same keyring and purpose on both paths.
-# RAUC_SIGNER_IMAGE (set by lib/sign-bundle.sh) selects a prepared image that
-# already holds RAUC: the signer then runs with no network, no capabilities and
-# as the calling user, so the key is never mounted into a container that fetches
-# or installs anything. RAUC_INFO_JSON names a json-2 `rauc info` file to write
-# next to the bundle for the caller's own checks.
 bundle_with_rauc() {
-  local content="$1" out="$2" runtime image out_dir info_name=""
+  local content="$1" out="$2" runtime image out_dir
   # RAUC's verity bundler refuses a squashfs payload <= 4096 bytes (bundle.c:
   # "squashfs size (%llu) must be larger than 4096 bytes" — a single dm-verity
   # block has no hash tree to build). A tiny bundle (e.g. the cert-rotation
@@ -116,26 +89,10 @@ bundle_with_rauc() {
   local -a mksquashfs_opt=()
   [[ -n "${RAUC_BUNDLE_MKSQUASHFS_ARGS:-}" ]] \
     && mksquashfs_opt=("--mksquashfs-args=${RAUC_BUNDLE_MKSQUASHFS_ARGS}")
-  if [[ -n "${RAUC_INFO_JSON:-}" ]]; then
-    [[ "$(dirname "${RAUC_INFO_JSON}")" == "$(dirname "${out}")" ]] \
-      || die "RAUC_INFO_JSON must sit next to the bundle: ${RAUC_INFO_JSON}"
-    info_name="$(basename "${RAUC_INFO_JSON}")"
-  fi
-  if [[ -n "${RAUC_SIGNER_IMAGE:-}" ]]; then
-    runtime="$(bundle_container_runtime)"
-    out_dir="$(dirname "${out}")"
-    assert_no_root_signing rauc bundle --key=/pki/leaf-signing.key
-    "${runtime}" run --rm --network none --cap-drop ALL \
-      --security-opt no-new-privileges --read-only --tmpfs /tmp \
-      --user "$(id -u):$(id -g)" \
-      -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" \
-      -e "RAUC_BUNDLE_MKSQUASHFS_ARGS=${RAUC_BUNDLE_MKSQUASHFS_ARGS:-}" \
-      -v "${content}:/bundle" -v "${out_dir}:/out" \
-      -v "${RAUC_PKI_DIR}:/pki:ro" "${RAUC_SIGNER_IMAGE}" \
-      bash -euo pipefail -c "${RAUC_CONTAINER_SIGN_SCRIPT}" \
-      _ "$(basename "${out}")" "${info_name}"
-  elif [[ -n "${MKOSI_BUILDER_IMAGE:-}" && "${MKOSI_NATIVE:-0}" != 1 ]]; then
-    runtime="$(bundle_container_runtime)"
+  if [[ -n "${MKOSI_BUILDER_IMAGE:-}" && "${MKOSI_NATIVE:-0}" != 1 ]]; then
+    if command -v docker >/dev/null 2>&1; then runtime=docker
+    elif command -v podman >/dev/null 2>&1; then runtime=podman
+    else die "no container runtime for canonical RAUC bundle build"; fi
     image="${MKOSI_BUILDER_IMAGE}"
     out_dir="$(dirname "${out}")"
     # ci/Dockerfile deliberately ships no `rauc` (Debian trixie's is 1.13, which
@@ -165,7 +122,13 @@ bundle_with_rauc() {
         # build-host operation; unsquashfs alone — a Depends: — is enough on
         # the device to INSTALL one), so this builder needs it named explicitly.
         apt-get install -y --no-install-recommends squashfs-tools /rauc-debs/rauc_*.deb /rauc-debs/rauc-service_*.deb >/dev/null
-'"${RAUC_CONTAINER_SIGN_SCRIPT}" _ "$(basename "${out}")" "${info_name}"
+        extra=()
+        [[ -n "${RAUC_BUNDLE_MKSQUASHFS_ARGS:-}" ]] && extra=("--mksquashfs-args=${RAUC_BUNDLE_MKSQUASHFS_ARGS}")
+        rauc bundle --cert=/pki/leaf-signing.pem --key=/pki/leaf-signing.key \
+          --intermediate=/pki/chain.pem "${extra[@]}" /bundle "/out/$1"
+        rauc info -C keyring:check-purpose=codesign \
+          --keyring=/pki/root-ca.pem "/out/$1"
+      ' _ "$(basename "${out}")"
   else
     require_cmd rauc
     local -a sign_cmd=(rauc bundle --cert="${RAUC_LEAF_CERT}" \
@@ -174,47 +137,7 @@ bundle_with_rauc() {
     assert_no_root_signing "${sign_cmd[@]}"
     "${sign_cmd[@]}"
     rauc info "${RAUC_VERIFY_OPTS[@]}" --keyring="${RAUC_ROOT_CA}" "${out}"
-    if [[ -n "${RAUC_INFO_JSON:-}" ]]; then
-      rauc info "${RAUC_VERIFY_OPTS[@]}" --output-format=json-2 \
-        --keyring="${RAUC_ROOT_CA}" "${out}" >"${RAUC_INFO_JSON}"
-    fi
   fi
-}
-
-# bundle_signer_image_prepare — for the containerized path, commit the builder
-# image plus the pinned host-native RAUC pair and squashfs-tools into a local
-# image, so the later signing step needs no network and installs nothing while
-# the key is mounted. Runs WITHOUT any key. Prints "<tag> <image-id>", or
-# nothing on the native path (the signer then uses the host's rauc).
-bundle_signer_image_prepare() {
-  [[ -n "${MKOSI_BUILDER_IMAGE:-}" && "${MKOSI_NATIVE:-0}" != 1 ]] || return 0
-  [[ -n "${RAUC_DEB_DIR:-}" && -d "${RAUC_DEB_DIR}" ]] \
-    || die "RAUC_DEB_DIR is required to prepare the offline RAUC signer image"
-  local runtime base_id debs_sha tag name id
-  runtime="$(bundle_container_runtime)"
-  base_id="$("${runtime}" image inspect --format '{{.Id}}' "${MKOSI_BUILDER_IMAGE}")" \
-    || die "builder image not found: ${MKOSI_BUILDER_IMAGE}"
-  debs_sha="$(cd "${RAUC_DEB_DIR}" && sha256sum rauc_*.deb rauc-service_*.deb | sha256sum | cut -c1-64)" \
-    || die "RAUC .deb pair missing in ${RAUC_DEB_DIR}"
-  tag="ceralive-rauc-signer:$(printf '%s %s' "${base_id}" "${debs_sha}" | sha256sum | cut -c1-16)"
-  if ! "${runtime}" image inspect "${tag}" >/dev/null 2>&1; then
-    name="ceralive-rauc-signer-prep-$$-${RANDOM}"
-    # Runs in a command substitution (subshell): EXIT also covers die().
-    # shellcheck disable=SC2064 # Bind this container name now.
-    trap "${runtime} rm -f ${name} >/dev/null 2>&1 || true" EXIT
-    "${runtime}" run --name "${name}" -v "${RAUC_DEB_DIR}:/rauc-debs:ro" "${MKOSI_BUILDER_IMAGE}" \
-      bash -euo pipefail -c '
-        apt-get update -qq
-        apt-get install -y --no-install-recommends squashfs-tools /rauc-debs/rauc_*.deb /rauc-debs/rauc-service_*.deb >/dev/null
-        rm -rf /var/lib/apt/lists/*
-        rauc --version >/dev/null
-        command -v mksquashfs >/dev/null
-      ' >&2 || die "could not prepare the offline RAUC signer image"
-    "${runtime}" commit "${name}" "${tag}" >/dev/null \
-      || die "could not commit the offline RAUC signer image"
-  fi
-  id="$("${runtime}" image inspect --format '{{.Id}}' "${tag}")" || die "signer image vanished: ${tag}"
-  printf '%s %s\n' "${tag}" "${id}"
 }
 
 # bundle_read_device_keyring <rootfs.ext4> <out-file> — copy the keyring the
@@ -277,14 +200,14 @@ build-bundle() {
 
 # bundle-prepare <board> <rootfs-tree> — deferred signing. Writes the exact
 # content `rauc bundle` will later sign, unsigned, as <ts>.raucb-content/, plus
-# <ts>.raucb-content.json (schema, compatible, version, the root the slot image
-# trusts, the offline signer image, and size/mode/sha256 of every file) and
+# <ts>.raucb-content.json (schema, pipeline commit, compatible, version, the
+# root the slot image trusts, and size/mode/sha256 of every file) and
 # <ts>.raucb-content.json.sha256. That digest is what lib/sign-bundle.sh must be
 # given (--expect) before it signs anything. No signing key is read here.
 bundle-prepare() {
   [[ $# -eq 2 ]] || { usage; die "prepare: expected <board> <rootfs-tree>"; }
   local board="$1" rootfs_tree="$2" compatible version ts out_dir content stage desc
-  local keyring_tmp keyring_sha signer="" signer_tag="" signer_id="" digest
+  local keyring_tmp keyring_sha commit digest
   [[ -n "${board}" && -d "${rootfs_tree}" ]] \
     || die "board and a rootfs directory are required (tar/plain input is not an ext4 slot image)"
   # shellcheck disable=SC2034 # Shared layout helpers read the CLI board dynamically.
@@ -318,18 +241,16 @@ bundle-prepare() {
     die "the slot image trusts root ${keyring_sha}, not the build's keyring ${RAUC_ROOT_SHA256}"
   fi
 
-  signer="$(bundle_signer_image_prepare)"
-  if [[ -n "${signer}" ]]; then
-    signer_tag="${signer%% *}"
-    signer_id="${signer#* }"
-  fi
+  # The commit the signing step must run from (a fresh clone, never this tree).
+  commit="$(GIT_MASTER=1 git -C "${PIPELINE_DIR}" rev-parse HEAD 2>/dev/null)" \
+    || die "deferred signing needs a git checkout: the signing step runs from the same commit"
 
   python3 -I - "${stage}" "${desc}.tmp" "${UNSIGNED_BUNDLE_SCHEMA}" "${board}" \
-    "${compatible}" "${version}" "${ts}" "${keyring_sha}" "${signer_tag}" "${signer_id}" \
+    "${compatible}" "${version}" "${ts}" "${keyring_sha}" "${commit}" \
     "${SOURCE_DATE_EPOCH}" <<'PY' \
     || die "could not write the unsigned bundle descriptor"
 import hashlib, json, os, stat, sys
-stage, out, schema, board, compatible, version, ts, keyring, tag, image_id, epoch = sys.argv[1:]
+stage, out, schema, board, compatible, version, ts, keyring, commit, epoch = sys.argv[1:]
 files = []
 for name in sorted(os.listdir(stage)):
     path = os.path.join(stage, name)
@@ -344,8 +265,7 @@ for name in sorted(os.listdir(stage)):
                   "size": st.st_size, "sha256": h.hexdigest()})
 doc = {"schema": schema, "board": board, "compatible": compatible, "version": version,
        "bundle": f"{ts}.raucb", "device_keyring_sha256": keyring,
-       "signer_image": {"tag": tag, "id": image_id} if image_id else None,
-       "source_date_epoch": int(epoch), "files": files}
+       "pipeline_commit": commit, "source_date_epoch": int(epoch), "files": files}
 with open(out, "x") as f:
     json.dump(doc, f, indent=1, sort_keys=True)
     f.write("\n")
@@ -357,7 +277,7 @@ PY
   rm -f "${keyring_tmp}"
   digest="$(cut -d' ' -f1 <"${desc}.sha256")"
   log_success "unsigned bundle content: ${content} (descriptor sha256 ${digest}, device root ${keyring_sha})"
-  log_info "sign it with: lib/sign-bundle.sh sign --content ${content} --expect ${digest}"
+  log_info "sign it from a fresh clone at ${commit}: lib/sign-bundle.sh check, sign, finish (--expect ${digest})"
   printf '%s\n' "${desc}"
 }
 
