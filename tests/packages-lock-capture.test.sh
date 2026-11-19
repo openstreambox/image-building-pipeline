@@ -18,6 +18,10 @@
 #   layers         later layers skip what earlier receipts and exclusions cover
 #   fail closed    a missing, ambiguous, virtual-only or wrong-arch package, or
 #                  no index at all, still fails the capture
+#   inherited      a package an earlier layer recorded fails the capture when
+#                  the index now lists it with other bytes
+#   no partials    a failed capture leaves the published receipts as they were
+#   one pass       the index is read a fixed number of times, not per package
 #
 # tests/fixtures/packages-lock-capture/ holds verbatim stanzas from the trixie
 # main, -security, -updates and -debug arm64 indexes and the matching dpkg
@@ -459,6 +463,135 @@ capture "$root" base 2>"$work/fail.err" \
   && bad "empty lists: capture succeeded" \
   || { grep -q 'has no verified Debian Packages SHA256' "$work/fail.err" \
          && ok "empty lists: capture fails closed" || bad "empty lists: wrong error: $(cat "$work/fail.err")"; }
+
+# --- an inherited receipt must agree with the index ---------------------------
+
+# An earlier layer recorded demo=1 with one SHA256. If the index this layer
+# reads lists the same version with OTHER bytes (for example its own apt lists
+# disagree with mkosi's metadata cache), the capture fails instead of quietly
+# trusting the earlier receipt. A version the mirror no longer lists at all
+# stays valid, and an index that agrees is fine.
+h1="$(sha demo-old-bytes)"
+h2="$(sha demo-new-bytes)"
+demo_tree() {
+  local root="$1"
+  mkdir -p "$root/var/lib/dpkg" "$root/var/lib/apt/lists" "$root/usr/lib/ceralive/build-lock"
+  cp "$FIXTURE/lists/deb.debian.org_debian_dists_trixie_InRelease" "$root/var/lib/apt/lists/"
+  printf 'Package: demo\nStatus: install ok installed\nArchitecture: arm64\nVersion: 1\n' >"$root/var/lib/dpkg/status"
+  printf '{"name":"demo","version":"1","arch":"arm64","origin":"debian","sha256":"%s"}\n' "$h1" \
+    >"$root/usr/lib/ceralive/build-lock/base.jsonl"
+}
+demo_list() {  # demo_list <root> <package> <sha>... — one stanza per digest
+  local root="$1" package="$2" digest
+  shift 2
+  for digest in "$@"; do
+    printf 'Package: %s\nVersion: 1\nArchitecture: arm64\nFilename: pool/d/%s_1_arm64.deb\nSHA256: %s\n\n' "$package" "$package" "$digest"
+  done >"$root/var/lib/apt/lists/deb.debian.org_debian_dists_trixie_main_binary-arm64_Packages"
+}
+for case in "agree:demo:$h1" "gone:other:$h2" "other:demo:$h2" "both:demo:$h1 $h2"; do
+  IFS=: read -r label package digests <<<"$case"
+  root="$work/inherit-$label"
+  demo_tree "$root"
+  # shellcheck disable=SC2086 # the digests are a word list on purpose
+  demo_list "$root" "$package" $digests
+  capture "$root" platform 2>"$work/inherit.err"
+  rc=$?
+  case "$label" in
+    agree|gone)
+      if [[ "$rc" -eq 0 && ! -s "$root/usr/lib/ceralive/build-lock/platform.jsonl" ]]; then
+        ok "inherited receipt, index $label: accepted, nothing re-recorded"
+      else
+        bad "inherited receipt, index $label: rc=$rc"; cat "$work/inherit.err"
+      fi ;;
+    *)
+      if [[ "$rc" -ne 0 ]] && grep -q 'recorded by an earlier layer with SHA256' "$work/inherit.err"; then
+        ok "inherited receipt, index $label: conflicting SHA256 fails closed"
+      else
+        bad "inherited receipt, index $label: rc=$rc"; cat "$work/inherit.err"
+      fi ;;
+  esac
+done
+
+# Two earlier layers that recorded the same package with different bytes.
+root="$work/inherit-twice"
+demo_tree "$root"
+demo_list "$root" other "$h2"
+printf '{"name":"demo","version":"1","arch":"arm64","origin":"debian","sha256":"%s"}\n' "$h2" \
+  >"$root/usr/lib/ceralive/build-lock/platform.jsonl"
+if capture "$root" runtime 2>"$work/inherit.err"; then
+  bad "inherited receipts that disagree: capture succeeded"
+else
+  grep -q 'earlier layers recorded demo=1/arm64 with different SHA256s' "$work/inherit.err" \
+    && ok "inherited receipts that disagree: capture fails closed" \
+    || { bad "inherited receipts that disagree: wrong error"; cat "$work/inherit.err"; }
+fi
+
+# --- a failed capture publishes nothing ---------------------------------------
+
+root="$work/partial"
+make_tree "$root" "$FIXTURE/status"
+capture "$root" base 2>/dev/null || bad "partial: first capture failed"
+lock_dir="$root/usr/lib/ceralive/build-lock"
+( cd "$lock_dir" && sha256sum ./* ) >"$work/partial.before"
+printf '\nPackage: z-missing\nStatus: install ok installed\nArchitecture: all\nVersion: 1\n' >>"$root/var/lib/dpkg/status"
+if capture "$root" base 2>"$work/partial.err"; then
+  bad "partial: capture with an unverifiable package succeeded"
+elif ( cd "$lock_dir" && sha256sum ./* ) | cmp -s - "$work/partial.before" \
+    && [[ -z "$(find "$lock_dir" -name '.*' ! -name .)" ]]; then
+  ok "partial: a failed re-run leaves the earlier receipts untouched and no temporary file"
+else
+  bad "partial: receipts changed by a failed run"; ls -la "$lock_dir"
+fi
+root="$work/partial-fresh"
+make_tree "$root" "$FIXTURE/status"
+printf '\nPackage: z-missing\nStatus: install ok installed\nArchitecture: all\nVersion: 1\n' >>"$root/var/lib/dpkg/status"
+if capture "$root" platform vendor-bsp 2>/dev/null; then
+  bad "partial-fresh: capture succeeded"
+elif [[ -z "$(find "$root/usr/lib/ceralive/build-lock" -type f)" ]]; then
+  ok "partial: a failed first run publishes no receipt, dates or excluded.tsv"
+else
+  bad "partial-fresh: files left"; find "$root/usr/lib/ceralive/build-lock"
+fi
+
+# --- one index pass, however many packages ------------------------------------
+
+# The point of auth_lookup_packages is that the capture reads the merged index a
+# fixed number of times (once to dedupe it, once to resolve every package), not
+# once per package. The result tests above cannot see that, so count it: common
+# text tools are wrapped to log each run that names the index file, and a
+# per-package lookup through any of them shows up as one run per package.
+spy="$work/spy"
+mkdir -p "$spy"
+for tool in awk mawk gawk grep sed perl python3 cat; do
+  real="$(command -v "$tool")" || continue
+  printf '#!/bin/bash\nfor arg in "$@"; do [[ "$arg" == */Packages ]] && printf "%%s\\n" %s >>"$SCAN_LOG"; done\nexec %q "$@"\n' \
+    "$tool" "$real" >"$spy/$tool"
+  chmod +x "$spy/$tool"
+done
+scan_count() {  # scan_count <root> — index reads during one base capture
+  : >"$work/scans"
+  PATH="$spy:$PATH" SCAN_LOG="$work/scans" capture "$1" base 2>"$work/scan.err" \
+    || { bad "scan count: capture failed"; cat "$work/scan.err" >&2; }
+  wc -l <"$work/scans"
+}
+root="$work/scan-small"
+make_tree "$root" "$FIXTURE/status"
+small="$(scan_count "$root")"
+root="$work/scan-large"
+make_tree "$root" "$FIXTURE/status"
+for n in $(seq 1 40); do
+  printf '\nPackage: bulk%02d\nStatus: install ok installed\nArchitecture: arm64\nVersion: 1\n' "$n" >>"$root/var/lib/dpkg/status"
+  printf 'Package: bulk%02d\nVersion: 1\nArchitecture: arm64\nFilename: pool/b/bulk%02d.deb\nSHA256: %s\n\n' "$n" "$n" "$(sha "bulk$n")" \
+    >>"$root/var/lib/apt/lists/deb.debian.org_debian_dists_trixie_main_binary-arm64_Packages.bulk_Packages"
+done
+large="$(scan_count "$root")"
+[[ "$(wc -l <"$root/usr/lib/ceralive/build-lock/base.jsonl")" -eq 54 ]] \
+  || bad "scan count: the large tree did not record 54 packages"
+if [[ "$small" -eq 2 && "$large" -eq 2 ]]; then
+  ok "index read twice (dedupe + one lookup pass) for 14 and for 54 packages"
+else
+  bad "index read $small times for 14 packages and $large times for 54 (expected 2 and 2)"
+fi
 
 # --- optional: a full-size real index -----------------------------------------
 
