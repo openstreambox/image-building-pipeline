@@ -61,8 +61,8 @@ auth_lookup_package() {
   printf '%s\n' "${rows}"
 }
 
-# auth_lookup_packages <index> <wanted.tsv> — auth_lookup_package for many
-# packages in ONE pass over the index. <wanted.tsv> holds one
+# auth_lookup_packages [--all] <index> <wanted.tsv> — auth_lookup_package for
+# many packages in ONE pass over the index. <wanted.tsv> holds one
 # "package<TAB>version<TAB>arch" line per lookup. For every line whose lookup
 # auth_lookup_package would answer, this prints
 # "package<TAB>version<TAB>arch<TAB>filename<TAB>sha256<TAB>version", in the
@@ -72,11 +72,17 @@ auth_lookup_package() {
 # line, so a caller fails closed on a missing row. One difference: an empty
 # version never matches here (auth_lookup_package would accept any version).
 #
+# --all prints EVERY matching stanza instead (several rows for one wanted line
+# when the index disagrees with itself), so a caller can also check a package
+# it does not look up, such as one an earlier layer already recorded.
+#
 # Why: a per-package scan re-reads the whole Debian index for every installed
 # package, which under qemu-user costs about 9 s per package.
 auth_lookup_packages() {
+  local all=0
+  if [[ "${1:-}" == --all ]]; then all=1; shift; fi
   local index="$1" wanted="$2"
-  awk -v wanted="${wanted}" '
+  awk -v wanted="${wanted}" -v all="${all}" '
     BEGIN {
       FS = "\t"
       while ((rc = (getline line < wanted)) > 0) {
@@ -106,12 +112,12 @@ auth_lookup_packages() {
       if (filename == "" || sha == "") next
       row = filename "\t" sha "\t" ver
       key = pkg SUBSEP ver SUBSEP a
-      if (key in want) { count[key]++; found[key] = row }
+      if (key in want) { count[key]++; found[key, count[key]] = row }
       if (a == "all" && ((pkg SUBSEP ver) in arches)) {
         n = split(arches[pkg SUBSEP ver], list, " ")
         for (j = 1; j <= n; j++) {
           key = pkg SUBSEP ver SUBSEP list[j]
-          count[key]++; found[key] = row
+          count[key]++; found[key, count[key]] = row
         }
       }
     }
@@ -119,10 +125,10 @@ auth_lookup_packages() {
       if (failed) exit 2
       for (i = 1; i <= n_wanted; i++) {
         key = order[i]
-        if ((key in count) && count[key] == 1) {
-          split(key, k, SUBSEP)
-          printf "%s\t%s\t%s\t%s\n", k[1], k[2], k[3], found[key]
-        }
+        if (!(key in count) || (!all && count[key] != 1)) continue
+        split(key, k, SUBSEP)
+        for (j = 1; j <= count[key]; j++)
+          printf "%s\t%s\t%s\t%s\n", k[1], k[2], k[3], found[key, j]
       }
     }
   ' "${index}"
