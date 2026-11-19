@@ -94,6 +94,11 @@ INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-1}"
 source "${RAUC_PKI_CONTRACT_SH}"
 CERALIVE_BUILD_MODE="${CERALIVE_BUILD_MODE:-development}"
 export CERALIVE_BUILD_MODE
+# inline (default): the build signs the RAUC bundle itself and needs the signing
+# PKI for its whole run. deferred: the build gets the PUBLIC keyring only and
+# leaves unsigned bundle content for lib/sign-bundle.sh, a separate short step.
+CERALIVE_RAUC_SIGNING="${CERALIVE_RAUC_SIGNING:-inline}"
+export CERALIVE_RAUC_SIGNING
 CHANNEL="${CHANNEL:-stable}"
 VARIANT="${VARIANT:-standard}"
 # Target userspace suite + its os-release VERSION_ID, from the ONE mapping in
@@ -247,8 +252,17 @@ main() {
   require_cmd tar
   require_cmd flock
   if (( kernel_only == 0 )); then
-    rauc_pki_resolve "${CERALIVE_BUILD_MODE}" "${CERALIVE_RAUC_PKI_DIR:-}" "${RAUC_KEYRING_FILE:-}"
-    export CERALIVE_RAUC_PKI_DIR RAUC_KEYRING_FILE RAUC_ROOT_SHA256
+    case "${CERALIVE_RAUC_SIGNING}" in
+      inline)
+        rauc_pki_resolve "${CERALIVE_BUILD_MODE}" "${CERALIVE_RAUC_PKI_DIR:-}" "${RAUC_KEYRING_FILE:-}"
+        export CERALIVE_RAUC_PKI_DIR RAUC_KEYRING_FILE RAUC_ROOT_SHA256
+        ;;
+      deferred)
+        rauc_keyring_resolve "${CERALIVE_BUILD_MODE}" "${CERALIVE_RAUC_PKI_DIR:-}" "${RAUC_KEYRING_FILE:-}"
+        export RAUC_KEYRING_FILE RAUC_ROOT_SHA256
+        ;;
+      *) die "CERALIVE_RAUC_SIGNING must be inline or deferred, not '${CERALIVE_RAUC_SIGNING}'" ;;
+    esac
     acquire_board_lock "${board}"
     prune_local_conf_install_traps
     prune_local_conf_preflight
