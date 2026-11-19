@@ -56,11 +56,16 @@ assert_no_root_signing() {
 }
 
 write_manifest() {
-  local path="$1" compatible="$2" version="$3"
+  local path="$1" compatible="$2" version="$3" build="${4:-}"
   cat >"${path}" <<EOF
 [update]
 compatible=${compatible}
 version=${version}
+EOF
+  # RAUC's own build-id field: the pipeline commit, shown by `rauc info` and per
+  # slot by `rauc status`, so a CalVer version keeps its provenance.
+  [[ -z "${build}" ]] || printf 'build=%s\n' "${build}" >>"${path}"
+  cat >>"${path}" <<EOF
 
 [bundle]
 format=verity
@@ -150,8 +155,9 @@ bundle_read_device_keyring() {
   [[ -s "${dest}" ]] || die "the slot image has no ${RAUC_DEVICE_KEYRING_PATH}"
 }
 
-# bundle_identity <board> — compatible/version/ts/out_dir for both paths. Sets the
-# caller's locals of the same names (dynamic scope).
+# bundle_identity <board> — compatible/version/build/ts/out_dir for both paths.
+# Sets the caller's locals of the same names (dynamic scope). build is the full
+# pipeline commit, empty outside a git checkout.
 bundle_identity() {
   local board="$1"
   compatible="${COMPATIBLE_STRING:-}"
@@ -160,19 +166,20 @@ bundle_identity() {
   if [[ -z "${version}" ]]; then
     version="$(GIT_MASTER=1 git -C "${PIPELINE_DIR}" rev-parse --short HEAD 2>/dev/null)" || version=""
   fi
+  build="$(GIT_MASTER=1 git -C "${PIPELINE_DIR}" rev-parse HEAD 2>/dev/null)" || build=""
   ts="${BUNDLE_TS:-$(date -u +%Y%m%dT%H%M%SZ)}"
   [[ -n "${version}" ]] || version="${ts}"
   out_dir="${BUNDLE_OUT_DIR:-${IMAGES_DIR}/${board}/bundles}"
   mkdir -p "${out_dir}"
 }
 
-# bundle_fill_content <rootfs-tree> <content-dir> <compatible> <version> — the
-# bundle payload, identical for inline and deferred signing.
+# bundle_fill_content <rootfs-tree> <content-dir> <compatible> <version> <build> —
+# the bundle payload, identical for inline and deferred signing.
 bundle_fill_content() {
-  local rootfs_tree="$1" content="$2" compatible="$3" version="$4"
+  local rootfs_tree="$1" content="$2" compatible="$3" version="$4" build="$5"
   BOARD_ID="${BOARD_ID}" SLOT_IMAGE_LABEL=rootfs make_slot_image "${rootfs_tree}" "${content}/rootfs.ext4" \
     || die "failed to make ext4 rootfs slot image"
-  write_manifest "${content}/manifest.raucm" "${compatible}" "${version}"
+  write_manifest "${content}/manifest.raucm" "${compatible}" "${version}" "${build}"
   if [[ "${BOARD_ID:-}" == rock-5b-plus ]]; then
     install -m 0755 "${PIPELINE_DIR}/mkosi/runtime/ceralive-layout-install-check.sh" "${content}/layout-check"
   fi
@@ -180,7 +187,7 @@ bundle_fill_content() {
 
 build-bundle() {
   [[ $# -eq 2 ]] || { usage; die "expected exactly 2 args, got $#"; }
-  local board="$1" rootfs_tree="$2" compatible version ts out_dir out content
+  local board="$1" rootfs_tree="$2" compatible version build ts out_dir out content
   [[ -n "${board}" && -d "${rootfs_tree}" ]] \
     || die "board and a rootfs directory are required (tar/plain input is not an ext4 slot image)"
   # shellcheck disable=SC2034 # Shared layout helpers read the CLI board dynamically.
@@ -191,7 +198,7 @@ build-bundle() {
   content="$(mktemp -d "${out_dir}/.bundle-content.XXXXXX")"
   trap 'rm -rf "${content}"' RETURN
   out="${out_dir}/${ts}.raucb"
-  bundle_fill_content "${rootfs_tree}" "${content}" "${compatible}" "${version}"
+  bundle_fill_content "${rootfs_tree}" "${content}" "${compatible}" "${version}" "${build}"
   bundle_with_rauc "${content}" "${out}"
   ( cd "${out_dir}" && sha256sum "$(basename "${out}")" >"$(basename "${out}").sha256" )
   log_success "verity adaptive bundle: ${out}"
@@ -206,7 +213,7 @@ build-bundle() {
 # given (--expect) before it signs anything. No signing key is read here.
 bundle-prepare() {
   [[ $# -eq 2 ]] || { usage; die "prepare: expected <board> <rootfs-tree>"; }
-  local board="$1" rootfs_tree="$2" compatible version ts out_dir content stage desc
+  local board="$1" rootfs_tree="$2" compatible version build ts out_dir content stage desc
   local keyring_tmp keyring_sha commit digest
   [[ -n "${board}" && -d "${rootfs_tree}" ]] \
     || die "board and a rootfs directory are required (tar/plain input is not an ext4 slot image)"
@@ -227,7 +234,7 @@ bundle-prepare() {
   # shellcheck disable=SC2064 # Bind these paths now.
   trap "rm -rf '${stage}' '${keyring_tmp}' '${desc}.tmp'" EXIT
   chmod 0755 "${stage}"
-  bundle_fill_content "${rootfs_tree}" "${stage}" "${compatible}" "${version}"
+  bundle_fill_content "${rootfs_tree}" "${stage}" "${compatible}" "${version}" "${build}"
   # Fixed modes, so the record does not depend on the caller's umask.
   chmod 0644 "${stage}/manifest.raucm" "${stage}/rootfs.ext4"
   [[ ! -e "${stage}/layout-check" ]] || chmod 0755 "${stage}/layout-check"

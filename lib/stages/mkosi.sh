@@ -226,7 +226,17 @@ stage_mkosi() {
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   # Bundle VERSION is embedded in manifest.raucm, so it must be deterministic
   # (the filename ts may stay wall-clock — it is not part of the .raucb bytes).
-  build_version="$(git -C "${PIPELINE_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+  # A release build names its OS CalVer, the same value the rootfs carries in
+  # /etc/ceralive/os-release-version, so a slot installed from the bundle shows
+  # that version; the commit stays in the manifest's [update] build field
+  # (lib/build-bundle.sh). Without it the git short SHA stays the default.
+  if [[ -n "${CERALIVE_OS_RELEASE_VERSION:-}" ]]; then
+    [[ "${CERALIVE_OS_RELEASE_VERSION}" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]] \
+      || die "CERALIVE_OS_RELEASE_VERSION must be YYYY.MINOR.PATCH CalVer, got '${CERALIVE_OS_RELEASE_VERSION}'"
+    build_version="${CERALIVE_OS_RELEASE_VERSION}"
+  else
+    build_version="$(git -C "${PIPELINE_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+  fi
   [[ -n "${build_version}" ]] || build_version="$(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y%m%dT%H%M%SZ 2>/dev/null || printf '%s' "${SOURCE_DATE_EPOCH}")"
   rootfs_tree="${MKOSI_DIR}/build/app"
   log_info "[5/9] building image layers with mkosi (${mkosi_arch}) — base → platform → runtime → app"
