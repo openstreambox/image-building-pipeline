@@ -147,10 +147,16 @@ kernel_release_main() {
       || die "CERALIVE_KERNEL_PIN=${pin_mode} builds cold with a fresh ccache; --ccache-dir is refused"
   fi
   if [[ "${pin_mode}" == write && "${DRY_RUN:-0}" != 1 ]]; then
-    kernel_pin_inputs_committed || die "CERALIVE_KERNEL_PIN=write needs every kernel input committed and unmodified"
+    kernel_pin_tree_clean || die "CERALIVE_KERNEL_PIN=write needs a clean, fully committed checkout"
+  fi
+  if [[ "${pin_mode}" == write || "${CERALIVE_BUILD_MODE:-}" == production ]]; then
+    kernel_pin_manifest_check "${board}" \
+      || die "KERNEL_SOURCE_* differs from the committed manifest; a pin is written and a release is built from the manifest only"
   fi
   if [[ "${pin_mode}" != write ]]; then
-    kernel_pin_check "${pin_file}" \
+    local -a check_args=()
+    [[ "${pin_mode}" != verify ]] || check_args=(--no-reproduction)
+    kernel_pin_check "${pin_file}" "${check_args[@]}" \
       || die "the kernel inputs differ from the pin ${pin_file}; restore the pinned inputs, or remove the pin and write a new one with CERALIVE_KERNEL_PIN=write"
   fi
   if [[ "${DRY_RUN:-0}" == 1 ]]; then
@@ -185,8 +191,8 @@ kernel_release_main() {
       kernel_pin_cold_build "${staged}" \
         || { rm -rf -- "${staged}"; die "the cold kernel build failed for board '${board}'"; }
       if [[ "${pin_mode}" == write ]]; then
-        kernel_pin_inputs_committed \
-          || { rm -rf -- "${staged}"; die "CERALIVE_KERNEL_PIN=write needs every kernel input committed and unmodified"; }
+        kernel_pin_tree_clean \
+          || { rm -rf -- "${staged}"; die "CERALIVE_KERNEL_PIN=write: the checkout changed during the build"; }
         kernel_pin_write "${staged}" "${pin_file}" \
           || { rm -rf -- "${staged}"; die "cannot write kernel pin ${pin_file}"; }
         log_success "kernel pin written from a cold build: ${pin_file}"
