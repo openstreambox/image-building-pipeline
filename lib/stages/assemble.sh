@@ -14,6 +14,26 @@
 # Reads from main()'s frame: board, ts, out_dir, artifact, build_version,
 # bsp_dir, rootfs_tree, rauc_build_dir_host.
 # ---------------------------------------------------------------------------
+# bundle_plan_log / bundle_done_log — the [8/9] bundle lines for both signing
+# modes. In deferred mode (CERALIVE_RAUC_SIGNING=deferred) build-bundle.sh
+# writes unsigned content plus its descriptor; lib/sign-bundle.sh signs it later.
+bundle_plan_log() {
+  local bundle_artifact="$1"
+  if [[ "${CERALIVE_RAUC_SIGNING:-inline}" == deferred ]]; then
+    log_info "[8/9] Stage-4 RAUC bundle content → ${bundle_artifact}-content (UNSIGNED, deferred signing, compatible=${COMPATIBLE_STRING:-unset}, device root=${RAUC_ROOT_SHA256:-unset})"
+  else
+    log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR:-unset})"
+  fi
+}
+bundle_done_log() {
+  local bundle_artifact="$1"
+  if [[ "${CERALIVE_RAUC_SIGNING:-inline}" == deferred ]]; then
+    log_success "unsigned bundle content: ${bundle_artifact}-content, descriptor sha256 $(cut -d' ' -f1 <"${bundle_artifact}-content.json.sha256") in ${bundle_artifact}-content.json.sha256; sign it with lib/sign-bundle.sh"
+  else
+    log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"
+  fi
+}
+
 stage_assemble() {
   local raw_artifact=""
   # -------------------------------------------------------------------------
@@ -59,14 +79,14 @@ stage_assemble() {
       # stamped with the same board-specific COMPATIBLE_STRING and timestamp as
       # the .raw, emitted ALONGSIDE it as a verity/adaptive full-slot image.
       local bundle_artifact="${out_dir}/${ts}.raucb"
-      log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
+      bundle_plan_log "${bundle_artifact}"
       CERALIVE_BOOT_PAYLOAD_DIR="${boot_payload_dir}" \
       BUNDLE_VERSION="${build_version}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
         MKOSI_BUILDER_IMAGE="${MKOSI_BUILDER_IMAGE}" MKOSI_NATIVE="${MKOSI_NATIVE:-0}" \
         RAUC_DEB_DIR="${rauc_build_dir_host}" \
         "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${rootfs_tree}" \
         || die "Stage-4 RAUC bundle build failed for board '${board}'"
-      log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"
+      bundle_done_log "${bundle_artifact}"
     else
       log_warn "[8/9] INSTALL_BOOT_BSP=0 — config+package parity build; Stage-4 disk assembly (flashable .raw) deferred to the full device build"
     fi
@@ -100,13 +120,13 @@ stage_assemble() {
       # COMPATIBLE_STRING from the env), so the x86 path mirrors the custom path
       # verbatim — same rootfs tree, same BUNDLE_* env, verity/adaptive image.
       local bundle_artifact="${out_dir}/${ts}.raucb"
-      log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
+      bundle_plan_log "${bundle_artifact}"
       BUNDLE_VERSION="${build_version}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
         MKOSI_BUILDER_IMAGE="${MKOSI_BUILDER_IMAGE}" MKOSI_NATIVE="${MKOSI_NATIVE:-0}" \
         RAUC_DEB_DIR="${rauc_build_dir_host}" \
         "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${rootfs_tree}" \
         || die "Stage-4 RAUC bundle build failed for board '${board}'"
-      log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"
+      bundle_done_log "${bundle_artifact}"
     else
       log_warn "[8/9] INSTALL_BOOT_BSP=0 — config+package parity build; Stage-4 x86 disk assembly (flashable .raw) deferred to the full device build"
     fi

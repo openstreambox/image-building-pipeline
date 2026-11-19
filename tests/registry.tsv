@@ -97,6 +97,7 @@ tests/rauc-pki-contract.test.sh	shell	unit	default-shell	signer root/chain/leaf 
 tests/rauc-source-fetch.test.sh	shell	unit	default-shell	offline exit-56 retries for all RAUC source fetches, bounded exhaustion and digest refusal
 tests/rauc-transition-contract.test.sh	shell	unit	default-shell	verity migration retains compatible, signing chain, and six RAUC writer invariants
 tests/verity-bundle.test.sh	shell	integration	default-shell	real RAUC (whatever is on PATH) verity adaptive fixture plus shipped producer contract
+tests/deferred-rauc-signing.test.sh	shell	integration	default-shell	unsigned build plus separate signing step: keyring-only build, descriptor digest, fail-closed refusals, same squashfs payload as inline signing
 tests/rauc-bundle-arch.test.sh	shell	unit	default-shell	Stage-4 bundle install uses a host-native rauc pair, never the target-arch one, on both Stage-4 adapters
 tests/rauc-post-install-label.test.sh	shell	unit	default-shell	post-install relabel reads each target's own GPT label and fails closed on missing metadata
 tests/update-capabilities.test.sh	shell	unit	default-shell	build-generated update capability schema, UID identities and complete feature set
