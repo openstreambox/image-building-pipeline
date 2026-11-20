@@ -74,9 +74,10 @@ FENCE_DIR = os.environ.get('CERALIVE_POWER_FENCE_DIR', os.path.join(RUN_DIR, 'fe
 KEEP_FINISHED_S = 86400
 FINISHED_STATES = ('failed', 'submitted')
 BOOT_ID_FILE = '/proc/sys/kernel/random/boot_id'
-# After a restart that lost the record of a request, nothing new is admitted
-# until no shutdown and no write has been seen for this long.
-RESOLVE_S = 60
+# Retry delay bounds for restoring the install fence and the update lock of a
+# request whose outcome is unknown.
+RETRY_MIN_S, RETRY_MAX_S = 1, 30
+KNOWN_STATES = ('idle', 'failed', 'admitted', 'waiting', 'stuck', 'submitting', 'submitted', 'uncertain')
 SHUTDOWN_TARGETS = ('poweroff.target', 'reboot.target', 'halt.target', 'kexec.target',
                     'shutdown.target', 'final.target')
 UPDATE_LOCK = os.environ.get('CERALIVE_UPDATE_LOCK_PATH', '/run/lock/ceralive-update.lock')
@@ -99,7 +100,7 @@ MAX_CONNECTIONS = 32
 MAX_PROMPTS = 4
 SO_PEERPIDFD = getattr(socket, 'SO_PEERPIDFD', 77)
 SKIP_INHIBITORS = 1 << 4
-ACTIONS = {'POWEROFF': 'poweroff', 'REBOOT': 'reboot'}
+ACTIONS = {'POWEROFF': 'poweroff', 'REBOOT': 'reboot', 'RECOVER': 'recover'}
 # Errors that say the call may or may not have reached logind.
 UNCERTAIN_ERRORS = ('org.freedesktop.DBus.Error.NoReply', 'org.freedesktop.DBus.Error.Timeout',
                     'org.freedesktop.DBus.Error.TimedOut', 'org.freedesktop.DBus.Error.Disconnected',
@@ -327,9 +328,11 @@ def activation_busy(path=None):
 
 
 def shutdown_in_flight(runner=run):
-    """What says a power action is already under way: logind preparing for
-    shutdown (its delay phase), a queued shutdown job, or the manager stopping.
-    Unreadable answers count."""
+    """What says a power action may be under way: logind preparing for
+    shutdown (its delay phase), a queued shutdown job, or the manager not
+    plainly up. Fails closed: an error or an empty answer counts. It can't see a
+    call still waiting for authorization, so it only gates an operator's
+    explicit recovery, never clears anything by itself."""
     seen = []
     try:
         out = runner(['busctl', '--system', '--timeout=5', 'get-property', 'org.freedesktop.login1',
@@ -344,8 +347,13 @@ def shutdown_in_flight(runner=run):
             seen += [f'{fields[1]} queued' for fields in (line.split() for line in out.stdout.splitlines())
                      if len(fields) > 1 and fields[1] in SHUTDOWN_TARGETS]
         out = runner(['systemctl', 'is-system-running'], 10)
-        if out.stdout.strip() == 'stopping':
+        # Its exit status is nonzero for `degraded` too: only the named states
+        # count, and anything else (also no answer) is not quiet.
+        manager = out.stdout.strip()
+        if manager == 'stopping':
             seen.append('the system is stopping')
+        elif manager not in ('running', 'degraded'):
+            seen.append(f'(manager state: {manager or out.stderr.strip() or "no answer"})')
     except (OSError, subprocess.SubprocessError) as error:
         seen.append(f'(shutdown state unreadable: {error})')
     return seen
@@ -629,6 +637,23 @@ def kept_records(records, boot, now, current=None):
     return {key: value for key, value in records.items() if keep(key, value)}
 
 
+def valid_record(record):
+    """A broker record whose state can be trusted; anything else is treated as
+    unreadable (lost evidence), never as idle."""
+    if not isinstance(record, dict) or not isinstance(record.get('requests', {}), dict):
+        return False
+    state = record.get('state')
+    if state not in KNOWN_STATES:
+        return False
+    if state == 'idle':
+        return True
+    if not isinstance(record.get('id'), str) or not record['id']:
+        return False
+    if state in ACTIVE_STATES and not record.get('cleared'):
+        return record.get('action') in ('poweroff', 'reboot') or (state == 'uncertain' and record.get('action') == 'unknown')
+    return True
+
+
 class Request:
     def __init__(self, conn, now):
         self.conn = conn
@@ -698,12 +723,12 @@ class Committer(threading.Thread):
             c = broker.committed
             if c and c['stage'] == 'failing':
                 return broker.fail(c['failure'])  # not recorded yet: try again
-            if c and c['stage'] == 'recovered':
+            if c and c['stage'] in ('recovered', 'uncertain'):
                 pass
             elif not c or c['stage'] not in ('fence', 'drain'):
                 return False
-        if c['stage'] == 'recovered':
-            return self.settle_recovered(c)
+        if c['stage'] in ('recovered', 'uncertain'):
+            return self.hold_unknown(c)
         if c['stage'] == 'fence':
             put_fence('broker', c['id'])  # raises: retried on the next step
             with broker.lock:
@@ -755,32 +780,51 @@ class Committer(threading.Thread):
                 broker.fail(detail)
         return True
 
-    def settle_recovered(self, c):
-        """A request whose record was lost: it may have reached logind. It
-        keeps its fence and the update lock, and nothing new is admitted, until
-        nothing is shutting down and nothing writes for RESOLVE_S. Then it is
-        recorded as uncertain (never resubmitted) and new requests are taken."""
-        seen = busy_writers(runner=self.runner, check_dpkg='dpkg' not in self.locks)
-        seen += shutdown_in_flight(self.runner)
+    def hold_unknown(self, c):
+        """A request whose outcome is unknown (no answer from logind, or its
+        record lost): it may have reached logind, and nothing observable proves
+        it won't still act. It keeps the install fence and the update lock
+        (restored and retried with backoff until both hold) until the box
+        restarts or an operator clears it with a typed `recover`."""
         broker = self.broker
+        now = self.clock()
+        if now >= c.get('retry_at', 0):
+            missing = []
+            if read_fence('broker') != c['id']:
+                try:
+                    put_fence('broker', c['id'])
+                except OSError as error:
+                    missing.append(f'install fence ({error.strerror or error})')
+            if not self.take_update():
+                missing.append('update lock (an update holds it)')
+            with broker.lock:
+                c['missing'] = missing
+                c['backoff'] = min(RETRY_MAX_S, c.get('backoff', RETRY_MIN_S / 2) * 2) if missing else RETRY_MIN_S / 2
+                c['retry_at'] = now + (c['backoff'] if missing else RETRY_MAX_S)
+            if missing:
+                log(f'request {c["id"]}: still restoring {", ".join(missing)}')
         with broker.lock:
-            if broker.committed is not c:
+            request = c.get('recovering')
+        if request is None:
+            return False
+        seen = shutdown_in_flight(self.runner)
+        with broker.lock:
+            if broker.committed is not c or c.get('recovering') is not request:
                 return False
+            c['recovering'] = None
             if seen:
-                c['quiet_since'] = None
+                broker.answer(request, f'REFUSED a shutdown may be in flight ({", ".join(seen)}); not cleared')
                 return False
-            if c['quiet_since'] is None:
-                c['quiet_since'] = self.clock()
-                return False
-            if self.clock() - c['quiet_since'] < RESOLVE_S:
-                return False
-            detail = f'{c["why"]}; no shutdown or write seen for {RESOLVE_S} s, so new requests are taken again'
-            if not broker.publish('uncertain', detail=detail, replace_unreadable=True):
+            detail = f'{c.get("why", "outcome unknown")}; cleared by an operator, not resubmitted'
+            if not broker.publish('uncertain', detail=detail, replace_unreadable=True, cleared=True):
+                broker.answer(request, 'REFUSED could not record the recovery; not cleared')
                 return False
             broker.state_unreadable = False
             broker.committed = None
             self.release()
             drop_fence('broker')
+            log(f'request {c["id"]} cleared by an operator (uid {request.uid})')
+            broker.answer(request, f'RECOVERED {c["id"]}')
         return True
 
     def run(self):
@@ -872,18 +916,21 @@ class Broker:
             with open(STATE_FILE) as source:
                 record = json.load(source)
         except FileNotFoundError:
-            record = {}
+            record = {'state': 'idle'}  # no record at all; a fence below still counts
         except (OSError, ValueError):
             record = None
-        if not isinstance(record, dict):
+        if not valid_record(record):
             # Never written over: it may hold a request that reached logind.
             self.state_unreadable = True
-            return self.recover_unknown(fence or 'unknown', "the broker's record is unreadable")
+            known = record.get('id') if isinstance(record, dict) and isinstance(record.get('id'), str) else None
+            return self.recover_unknown(fence or known or 'unknown', "the broker's record is unreadable")
         requests = record.get('requests')
         if isinstance(requests, dict):
             self.records = {k: v for k, v in requests.items() if isinstance(v, dict)}
         state = record.get('state')
-        if state in ACTIVE_STATES and record.get('id') and record.get('action') in ('poweroff', 'reboot'):
+        if state in ACTIVE_STATES and not record.get('cleared') and record.get('action') == 'unknown':
+            return self.recover_unknown(record['id'], record.get('why') or "an earlier request's outcome is unknown")
+        if state in ACTIVE_STATES and not record.get('cleared'):
             self.committed = {'id': record['id'], 'action': record['action'], 'origin': record.get('origin', 'unknown'),
                               'since': self.clock(), 'escalated': False}
             if state in ('admitted', 'waiting', 'stuck'):
@@ -898,7 +945,7 @@ class Broker:
                 self.committer.take_update()
                 self.publish('uncertain', detail='the broker restarted after submitting; not resubmitted')
             return
-        if fence is not None and (self.records.get(fence) or {}).get('state') != 'failed':
+        if fence is not None and not self.settled(fence):
             # The fence is written after admission: a request got this far, and
             # its record is gone.
             return self.recover_unknown(fence, 'an install fence survived without its record')
@@ -907,16 +954,31 @@ class Broker:
 
     def recover_unknown(self, request_id, why):
         """Evidence of a request without its record: it may have reached logind.
-        Keep the fence and the update lock, report uncertain (when the record can
-        be written) and admit nothing until settle_recovered clears it."""
+        Keep the fence and the update lock (hold_unknown restores and retries
+        them), report uncertain where the record can be written, and admit
+        nothing until a reboot or an operator's typed recovery."""
         self.committed = {'id': request_id, 'action': 'unknown', 'origin': 'unknown', 'since': self.clock(),
-                          'escalated': False, 'stage': 'recovered', 'why': why, 'quiet_since': None}
-        try:
-            put_fence('broker', request_id)
-        except OSError as error:
-            log(f'install fence not restored: {error}')
-        self.committer.take_update()
-        self.publish('uncertain', detail=f'{why}; nothing new is taken until no shutdown or write is seen for {RESOLVE_S} s')
+                          'escalated': False, 'stage': 'recovered', 'why': why, 'missing': [], 'retry_at': 0}
+        self.publish('uncertain', why=why, detail=f'{why}; held until the box restarts or an operator recovers it')
+        self.committer.hold_unknown(self.committed)
+
+    def settled(self, request_id):
+        record = self.records.get(request_id) or {}
+        return record.get('state') == 'failed' or bool(record.get('cleared'))
+
+    def answer(self, request, line):
+        """A final line for one client, delivered by the I/O thread."""
+        self.outbox.put((request, line))
+        self.outbox.put((request, None))
+        self.poke()
+
+    def unknown_reason(self, c):
+        missing = f'; still restoring {", ".join(c["missing"])}' if c.get('missing') else ''
+        return (f"an earlier power request's outcome is unknown ({c.get('why', 'no answer from the system')}); a "
+                'shutdown may still be in flight. Nothing new is taken until an operator runs '
+                '`ceralive-poweroff --recover` at a terminal, or the box restarts: root `systemctl poweroff` or '
+                '`systemctl reboot`, the power key once the button daemon has stopped, or holding the button until '
+                f'the power cuts{missing}')
 
     def fail(self, detail):
         """A definite failure. The request is let go only once its failure is
@@ -1048,6 +1110,8 @@ class Broker:
             unit = system_unit(pidfd)
         except (PeerError, OSError) as error:
             return self.refuse(request, f'unverifiable caller: {error}')
+        if request.action == 'recover':
+            return self.admit_recovery(request, uid, gid, unit)
         if uid == 0 and unit == BUTTON_UNIT:
             if request.action != 'poweroff':
                 return self.refuse(request, 'the button may only power off')
@@ -1063,10 +1127,29 @@ class Broker:
             # already admitted; it never creates one.
             if self.committed is not None:
                 return self.join_committed(request)
+        what = 'power off' if request.action == 'poweroff' else 'restart'
+        self.prompt(request, pidfd, f'This will {what} the box. A stream or carried connection ends; a running '
+                                    'update finishes first.')
+
+    def admit_recovery(self, request, uid, gid, unit):
+        """`ceralive-poweroff --recover`: an operator at their own terminal clears
+        a request whose outcome is unknown, after typing `recover`."""
+        if unit in (BUTTON_UNIT, CERAUI_UNIT) or not is_operator(uid, gid):
+            return self.refuse(request, 'recovery needs an operator at their own terminal')
+        with self.lock:
+            c = self.committed
+            if not c or c['stage'] not in ('recovered', 'uncertain'):
+                return self.refuse(request, 'nothing to recover')
+            why = c.get('why', 'no answer from the system')
+        self.prompt(request, request.pidfd,
+                    f"An earlier power request's outcome is unknown ({why}). A shutdown may still be in flight. "
+                    'Clearing it lets updates and new power requests go ahead; it is not resubmitted.')
+
+    def prompt(self, request, pidfd, text):
         if len(self.prompts) >= MAX_PROMPTS:
             return self.refuse(request, 'too many confirmations pending')
         try:
-            fd, proc = open_terminal(uid, pidfd)
+            fd, proc = open_terminal(request.uid, pidfd)
         except (PeerError, OSError) as error:
             return self.refuse(request, f'needs your own terminal ({error})')
         rdev = proc['tty_nr']
@@ -1076,10 +1159,7 @@ class Broker:
         self.prompts[rdev] = request
         request.origin = 'terminal'
         request.deadline = self.clock() + PROMPT_S
-        word = request.action
-        what = 'power off' if word == 'poweroff' else 'restart'
-        prompt = (f'\r\nThis will {what} the box. A stream or carried connection ends; a running '
-                  f'update finishes first.\r\nType {word} and press Enter within {PROMPT_S} s: ')
+        prompt = f'\r\n{text}\r\nType {request.action} and press Enter within {PROMPT_S} s: '
         try:
             termios.tcflush(fd, termios.TCIFLUSH)  # input typed before the prompt never counts
             os.write(fd, prompt.encode())
@@ -1118,7 +1198,21 @@ class Broker:
             return self.refuse(request, 'not confirmed')
         self.close_tty(request)
         request.confirmed = True
+        if request.action == 'recover':
+            return self.confirm_recovery(request)
         self.commit(request)
+
+    def confirm_recovery(self, request):
+        """The committer checks that no shutdown is visibly under way, then
+        clears the request and answers."""
+        with self.lock:
+            c = self.committed
+            if not c or c['stage'] not in ('recovered', 'uncertain'):
+                return self.refuse(request, 'nothing to recover')
+            c['recovering'] = request
+            request.deadline = self.clock() + 120
+            self.waiters.append(request)  # answered by the committer
+        self.committer.wake.set()
 
     def join_committed(self, request):
         """Follow the pending request, or refuse. Never creates one."""
@@ -1130,8 +1224,7 @@ class Broker:
                 return self.refuse(request, f'the last request was refused by logind ({c["failure"]}) and could not be '
                                             'recorded yet; nothing is submitted until it is')
             if c['stage'] == 'recovered':
-                return self.refuse(request, f"an earlier request's outcome is unknown ({c['why']}); new requests are "
-                                            f'taken once no shutdown or write is seen for {RESOLVE_S} s')
+                return self.refuse(request, self.unknown_reason(c))
             if c['action'] != request.action:
                 return self.refuse(request, f'{c["action"]} already pending')
             self.send(request, f'PENDING {c["action"]} {c["id"]}')

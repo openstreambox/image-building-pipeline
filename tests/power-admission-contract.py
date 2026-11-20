@@ -1118,30 +1118,6 @@ class RecheckFour(Harness):
         self.assertFalse(os.path.exists(self.fence))
         self.assertIsNone(self.broker.committed)
 
-    def test_recovered_uncertainty_clears_only_after_a_quiet_minute(self):
-        self.restart_with(fence='abcabcabcabc')
-        for noise in ('preparing', 'job', 'installing'):
-            with self.subTest(noise=noise):
-                self.system.preparing = noise == 'preparing'
-                self.system.jobs = ['poweroff.target'] if noise == 'job' else []
-                self.system.installing = noise == 'installing'
-                for _ in range(4):
-                    self.clock[0] += 30
-                    self.pump(lambda: False, rounds=2)
-                self.assertIsNotNone(self.broker.committed, f'cleared while {noise}')
-                self.assertTrue(os.path.exists(self.fence))
-        self.system.preparing, self.system.jobs, self.system.installing = False, [], False
-        self.pump(lambda: False, rounds=2)
-        self.clock[0] += 30
-        self.pump(lambda: False, rounds=2)
-        self.assertIsNotNone(self.broker.committed, 'cleared before a full quiet minute')
-        self.clock[0] += 31
-        self.assertTrue(self.pump(lambda: self.broker.committed is None))
-        self.assertFalse(os.path.exists(self.fence))
-        self.assertEqual(self.persisted('abcabcabcabc')['state'], 'uncertain')
-        _, got = self.as_unit('ceralive.service')
-        self.assertTrue(got[0].startswith('ADMITTED'), got)
-
     # P2: an unrecorded failure is told, not hidden
     def block_failed_writes(self):
         real = broker.write_json
@@ -1189,6 +1165,127 @@ class RecheckFour(Harness):
             self.as_unit('ceralive.service')
             self.pump(lambda: self.broker.committed is None)
             self.assertIsNone(self.persisted(first), 'kept beyond 24 h of boot time')
+
+
+class RecheckFive(Harness):
+    """Fifth re-check: a lost request clears only by reboot or an operator's
+    typed recovery; the in-flight check fails closed; fence and lock retried."""
+
+    def setUp(self):
+        super().setUp()
+        self.op = patch.object(broker, 'is_operator', lambda uid, gid: True)
+        self.op.start()
+        self.addCleanup(self.op.stop)
+
+    restart_with = RecheckFour.restart_with
+    as_unit = RecheckFour.as_unit
+
+    def recover_on_pty(self, word=b'recover'):
+        pid, master, out = self.operator_on_pty(b'RECOVER\n')
+        prompt = []
+        self.pump(lambda: prompt.append(self.read_master(master)) or 'press Enter' in ''.join(prompt))
+        os.write(master, word + b'\n')
+        got = []
+        self.pump(lambda: got.append(self.read_pipe(out)) or any(w in ''.join(got) for w in ('RECOVERED', 'REFUSED')))
+        return ''.join(prompt), ''.join(got)
+
+    def test_a_lost_request_never_clears_by_itself(self):
+        self.restart_with(fence='abcabcabcabc')
+        for _ in range(20):
+            self.clock[0] += 60
+            self.pump(lambda: False, rounds=2)
+        self.assertIsNotNone(self.broker.committed, 'cleared without reboot or recovery')
+        self.assertTrue(os.path.exists(self.fence))
+        _, got = self.as_unit('ceralive.service')
+        self.assertTrue(got[0].startswith('REFUSED'), got)
+        for what in ('ceralive-poweroff --recover', 'systemctl poweroff', 'holding the button'):
+            self.assertIn(what, got[0])
+
+    def test_an_operator_clears_it_with_a_typed_word(self):
+        self.restart_with(fence='abcabcabcabc')
+        prompt, got = self.recover_on_pty()
+        self.assertIn('may still be in flight', prompt)
+        self.assertIn('Type recover', prompt)
+        self.assertIn('RECOVERED abcabcabcabc', got)
+        self.assertIsNone(self.broker.committed)
+        self.assertFalse(os.path.exists(self.fence))
+        self.assertEqual(self.persisted('abcabcabcabc')['state'], 'uncertain')
+        self.assertEqual(self.system.submissions(), [], 'the lost request was resubmitted')
+        _, got = self.as_unit('ceralive.service')
+        self.assertTrue(got[0].startswith('ADMITTED'), got)
+
+    def test_recovery_clears_unreadable_state_too(self):
+        self.restart_with(state=b'not json', fence='abcabcabcabc')
+        _, got = self.recover_on_pty()
+        self.assertIn('RECOVERED', got)
+        self.assertEqual(json.loads(self.state_json())['state'], 'uncertain')
+
+    def test_a_wrong_word_or_a_shutdown_in_flight_keeps_it(self):
+        self.restart_with(fence='abcabcabcabc')
+        _, got = self.recover_on_pty(b'poweroff')
+        self.assertIn('REFUSED', got)
+        self.assertIsNotNone(self.broker.committed)
+        self.system.preparing = True
+        _, got = self.recover_on_pty()
+        self.assertIn('REFUSED', got)
+        self.assertIn('may be in flight', got)
+        self.assertIsNotNone(self.broker.committed)
+        self.assertTrue(os.path.exists(self.fence))
+
+    def test_recovery_needs_an_operator_terminal_and_something_to_recover(self):
+        self.restart_with(fence='abcabcabcabc')
+        _, got = self.as_unit('ceralive.service', b'RECOVER\n')
+        self.assertEqual(got[0], 'REFUSED recovery needs an operator at their own terminal')
+        self.assertIsNotNone(self.broker.committed)
+        self.restart_with()
+        _, got = self.recover_on_pty()
+        self.assertIn('REFUSED nothing to recover', got)
+
+    def test_an_unreadable_manager_state_is_not_quiet(self):
+        def system(answer, code):
+            def runner(argv, timeout):
+                if argv[:1] == ['busctl']:
+                    return subprocess.CompletedProcess(argv, 0, 'b false\n', '')
+                if argv[:2] == ['systemctl', 'list-jobs']:
+                    return subprocess.CompletedProcess(argv, 0, '', '')
+                return subprocess.CompletedProcess(argv, code, answer, 'Failed to connect to bus\n' if not answer else '')
+            return runner
+        self.assertTrue(broker.shutdown_in_flight(system('', 1)), 'a failed manager query with empty stdout counted as quiet')
+        self.assertTrue(broker.shutdown_in_flight(system('stopping\n', 1)))
+        self.assertTrue(broker.shutdown_in_flight(system('offline\n', 1)))
+        self.assertEqual(broker.shutdown_in_flight(system('running\n', 0)), [])
+        self.assertEqual(broker.shutdown_in_flight(system('degraded\n', 1)), [])
+
+    def test_fence_and_update_lock_are_retried_until_held(self):
+        blocker = os.open(self.paths['update.lock'], os.O_RDWR)
+        fcntl.flock(blocker, fcntl.LOCK_EX)
+        os.makedirs(self.dir, exist_ok=True)
+        real_dir = self.fence_dir
+        self.restart_with()
+        self.broker.release()
+        Path(real_dir).mkdir(exist_ok=True)
+        os.rmdir(real_dir)
+        Path(real_dir).write_text('not a directory')  # the fence can't be written yet
+        Path(self.state).write_bytes(b'not json')
+        self.broker = self.new_broker()
+        self.assertNotIn('update', self.broker.locks)
+        _, got = self.as_unit('ceralive.service')
+        self.assertIn('REFUSED', got[0])
+        os.unlink(real_dir)
+        os.close(blocker)
+        for _ in range(12):
+            self.clock[0] += 30
+            self.pump(lambda: False, rounds=2)
+        self.assertTrue(os.path.exists(self.fence), 'the fence was not restored')
+        self.assertIn('update', self.broker.locks, 'the update lock was not taken')
+        self.assertIsNotNone(self.broker.committed)
+
+    def test_a_record_missing_required_fields_is_lost_evidence(self):
+        for bad in (b'{"time": 1}', b'{"state": "waiting"}', b'{"state": "idle", "requests": []}', b'[]'):
+            with self.subTest(record=bad):
+                self.restart_with(state=bad)
+                self.assertIsNotNone(self.broker.committed, 'a malformed record became idle')
+                self.assertEqual(Path(self.state).read_bytes(), bad)
 
 
 class Parsing(unittest.TestCase):

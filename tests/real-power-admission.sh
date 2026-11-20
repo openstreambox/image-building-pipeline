@@ -113,7 +113,7 @@ while time.time() < end:
         out += data
     if not typed and b'press Enter' in out:
         os.write(fd, word.encode() + b'\r'); typed = True
-    if b'Shutting down' in out or b'Not done' in out or b'Refused' in out or b'not available' in out:
+    if b'Shutting down' in out or b'Not done' in out or b'Refused' in out or b'not available' in out or b'Cleared' in out:
         if select.select([fd], [], [], 0.3)[0]:
             try:
                 out += os.read(fd, 4096)
@@ -295,7 +295,8 @@ target_at="$(systemctl show -p ActiveEnterTimestampMonotonic --value poweroff.ta
 ok "submitted only after the install finished (install done at ${done_at} us, target at ${target_at} us): $(cat /run/power-test-out)"
 
 # A restart that lost the record while the broker's fence survived: uncertain,
-# fence kept, nothing admitted until a quiet minute, then taken again.
+# fence kept, nothing admitted, not even after a quiet minute; an operator's
+# typed recovery clears it without resubmitting.
 reset; lock
 systemctl stop ceralive-power.service
 echo 0123456789ab > /run/ceralive-power/fence.d/broker
@@ -306,10 +307,18 @@ grep -q '"uncertain"' /run/ceralive-power/state.json && [ -e /run/ceralive-power
 out="$(as_unit ceralive.service POWEROFF)"
 [[ "$out" == REFUSED*unknown* && "$(active poweroff)" = inactive ]] || fail "lost record" "admitted: $out"
 ok "a surviving fence without its record is uncertain, keeps the fence and admits nothing: $out"
-for i in $(seq 1 90); do [ ! -e /run/ceralive-power/fence.d/broker ] && break; sleep 1; done
+sleep 65
 out="$(as_unit ceralive.service POWEROFF)"
-[[ "$out" == *SUBMITTED* && "$(active poweroff)" = active ]] || fail "lost record" "not taken again: $out"
-ok "after a quiet minute it is recorded uncertain and new requests are taken ($i s): $out"
+[[ "$out" == REFUSED*unknown* && -e /run/ceralive-power/fence.d/broker ]] || fail "lost record" "cleared by itself: $out"
+ok "a quiet minute later it still holds the fence and refuses"
+out="$(timeout 75 /usr/local/bin/power-test-operator ceralive 'ceralive-poweroff --recover' recover)"
+[[ "$out" == Cleared*0123456789ab* && ! -e /run/ceralive-power/fence.d/broker && "$(active poweroff)" = inactive ]] \
+  || fail "recover" "$out"
+grep -q '"cleared": true' /run/ceralive-power/state.json || fail "recover" "$(cat /run/ceralive-power/state.json)"
+ok "the login user clears it over SSH with the typed word; recorded uncertain, not resubmitted: $out"
+out="$(as_unit ceralive.service POWEROFF)"
+[[ "$out" == *SUBMITTED* && "$(active poweroff)" = active ]] || fail "after recover" "not taken again: $out"
+ok "new requests are taken again: $out"
 unlock; reset
 echo "1..$pass"
 INNER

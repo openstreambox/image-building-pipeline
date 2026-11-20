@@ -107,7 +107,8 @@ or a terminal prompt.
    refusal (`AccessDenied`, `ServiceUnknown`, a masked unit, …) is `failed`, and
    the broker's fence goes (only its own; the drain's fence stays). No reply, a
    timeout, a lost connection or an error without a name is `uncertain`: the
-   fence stays and nothing is retried.
+   fence and the update lock stay, nothing is retried, and nothing new is
+   taken until the box restarts or an operator clears it (below).
 
 The admission lock only guards the request record. The probes, the locks and
 the logind call run outside it, so a slow check never holds up a new client.
@@ -150,11 +151,25 @@ Only a start with no record and no broker fence is idle. Lost evidence is not:
 - A broker fence that survived without a record of its request (or whose
   request isn't recorded as `failed`) means a request got past admission.
 
-In both cases the broker keeps (or restores) its fence and the update lock,
-reports `uncertain` when it can write, and refuses new requests with the reason.
-Once nothing shuts down (logind not preparing for shutdown, no shutdown job
-queued, the manager not stopping) and no writer runs for 60 s, it records the
-lost request as `uncertain` and takes requests again. It never resubmits.
+A record that parses but lacks what its state needs (a known `state`; for a
+request, its id and action; `requests` as an object) counts as unreadable too.
+In all these cases the broker keeps its fence and the update lock, restoring
+them with backoff (1 s doubling to 30 s) until both hold. It reports
+`uncertain` where it can write, and refuses new requests with the reason. A
+quiet period proves nothing: logind may still be waiting for authorization of
+the earlier call, which no visible property shows. So the broker never clears
+this by itself.
+
+**Explicit recovery.** An operator at their own terminal runs
+`ceralive-poweroff --recover`. The broker prompts there, says the earlier
+outcome is unknown and that a shutdown may still be in flight, and reads the
+typed word `recover`, under the same terminal checks as a power-off. It then
+refuses if a shutdown is visibly under way: logind preparing for shutdown, a
+shutdown job queued, or the manager not plainly `running` or `degraded`. Any
+error or empty answer counts as under way. Otherwise it records the request as
+`uncertain` and cleared, drops its fence and the locks, and takes requests
+again. Nothing is resubmitted. The button and CeraUI can't recover. A reboot
+also clears it (`/run` is per boot).
 
 **Polkit.** The rule `60-ceralive-power-broker.rules` grants the power-off and
 reboot `*-ignore-inhibit` actions only to root in exactly `ceralive-power.service`,
@@ -192,10 +207,14 @@ unit keeps its own stop timeout, so only a running write can hold a shutdown thi
 long. Cutting a stuck write is a separate decision: holding the power button until
 the PMIC cuts power, about 10 s.
 
-**When the broker refuses.** While a failure can't be recorded, or after a
-restart that lost a request's record (above), the broker refuses new requests,
-the button's hold included: the running button daemon sends its hold to the
-broker and does nothing else with it. Other ways to power off then:
+**When the broker refuses.** While a failure can't be recorded, or while a
+request's outcome is unknown (above), the broker refuses new requests, the
+button's hold included: the running button daemon sends its hold to the broker
+and shows its usual refusal. CeraUI shows that the box was not shut down, and
+the broker's `uncertain` notice when the record could be written. What works
+then:
+- `ceralive-poweroff --recover` at an operator's terminal, for an unknown
+  outcome;
 - logind's own key handling (the short tap) only applies once the button
   daemon is down and has handed the key back to logind. The shutdown then goes
   through the drain, which must first write its own fence (`fence.d/shutdown`).

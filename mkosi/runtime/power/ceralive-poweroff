@@ -5,6 +5,11 @@ Run it from your own terminal as the login user (or as root on root's own
 terminal). The broker asks for confirmation on that terminal, waits for a
 running update to finish, then powers off. The prompt is the broker's; this
 client only shows what the broker reports.
+
+`ceralive-poweroff --recover` clears an earlier request whose outcome is
+unknown (no answer from the system, or its record lost), after you type
+`recover` at that prompt. It is not resubmitted; a shutdown it started may
+still be under way.
 """
 import os
 import socket
@@ -12,12 +17,14 @@ import sys
 
 SOCKET = os.environ.get('CERALIVE_POWER_SOCKET', '/run/ceralive-power/request.sock')
 action = 'REBOOT' if os.path.basename(sys.argv[0]).endswith('reboot') else 'POWEROFF'
+if sys.argv[1:] == ['--recover']:
+    action = 'RECOVER'
 # --no-wait (for services such as CeraUI): print the broker's first answer as
 # is. Exit 0: admitted or already pending (the line carries the request id);
 # 1: refused, nothing was submitted; 70: no answer, the outcome is unknown;
 # 75: the broker is not reachable, nothing was submitted.
 no_wait = sys.argv[1:] == ['--no-wait']
-if len(sys.argv) > 1 and not no_wait:
+if len(sys.argv) > 1 and not no_wait and action != 'RECOVER':
     print(__doc__.strip(), file=sys.stderr)
     sys.exit(64)
 try:
@@ -37,6 +44,7 @@ messages = {
     'UNCERTAIN': 'No answer from the system; not retried:',
     'FAILED': 'Refused by the system:',
     'REFUSED': 'Not done:',
+    'RECOVERED': 'Cleared; it was not resubmitted. New power requests and updates go ahead again:',
 }
 if no_wait:
     conn.settimeout(15)
@@ -70,7 +78,7 @@ while True:
         if word in ('ADMITTED', 'PENDING') and detail:
             detail = ''
         print(messages.get(word, word), detail, flush=True)
-        if word == 'SUBMITTED':
+        if word in ('SUBMITTED', 'RECOVERED'):
             status = 0
         elif word in ('REFUSED', 'FAILED', 'UNCERTAIN'):
             status = 1
