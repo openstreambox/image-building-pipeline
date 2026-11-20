@@ -13,7 +13,9 @@ import sys
 SOCKET = os.environ.get('CERALIVE_POWER_SOCKET', '/run/ceralive-power/request.sock')
 action = 'REBOOT' if os.path.basename(sys.argv[0]).endswith('reboot') else 'POWEROFF'
 # --no-wait (for services such as CeraUI): print the broker's first answer as
-# is and exit 0 only when the request was admitted or is already pending.
+# is. Exit 0: admitted or already pending (the line carries the request id);
+# 1: refused, nothing was submitted; 70: no answer, the outcome is unknown;
+# 75: the broker is not reachable, nothing was submitted.
 no_wait = sys.argv[1:] == ['--no-wait']
 if len(sys.argv) > 1 and not no_wait:
     print(__doc__.strip(), file=sys.stderr)
@@ -49,7 +51,8 @@ if no_wait:
         pass
     line = reply.split(b'\n', 1)[0].decode(errors='replace').strip() or 'NOANSWER'
     print(line)
-    sys.exit(0 if line.split(' ', 1)[0] in ('ADMITTED', 'PENDING') else 1)
+    word = line.split(' ', 1)[0]
+    sys.exit(0 if word in ('ADMITTED', 'PENDING') else 1 if word == 'REFUSED' else 70)
 status = 1
 buffer = b''
 while True:

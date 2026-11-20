@@ -1,0 +1,14 @@
+#!/bin/sh
+# RAUC pre-install handler: refuse to write any slot while a power-off or
+# reboot is pending. RAUC runs this inside its install worker, after the bundle
+# is mounted and before any slot is written, whoever started the install (the
+# CLI, a direct D-Bus call, the hawkBit updater). The power broker and the
+# shutdown drain create the fence before their final writer check, so an
+# install either became visible to that check (its bundle is mounted) or is
+# refused here. Nothing has been written when it is refused.
+FENCE="${CERALIVE_POWER_FENCE:-/run/ceralive-power/fence}"
+if [ -e "$FENCE" ]; then
+  echo "ceralive: a power-off or reboot is pending; this install is refused before writing" >&2
+  exit 1
+fi
+exit 0

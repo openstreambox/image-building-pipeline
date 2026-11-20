@@ -79,3 +79,45 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; P="$ROOT/mkosi/runtime/po
   grep -qx 'm ceralive-tailscale ceralive-power' "$ROOT/mkosi/runtime/remote-access/ceralive-tailscale.sysusers.conf"
   grep -q 'usermod -aG ceralive-power ceralive' "$ROOT/mkosi/customize/postinst.d/services.sh"
 }
+
+@test "power admission: RAUC refuses to start writing while a power-off is pending" {
+  local h="$ROOT/mkosi/runtime/rauc/ceralive-pre-install"
+  [ -x "$h" ]
+  CERALIVE_POWER_FENCE="$BATS_TEST_TMPDIR/fence" run "$h"
+  [ "$status" -eq 0 ]
+  touch "$BATS_TEST_TMPDIR/fence"
+  CERALIVE_POWER_FENCE="$BATS_TEST_TMPDIR/fence" run "$h"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"refused before writing"* ]]
+  # Every place that writes RAUC's system.conf runs it, and installs it.
+  for f in mkosi/platform/boot/install-boot.sh mkosi/customize/rauc-setup.sh \
+      mkosi/platform/x86/install-x86-boot.sh mkosi/platform/x86/install-x86-grub.sh mkosi/runtime/rauc/system.conf; do
+    grep -qx 'pre-install=/usr/lib/rauc/ceralive-pre-install' "$ROOT/$f"
+  done
+  for f in mkosi/platform/boot/install-boot.sh mkosi/customize/rauc-setup.sh \
+      mkosi/platform/x86/install-x86-boot.sh mkosi/platform/x86/install-x86-grub.sh; do
+    grep -q 'ceralive-pre-install" .*/usr/lib/rauc/ceralive-pre-install\|ceralive-pre-install" /usr/lib/rauc/ceralive-pre-install' "$ROOT/$f"
+  done
+}
+
+@test "power admission: no power target forces the shutdown while a write runs" {
+  local conf="$P/60-ceralive-wait-for-writes.conf"
+  grep -qx 'JobTimeoutSec=infinity' "$conf"
+  grep -qx 'JobTimeoutAction=none' "$conf"
+  run bash -euc '
+    source "$1/mkosi/customize/postinst.d/services.sh"
+    CERALIVE_RUNTIME_SRC="$1/mkosi/runtime"; CERALIVE_POWER_ROOT="$2"
+    enable_service() { :; }; setup_power_operators() { :; }
+    setup_power_admission
+  ' _ "$ROOT" "$BATS_TEST_TMPDIR"
+  [ "$status" -eq 0 ]
+  for t in poweroff reboot halt; do
+    cmp "$conf" "$BATS_TEST_TMPDIR/etc/systemd/system/$t.target.d/60-ceralive-wait-for-writes.conf"
+  done
+}
+
+@test "power admission: activation and boot-script writers stop only after the drain" {
+  grep -E '^After=' "$P/ceralive-write-drain.service" | grep -qw ceralive-boot-script-sync.service
+  grep -E '^After=' "$P/ceralive-write-drain.service" | grep -qw ceralive-rauc-activate.service
+  grep -qx 'Before=ceralive-write-drain.service' "$ROOT/mkosi/runtime/ceralive-rauc-arm@.service"
+}

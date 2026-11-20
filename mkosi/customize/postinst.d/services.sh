@@ -200,7 +200,8 @@ setup_power_policy() {
 setup_power_admission() {
   local src="${CERALIVE_RUNTIME_SRC:?}/power" root="${CERALIVE_POWER_ROOT:-}" file
   for file in ceralive-power-broker.py ceralive-poweroff ceralive-power.socket ceralive-power.service \
-      ceralive-write-drain.service ceralive-power.sysusers.conf 60-ceralive-power-broker.rules; do
+      ceralive-write-drain.service ceralive-power.sysusers.conf 60-ceralive-power-broker.rules \
+      60-ceralive-wait-for-writes.conf; do
     [[ -f "$src/$file" ]] || die "power admission source missing: $file"
   done
   install -D -m 0755 "$src/ceralive-power-broker.py" "$root/usr/libexec/ceralive/ceralive-power-broker"
@@ -210,6 +211,9 @@ setup_power_admission() {
     install -D -m 0644 "$src/$file" "$root/etc/systemd/system/$file"
   done
   install -D -m 0644 "$src/ceralive-power.sysusers.conf" "$root/usr/lib/sysusers.d/ceralive-power.conf"
+  for file in poweroff.target reboot.target halt.target; do
+    install -D -m 0644 "$src/60-ceralive-wait-for-writes.conf" "$root/etc/systemd/system/$file.d/60-ceralive-wait-for-writes.conf"
+  done
   install -D -m 0644 "$src/60-ceralive-power-broker.rules" "$root/etc/polkit-1/rules.d/60-ceralive-power-broker.rules"
   setup_power_operators
   enable_service ceralive-power.socket

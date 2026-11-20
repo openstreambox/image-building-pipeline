@@ -136,6 +136,7 @@ install_rootfs() {
   install -D -m 0755 "${SCRIPT_DIR}/ceralive-boot-state.sh"          "${root}/usr/bin/ceralive-boot-state"
   install -D -m 0755 "${SCRIPT_DIR}/ceralive-rauc-boot-adapter.sh"   "${root}/usr/lib/rauc/ceralive-rauc-boot-adapter"
   install -D -m 0755 "${SCRIPT_DIR}/../../runtime/rauc/ceralive-post-install" "${root}/usr/lib/rauc/ceralive-post-install"
+  install -D -m 0755 "${SCRIPT_DIR}/../../runtime/rauc/ceralive-pre-install" "${root}/usr/lib/rauc/ceralive-pre-install"
 
   # RAUC system.conf — bootloader=custom wired to our backend. Slots referenced by
   # PARTLABEL (frozen contract: never FS-UUID). The B slot is omitted for
@@ -167,6 +168,7 @@ send-headers=boot-id;transaction-id
 # BOOT_ORDER and per-slot attempt counters live on the FAT boot partition
 # because the staged vendor U-Boot has no persistent fw_setenv (decision D3).
 bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
+pre-install=/usr/lib/rauc/ceralive-pre-install
 post-install=/usr/lib/rauc/ceralive-post-install
 
 [keyring]

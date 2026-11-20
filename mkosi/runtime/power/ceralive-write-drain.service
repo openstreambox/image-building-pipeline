@@ -5,8 +5,13 @@ Description=Hold shutdown until running system writes finish
 # idle, and with networking still up for a streamed RAUC install. Any shutdown
 # path gets this, including logind's own power-key handling.
 After=rauc.service ceralive-software-update.service ceralive-os-stage-guard.service ceralive-slot-sync.service
-After=NetworkManager.service ModemManager.service network-online.target dbus.service
-Wants=network-online.target
+After=ceralive-boot-script-sync.service ceralive-rauc-activate.service
+# Per-attempt units order themselves: ceralive-rauc-arm@.service and CeraUI's
+# ceralive-kernel-stage-<id>.service carry Before=ceralive-write-drain.service.
+# NetworkManager and ModemManager stop after the drain, so a streamed RAUC
+# install keeps its network. No network-online.target: nothing on this image
+# waits for it at boot.
+After=NetworkManager.service ModemManager.service dbus.service
 
 [Service]
 Type=oneshot
@@ -15,7 +20,9 @@ ExecStart=/bin/true
 ExecStop=/usr/bin/python3 -I /usr/libexec/ceralive/ceralive-power-broker drain
 # No deadline: an unfinished write is never cut by a timer. The drain reports
 # a stuck writer after 15 minutes; cutting it is a separate physical decision
-# (holding the power button until the PMIC cuts power).
+# (holding the power button until the PMIC cuts power). The power targets'
+# stock 30-minute forced action is removed for the same reason
+# (60-ceralive-wait-for-writes.conf on poweroff/reboot/halt.target).
 TimeoutStopSec=infinity
 StandardOutput=journal+console
 
