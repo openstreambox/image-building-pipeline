@@ -323,7 +323,7 @@ migrate() {
   mkdir -p "$d/bin" "$d/etc/ceralive" "$d/data" "$d/varlog" "$d/nm"
   printf '#!/bin/sh\nexit 1\n' >"$d/bin/mountpoint"; chmod +x "$d/bin/mountpoint"
   printf '#!/bin/sh\nexit 0\n' >"$d/bin/logger"; chmod +x "$d/bin/logger"
-  { echo 'set -euo pipefail'; echo "DATA=$d/data"; echo "WORKDIR=$d/opt/ceralive"; echo "NM_CONN=$d/nm"
+  { echo 'set -euo pipefail'; echo "DATA=$d/data"; echo "WORKDIR=$d/opt/ceralive"; echo "NM_CONN=$d/nm"; echo "CERAUI_HELPERS=$d/ceraui-workdir"
     awk '/cat >>\/usr\/local\/sbin\/ceralive-migrate-data <<.EOF./{on=1; next} on && /^EOF$/{exit} on' \
       "$PIPELINE_DIR/mkosi/customize/postinst.d/persistence.sh" \
       | sed "s#/etc/ceralive#$d/etc/ceralive#g; s#/var/log#$d/varlog#g"; } >"$d/migrate.sh"

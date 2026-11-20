@@ -4257,6 +4257,22 @@ cannot see. Offline guard: `tests/data-persistence-public-symlink.test.sh`
 synthetic tree and proves the symlink is preserved, resolves after the bind mount,
 is idempotent, and never clobbers an existing entry). Wired into `run-tests`.
 
+**CeraUI's working-dir helpers live outside the `/data` bind** [EXISTS]
+
+CeraUI runs its captive-portal sign-in helper as
+`python3 -I /opt/ceralive/captive-portal-window.py`, and the `.deb` installs it in
+`/opt/ceralive`, where the bind above hides it. The seeding loop never copied it,
+so `portal-reconcile` failed at every CeraUI start and the setup-hotspot sign-in
+window could not open. The app layer
+(`mkosi.images/app/mkosi.postinst.chroot::keep_ceraui_workdir_helpers`) keeps a
+copy in `/usr/libexec/ceralive/ceraui-workdir/`, and `ceralive-migrate-data` links
+`/data/ceralive/<name>` to it on every boot: a link rather than a seeded copy, so
+after an OTA the box runs its new slot's helper, and boxes whose `/data` an older
+image seeded get the link on their first boot after the update. Absent and
+dangling entries are (re)linked; a regular file is left alone, because only a
+later CeraUI package upgrade writes one. New helpers go in
+`CERAUI_WORKDIR_HELPERS`. Offline guard: `tests/ceraui-workdir-helpers.test.sh`.
+
 **`/etc/resolv.conf` MUST be the systemd-resolved stub symlink — else DNS is
 totally dead** [EXISTS]
 

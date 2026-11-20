@@ -93,6 +93,7 @@ run_block() { # $1=DATA  $2=WORKDIR
     echo 'mountpoint() { return 1; }'
     printf 'DATA=%q\n' "$1"
     printf 'WORKDIR=%q\n' "$2"
+    printf 'CERAUI_HELPERS=%q\n' "$2/../no-helpers"   # no kept helpers here; ceraui-workdir-helpers.test.sh covers them
     printf '%s\n' "${block}"
   } >"${runner}"
   bash "${runner}"
