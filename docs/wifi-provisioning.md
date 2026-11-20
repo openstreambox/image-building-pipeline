@@ -32,10 +32,11 @@ All under `/data/ceralive/provision/`:
 | File | Meaning |
 |------|---------|
 | `force-portal` | Factory-reset re-trigger flag — start the portal even when profiles exist |
-| `portal-active` | Written while the AP is up; `key=value` (`ssid`, `gateway`, `iface`, `con`, `user_con`) |
+| `portal-active` | Setup marker: the setup owns `wlan0`; `key=value` (`ssid`, `gateway`, `iface`, `con`, `user_con`). See *Setup marker* below |
 | `teardown-requested` | Out-of-band teardown request honored at next service start |
 | `scan.txt` | Cached visible SSIDs (one per line), scanned **before** the AP came up |
 | `last-error` | After a failed join: `ssid=<name>` + `reason=auth_or_timeout` — shown by the portal |
+| `ap-uuid` | UUIDs of setup AP profiles, one per line; a new one is added before its profile is created, and each stays until NetworkManager shows it neither active nor saved. Replaced only whole (temp file + rename) |
 
 The WiFi credentials themselves are **never** written here — they go only into
 NetworkManager's own `system-connections` store (`/etc/NetworkManager/system-connections`,
@@ -64,10 +65,17 @@ The device's own `ceralive-ap` profile is excluded from the stored-profile count
    `/etc/NetworkManager/dnsmasq-shared.d/ceralive-portal.conf`. NM's shared-mode dnsmasq
    reads it at activation, so every hostname resolves to the gateway → the operator's OS
    pops its captive-portal sign-in.
-3. **AP up**: NM-native AP (`802-11-wireless.mode ap` + `ipv4.method shared`), SSID
+3. **Setup marker**: write `portal-active` (see *Setup marker*); if it cannot be
+   written, stop here.
+4. **CeraUI and the button ingress stop** (frees `0.0.0.0:80`, and CeraUI issues
+   nothing more for `wlan0`). Both must then report inactive (an image without the
+   ingress unit reports it inactive); otherwise bring-up stops here, releases the
+   marker, starts them again and fails.
+5. **AP up**: earlier setup AP profiles are deleted by UUID, a fresh UUID is
+   added to `ap-uuid` next to any that NetworkManager still shows, and the profile
+   is created with that `connection.uuid` and activated by it. NM-native AP (`802-11-wireless.mode ap` + `ipv4.method shared`), SSID
    `CeraLive-Setup-<short-id>`, passphrase `ceralive-setup`, gateway `192.168.42.1/24`.
-4. **Port-80 handoff**: `systemctl stop ceralive.service` (frees `0.0.0.0:80`) →
-   `systemctl start ceralive-portal.socket` (binds `192.168.42.1:80`).
+6. **Portal**: `systemctl start ceralive-portal.socket` (binds `192.168.42.1:80`).
 
 ## The captive page (`ceralive-portal.sh`)
 
@@ -146,8 +154,31 @@ Two teardown entry points:
 `systemctl stop ceralive-provision` runs `ExecStop=ceralive-provision service-stop` — a
 link-down + portal-down clean stop that **retains** the AP profile and the factory-reset
 flags so the next boot re-evaluates the trigger and a pending factory reset is not
-silently disarmed. On a manual stop it restores CeraUI and the button ingress to
-port 80; during shutdown it starts nothing (see *Shutdown cleanup*).
+silently disarmed. On a manual stop it removes the setup marker and restores CeraUI
+and the button ingress to port 80; during shutdown it starts nothing and keeps the
+marker (see *Shutdown cleanup* and *Setup marker*). A later boot that needs no portal
+deletes the AP profile a stop left behind, without touching `wlan0` or CeraUI.
+
+Every setup-only NetworkManager operation (up, down, delete, the active check) goes
+by UUID, never by connection name, so a user's profile that happens to share the
+name is never touched. The UUID is the one recorded in `ap-uuid`, which still
+identifies the profile if its settings change later. A profile from an older run
+without that record counts as the setup's only on positive evidence: connection
+name, AP mode, this device's `CeraLive-Setup-<short-id>` SSID and the
+`192.168.42.1/24` address. An empty, unreadable or malformed `ap-uuid` counts as
+uncertain, never as "no setup AP". The marker then goes only on live evidence that
+`wlan0` is not an AP: the interface doesn't exist, or NetworkManager has it in a
+settled state (unmanaged, unavailable, disconnected or connected) and
+`iw dev wlan0 info` reports a station-side type. A blank or unknown type, a device
+still activating or deactivating, or anything unreadable keeps the marker. Only that
+same proof lets a later run set the record aside (as `ap-uuid.unreadable`) and start
+a fresh one.
+
+Whether a recorded setup AP is still active comes from
+`nmcli -t -f UUID,ACTIVE-PATH connection show --active`. Naming an active field makes
+nmcli list every active or activating connection, including one whose saved profile
+is gone; a UUID-only request lists only rows that still have a profile. A failed delete or an
+unreadable NetworkManager is logged, `last-error` stays, and the run exits non-zero.
 
 Whenever provisioning hands the front door back (after a join, on `stop`/`teardown`, or
 when it undoes a failed bring-up), a CeraUI or ingress unit that does not start is
@@ -161,6 +192,34 @@ CeraUI and the ingress are started again, and `start` fails. The AP profile, the
 force flag and `last-error` stay, so the next boot or trigger tries again. A boot
 that needs no portal also removes a DNS capture an older failed bring-up left
 behind, so later shared connections don't send their DNS to the AP gateway.
+
+### Setup marker
+
+CeraUI reads `portal-active` as "the image's setup owns `wlan0`": while it exists,
+CeraUI does not start, switch, restore or arm a hotspot on that radio, and checks
+again right before it hands a hotspot to NetworkManager. The marker therefore covers
+exactly the time the setup AP is up or about to come up:
+
+- written before the AP profile is created or activated; if it cannot be written,
+  no AP is brought up;
+- followed by stopping CeraUI and the ingress, still before the AP is created. The
+  marker stops new CeraUI activations, but a CeraUI AP already handed to
+  NetworkManager just before can still be activating; activating `ceralive-ap` only
+  after CeraUI has exited makes it the last request for `wlan0`, so NM gives it the
+  device;
+- kept through the station join and any re-arm after a failed join;
+- removed before CeraUI starts again on every way out: a failed bring-up, a manual
+  stop, and teardown (after a successful join the station is up on `wlan0` first,
+  so CeraUI's handover sees the joined station). It is removed only once
+  NetworkManager shows no setup AP active (an inactive or deleted profile counts as
+  gone), and the removal is checked. If the AP is still up, NetworkManager can't be
+  read, or the file can't be removed, the marker stays and the command logs an error
+  and exits non-zero. CeraUI and the ingress still come back, so there is a front
+  door, but CeraUI keeps off `wlan0` as the marker says;
+- kept across shutdown, so the setup keeps priority until the next boot re-evaluates
+  the trigger; that boot removes a marker it no longer needs through the stale-marker
+  teardown, which keeps `wlan0` connected (a saved network may already be up on it).
+  Only the explicit `teardown` verb or flag still releases `wlan0`.
 
 ## Port-80 / 443 coexistence
 

@@ -78,11 +78,29 @@
 #   Exit paths:
 #     * `connect` success → teardown_ap KEEP_LINK (does NOT disconnect wlan0; it is
 #       carrying the freshly-joined client connection).
-#     * `ceralive-provision teardown` (out-of-band) / stale marker → teardown_ap drops
-#       wlan0 too (no client connection in that path).
+#     * `ceralive-provision teardown` (out-of-band) → teardown_ap drops wlan0 too (no
+#       client connection in that path).
+#     * stale marker on a boot that needs no portal → teardown_ap KEEP_LINK (a saved
+#       network may already be up on wlan0).
 #   Plain `systemctl stop` runs ExecStop=`stop`, a link-down + portal-down clean stop
 #   that RETAINS the AP profile + the factory-reset flags so the next boot re-evaluates
 #   the trigger and does NOT silently disarm a pending factory reset.
+#
+# SETUP MARKER (portal-active): CeraUI treats this file as "the setup owns wlan0" and
+#   will not start, switch, restore or arm a hotspot there while it exists. It is
+#   therefore written BEFORE the AP profile is created or activated, and it exists
+#   exactly while the setup AP is up or about to come up: through the station join
+#   and any re-arm. CeraUI and the ingress are then stopped BEFORE the AP is created:
+#   the marker stops new CeraUI activations, but one CeraUI already handed to NM just
+#   before the marker appeared can still be in flight, and only issuing the setup's own
+#   activation after CeraUI has exited makes it the last one on wlan0, so nothing
+#   touches the AP until both units are confirmed inactive. Every path that
+#   gives wlan0 back removes the marker before CeraUI starts again (failed bring-up,
+#   manual stop, teardown), and only once NM shows no setup AP active and the file is
+#   really gone (release_marker); otherwise the marker stays and the command fails
+#   visibly. Only shutdown keeps it, so the setup keeps priority until the next boot
+#   re-evaluates the trigger; that boot removes it through the stale-marker teardown
+#   when no portal is needed, keeping whatever station wlan0 carries by then.
 #
 # This is a standalone DEVICE script: it does NOT source the repo lib/common.sh
 # (not present on the device). NOT `set -e`: the trigger probes are EXPECTED to fail
@@ -100,6 +118,8 @@ die()  { log "FATAL: $*"; exit 1; }
 # --- config / test seams (overridable for the offline proof harness) ----------
 NMCLI="${NMCLI:-nmcli}"
 IP_BIN="${IP_BIN:-ip}"
+IW_BIN="${IW_BIN:-iw}"
+SYSFS_NET="${CERALIVE_SYSFS_NET:-/sys/class/net}"
 SYSTEMCTL="${SYSTEMCTL:-systemctl}"
 SYSTEMD_RUN="${SYSTEMD_RUN:-systemd-run}"
 TIMEOUT_BIN="${TIMEOUT_BIN:-timeout}"   # set empty to skip the outer hard-timeout wrapper
@@ -125,10 +145,12 @@ PORTAL_SERVICE_GLOB="${CERALIVE_PORTAL_SERVICE_GLOB:-ceralive-portal@*.service}"
 # factory-reset re-trigger flag and the portal-active marker persist across updates.
 STATE_DIR="${CERALIVE_PROVISION_STATE_DIR:-/data/ceralive/provision}"
 FORCE_FLAG="${CERALIVE_PROVISION_FORCE_FLAG:-${STATE_DIR}/force-portal}"          # factory-reset re-trigger
-ACTIVE_FLAG="${CERALIVE_PROVISION_ACTIVE_FLAG:-${STATE_DIR}/portal-active}"       # set while AP is up; read by the portal
+ACTIVE_FLAG="${CERALIVE_PROVISION_ACTIVE_FLAG:-${STATE_DIR}/portal-active}"       # setup owns wlan0 (header §SETUP MARKER); read by the portal and CeraUI
 TEARDOWN_FLAG="${CERALIVE_PROVISION_TEARDOWN_FLAG:-${STATE_DIR}/teardown-requested}"
 SCAN_CACHE="${CERALIVE_PROVISION_SCAN_CACHE:-${STATE_DIR}/scan.txt}"              # SSID list (single-radio: scanned BEFORE AP up)
 ERROR_MARKER="${CERALIVE_PROVISION_ERROR_MARKER:-${STATE_DIR}/last-error}"        # written on a failed join; shown by the portal
+AP_UUID_FILE="${CERALIVE_PROVISION_AP_UUID_FILE:-${STATE_DIR}/ap-uuid}"           # UUIDs of setup AP profiles this script created, one per line
+UUID_SOURCE="${CERALIVE_UUID_SOURCE:-/proc/sys/kernel/random/uuid}"               # fresh UUID for each setup AP profile
 
 # DNS-capture drop-in: NM's shared-mode dnsmasq reads dnsmasq-shared.d at activation.
 # Wildcard-resolving every name to the gateway is what pops the captive-portal sign-in.
@@ -175,6 +197,224 @@ stored_wifi_profile_count() {
     | awk -F: -v ap="${AP_CON_NAME}" '
         $2 == "802-11-wireless" && $1 != ap { n++ }
         END { print n + 0 }'
+}
+
+# --- the image's own setup AP profiles -----------------------------------------
+# Identity is the UUID bring_up_ap chooses for each profile and records in
+# ${AP_UUID_FILE} before it creates it: every setup-only up/down/delete goes by UUID,
+# never by connection name, so a user's profile that shares the name is never
+# touched, and a later change to the profile's settings doesn't hide it. A UUID stays
+# in the record until NM shows it neither active nor saved, so an activation whose
+# profile is gone, or whose down failed, is never lost; a new bring-up adds its UUID
+# next to any still there. The record is only ever replaced whole (temp file +
+# rename). Profiles from older runs without a record are recognised only on positive
+# NM evidence: our connection name, Wi-Fi type, AP mode, this device's machine-id SSID
+# and the setup gateway address, all as bring_up_ap writes them.
+
+UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+# The recorded UUIDs, one per line; nothing when there is no record. Non-zero when the
+# record exists but is empty, unreadable or holds anything but UUIDs: identity is
+# then uncertain and nobody may treat it as "no setup AP".
+recorded_ap_uuids() {
+  [ -e "${AP_UUID_FILE}" ] || return 0
+  local content line n=0
+  content="$(cat "${AP_UUID_FILE}" 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    [ -n "${line}" ] || continue
+    [[ "${line}" =~ ${UUID_RE} ]] || return 1
+    n=$((n + 1))
+  done <<<"${content}"
+  [ "${n}" -gt 0 ] || return 1
+  printf '%s\n' "${content}" | awk 'NF && !seen[$0]++'
+}
+
+# Replace the record with the UUIDs in $1 (newline-separated), atomically; an empty
+# list removes it. Non-zero when the new record is not in place.
+write_ap_record() {
+  local uuids tmp
+  uuids="$(printf '%s\n' "$1" | awk 'NF && !seen[$0]++')"
+  if [ -z "${uuids}" ]; then
+    rm -f "${AP_UUID_FILE}" 2>/dev/null
+    [ ! -e "${AP_UUID_FILE}" ]
+    return
+  fi
+  tmp="${AP_UUID_FILE}.tmp.$$"
+  if printf '%s\n' "${uuids}" >"${tmp}" 2>/dev/null && mv -f "${tmp}" "${AP_UUID_FILE}" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "${tmp}" 2>/dev/null
+  return 1
+}
+
+# Active and activating connection UUIDs, one per line. The query names an active-only
+# field (ACTIVE-PATH): with UUID alone nmcli prints only rows that still have a saved
+# profile, and an active setup AP whose profile is gone would be missing from both
+# lists. Non-zero when NM cannot be read.
+active_uuids() {
+  local rows
+  rows="$("${NMCLI}" -t -f UUID,ACTIVE-PATH connection show --active 2>/dev/null)" || return 1
+  awk -F: '$1 != "" { print $1 }' <<<"${rows}"
+}
+
+# Whether ${AP_IFACE} is an AP right now, from live state rather than profiles:
+# 0 = it is (kernel type AP, AP/VLAN or P2P-GO), 1 = positive evidence it is not (the
+# interface does not exist, or NM has it settled - unmanaged, unavailable,
+# disconnected or connected - and the kernel reports a station-side type), 2 =
+# anything ambiguous: NM or iw unreadable, NM still activating or deactivating, or a
+# blank or unknown type. The setup AP is bound to ${AP_IFACE}, so 1 proves no setup AP
+# is up whatever its UUID was.
+ap_mode_active_on_iface() {
+  local state info type
+  [ -e "${SYSFS_NET}/${AP_IFACE}" ] || return 1
+  state="$("${NMCLI}" -g GENERAL.STATE device show "${AP_IFACE}" 2>/dev/null)" || return 2
+  case "${state%% *}" in
+    10|20|30|100) ;;
+    *) return 2 ;;
+  esac
+  info="$("${IW_BIN}" dev "${AP_IFACE}" info 2>/dev/null)" || return 2
+  type="$(awk '$1 == "type" { $1 = ""; sub(/^ +/, ""); print; exit }' <<<"${info}")"
+  case "${type}" in
+    AP|AP/VLAN|P2P-GO) return 0 ;;
+    managed|monitor|P2P-client|P2P-device) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# An uncertain record (see recorded_ap_uuids) is retired only on the stronger proof
+# that no AP at all is active on ${AP_IFACE}; it is kept aside, not deleted. Returns 0
+# when the record is readable or was retired, non-zero (logged) when it stays.
+settle_uncertain_record() {
+  recorded_ap_uuids >/dev/null && return 0
+  local st=0
+  ap_mode_active_on_iface || st=$?
+  if [ "${st}" -eq 1 ] && mv -f "${AP_UUID_FILE}" "${AP_UUID_FILE}.unreadable" 2>/dev/null; then
+    log "setup AP record ${AP_UUID_FILE} was unreadable; no AP is active on ${AP_IFACE}, so it is set aside (${AP_UUID_FILE}.unreadable)"
+    return 0
+  fi
+  log "ERROR: setup AP record ${AP_UUID_FILE} is unreadable and no AP-free ${AP_IFACE} could be confirmed; keeping it"
+  return 1
+}
+
+# Legacy setup APs in a NAME:UUID:TYPE listing ($1), by the settings fingerprint.
+fingerprint_ap_uuids() {
+  local name uuid type mode ssid addr
+  while IFS=: read -r name uuid type; do
+    [ "${name}" = "${AP_CON_NAME}" ] && [ "${type}" = 802-11-wireless ] && [ -n "${uuid}" ] || continue
+    mode="$("${NMCLI}" -g 802-11-wireless.mode connection show uuid "${uuid}" 2>/dev/null)" || return 1
+    ssid="$("${NMCLI}" -g 802-11-wireless.ssid connection show uuid "${uuid}" 2>/dev/null)" || return 1
+    addr="$("${NMCLI}" -g ipv4.addresses connection show uuid "${uuid}" 2>/dev/null)" || return 1
+    [ "${mode}" = ap ] && [ "${ssid}" = "$(ap_ssid)" ] && [ "${addr}" = "${AP_GW}/${AP_PREFIX}" ] \
+      && printf '%s\n' "${uuid}"
+  done <<<"$1"
+  return 0
+}
+
+# Setup AP profiles NM has now: the recorded one if NM lists it, plus legacy ones.
+# One UUID per line; non-zero when NM or the record cannot be read, so callers never
+# mistake "could not check" for "none".
+setup_ap_uuids() {
+  local rec list legacy
+  rec="$(recorded_ap_uuids)" || return 1
+  list="$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" || return 1
+  legacy="$(fingerprint_ap_uuids "${list}")" || return 1
+  {
+    awk -F: 'NR == FNR { r[$0] = 1; next } ($2 in r) { print $2 }' <(printf '%s\n' "${rec}") - <<<"${list}"
+    printf '%s\n' "${legacy}"
+  } | awk 'NF && !seen[$0]++'
+}
+
+# 0 = a setup AP is active, 1 = none is (an inactive or absent profile counts as gone),
+# 2 = NM could not be read. Only 1 is evidence that the setup no longer holds wlan0.
+# Recorded UUIDs count even if NM no longer lists their profile. With an uncertain
+# record, only "no AP active on the interface at all" counts as gone.
+setup_ap_active() {
+  local rec uuids active
+  if ! rec="$(recorded_ap_uuids)"; then
+    log "setup AP record ${AP_UUID_FILE} is unreadable; checking ${AP_IFACE} for any active AP instead"
+    ap_mode_active_on_iface
+    return
+  fi
+  uuids="$(setup_ap_uuids)" || return 2
+  uuids="$(printf '%s\n%s\n' "${rec}" "${uuids}" | awk 'NF && !seen[$0]++')"
+  [ -n "${uuids}" ] || return 1
+  active="$(active_uuids)" || return 2
+  grep -qxF -f <(printf '%s\n' "${uuids}") <<<"${active}" && return 0
+  return 1
+}
+
+# Bring every setup AP down by UUID. Extra args go before `connection down` (the
+# shutdown path passes a bounded --wait). Best effort: release_marker checks the result.
+down_setup_aps() {
+  local rec uuids u
+  rec="$(recorded_ap_uuids 2>/dev/null)" || rec=""
+  # With an uncertain record, still bring down what the settings fingerprint finds.
+  uuids="$(setup_ap_uuids 2>/dev/null)" \
+    || uuids="$(fingerprint_ap_uuids "$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" 2>/dev/null)" \
+    || uuids=""
+  for u in $(printf '%s\n%s\n' "${rec}" "${uuids}" | awk 'NF && !seen[$0]++'); do
+    "${NMCLI}" "$@" connection down uuid "${u}" >/dev/null 2>&1 || true
+  done
+}
+
+# Delete every setup AP profile by UUID, then drop from the record only UUIDs NM shows
+# neither active nor saved. Non-zero (logged) when NM or the record cannot be read, a
+# delete fails, or a recorded UUID is still active or saved.
+delete_setup_aps() {
+  local uuids u rc=0
+  settle_uncertain_record || return 1
+  if ! uuids="$(setup_ap_uuids)"; then
+    log "ERROR: could not read NetworkManager profiles or ${AP_UUID_FILE}; setup AP profiles not cleaned up"
+    return 1
+  fi
+  for u in ${uuids}; do
+    if "${NMCLI}" connection delete uuid "${u}" >/dev/null 2>&1; then
+      log "deleted setup AP profile ${u}"
+    else
+      log "ERROR: could not delete setup AP profile ${u}"
+      rc=1
+    fi
+  done
+  prune_ap_record || rc=1
+  return "${rc}"
+}
+
+# Keep in the record only the UUIDs NM still shows active or saved. Non-zero when the
+# record or NM cannot be read, the record cannot be rewritten, or any UUID remains.
+prune_ap_record() {
+  local rec list active keep
+  rec="$(recorded_ap_uuids)" || return 1
+  [ -n "${rec}" ] || return 0
+  list="$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" || return 1
+  active="$(active_uuids)" || return 1
+  keep="$(awk -F: 'NR == FNR { if (NF) k[$NF] = 1; next } ($0 in k)' \
+            <(printf '%s\n%s\n' "$(cut -d: -f2 <<<"${list}")" "${active}") <(printf '%s\n' "${rec}"))"
+  if ! write_ap_record "${keep}"; then
+    log "ERROR: could not rewrite the setup AP record ${AP_UUID_FILE}"
+    return 1
+  fi
+  if [ -n "${keep}" ]; then
+    log "setup AP ${keep//$'\n'/ } still active or saved; kept in ${AP_UUID_FILE}"
+    return 1
+  fi
+  return 0
+}
+
+# Hand wlan0 back to CeraUI: remove the setup marker only once NM shows no setup AP
+# active, and confirm it is gone. Otherwise keep a truthful state (an AP that is still
+# up keeps its marker), log why, and return non-zero so the caller reports failure.
+release_marker() {
+  local st=0
+  setup_ap_active || st=$?
+  case "${st}" in
+    0) log "ERROR: setup AP still active on ${AP_IFACE}; keeping the setup marker (CeraUI keeps off ${AP_IFACE})"; return 1 ;;
+    2) log "ERROR: could not confirm the setup AP is down (NetworkManager or ${AP_IFACE} state unreadable or ambiguous); keeping the setup marker"; return 1 ;;
+  esac
+  if ! rm -f "${ACTIVE_FLAG}" 2>/dev/null || [ -e "${ACTIVE_FLAG}" ]; then
+    log "ERROR: could not remove the setup marker ${ACTIVE_FLAG}; CeraUI keeps deferring ${AP_IFACE}"
+    return 1
+  fi
+  return 0
 }
 
 # --- connectivity probe --------------------------------------------------------
@@ -252,9 +492,21 @@ remove_dns_capture() { rm -f "${DNS_CAPTURE_FILE}"; }
 # ingress. Its PartOf=ceralive-tls-firstboot.service only propagates try-restart,
 # which leaves a stopped unit stopped. Nothing needs button confirmation while the
 # AP is up: CeraUI itself is stopped.
+#
+# Returns non-zero (logged) unless both units are confirmed inactive afterwards. An
+# image without the ingress unit reports it inactive (not loaded), which is fine.
 stop_ceraui() {
+  local unit state rc=0
   "${SYSTEMCTL}" stop "${INGRESS_SERVICE}" >/dev/null 2>&1 || true
   "${SYSTEMCTL}" stop "${CERAUI_SERVICE}"  >/dev/null 2>&1 || true
+  for unit in "${CERAUI_SERVICE}" "${INGRESS_SERVICE}"; do
+    state="$("${SYSTEMCTL}" show -p ActiveState --value "${unit}" 2>/dev/null)" || state="unknown"
+    case "${state}" in
+      inactive|failed) ;;
+      *) log "ERROR: ${unit} did not stop (state: ${state:-unknown})"; rc=1 ;;
+    esac
+  done
+  return "${rc}"
 }
 # Returns non-zero when CeraUI or a present ingress unit did not start, after logging
 # which one. An image without the ingress unit is fine (nothing to restore there).
@@ -283,21 +535,35 @@ start_portal_socket() {
 
 # Undo a half-done handoff: an AP that cannot come up, or whose portal cannot listen,
 # would leave the box with no control plane at all on the re-arm path (CeraUI and the
-# ingress already stopped) and the DNS capture in place for every later shared link. Drop the AP and its
-# marker and bring the normal front door back. The AP profile, the force flag and the
-# last-error marker stay, so the next boot (or the next trigger) tries again.
-abort_ap_handoff() {
+# ingress already stopped) and the DNS capture in place for every later shared link.
+# Drop the AP, release its marker and bring the normal front door back. The AP
+# profile, the force flag and the last-error marker stay, so the next boot (or the
+# next trigger) tries again. The front door comes back even when the marker cannot be
+# released: CeraUI then runs but keeps off wlan0, which is what the marker says.
+abort_ap_handoff() { # sets ABORT_MARKER to what happened to the marker
   stop_portal_socket
   remove_dns_capture
-  "${NMCLI}" connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
-  rm -f "${ACTIVE_FLAG}"
+  down_setup_aps
+  if release_marker; then ABORT_MARKER="AP dropped"; else ABORT_MARKER="setup marker KEPT"; fi
   start_ceraui
+}
+# Before any AP change (marker not writable, CeraUI would not stop, no UUID): nothing
+# to bring down. Release the marker on the usual proof, bring the front door back
+# (on the re-arm path CeraUI is already stopped) and exit 1.
+abort_before_ap() { # $1=what failed
+  local ui=0 m="setup marker released"
+  stop_portal_socket
+  remove_dns_capture
+  release_marker || m="setup marker KEPT"
+  start_ceraui || ui=$?
+  die "$1; no AP brought up, ${m}, $(restore_result "${ui}"), retry flags kept"
 }
 # abort_ap_handoff, then exit 1 with a log line that says what actually happened.
 abort_and_die() { # $1=what failed
   local rc=0
+  ABORT_MARKER=""
   abort_ap_handoff || rc=$?
-  die "$1; AP dropped, $(restore_result "${rc}"), retry flags kept"
+  die "$1; ${ABORT_MARKER}, $(restore_result "${rc}"), retry flags kept"
 }
 
 # Stop the listener (frees port 80) AND any in-flight per-connection instances.
@@ -317,28 +583,47 @@ bring_up_ap() {
   cache_scan
   write_dns_capture
 
-  # Idempotent: drop any prior profile so settings always match this script. The
-  # profile is autoconnect=no — it must come up ONLY when the trigger fires, never
-  # automatically on a boot where a real uplink exists.
-  "${NMCLI}" connection delete "${AP_CON_NAME}" >/dev/null 2>&1 || true
+  # The setup marker goes first (header §SETUP MARKER): from here until it is removed,
+  # CeraUI leaves wlan0 alone, whatever the AP's connection is called. No marker, no
+  # AP: an unwritable marker aborts before anything touches the radio.
+  mkdir -p "${STATE_DIR}"
+  printf 'ssid=%s\ngateway=%s\niface=%s\ncon=%s\nuser_con=%s\n' \
+      "${ssid}" "${AP_GW}" "${AP_IFACE}" "${AP_CON_NAME}" "${USER_CON_NAME}" >"${ACTIVE_FLAG}" \
+    || abort_before_ap "could not write the setup marker ${ACTIVE_FLAG}"
+
+  # Hand wlan0 and port 80 over BEFORE the AP exists (header §SETUP MARKER): once these
+  # units have exited, CeraUI issues nothing more, so the activation below is the last
+  # one NM sees for wlan0 and replaces any CeraUI AP still activating there. The ingress
+  # never gets to bind the AP gateway either. Nothing touches the AP until both are
+  # confirmed stopped. A failed bring-up below restarts both.
+  stop_ceraui || abort_before_ap "CeraUI or the button ingress did not stop"
+
+  # Fresh profile for every bring-up, so its settings always match this script: drop
+  # earlier setup profiles (by UUID only), then record the new profile's UUID BEFORE
+  # creating it, so no crash can leave a setup AP we cannot identify. The profile is
+  # autoconnect=no — it must come up ONLY when the trigger fires, never automatically
+  # on a boot where a real uplink exists.
+  delete_setup_aps || log "continuing with a fresh setup AP profile; the old one stays recorded until NM shows it gone"
+  # The new UUID joins whatever the record still holds; an uncertain record that could
+  # not be settled stops here, since replacing it would lose track of its activation.
+  local ap_uuid old
+  old="$(recorded_ap_uuids)" || abort_before_ap "setup AP record ${AP_UUID_FILE} is unreadable while an AP may be active on ${AP_IFACE}"
+  ap_uuid="$(tr -d '[:space:]' <"${UUID_SOURCE}" 2>/dev/null)"
+  if ! [[ "${ap_uuid}" =~ ${UUID_RE} ]] || ! write_ap_record "$(printf '%s\n%s' "${old}" "${ap_uuid}")"; then
+    abort_before_ap "could not choose and record a UUID for the setup AP (${AP_UUID_FILE})"
+  fi
   "${NMCLI}" connection add \
-      type wifi ifname "${AP_IFACE}" con-name "${AP_CON_NAME}" \
+      type wifi ifname "${AP_IFACE}" con-name "${AP_CON_NAME}" connection.uuid "${ap_uuid}" \
       autoconnect no ssid "${ssid}" \
       802-11-wireless.mode ap 802-11-wireless.band bg \
       ipv4.method shared ipv4.addresses "${AP_GW}/${AP_PREFIX}" \
       wifi-sec.key-mgmt wpa-psk wifi-sec.psk "${AP_PASSPHRASE}" \
     || abort_and_die "failed to create AP connection profile '${AP_CON_NAME}'"
 
-  "${NMCLI}" connection up "${AP_CON_NAME}" \
+  "${NMCLI}" connection up uuid "${ap_uuid}" \
     || abort_and_die "failed to activate AP connection '${AP_CON_NAME}' on ${AP_IFACE}"
 
-  mkdir -p "${STATE_DIR}"
-  # Marker consumed by the captive portal and the teardown contract.
-  printf 'ssid=%s\ngateway=%s\niface=%s\ncon=%s\nuser_con=%s\n' \
-      "${ssid}" "${AP_GW}" "${AP_IFACE}" "${AP_CON_NAME}" "${USER_CON_NAME}" >"${ACTIVE_FLAG}"
-
-  # Hand port 80 from CeraUI to the captive portal.
-  stop_ceraui
+  # Port 80 on the AP gateway is free (CeraUI and the ingress stopped above).
   start_portal_socket || abort_and_die "captive portal could not take ${AP_GW}:80"
   log "provisioning AP active — captive portal on ${AP_GW}:80 (marker ${ACTIVE_FLAG})"
 }
@@ -346,10 +631,11 @@ bring_up_ap() {
 # --- clean link-down only (service ExecStop / shutdown) ------------------------
 # The AP profile + the /data flags are RETAINED so the next boot re-evaluates the
 # trigger; the factory-reset force flag is NOT cleared here. A manual `stop` (and a
-# manual unit stop) restores CeraUI and the ingress so the device keeps a reachable
-# control plane. During shutdown (arg 1 = 1) nothing is started: a synchronous start
-# from ExecStop would wait behind the shutdown transaction that is stopping those
-# units. Portal stops are only queued then, and the NM link-down is bounded.
+# manual unit stop) removes the setup marker and then restores CeraUI and the
+# ingress, so the device keeps a reachable control plane that may use wlan0 again.
+# During shutdown (arg 1 = 1) nothing is started: a synchronous start from ExecStop
+# would wait behind the shutdown transaction that is stopping those units. Portal
+# stops are only queued then, the NM link-down is bounded, and the marker stays.
 stop_ap() {
   local shutdown="${1:-0}"
   log "stopping provisioning AP link (profile + flags retained; shutdown=${shutdown})"
@@ -359,16 +645,31 @@ stop_ap() {
     stop_portal_socket
   fi
   remove_dns_capture
-  if [ -n "${TIMEOUT_BIN}" ] && command -v "${TIMEOUT_BIN}" >/dev/null 2>&1; then
-    "${TIMEOUT_BIN}" 5 "${NMCLI}" --wait 3 connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
-  else
-    "${NMCLI}" --wait 3 connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
+  if [[ "${shutdown}" == 1 ]]; then
+    # Bounded, and only recorded UUIDs: no profile reads while the system stops. The
+    # marker and the record stay; the next boot settles them.
+    local rec u
+    rec="$(recorded_ap_uuids 2>/dev/null)" || rec=""
+    for u in ${rec}; do
+      if [ -n "${TIMEOUT_BIN}" ] && command -v "${TIMEOUT_BIN}" >/dev/null 2>&1; then
+        "${TIMEOUT_BIN}" 5 "${NMCLI}" --wait 3 connection down uuid "${u}" >/dev/null 2>&1 || true
+      else
+        "${NMCLI}" --wait 3 connection down uuid "${u}" >/dev/null 2>&1 || true
+      fi
+    done
+    return 0
   fi
-  [[ "${shutdown}" == 1 ]] && return 0
-  local rc=0
-  start_ceraui || rc=$?
-  log "provisioning AP link stopped; $(restore_result "${rc}")"
-  return "${rc}"
+  down_setup_aps --wait 3
+  # The front door comes back either way; only a released marker counts as a handback.
+  local released=0 ui=0
+  release_marker || released=$?
+  start_ceraui || ui=$?
+  if [ "${released}" -eq 0 ]; then
+    log "provisioning AP link stopped; $(restore_result "${ui}")"
+  else
+    log "ERROR: provisioning AP stop incomplete (setup marker kept); $(restore_result "${ui}")"
+  fi
+  [ "${released}" -eq 0 ] && [ "${ui}" -eq 0 ]
 }
 
 # --- TEARDOWN: full provisioning-mode exit (MAC6 end-state) --------------------
@@ -383,25 +684,30 @@ teardown_ap() {
   stop_portal_socket
   remove_dns_capture
 
-  # (a) AP mode disabled — bring the AP down and DELETE the profile.
-  "${NMCLI}" connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
-  "${NMCLI}" connection delete "${AP_CON_NAME}" >/dev/null 2>&1 || true
+  # (a) AP mode disabled — bring the setup AP down and DELETE its profile, by UUID
+  # only (a same-named user profile stays). A failed delete is logged; the marker
+  # release below still decides on whether the AP is actually down.
+  down_setup_aps
+  delete_setup_aps || true
   if [ "${keep_link}" != "1" ]; then
     "${NMCLI}" device disconnect "${AP_IFACE}" >/dev/null 2>&1 || true
   fi
 
-  rm -f "${ACTIVE_FLAG}" "${FORCE_FLAG}" "${TEARDOWN_FLAG}" "${ERROR_MARKER}"
+  rm -f "${FORCE_FLAG}" "${TEARDOWN_FLAG}" "${ERROR_MARKER}"
+  local released=0 ui=0
+  release_marker || released=$?
 
   # (d) CeraUI reachable on the new IP — restart so it re-binds port 80. A failed
-  # start is reported (non-zero), but the joined link and the cleared state stay.
-  local rc=0
-  start_ceraui || rc=$?
-  if [ "${rc}" -eq 0 ]; then
+  # start or a kept marker is reported (non-zero), but the joined link stays.
+  start_ceraui || ui=$?
+  if [ "${released}" -ne 0 ]; then
+    log "ERROR: provisioning teardown incomplete (setup marker kept); $(restore_result "${ui}")"
+  elif [ "${ui}" -eq 0 ]; then
     log "provisioning mode cleared (AP profile deleted, flags cleared, CeraUI on port 80)"
   else
     log "ERROR: provisioning mode cleared (AP profile deleted, flags cleared) but CeraUI/ingress did not start"
   fi
-  return "${rc}"
+  [ "${released}" -eq 0 ] && [ "${ui}" -eq 0 ]
 }
 
 # --- credential-handoff worker (detached; runs in its own transient unit) ------
@@ -439,7 +745,7 @@ connect_target() {
   # radio release for the FAILURE path is handled by re-arming, and for out-of-band
   # exits by teardown_ap with keep_link=0.
   stop_portal_socket
-  "${NMCLI}" connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
+  down_setup_aps
 
   if bounded_connect "${con}" && verify_joined; then
     log "joined target network (${con}) — finalising provisioning teardown"
@@ -491,8 +797,27 @@ main() {
     bring_up_ap
   else
     if [ -e "${ACTIVE_FLAG}" ]; then
-      log "stale portal marker but portal no longer required → tearing down"
-      teardown_ap || rc=$?
+      # Left by a shutdown or power loss during setup. wlan0 may already carry a saved
+      # network by now (that is often why no portal is needed): keep the link.
+      log "stale portal marker but portal no longer required → tearing down (wlan0 kept)"
+      teardown_ap 1 || rc=$?
+    else
+      # A stop keeps the AP profile for a retry but drops the marker, so the stale-
+      # marker teardown above no longer finds it. Delete only setup AP profiles, by
+      # UUID, and the old error once they are gone. wlan0 and CeraUI are left alone:
+      # wlan0 may be carrying a real uplink, and CeraUI is already up.
+      local found
+      if ! found="$(setup_ap_uuids)"; then
+        log "ERROR: could not read NetworkManager profiles or ${AP_UUID_FILE}; leftover setup AP check skipped"
+        rc=1
+      elif [ -n "${found}" ] || [ -e "${AP_UUID_FILE}" ]; then
+        log "leftover setup AP profile(s) but portal no longer required → deleting them"
+        if delete_setup_aps; then
+          [ -n "${found}" ] && rm -f "${ERROR_MARKER}"
+        else
+          rc=1
+        fi
+      fi
     fi
     # A capture left by an older failed bring-up would send every later shared
     # connection's DNS to the AP gateway.
