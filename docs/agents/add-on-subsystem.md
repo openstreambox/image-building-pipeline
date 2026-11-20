@@ -756,7 +756,10 @@ The portal mark is vendored under `mkosi/runtime/brand/`, pinned by `brand-asset
   `/data/ceralive/provision/teardown-requested` flag) also releases `wlan0` and clears
   the portal-active + force flags. Plain `systemctl stop` (ExecStop) is link-down +
   portal-down only and RETAINS the AP profile + flags (shutdown must not disarm a
-  pending factory reset). Offline proof harness:
+  pending factory reset); a manual stop drops the `portal-active` setup marker before
+  CeraUI restarts, shutdown keeps it. The marker is written before the AP profile is
+  created, so CeraUI never sees the setup AP without it (docs/wifi-provisioning.md,
+  *Setup marker*). Offline proof harness:
   `tests/provision-portal.test.sh` (gated in `postinst-wiring.bats`).
 
 **CeraUI TLS front — nginx on 443 (Task 15, SC3)** [EXISTS]

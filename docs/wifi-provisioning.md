@@ -32,7 +32,7 @@ All under `/data/ceralive/provision/`:
 | File | Meaning |
 |------|---------|
 | `force-portal` | Factory-reset re-trigger flag — start the portal even when profiles exist |
-| `portal-active` | Written while the AP is up; `key=value` (`ssid`, `gateway`, `iface`, `con`, `user_con`) |
+| `portal-active` | Setup marker: the setup owns `wlan0`; `key=value` (`ssid`, `gateway`, `iface`, `con`, `user_con`). See *Setup marker* below |
 | `teardown-requested` | Out-of-band teardown request honored at next service start |
 | `scan.txt` | Cached visible SSIDs (one per line), scanned **before** the AP came up |
 | `last-error` | After a failed join: `ssid=<name>` + `reason=auth_or_timeout` — shown by the portal |
@@ -146,8 +146,10 @@ Two teardown entry points:
 `systemctl stop ceralive-provision` runs `ExecStop=ceralive-provision service-stop` — a
 link-down + portal-down clean stop that **retains** the AP profile and the factory-reset
 flags so the next boot re-evaluates the trigger and a pending factory reset is not
-silently disarmed. On a manual stop it restores CeraUI and the button ingress to
-port 80; during shutdown it starts nothing (see *Shutdown cleanup*).
+silently disarmed. On a manual stop it removes the setup marker and restores CeraUI
+and the button ingress to port 80; during shutdown it starts nothing and keeps the
+marker (see *Shutdown cleanup* and *Setup marker*). A later boot that needs no portal
+deletes the AP profile a stop left behind, without touching `wlan0` or CeraUI.
 
 Whenever provisioning hands the front door back (after a join, on `stop`/`teardown`, or
 when it undoes a failed bring-up), a CeraUI or ingress unit that does not start is
@@ -161,6 +163,23 @@ CeraUI and the ingress are started again, and `start` fails. The AP profile, the
 force flag and `last-error` stay, so the next boot or trigger tries again. A boot
 that needs no portal also removes a DNS capture an older failed bring-up left
 behind, so later shared connections don't send their DNS to the AP gateway.
+
+### Setup marker
+
+CeraUI reads `portal-active` as "the image's setup owns `wlan0`": while it exists,
+CeraUI does not start, switch, restore or arm a hotspot on that radio, and checks
+again right before it hands a hotspot to NetworkManager. The marker therefore covers
+exactly the time the setup AP is up or about to come up:
+
+- written before the AP profile is created or activated; if it cannot be written,
+  no AP is brought up;
+- kept through the station join and any re-arm after a failed join;
+- removed before CeraUI starts again on every way out: a failed bring-up, a manual
+  stop, and teardown (after a successful join the station is up on `wlan0` first,
+  so CeraUI's handover sees the joined station);
+- kept across shutdown, so the setup keeps priority until the next boot re-evaluates
+  the trigger; that boot removes a marker it no longer needs through the stale-marker
+  teardown.
 
 ## Port-80 / 443 coexistence
 

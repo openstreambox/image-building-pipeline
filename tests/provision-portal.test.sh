@@ -16,6 +16,8 @@
 #   + hard-timeout path returns to AP mode (never headless-dead)
 #   + only the portal listens on 192.168.42.1:80 while the AP is up (button ingress
 #     and CeraUI stopped, both restored on teardown)
+#   + the setup marker exists before the AP profile is created or activated, through
+#     the station join, and is gone before CeraUI starts on every way out
 #
 # Run: tests/provision-portal.test.sh   (also gated via tests/postinst-wiring.bats)
 #
@@ -45,17 +47,23 @@ printf 'deadbeefcafef00d\n' >"${MACHINE_ID}"
 
 make_stub() { local p="${BIN}/$1"; shift; printf '%s\n' '#!/usr/bin/env bash' "$@" >"${p}"; chmod +x "${p}"; }
 
+# Every nmcli and systemctl call is also logged with whether the setup marker existed
+# at that moment ("marker ..." / "nomarker ..."), so ordering is asserted directly.
+MARK_CALL='[ -e "${CERALIVE_PROVISION_ACTIVE_FLAG:-$CERALIVE_PROVISION_STATE_DIR/portal-active}" ] && m=marker || m=nomarker; echo "$m $(basename "$0") $*" >>"$MARKER_LOG"'
+
 # nmcli: records every call; returns programmed data/exit codes. The AP profile ALWAYS
 # comes up (so a re-arm during the failure path succeeds); only the USER connection's
 # `connection up` exit code is programmable (STUB_USER_UP_RC).
 make_stub nmcli \
   'echo "nmcli $*" >>"$CALL_LOG"' \
+  "${MARK_CALL}" \
   'args="$*"' \
   'case "$args" in' \
   '  *"dev wifi list"*) [ -n "${STUB_SCAN_FILE:-}" ] && cat "$STUB_SCAN_FILE"; exit 0 ;;' \
   '  *"-f CONNECTIVITY general status"*) printf "%s\n" "${STUB_CONNECTIVITY:-full}"; exit 0 ;;' \
   '  *"802-11-wireless.ssid connection show"*) printf "%s\n" "${STUB_CON_SSID:-HomeNet}"; exit 0 ;;' \
   '  *"-f NAME,TYPE connection show"*) [ -n "${STUB_PROFILES_FILE:-}" ] && cat "$STUB_PROFILES_FILE"; exit 0 ;;' \
+  '  *"connection add"*ceralive-ap*) exit "${STUB_AP_ADD_RC:-0}" ;;' \
   '  *"connection up"*) case "$args" in *ceralive-ap*) exit "${STUB_AP_UP_RC:-0}" ;; *) exit "${STUB_USER_UP_RC:-0}" ;; esac ;;' \
   '  *"connection add"*) if [ "${STUB_ADD_RC:-0}" -ne 0 ]; then echo "Error: failed to modify 802-11-wireless.ssid: invalid" >&2; exit "$STUB_ADD_RC"; fi' \
   '                      echo "Connection '"'"'ceralive-wifi'"'"' (00000000-0000-0000-0000-000000000000) successfully added."; exit 0 ;;' \
@@ -66,7 +74,7 @@ make_stub ip \
   'echo "ip $*" >>"$CALL_LOG"' \
   '[ -n "${STUB_DEFAULT_ROUTE:-}" ] && echo "default via 10.0.0.1"; exit 0'
 
-make_stub systemctl 'echo "systemctl $*" >>"$CALL_LOG"; exit 0'
+make_stub systemctl 'echo "systemctl $*" >>"$CALL_LOG"' "${MARK_CALL}" 'exit 0'
 
 # systemd-run: records the transient-unit launch but does NOT execute it (--no-block).
 make_stub systemd-run 'echo "systemd-run $*" >>"$CALL_LOG"; exit 0'
@@ -100,9 +108,10 @@ export CERALIVE_HOSTNAME_FILE="${HOSTNAME_FILE}"
 export CERALIVE_HOSTNAME_INDEX_FILE="${HOST_INDEX_FILE}"
 export CERALIVE_HOSTNAME_BIN="${BIN}/hostname"
 export CERALIVE_CONNECT_FLUSH_DELAY=0
-export CALL_LOG STUB_SCAN_FILE="${SCAN_SRC}"
+MARKER_LOG="${SANDBOX}/marker-calls.log"
+export CALL_LOG MARKER_LOG STUB_SCAN_FILE="${SCAN_SRC}"
 
-reset_state() { rm -rf "${STATE}" "${DNSDIR}"; mkdir -p "${STATE}"; : >"${CALL_LOG}"; }
+reset_state() { rm -rf "${STATE}" "${DNSDIR}"; mkdir -p "${STATE}"; : >"${CALL_LOG}"; : >"${MARKER_LOG}"; }
 called()     { grep -qF -- "$1" "${CALL_LOG}"; }
 state_file() { printf '%s/%s' "${STATE}" "$1"; }
 
@@ -275,6 +284,8 @@ UNITS="${SANDBOX}/units"
 cat >"${BIN}/systemctl-stateful" <<'STUB'
 #!/usr/bin/env bash
 echo "systemctl $*" >>"$CALL_LOG"
+[ -e "${CERALIVE_PROVISION_ACTIVE_FLAG:-$CERALIVE_PROVISION_STATE_DIR/portal-active}" ] && m=marker || m=nomarker
+echo "$m systemctl $*" >>"$MARKER_LOG"
 [ "$1" = --no-block ] && shift
 verb="$1"; shift; unit="${1:-}"
 ap_up() {
@@ -480,6 +491,112 @@ env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/d
 rc=$?
 [ "${rc}" -ne 0 ] && grep -q "CeraUI restored" "${OUTF}" && ! grep -q "restore FAILED" "${OUTF}" \
                                                  && pass "abort: a full restore without the ingress unit is logged as restored" || fail "abort: a full restore without the ingress unit is logged as restored"
+
+# ===========================================================================
+echo "== Scenario M: the setup marker covers the whole AP lifetime and nothing more =="
+# with_marker / without_marker: some call matching the ERE ran with / without the marker.
+with_marker()    { grep -qE -- "^marker $1" "${MARKER_LOG}"; }
+without_marker() { grep -qE -- "^nomarker $1" "${MARKER_LOG}"; }
+AP_ADD='nmcli connection add .*con-name ceralive-ap '
+AP_UP='nmcli connection up ceralive-ap$'
+CERAUI_START='systemctl start ceralive.service$'
+SC=(env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/dev/null)
+
+# Bring-up: the marker exists before the profile is created and before it is activated,
+# and it carries what the portal reads.
+reset_state; boot_units; : >"$(state_file force-portal)"
+"${SC[@]}" bash "${PROVISION}" start >/dev/null 2>&1
+with_marker "${AP_ADD}" && ! without_marker "${AP_ADD}" \
+                                                 && pass "marker exists before the AP profile is created" || fail "marker exists before the AP profile is created"
+with_marker "${AP_UP}" && ! without_marker "${AP_UP}" \
+                                                 && pass "marker exists before the AP is activated" || fail "marker exists before the AP is activated"
+grep -qx 'ssid=CeraLive-Setup-f00d' "$(state_file portal-active)" && grep -qx 'iface=wlan0' "$(state_file portal-active)" \
+                                                 && pass "marker carries ssid and iface" || fail "marker carries ssid and iface"
+
+# Station join: the marker stays through the attempt (CeraUI is told the radio is
+# still the setup's) and is gone before CeraUI starts on the joined link.
+: >"${MARKER_LOG}"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=0 STUB_CONNECTIVITY=full STUB_CON_SSID=HomeNet \
+    bash "${PROVISION}" connect ceralive-wifi >/dev/null 2>&1
+with_marker 'nmcli --wait [0-9]+ connection up ceralive-wifi$' \
+                                                 && pass "marker held through the station join" || fail "marker held through the station join"
+without_marker "${CERAUI_START}" && ! with_marker "${CERAUI_START}" \
+                                                 && pass "join: marker gone before CeraUI starts" || fail "join: marker gone before CeraUI starts"
+
+# A failed join re-arms with the marker in place the whole time.
+reset_state; boot_units; : >"$(state_file force-portal)"
+"${SC[@]}" bash "${PROVISION}" start >/dev/null 2>&1
+: >"${MARKER_LOG}"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=4 STUB_CON_SSID=HomeNet \
+    bash "${PROVISION}" connect ceralive-wifi >/dev/null 2>&1
+! grep -q '^nomarker' "${MARKER_LOG}" && [ -e "$(state_file portal-active)" ] \
+                                                 && pass "failed join: marker never dropped while re-arming" || fail "failed join: marker never dropped while re-arming"
+
+# Every failed bring-up, first or re-arm, leaves no marker, and CeraUI only starts
+# after it is gone.
+fail_case() { # $1=label $2=verb (start|rearm), rest=env for the failing call
+  local label="$1" verb="$2"; shift 2
+  reset_state; boot_units; : >"$(state_file force-portal)"
+  if [ "${verb}" = rearm ]; then
+    "${SC[@]}" bash "${PROVISION}" start >/dev/null 2>&1
+    : >"${MARKER_LOG}"
+    env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=4 STUB_CON_SSID=HomeNet "$@" \
+        bash "${PROVISION}" connect ceralive-wifi >/dev/null 2>&1
+  else
+    "${SC[@]}" "$@" bash "${PROVISION}" start >/dev/null 2>&1
+  fi
+  local rc=$?
+  [ "${rc}" -ne 0 ] && [ ! -e "$(state_file portal-active)" ] \
+                                                 && pass "${label}: fails and leaves no marker" || fail "${label}: fails and leaves no marker (rc=${rc})"
+  without_marker "${CERAUI_START}" && ! with_marker "${CERAUI_START}" && [ -e "${UNITS}/ceralive.service" ] \
+                                                 && pass "${label}: CeraUI starts only after the marker is gone" || fail "${label}: CeraUI starts only after the marker is gone"
+}
+fail_case "profile cannot be created"            start STUB_AP_ADD_RC=2
+fail_case "AP cannot be activated"               start STUB_AP_UP_RC=10
+fail_case "portal cannot listen"                 start STUB_PORTAL_FAIL=1
+fail_case "re-arm: profile cannot be created"    rearm STUB_AP_ADD_RC=2
+fail_case "re-arm: AP cannot be activated"       rearm STUB_AP_UP_RC=10
+fail_case "re-arm: portal cannot listen"         rearm STUB_PORTAL_FAIL=1
+
+# A marker that cannot be written means no AP at all.
+reset_state; boot_units; : >"$(state_file force-portal)"
+"${SC[@]}" CERALIVE_PROVISION_ACTIVE_FLAG="${SANDBOX}/missing-dir/portal-active" bash "${PROVISION}" start >/dev/null 2>&1
+rc=$?
+[ "${rc}" -ne 0 ] && ! called "nmcli connection add type wifi ifname wlan0 con-name ceralive-ap" && ! called "nmcli connection up ceralive-ap" \
+                                                 && pass "unwritable marker: no AP profile created or activated" || fail "unwritable marker: no AP profile created or activated (rc=${rc})"
+[ -e "${UNITS}/ceralive.service" ] && [ -e "${UNITS}/ceralive-button-ingress.service" ] \
+                                                 && pass "unwritable marker: CeraUI and ingress keep running" || fail "unwritable marker: CeraUI and ingress keep running"
+
+# Manual stop (verb and unit stop) clears the marker before CeraUI starts and keeps
+# the retry state; the next trigger brings the setup back with a fresh marker.
+for verb in stop service-stop; do
+  reset_state; boot_units; : >"$(state_file force-portal)"
+  "${SC[@]}" bash "${PROVISION}" start >/dev/null 2>&1
+  : >"${MARKER_LOG}"
+  env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running bash "${PROVISION}" "${verb}" >/dev/null 2>&1
+  [ ! -e "$(state_file portal-active)" ] && [ -e "$(state_file force-portal)" ] \
+                                                 && pass "${verb}: marker cleared, force flag kept" || fail "${verb}: marker cleared, force flag kept"
+  with_marker 'nmcli --wait 3 connection down ceralive-ap$' && without_marker "${CERAUI_START}" && ! with_marker "${CERAUI_START}" \
+                                                 && pass "${verb}: marker held until the AP is down, gone before CeraUI starts" || fail "${verb}: marker held until the AP is down, gone before CeraUI starts"
+done
+"${SC[@]}" bash "${PROVISION}" start >/dev/null 2>&1
+[ -e "$(state_file portal-active)" ]             && pass "next trigger after a stop writes the marker again" || fail "next trigger after a stop writes the marker again"
+
+# After a stop, a boot that needs no portal deletes the leftover profile, and only that.
+reset_state; boot_units
+printf 'ceralive-ap:802-11-wireless\nHomeNet:802-11-wireless\n' >"${SANDBOX}/profiles-left.txt"
+printf 'ssid=HomeNet\nreason=auth_or_timeout\n' >"$(state_file last-error)"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE="${SANDBOX}/profiles-left.txt" \
+    bash "${PROVISION}" start >/dev/null 2>&1
+rc=$?
+[ "${rc}" -eq 0 ] && called "nmcli connection delete ceralive-ap" && [ ! -e "$(state_file last-error)" ] \
+                                                 && pass "leftover AP profile deleted when no portal is needed" || fail "leftover AP profile deleted when no portal is needed (rc=${rc})"
+! called "nmcli device disconnect" && ! called "systemctl start" && ! called "nmcli connection up" \
+                                                 && pass "leftover cleanup leaves wlan0 and CeraUI alone" || fail "leftover cleanup leaves wlan0 and CeraUI alone"
+reset_state; boot_units
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_CONNECTIVITY=full STUB_PROFILES_FILE=/dev/null \
+    bash "${PROVISION}" start >/dev/null 2>&1
+! called "nmcli connection delete"               && pass "no AP profile, nothing deleted" || fail "no AP profile, nothing deleted"
 
 # Upstream's shutdown cases (12056fa, 07c1820): a blocking start during ExecStop
 # waits behind the shutdown transaction; model that by refusing every blocking call.

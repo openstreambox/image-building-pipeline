@@ -84,6 +84,15 @@
 #   that RETAINS the AP profile + the factory-reset flags so the next boot re-evaluates
 #   the trigger and does NOT silently disarm a pending factory reset.
 #
+# SETUP MARKER (portal-active): CeraUI treats this file as "the setup owns wlan0" and
+#   will not start, switch, restore or arm a hotspot there while it exists. It is
+#   therefore written BEFORE the AP profile is created or activated, and it exists
+#   exactly while the setup AP is up or about to come up: through the station join
+#   and any re-arm. Every path that gives wlan0 back removes it before CeraUI starts
+#   again (failed bring-up, manual stop, teardown). Only shutdown keeps it, so the
+#   setup keeps priority until the next boot re-evaluates the trigger; that boot
+#   removes it through the stale-marker teardown when no portal is needed.
+#
 # This is a standalone DEVICE script: it does NOT source the repo lib/common.sh
 # (not present on the device). NOT `set -e`: the trigger probes are EXPECTED to fail
 # transiently (NM still settling) and are evaluated explicitly in a grace loop.
@@ -125,7 +134,7 @@ PORTAL_SERVICE_GLOB="${CERALIVE_PORTAL_SERVICE_GLOB:-ceralive-portal@*.service}"
 # factory-reset re-trigger flag and the portal-active marker persist across updates.
 STATE_DIR="${CERALIVE_PROVISION_STATE_DIR:-/data/ceralive/provision}"
 FORCE_FLAG="${CERALIVE_PROVISION_FORCE_FLAG:-${STATE_DIR}/force-portal}"          # factory-reset re-trigger
-ACTIVE_FLAG="${CERALIVE_PROVISION_ACTIVE_FLAG:-${STATE_DIR}/portal-active}"       # set while AP is up; read by the portal
+ACTIVE_FLAG="${CERALIVE_PROVISION_ACTIVE_FLAG:-${STATE_DIR}/portal-active}"       # setup owns wlan0 (header §SETUP MARKER); read by the portal and CeraUI
 TEARDOWN_FLAG="${CERALIVE_PROVISION_TEARDOWN_FLAG:-${STATE_DIR}/teardown-requested}"
 SCAN_CACHE="${CERALIVE_PROVISION_SCAN_CACHE:-${STATE_DIR}/scan.txt}"              # SSID list (single-radio: scanned BEFORE AP up)
 ERROR_MARKER="${CERALIVE_PROVISION_ERROR_MARKER:-${STATE_DIR}/last-error}"        # written on a failed join; shown by the portal
@@ -175,6 +184,12 @@ stored_wifi_profile_count() {
     | awk -F: -v ap="${AP_CON_NAME}" '
         $2 == "802-11-wireless" && $1 != ap { n++ }
         END { print n + 0 }'
+}
+
+# Our own AP profile left behind by a stop (the profile outlives the AP link).
+ap_profile_exists() {
+  "${NMCLI}" -t -f NAME,TYPE connection show 2>/dev/null \
+    | awk -F: -v ap="${AP_CON_NAME}" '$1 == ap && $2 == "802-11-wireless" { f = 1 } END { exit !f }'
 }
 
 # --- connectivity probe --------------------------------------------------------
@@ -317,6 +332,14 @@ bring_up_ap() {
   cache_scan
   write_dns_capture
 
+  # The setup marker goes first (header §SETUP MARKER): from here until it is removed,
+  # CeraUI leaves wlan0 alone, whatever the AP's connection is called. No marker, no
+  # AP: an unwritable marker aborts before anything touches the radio.
+  mkdir -p "${STATE_DIR}"
+  printf 'ssid=%s\ngateway=%s\niface=%s\ncon=%s\nuser_con=%s\n' \
+      "${ssid}" "${AP_GW}" "${AP_IFACE}" "${AP_CON_NAME}" "${USER_CON_NAME}" >"${ACTIVE_FLAG}" \
+    || abort_and_die "could not write the setup marker ${ACTIVE_FLAG}"
+
   # Idempotent: drop any prior profile so settings always match this script. The
   # profile is autoconnect=no — it must come up ONLY when the trigger fires, never
   # automatically on a boot where a real uplink exists.
@@ -332,11 +355,6 @@ bring_up_ap() {
   "${NMCLI}" connection up "${AP_CON_NAME}" \
     || abort_and_die "failed to activate AP connection '${AP_CON_NAME}' on ${AP_IFACE}"
 
-  mkdir -p "${STATE_DIR}"
-  # Marker consumed by the captive portal and the teardown contract.
-  printf 'ssid=%s\ngateway=%s\niface=%s\ncon=%s\nuser_con=%s\n' \
-      "${ssid}" "${AP_GW}" "${AP_IFACE}" "${AP_CON_NAME}" "${USER_CON_NAME}" >"${ACTIVE_FLAG}"
-
   # Hand port 80 from CeraUI to the captive portal.
   stop_ceraui
   start_portal_socket || abort_and_die "captive portal could not take ${AP_GW}:80"
@@ -346,10 +364,11 @@ bring_up_ap() {
 # --- clean link-down only (service ExecStop / shutdown) ------------------------
 # The AP profile + the /data flags are RETAINED so the next boot re-evaluates the
 # trigger; the factory-reset force flag is NOT cleared here. A manual `stop` (and a
-# manual unit stop) restores CeraUI and the ingress so the device keeps a reachable
-# control plane. During shutdown (arg 1 = 1) nothing is started: a synchronous start
-# from ExecStop would wait behind the shutdown transaction that is stopping those
-# units. Portal stops are only queued then, and the NM link-down is bounded.
+# manual unit stop) removes the setup marker and then restores CeraUI and the
+# ingress, so the device keeps a reachable control plane that may use wlan0 again.
+# During shutdown (arg 1 = 1) nothing is started: a synchronous start from ExecStop
+# would wait behind the shutdown transaction that is stopping those units. Portal
+# stops are only queued then, the NM link-down is bounded, and the marker stays.
 stop_ap() {
   local shutdown="${1:-0}"
   log "stopping provisioning AP link (profile + flags retained; shutdown=${shutdown})"
@@ -365,6 +384,7 @@ stop_ap() {
     "${NMCLI}" --wait 3 connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
   fi
   [[ "${shutdown}" == 1 ]] && return 0
+  rm -f "${ACTIVE_FLAG}"
   local rc=0
   start_ceraui || rc=$?
   log "provisioning AP link stopped; $(restore_result "${rc}")"
@@ -493,6 +513,13 @@ main() {
     if [ -e "${ACTIVE_FLAG}" ]; then
       log "stale portal marker but portal no longer required → tearing down"
       teardown_ap || rc=$?
+    elif ap_profile_exists; then
+      # A stop keeps the AP profile for a retry but drops the marker, so the stale-
+      # marker teardown above no longer finds it. Remove just the profile and the
+      # old error: wlan0 may be carrying a real uplink, and CeraUI is already up.
+      log "leftover AP profile '${AP_CON_NAME}' but portal no longer required → deleting it"
+      "${NMCLI}" connection delete "${AP_CON_NAME}" >/dev/null 2>&1 || true
+      rm -f "${ERROR_MARKER}"
     fi
     # A capture left by an older failed bring-up would send every later shared
     # connection's DNS to the AP gateway.
