@@ -152,7 +152,11 @@ flags so the next boot re-evaluates the trigger and a pending factory reset is n
 silently disarmed. On a manual stop it removes the setup marker and restores CeraUI
 and the button ingress to port 80; during shutdown it starts nothing and keeps the
 marker (see *Shutdown cleanup* and *Setup marker*). A later boot that needs no portal
-deletes the AP profile a stop left behind, without touching `wlan0` or CeraUI.
+deletes the AP profile a stop left behind, without touching `wlan0` or CeraUI. It
+deletes only a verified setup AP (connection name, AP mode, this device's
+`CeraLive-Setup-<short-id>` SSID and the `192.168.42.1/24` address), by UUID, so a
+user's station profile that happens to share the name stays. A failed delete or an
+unreadable NetworkManager is logged, `last-error` stays, and the run exits non-zero.
 
 Whenever provisioning hands the front door back (after a join, on `stop`/`teardown`, or
 when it undoes a failed bring-up), a CeraUI or ingress unit that does not start is
@@ -184,10 +188,16 @@ exactly the time the setup AP is up or about to come up:
 - kept through the station join and any re-arm after a failed join;
 - removed before CeraUI starts again on every way out: a failed bring-up, a manual
   stop, and teardown (after a successful join the station is up on `wlan0` first,
-  so CeraUI's handover sees the joined station);
+  so CeraUI's handover sees the joined station). It is removed only once
+  NetworkManager shows no setup AP active (an inactive or deleted profile counts as
+  gone), and the removal is checked. If the AP is still up, NetworkManager can't be
+  read, or the file can't be removed, the marker stays and the command logs an error
+  and exits non-zero. CeraUI and the ingress still come back, so there is a front
+  door, but CeraUI keeps off `wlan0` as the marker says;
 - kept across shutdown, so the setup keeps priority until the next boot re-evaluates
   the trigger; that boot removes a marker it no longer needs through the stale-marker
-  teardown.
+  teardown, which keeps `wlan0` connected (a saved network may already be up on it).
+  Only the explicit `teardown` verb or flag still releases `wlan0`.
 
 ## Port-80 / 443 coexistence
 
