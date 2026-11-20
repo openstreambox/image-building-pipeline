@@ -95,6 +95,32 @@ class Gestures(unittest.TestCase):
             self.assertIn(('countdown', 3), self.lights)
             self.assertIn(('cancel', 0), self.lights)
 
+    def test_refused_poweroff_keeps_the_daemon_up(self):
+        calls = []
+        def refused():
+            calls.append(True)
+            raise b.subprocess.CalledProcessError(1, ['/usr/bin/systemctl', 'poweroff'])
+        self.g = b.Gestures(lambda *x: self.lights.append(x), refused)
+        self.g.key(1, 0)
+        self.g.tick(3)  # must not raise into serve()
+        self.assertEqual(calls, [True])
+        self.assertIn(('failed', 0), self.lights)
+        self.assertNotIn(('shutdown', 0), self.lights)
+        self.g.tick(4)
+        self.assertEqual(calls, [True])  # one request per hold
+        self.g.key(0, 5)
+        self.g.key(1, 10)
+        self.g.tick(13)
+        self.assertEqual(calls, [True, True])  # the next full hold asks again
+
+    def test_unanswered_poweroff_is_reported_not_raised(self):
+        def hung():
+            raise b.subprocess.TimeoutExpired(['/usr/bin/systemctl', 'poweroff'], 10)
+        self.g = b.Gestures(lambda *x: self.lights.append(x), hung)
+        self.g.key(1, 0)
+        self.g.tick(3)
+        self.assertIn(('failed', 0), self.lights)
+
     def test_decoder(self):
         decoder = b.Input(self.g)
         def ev(kind, code, value):
