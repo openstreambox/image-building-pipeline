@@ -149,10 +149,12 @@ flags so the next boot re-evaluates the trigger and a pending factory reset is n
 silently disarmed. On a manual stop it restores CeraUI and the button ingress to
 port 80; during shutdown it starts nothing (see *Shutdown cleanup*).
 
-If the portal socket cannot start after the AP is up (port 80 on the AP gateway still
-taken), bring-up is undone: the AP goes down, the portal-active marker is removed,
+If the AP profile cannot be created or activated, or the portal socket cannot start
+after the AP is up (port 80 on the AP gateway still taken), bring-up is undone: the AP goes down, the portal-active marker is removed,
 CeraUI and the ingress are started again, and `start` fails. The AP profile, the
-force flag and `last-error` stay, so the next boot or trigger tries again.
+force flag and `last-error` stay, so the next boot or trigger tries again. A boot
+that needs no portal also removes a DNS capture an older failed bring-up left
+behind, so later shared connections don't send their DNS to the AP gateway.
 
 ## Port-80 / 443 coexistence
 

@@ -56,7 +56,7 @@ make_stub nmcli \
   '  *"-f CONNECTIVITY general status"*) printf "%s\n" "${STUB_CONNECTIVITY:-full}"; exit 0 ;;' \
   '  *"802-11-wireless.ssid connection show"*) printf "%s\n" "${STUB_CON_SSID:-HomeNet}"; exit 0 ;;' \
   '  *"-f NAME,TYPE connection show"*) [ -n "${STUB_PROFILES_FILE:-}" ] && cat "$STUB_PROFILES_FILE"; exit 0 ;;' \
-  '  *"connection up"*) case "$args" in *ceralive-ap*) exit 0 ;; *) exit "${STUB_USER_UP_RC:-0}" ;; esac ;;' \
+  '  *"connection up"*) case "$args" in *ceralive-ap*) exit "${STUB_AP_UP_RC:-0}" ;; *) exit "${STUB_USER_UP_RC:-0}" ;; esac ;;' \
   '  *"connection add"*) if [ "${STUB_ADD_RC:-0}" -ne 0 ]; then echo "Error: failed to modify 802-11-wireless.ssid: invalid" >&2; exit "$STUB_ADD_RC"; fi' \
   '                      echo "Connection '"'"'ceralive-wifi'"'"' (00000000-0000-0000-0000-000000000000) successfully added."; exit 0 ;;' \
   'esac' \
@@ -363,6 +363,28 @@ env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=4 STU
 [ -e "$(state_file last-error)" ]                && pass "re-arm: last-error kept" || fail "re-arm: last-error kept"
 [ -e "${UNITS}/ceralive.service" ] && [ -e "${UNITS}/ceralive-button-ingress.service" ] \
                                                  && pass "re-arm: CeraUI and ingress restored" || fail "re-arm: CeraUI and ingress restored"
+
+# The AP itself cannot be re-activated after a failed join: same way out.
+reset_state; boot_units
+: >"$(state_file force-portal)"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/dev/null \
+    bash "${PROVISION}" start >/dev/null 2>&1
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=4 STUB_CON_SSID=HomeNet STUB_AP_UP_RC=10 \
+    bash "${PROVISION}" connect ceralive-wifi >/dev/null 2>&1
+[ ! -e "$(state_file portal-active)" ]           && pass "AP re-activation fails: marker removed" || fail "AP re-activation fails: marker removed"
+[ -e "${UNITS}/ceralive.service" ] && [ -e "${UNITS}/ceralive-button-ingress.service" ] \
+                                                 && pass "AP re-activation fails: CeraUI and ingress restored" || fail "AP re-activation fails: CeraUI and ingress restored"
+[ -z "$(ls -A "${DNSDIR}" 2>/dev/null)" ]        && pass "AP re-activation fails: DNS capture removed" || fail "AP re-activation fails: DNS capture removed"
+[ -e "$(state_file force-portal)" ] && [ -e "$(state_file last-error)" ] \
+                                                 && pass "AP re-activation fails: retry flags kept" || fail "AP re-activation fails: retry flags kept"
+
+# A DNS capture left behind by an older failed bring-up goes on the next boot that
+# needs no portal.
+reset_state; boot_units
+mkdir -p "${DNSDIR}"; printf 'address=/#/192.168.42.1\n' >"${DNSDIR}/ceralive-portal.conf"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/dev/null STUB_CONNECTIVITY=full \
+    bash "${PROVISION}" start >/dev/null 2>&1
+[ ! -e "${DNSDIR}/ceralive-portal.conf" ]        && pass "stale DNS capture removed when no portal is needed" || fail "stale DNS capture removed when no portal is needed"
 
 # ===========================================================================
 echo "== Scenario K: ExecStop restores the front door on a manual stop, starts nothing at shutdown =="

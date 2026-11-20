@@ -273,8 +273,9 @@ start_portal_socket() {
   return 1
 }
 
-# Undo a half-done handoff: an AP whose portal cannot listen would leave the box with
-# no control plane at all (CeraUI and the ingress already stopped). Drop the AP and its
+# Undo a half-done handoff: an AP that cannot come up, or whose portal cannot listen,
+# would leave the box with no control plane at all on the re-arm path (CeraUI and the
+# ingress already stopped) and the DNS capture in place for every later shared link. Drop the AP and its
 # marker and bring the normal front door back. The AP profile, the force flag and the
 # last-error marker stay, so the next boot (or the next trigger) tries again.
 abort_ap_handoff() {
@@ -312,10 +313,10 @@ bring_up_ap() {
       802-11-wireless.mode ap 802-11-wireless.band bg \
       ipv4.method shared ipv4.addresses "${AP_GW}/${AP_PREFIX}" \
       wifi-sec.key-mgmt wpa-psk wifi-sec.psk "${AP_PASSPHRASE}" \
-    || die "failed to create AP connection profile '${AP_CON_NAME}'"
+    || { abort_ap_handoff; die "failed to create AP connection profile '${AP_CON_NAME}'; CeraUI restored"; }
 
   "${NMCLI}" connection up "${AP_CON_NAME}" \
-    || die "failed to activate AP connection '${AP_CON_NAME}' on ${AP_IFACE}"
+    || { abort_ap_handoff; die "failed to activate AP connection '${AP_CON_NAME}' on ${AP_IFACE}; CeraUI restored"; }
 
   mkdir -p "${STATE_DIR}"
   # Marker consumed by the captive portal and the teardown contract.
@@ -471,6 +472,9 @@ main() {
       log "stale portal marker but portal no longer required → tearing down"
       teardown_ap
     fi
+    # A capture left by an older failed bring-up would send every later shared
+    # connection's DNS to the AP gateway.
+    [ -e "${DNS_CAPTURE_FILE}" ] && { log "removing a stale DNS capture"; remove_dns_capture; }
     log "provisioning portal not started"
   fi
   exit 0
