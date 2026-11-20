@@ -64,10 +64,13 @@ The device's own `ceralive-ap` profile is excluded from the stored-profile count
    `/etc/NetworkManager/dnsmasq-shared.d/ceralive-portal.conf`. NM's shared-mode dnsmasq
    reads it at activation, so every hostname resolves to the gateway → the operator's OS
    pops its captive-portal sign-in.
-3. **AP up**: NM-native AP (`802-11-wireless.mode ap` + `ipv4.method shared`), SSID
+3. **Setup marker**: write `portal-active` (see *Setup marker*); if it cannot be
+   written, stop here.
+4. **CeraUI and the button ingress stop** (frees `0.0.0.0:80`, and CeraUI issues
+   nothing more for `wlan0`).
+5. **AP up**: NM-native AP (`802-11-wireless.mode ap` + `ipv4.method shared`), SSID
    `CeraLive-Setup-<short-id>`, passphrase `ceralive-setup`, gateway `192.168.42.1/24`.
-4. **Port-80 handoff**: `systemctl stop ceralive.service` (frees `0.0.0.0:80`) →
-   `systemctl start ceralive-portal.socket` (binds `192.168.42.1:80`).
+6. **Portal**: `systemctl start ceralive-portal.socket` (binds `192.168.42.1:80`).
 
 ## The captive page (`ceralive-portal.sh`)
 
@@ -173,6 +176,11 @@ exactly the time the setup AP is up or about to come up:
 
 - written before the AP profile is created or activated; if it cannot be written,
   no AP is brought up;
+- followed by stopping CeraUI and the ingress, still before the AP is created. The
+  marker stops new CeraUI activations, but a CeraUI AP already handed to
+  NetworkManager just before can still be activating; activating `ceralive-ap` only
+  after CeraUI has exited makes it the last request for `wlan0`, so NM gives it the
+  device;
 - kept through the station join and any re-arm after a failed join;
 - removed before CeraUI starts again on every way out: a failed bring-up, a manual
   stop, and teardown (after a successful join the station is up on `wlan0` first,

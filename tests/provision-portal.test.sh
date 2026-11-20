@@ -18,6 +18,7 @@
 #     and CeraUI stopped, both restored on teardown)
 #   + the setup marker exists before the AP profile is created or activated, through
 #     the station join, and is gone before CeraUI starts on every way out
+#   + CeraUI and the ingress are stopped after the marker and before the AP is created
 #
 # Run: tests/provision-portal.test.sh   (also gated via tests/postinst-wiring.bats)
 #
@@ -522,6 +523,28 @@ with_marker 'nmcli --wait [0-9]+ connection up ceralive-wifi$' \
                                                  && pass "marker held through the station join" || fail "marker held through the station join"
 without_marker "${CERAUI_START}" && ! with_marker "${CERAUI_START}" \
                                                  && pass "join: marker gone before CeraUI starts" || fail "join: marker gone before CeraUI starts"
+
+# CeraUI and the ingress have exited (marker already present) before the AP profile is
+# created or activated, on bring-up and on re-arm: a CeraUI AP request already in NM
+# must not be the last activation on wlan0.
+first_line() { grep -nE -- "$1" "${CALL_LOG}" | head -n1 | cut -d: -f1; }
+stops_before_ap() { # $1=label
+  local s_ui s_in add up
+  s_ui="$(first_line '^systemctl stop ceralive.service$')"; s_in="$(first_line '^systemctl stop ceralive-button-ingress.service$')"
+  add="$(first_line "^${AP_ADD}")"; up="$(first_line "^${AP_UP}")"
+  [ -n "${s_ui}" ] && [ -n "${s_in}" ] && [ -n "${add}" ] && [ -n "${up}" ] \
+    && [ "${s_ui}" -lt "${add}" ] && [ "${s_in}" -lt "${add}" ] && [ "${add}" -lt "${up}" ] \
+                                                 && pass "${1}: CeraUI and ingress stopped before the AP is created" || fail "${1}: CeraUI and ingress stopped before the AP is created (${s_ui:-none}/${s_in:-none} vs ${add:-none})"
+  with_marker 'systemctl stop ceralive.service$' && ! without_marker 'systemctl stop ceralive.service$' \
+                                                 && pass "${1}: marker already present when CeraUI is stopped" || fail "${1}: marker already present when CeraUI is stopped"
+}
+reset_state; boot_units; : >"$(state_file force-portal)"
+"${SC[@]}" bash "${PROVISION}" start >/dev/null 2>&1
+stops_before_ap "bring-up"
+: >"${CALL_LOG}"; : >"${MARKER_LOG}"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=4 STUB_CON_SSID=HomeNet \
+    bash "${PROVISION}" connect ceralive-wifi >/dev/null 2>&1
+stops_before_ap "re-arm"
 
 # A failed join re-arms with the marker in place the whole time.
 reset_state; boot_units; : >"$(state_file force-portal)"

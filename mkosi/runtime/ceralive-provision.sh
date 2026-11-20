@@ -88,8 +88,12 @@
 #   will not start, switch, restore or arm a hotspot there while it exists. It is
 #   therefore written BEFORE the AP profile is created or activated, and it exists
 #   exactly while the setup AP is up or about to come up: through the station join
-#   and any re-arm. Every path that gives wlan0 back removes it before CeraUI starts
-#   again (failed bring-up, manual stop, teardown). Only shutdown keeps it, so the
+#   and any re-arm. CeraUI and the ingress are then stopped BEFORE the AP is created:
+#   the marker stops new CeraUI activations, but one CeraUI already handed to NM just
+#   before the marker appeared can still be in flight, and only issuing the setup's own
+#   activation after CeraUI has exited makes it the last one on wlan0. Every path that
+#   gives wlan0 back removes the marker before CeraUI starts again (failed bring-up,
+#   manual stop, teardown). Only shutdown keeps it, so the
 #   setup keeps priority until the next boot re-evaluates the trigger; that boot
 #   removes it through the stale-marker teardown when no portal is needed.
 #
@@ -340,6 +344,12 @@ bring_up_ap() {
       "${ssid}" "${AP_GW}" "${AP_IFACE}" "${AP_CON_NAME}" "${USER_CON_NAME}" >"${ACTIVE_FLAG}" \
     || abort_and_die "could not write the setup marker ${ACTIVE_FLAG}"
 
+  # Hand wlan0 and port 80 over BEFORE the AP exists (header §SETUP MARKER): once these
+  # units have exited, CeraUI issues nothing more, so the activation below is the last
+  # one NM sees for wlan0 and replaces any CeraUI AP still activating there. The ingress
+  # never gets to bind the AP gateway either. A failed bring-up below restarts both.
+  stop_ceraui
+
   # Idempotent: drop any prior profile so settings always match this script. The
   # profile is autoconnect=no — it must come up ONLY when the trigger fires, never
   # automatically on a boot where a real uplink exists.
@@ -355,8 +365,7 @@ bring_up_ap() {
   "${NMCLI}" connection up "${AP_CON_NAME}" \
     || abort_and_die "failed to activate AP connection '${AP_CON_NAME}' on ${AP_IFACE}"
 
-  # Hand port 80 from CeraUI to the captive portal.
-  stop_ceraui
+  # Port 80 on the AP gateway is free (CeraUI and the ingress stopped above).
   start_portal_socket || abort_and_die "captive portal could not take ${AP_GW}:80"
   log "provisioning AP active — captive portal on ${AP_GW}:80 (marker ${ACTIVE_FLAG})"
 }
