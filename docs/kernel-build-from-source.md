@@ -551,11 +551,43 @@ fragment content in defconfig mode), output variant/identity, build timestamp,
 actual builder image identity, Dockerfile and kernel build/verifier script bytes;
 mtimes never participate. Every hit verifies the manifest's three SHA-256 values,
 the package identity and board DTB, and the config-survival/required/forbidden
-symbol checks. A corrupt or invalid entry is deleted and rebuilt. `=0` disables
-lookup and store; other values are rejected. The per-key flock protects both
-copy-out and atomic publication. `tests/kernel-artifact-cache.test.sh` pins the
-offline contract; a runner cache-hit time remains unmeasured because the current
-audit workflow deletes `mkosi/cache` before and after every run.
+symbol checks. Each entry's `manifest.json` (format
+`ceralive-kernel-artifact-cache/2`) also records its key and the three values the
+key derives from (input fingerprint, builder image id, board DTB path). A hit is
+refused when the recorded key is not the requested one, when the recorded inputs
+do not derive it, or when they are not this build's inputs, so an entry renamed
+or copied under another key, or left by an older format, is never staged. A
+refused entry is evicted and the kernel rebuilt: a current-format entry moves to
+`.quarantine/` (the newest eight are kept) as evidence, an older-format or
+incomplete one is deleted. `=0` disables lookup and store; other values are
+rejected. The per-key flock protects copy-out and atomic publication; the first
+intact entry for a key wins. A later build that produced a different deb for the
+same key is not reproducible: a `CERALIVE_BUILD_MODE=production` build stops
+before staging either deb, other builds keep the first entry and log both
+digests. A store whose inputs changed during the build (the key no longer
+derives) is skipped with a warning, and `.pending.*`/`.remote.*` directories
+left by interrupted stores are swept after six hours.
+`tests/kernel-artifact-cache.test.sh` pins the offline contract; a runner
+cache-hit time remains unmeasured because the current audit workflow deletes
+`mkosi/cache` before and after every run.
+
+**Shared across checkouts.** `CERALIVE_KERNEL_CACHE_DIR=<absolute dir>` moves the
+artifact cache, the ccache and the default source mirror out of the checkout, to
+`kernel-artifacts/`, `kernel-ccache/` and the mirror leaf under that directory,
+so every checkout or worktree on one host reuses them. Unset keeps the in-tree
+paths. The root and `kernel-artifacts/` must be owned by the invoking user and
+not group or other writable, and the path must be absolute without `:` or `,`;
+anything else is refused before any kernel work starts. The key uses
+checkout-relative paths, so two checkouts of the same tree compute the same key.
+`--ccache-dir` and `CERALIVE_KERNEL_SRC_MIRROR_DIR` still win.
+
+The ccache is mounted from a per-builder-image leaf, `<ccache dir>/<image id>`.
+ccache's default compiler check stats only the gcc driver, not the assembler or
+linker, so one directory never serves two toolchains; within one image the
+container always compiles in `/src/linux`, so checkouts share objects. Under a
+rootful Docker daemon the container hands `/ccache` back to the invoking user
+on exit. A cold build is `CERALIVE_KERNEL_ARTIFACT_CACHE=0` with a fresh
+`--ccache-dir`; it must produce the same deb as a cache hit.
 
 **Validated, not assumed.** Before staging, the built `.deb` is checked on four
 axes against the manifest: control `Package:`, control `Version:`, control
@@ -880,6 +912,69 @@ untouched), a raw vmlinuz (symlink preserved), an xz vmlinuz (fatal), a gzip of 
 non-Image payload (fatal), and a re-run (idempotent).
 
 ---
+
+## SHA-pinned kernel reuse
+
+A kernel that was built once from pinned inputs does not need to be compiled
+again for every image. `manifests/kernel/pins/<package_version>.json`
+(format `ceralive-kernel-pin/2`) pins the exact bytes of one cold build (sha256
+of the `.deb`, `resolved.config` and `built-modules.txt`) and every input that
+build used. The inputs are the producer fingerprint's own lists,
+`kernel_input_values` and `kernel_input_files` in `lib/kernel/artifact-cache.sh`:
+the manifest's source, patch, config and builder pins, the variant, package and
+release names, and every input file by path and digest (config fragments, the
+ramoops script and reservation, the builder Dockerfile, the producer scripts
+including the container build script, the verifiers and symbol lists). A new
+producer input therefore reaches the cache key and the pin together. The three
+values only known inside the builder (package closure, compiler banner, kernel
+commit epoch) are in the pinned `kernel-artifact.json` record and are compared
+by `verify`. The pin also records the pipeline commit, the builder image id and
+that the build was cold. `lib/kernel/released.sh` handles pins through
+`lib/kernel/pinned.sh`; neither file is a producer input.
+
+At `[2b/9]`, when a pin exists for the manifest's `package_version`, the
+current inputs must equal the pinned ones, or the build stops: the tree asks
+for a different kernel than the pinned one. Any change to a producer input,
+including producer code, therefore needs a new pin from a new cold build. The
+pinned bytes are then taken from a trusted store without compiling: first the
+kernel artifact cache, looked up by content (skipped with
+`CERALIVE_KERNEL_ARTIFACT_CACHE=0`), then each base URL in the pin's `sources`
+(HTTPS only, redirects only to HTTPS, so a release-asset URL works;
+`<base>/<file>` for the three files; `CERALIVE_KERNEL_PIN_FETCH_TIMEOUT` seconds
+per file, default 1800). Every candidate is re-hashed against the pin and passes
+the same four-axis deb and Kconfig gates as a fresh build. Pin paths build or
+stage into a private directory and publish into `--out` only after the checks,
+so `--out` never holds a kernel that differs from its pin. A production build
+refuses `CERALIVE_KERNEL_PIN_DIR` and uses the in-tree pin. `write` and every
+production build re-resolve the committed manifest in a clean environment and
+stop if any `KERNEL_SOURCE_*` value the producer reads differs from it, so an
+environment override can neither be pinned nor released.
+
+`CERALIVE_KERNEL_PIN` selects the policy:
+
+- `auto` (default): stage the pinned bytes; if no store has them, compile and
+  stop unless the result equals the pin.
+- `require`: release builds. Stage the pinned bytes or stop; never compile.
+  In `CERALIVE_BUILD_MODE=production` the pin must also carry at least one
+  recorded independent cold `verify` in `reproduced`.
+- `verify`: the periodic proof that the kernel still builds. Always a cold
+  compile (the artifact cache is switched off and a fresh ccache is used; a
+  `--ccache-dir` is refused), which must reproduce the pinned bytes and the
+  pinned builder record. It writes `kernel-pin-verify.json` next to the kernel;
+  `CERALIVE_KERNEL_PIN_RECORD=1` also appends the run to the pin's `reproduced`
+  list (committed inputs only). Example:
+  `CERALIVE_KERNEL_PIN=verify ./build rk3588 --kernel-only`.
+- `write`: create the pin. Refuses an existing pin and a checkout with any
+  modified, staged or untracked file (the manifests decide the source pins, so
+  the whole tree must be committed), then compiles cold and writes the pin from
+  that build.
+  `CERALIVE_KERNEL_PIN_SOURCES` (space-separated HTTPS base URLs) fills
+  `sources`. Commit the pin together with a second cold `verify` run recorded
+  in `reproduced`.
+- `0`: ignore pins.
+
+`tests/kernel-pin.test.sh` runs these paths through the real entrypoint with
+only the compiler boundary stubbed.
 
 ## Released kernel reuse [EXISTS]
 
