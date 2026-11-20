@@ -21,8 +21,11 @@ address cannot reach the device-bound LAN listener. Routed physical networks
 outside the listener's subnet also remain password-only.
 
 The netlink subscription precedes the initial snapshot. Each listener address
-is a trust basis: interface index, name, admin-up state, link type, master,
-link kind, address family, address and prefix length. Both sides of every
+is a trust basis: interface index, name, admin-up state, Ethernet or not,
+enslaved or not, link kind, address family, address and prefix length. Link
+type and master are tracked as those eligibility classes, so a move between
+two non-Ethernet types or directly between two masters does not retire an
+(already password-only) basis; leaving either class does. Both sides of every
 accepted connection belong to the basis it arrived on. Each link/address event
 is parsed in the callback that reads it, and a basis is retired (listeners
 closed, both sides of its connections closed, handlers cancelled) when an
@@ -35,20 +38,26 @@ interface and carrier changes, leave established sessions open.
 Every event still withholds new trusted admission until a fresh dump is
 synchronized with the event stream. That dump also retires any basis it no
 longer contains and binds new ones without touching unchanged listeners.
-On ENOBUFS, overflow, truncation, interrupted/inconsistent dumps, an unknown or
-malformed message or any other loss of event continuity, retire **all** bases
-and their connections immediately. Rebuild from a fresh netlink subscription
+On ENOBUFS, overflow, truncation, interrupted multicast messages, an unknown
+message, a malformed message or trust attribute (short, fragmentary or
+conflicting duplicate) or any other loss of event continuity, retire **all**
+bases and their connections immediately. Rebuild from a fresh netlink subscription
 established before a complete address dump; withhold privileged forwarding
 until that dump is synchronized with events. An identical address and mask
 after a lost remove/readd interval cannot prove continuity and must never
-preserve or revive pre-loss evidence. A failed dump is not lost history: it
-keeps established sessions, which the continuous event stream still covers,
-and withholds trusted admission until a later dump succeeds.
+preserve or revive pre-loss evidence. The address dump counts only when `ip`
+exits 0 with nothing on stderr; iproute2 reports an interrupted dump there and
+may still exit 0. A failed, timed-out or interrupted dump is not lost history:
+nothing from it is applied, established sessions stay judged by the
+continuous event stream, and trusted admission stays withheld until a later
+dump succeeds.
 Only a drained, current snapshot enables trusted admission. A failed bind
 withholds trusted admission globally and retries reconciliation. Address
 removal/readdition, mask changes, renames and interface identity changes cannot
 restore a prior connection's evidence. Events are checked again around async
-upstream connection establishment. Restart closes every session.
+upstream connection establishment: any event between the trusted decision and
+the forwarded upgrade voids that grant, even if a refresh has restored
+readiness meanwhile. Restart closes every session.
 
 Each accepted request is inspected. Only an exact GET /ws WebSocket upgrade
 without a body or forwarding/reserved metadata can reach a fresh private Unix

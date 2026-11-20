@@ -11,6 +11,7 @@ import struct
 import subprocess
 
 UNIX = '/run/ceralive-button-ingress/rpc.sock'
+IP = '/usr/sbin/ip'
 MAX_CONNECTIONS = 128
 HEADER_LIMIT = 16384
 
@@ -89,9 +90,25 @@ def attributes(data, offset):
         length, kind = struct.unpack_from('=HH', data, offset)
         if length < 4 or offset + length > len(data):
             raise ValueError('netlink attribute')
-        found.setdefault(kind & 0x3fff, data[offset + 4:offset + length])
+        found.setdefault(kind & 0x3fff, []).append(data[offset + 4:offset + length])
         offset += (length + 3) & ~3
+    if offset < len(data):
+        raise ValueError('netlink attribute fragment')
     return found
+
+
+def single(found, kind, size=0):
+    """A trust-relevant attribute: absent, or one well-formed value.
+
+    Unknown attributes are ignored for forward compatibility; a short or
+    conflicting encoding of a field the trust basis uses is malformed.
+    """
+    values = found.get(kind)
+    if not values:
+        return None
+    if len(values[0]) < size or any(value != values[0] for value in values):
+        raise ValueError(f'netlink attribute {kind}')
+    return values[0]
 
 
 def identity(link):
@@ -114,12 +131,13 @@ def parse_event(kind, body):
         found = attributes(body, 16)
         current = None
         if family == socket.AF_UNSPEC:
-            if IFLA_IFNAME not in found:
+            name = single(found, IFLA_IFNAME, 1)
+            if name is None:
                 raise ValueError('link without name')
-            master = found.get(IFLA_MASTER, b'')
-            info = attributes(found.get(IFLA_LINKINFO, b''), 0).get(IFLA_INFO_KIND)
-            current = (found[IFLA_IFNAME].split(b'\0', 1)[0].decode(), bool(flags & IFF_UP),
-                       link_type == ARPHRD_ETHER, len(master) >= 4 and struct.unpack_from('=I', master)[0] != 0,
+            master = single(found, IFLA_MASTER, 4)
+            info = single(attributes(single(found, IFLA_LINKINFO) or b'', 0), IFLA_INFO_KIND)
+            current = (name.split(b'\0', 1)[0].decode(), bool(flags & IFF_UP),
+                       link_type == ARPHRD_ETHER, master is not None and struct.unpack_from('=I', master)[0] != 0,
                        info.split(b'\0', 1)[0].decode() if info else None)
         return index, kind == RTM_DELLINK, None, None, None, False, current
     if kind in (RTM_NEWADDR, RTM_DELADDR):
@@ -129,14 +147,28 @@ def parse_event(kind, body):
         found = attributes(body, 8)
         if family not in (socket.AF_INET, socket.AF_INET6):
             return None
-        raw = found.get(IFA_LOCAL) or found.get(IFA_ADDRESS)
+        raw = single(found, IFA_LOCAL) or single(found, IFA_ADDRESS)
         if raw is None or len(raw) != (4 if family == socket.AF_INET else 16):
             raise ValueError('address payload')
-        if len(found.get(IFA_FLAGS, b'')) >= 4:
-            flags = struct.unpack_from('=I', found[IFA_FLAGS])[0]
+        extended = single(found, IFA_FLAGS, 4)
+        if extended is not None:
+            flags = struct.unpack_from('=I', extended)[0]
         return (index, kind == RTM_DELADDR, family, ipaddress.ip_address(raw), prefixlen,
                 bool(flags & (IFA_F_TENTATIVE | IFA_F_DADFAILED)), None)
     raise ValueError('unexpected netlink message')
+
+
+def dump_addresses():
+    """A complete address dump, or an exception.
+
+    iproute2 reports an interrupted (NLM_F_DUMP_INTR) dump only on stderr and
+    can still exit 0, so anything on stderr makes the dump incomplete.
+    """
+    result = subprocess.run([IP, '-j', '-d', 'address', 'show'],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+    if result.returncode or result.stderr:
+        raise subprocess.SubprocessError(f'incomplete address dump ({result.returncode}): {result.stderr[:200]!r}')
+    return json.loads(result.stdout)
 
 
 class Basis:
@@ -189,6 +221,7 @@ class FrontDoor:
         self.tasks = set()
         self.trusted_ready = False
         self.dirty = False
+        self.events = 0
         self.backend_address = ('127.0.0.1', 18080)
         self.unix_path = UNIX
         self.monitor = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE)
@@ -221,6 +254,7 @@ class FrontDoor:
             try:
                 data, _, flags, _ = self.monitor.recvmsg(262144)
                 changed = True
+                self.events += 1
                 # Any change withholds new trusted admission until a fresh,
                 # synchronized snapshot; established sessions are judged below.
                 self.trusted_ready = False
@@ -290,7 +324,7 @@ class FrontDoor:
             # Synchronous bounded dumps: no application handler runs between
             # snapshot and event drain. Queued events discard the snapshot;
             # the drain has already retired whatever they touched.
-            links = json.loads(subprocess.check_output(['/usr/sbin/ip', '-j', '-d', 'address', 'show'], timeout=3))
+            links = dump_addresses()
             if self.drain_events():
                 return
             wanted = self.snapshot(links)
@@ -326,9 +360,9 @@ class FrontDoor:
             if not self.drain_events() and not self.dirty:
                 self.trusted_ready = not failed
         except (OSError, ValueError, KeyError, subprocess.SubprocessError):
-            # A failed dump is not lost event history: established sessions
-            # stay judged by the continuous event stream, and trusted admission
-            # stays withheld until a later snapshot succeeds.
+            # A failed or interrupted dump is not lost event history:
+            # established sessions stay judged by the continuous event stream,
+            # and trusted admission stays withheld until a later dump succeeds.
             self.trusted_ready = False
             logging.exception('listener reconciliation unavailable')
         finally:
@@ -375,6 +409,7 @@ class FrontDoor:
             if self.drain_events():
                 self.schedule()
             trusted = privileged(head, basis.direct and self.trusted_ready, peer, basis.cidr)
+            seen = self.events
             if not basis.alive:
                 return
             if trusted:
@@ -396,6 +431,11 @@ class FrontDoor:
             if self.drain_events():
                 self.schedule()
             if not basis.alive:
+                return
+            # The grant was made on the snapshot current at the decision. Any
+            # event while the private connection opened voids it, even if a
+            # refresh has since restored readiness.
+            if trusted and (self.events != seen or not self.trusted_ready):
                 return
             backend.write(raw)
             await asyncio.wait_for(backend.drain(), 5)

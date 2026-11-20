@@ -6,6 +6,7 @@ import errno
 import importlib.util
 import ipaddress
 import json
+import os
 import pathlib
 import socket
 import struct
@@ -71,8 +72,19 @@ class Contract(unittest.TestCase):
         self.assertEqual(event, (7, True, socket.AF_INET, ipaddress.ip_address('192.168.2.1'), 24, False, None))
         event = m.parse_event(m.RTM_NEWADDR, addr_msg(m.RTM_NEWADDR, 7, 'fe80::1', 64, flags=m.IFA_F_TENTATIVE)[16:])
         self.assertEqual(event[2:6], (socket.AF_INET6, ipaddress.ip_address('fe80::1'), 64, True))
+        header = struct.pack('=BBHiII', 0, 0, 1, 7, m.IFF_UP, 0)
+        name = rta(3, b'eth7\0')
+        address = b'\x02\x18\0\0\x07\0\0\0' + rta(1, bytes([192, 168, 2, 1]))
+        # Unknown attributes and identical repeats stay accepted.
+        self.assertEqual(m.parse_event(m.RTM_NEWLINK, header + name + rta(0x3ff, b'new') + name)[6], ('eth7', True, True, False, None))
         for kind, body in [(99, b''), (m.RTM_NEWLINK, b'\0' * 8), (m.RTM_NEWADDR, b'\x02\x18\0\0\x07\0\0\0' + rta(1, b'\x01\x02')),
-                           (m.RTM_NEWADDR, b'\x02\x18\0\0\x07\0\0\0' + struct.pack('=HH', 64, 1))]:
+                           (m.RTM_NEWADDR, b'\x02\x18\0\0\x07\0\0\0' + struct.pack('=HH', 64, 1)),
+                           (m.RTM_NEWLINK, header + name + b'\0\0'),              # trailing fragment
+                           (m.RTM_NEWLINK, header + name + rta(10, b'\x0c\0')),    # short master
+                           (m.RTM_NEWLINK, header + name + rta(3, b'eth9\0')),     # conflicting names
+                           (m.RTM_NEWLINK, header + name + rta(18, rta(1, b'veth\0') + rta(1, b'vlan\0'))),
+                           (m.RTM_NEWADDR, address + rta(8, b'\x40\0')),           # short flags
+                           (m.RTM_NEWADDR, address + rta(1, bytes([192, 168, 2, 9])))]:
             with self.assertRaises(ValueError):
                 m.parse_event(kind, body)
 
@@ -138,7 +150,8 @@ class Box:
     tunnels and session lifetime code for whichever ingress is loaded.
     """
     def __init__(self, links):
-        self.links = links
+        self._links = links
+        self.directory = None
         self.datagrams = collections.deque()
         self.ports = {}
         self.unix_heads = []
@@ -157,13 +170,14 @@ class Box:
         eligible, privileged = m.eligible, m.privileged
         for target, value in [('bound_socket', bound), ('eligible', lambda link, physical: eligible(link, True)),
                               # Loopback stands in for the LAN peer 192.168.2.4.
-                              ('privileged', lambda head, direct, peer, cidr: privileged(head, direct, '192.168.2.4', cidr)),
-                              ('subprocess', Mock(check_output=lambda *a, **k: json.dumps(self.links).encode(),
-                                                  SubprocessError=subprocess.SubprocessError,
-                                                  TimeoutExpired=subprocess.TimeoutExpired))]:
+                              ('privileged', lambda head, direct, peer, cidr: privileged(head, direct, '192.168.2.4', cidr))]:
             self.stack.enter_context(patch.object(m, target, value))
         async def echo(reader, writer, record=None):
-            head = await reader.readuntil(b'\r\n\r\n')
+            try:
+                head = await reader.readuntil(b'\r\n\r\n')
+            except asyncio.IncompleteReadError:
+                writer.close()
+                return
             if record is not None:
                 record.append(head)
             writer.write(b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n')
@@ -171,7 +185,17 @@ class Box:
                 writer.write(data)
                 await writer.drain()
             writer.close()
-        directory = self.stack.enter_context(tempfile.TemporaryDirectory())
+        directory = self.directory = self.stack.enter_context(tempfile.TemporaryDirectory())
+        # The dump goes through a real process boundary: a stand-in `ip`
+        # prints the current links, plus whatever stderr and exit status a
+        # test sets, exactly as the front door reads them.
+        script = directory + '/ip'
+        with open(script, 'w') as handle:
+            handle.write(f'#!/bin/sh\ncat "{directory}/dump.json"\ncat "{directory}/stderr" >&2\nexit "$(cat "{directory}/status")"\n')
+        os.chmod(script, 0o755)
+        self.links = self._links
+        self.dump_result()
+        self.stack.enter_context(patch.object(m, 'IP', script))
         self.unix = await asyncio.start_unix_server(lambda r, w: echo(r, w, self.unix_heads), directory + '/rpc.sock')
         self.tcp = await asyncio.start_server(echo, '127.0.0.1', 0)
         self.front = m.FrontDoor([(80, None)])
@@ -194,6 +218,23 @@ class Box:
             service.close()
         await asyncio.sleep(0)
         self.stack.close()
+
+    @property
+    def links(self):
+        return self._links
+
+    @links.setter
+    def links(self, links):
+        self._links = links
+        if self.directory:
+            with open(self.directory + '/dump.json', 'w') as handle:
+                json.dump(links, handle)
+
+    def dump_result(self, stderr=b'', status=0):
+        with open(self.directory + '/stderr', 'wb') as handle:
+            handle.write(stderr)
+        with open(self.directory + '/status', 'w') as handle:
+            handle.write(str(status))
 
     def receive(self, size):
         if not self.datagrams:
@@ -329,13 +370,75 @@ class Scope(unittest.IsolatedAsyncioTestCase):
             await box.front.reconcile()
             self.assertNotIn(('clap-wlan0', 'fe80::2'), box.ports)
 
+    async def test_incomplete_dump_is_not_applied(self):
+        # iproute2 reports NLM_F_DUMP_INTR on stderr and may still exit 0.
+        # A partial dump that lacks eth7 must neither retire its sessions nor
+        # restore trusted admission.
+        for stderr, status in [(b'Dump was interrupted and may be inconsistent.\n', 0), (b'', 1)]:
+            with self.subTest(stderr=stderr, status=status):
+                async with Box([ETH7, WLAN1]) as box:
+                    sessions = await self.sessions(box)
+                    box.events(link_msg(m.RTM_NEWLINK, 9, 'clap-wlan0'))
+                    box.links = [WLAN1, CLAP]
+                    box.dump_result(stderr, status)
+                    await box.front.reconcile()
+                    self.assertFalse(box.front.trusted_ready)
+                    self.assertIn(('eth7', '192.168.2.1'), {(b.name, b.local) for b in box.front.bases.values()})
+                    self.assertNotIn(('clap-wlan0', '10.42.0.1'), box.ports)
+                    for session in sessions:
+                        self.assertTrue(await box.alive(*session))
+                    await box.session()
+                    self.assertEqual(len(box.unix_heads), 1)
+                    # A clean dump is applied again.
+                    box.links = [ETH7, WLAN1, CLAP]
+                    box.dump_result()
+                    await box.front.reconcile()
+                    self.assertTrue(box.front.trusted_ready)
+                    self.assertIn(('clap-wlan0', '10.42.0.1'), box.ports)
+                    await box.session()
+                    self.assertEqual(len(box.unix_heads), 2)
+
+    async def test_event_while_private_connection_opens_voids_the_grant(self):
+        cases = {'no event': (False, False), 'event, readiness still withheld': (True, False),
+                 'event, readiness restored by a refresh': (True, True)}
+        for name, (event, refresh) in cases.items():
+            with self.subTest(name):
+                async with Box([ETH7, WLAN1]) as box:
+                    entered, release = asyncio.Event(), asyncio.Event()
+                    real = asyncio.open_unix_connection
+                    async def paused(*args, **kwargs):
+                        entered.set()
+                        await release.wait()
+                        return await real(*args, **kwargs)
+                    with patch.object(m.asyncio, 'open_unix_connection', paused):
+                        reader, writer = await asyncio.open_connection('127.0.0.1', box.ports[('eth7', '192.168.2.1')])
+                        box.clients.append(writer)
+                        writer.write(UPGRADE + b'\r\n')
+                        await writer.drain()
+                        await asyncio.wait_for(entered.wait(), 2)
+                        if event:
+                            box.events(link_msg(m.RTM_NEWLINK, 9, 'clap-wlan0'))
+                            self.assertFalse(box.front.trusted_ready)
+                        if refresh:
+                            box.links = [ETH7, WLAN1, CLAP]
+                            await box.front.reconcile()
+                            self.assertTrue(box.front.trusted_ready)
+                        release.set()
+                        response = await asyncio.wait_for(reader.read(65536), 2)
+                    if event:
+                        self.assertEqual(response, b'')
+                        self.assertEqual(box.unix_heads, [])
+                    else:
+                        self.assertTrue(response.startswith(b'HTTP/1.1 101 '))
+                        self.assertEqual(len(box.unix_heads), 1)
+
     async def test_failed_dump_withholds_admission_and_keeps_sessions(self):
         async with Box([ETH7, WLAN1]) as box:
             sessions = await self.sessions(box)
             def timeout(*a, **k):
                 raise subprocess.TimeoutExpired('ip', 3)
             box.events(link_msg(m.RTM_NEWLINK, 9, 'clap-wlan0'))
-            with patch.object(m.subprocess, 'check_output', timeout):
+            with patch.object(m.subprocess, 'run', timeout):
                 await box.front.reconcile()
             self.assertFalse(box.front.trusted_ready)
             self.assertFalse(box.front.needs_subscription)
@@ -371,11 +474,11 @@ class Transport(unittest.IsolatedAsyncioTestCase):
                         # A new subscription must exist before taking the dump.
                         fresh_monitor.bind.assert_called_once_with((0, 1 | 0x10 | 0x100))
                         self.assertIs(box.front.monitor, fresh_monitor)
-                        return json.dumps(box.links).encode()
+                        return box.links
                     real_socket = socket.socket
                     def sockets(family, *args):
                         return fresh_monitor if family == socket.AF_NETLINK else real_socket(family, *args)
-                    with patch.object(m.socket, 'socket', sockets), patch.object(m.subprocess, 'check_output', side_effect=dump):
+                    with patch.object(m.socket, 'socket', sockets), patch.object(m, 'dump_addresses', side_effect=dump):
                         await box.front.reconcile()
                     old_monitor.close.assert_called_once()
                     box.front.loop.remove_reader.assert_called_once_with(old_monitor)
@@ -408,6 +511,11 @@ class Transport(unittest.IsolatedAsyncioTestCase):
             unix = await asyncio.start_unix_server(backend, path)
             ordinary = await asyncio.start_server(backend, '127.0.0.1', 0)
             front = m.FrontDoor([])
+            # Hermetic: no live host netlink traffic may reach this fixture.
+            front.monitor.close()
+            front.monitor = Mock()
+            front.monitor.recvmsg.side_effect = BlockingIOError()
+            front.schedule = Mock()
             front.trusted_ready = True
             front.unix_path = path
             front.backend_address = ordinary.sockets[0].getsockname()[:2]
@@ -443,16 +551,13 @@ class Transport(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(b'Via:', received[3])
                 # Lose a remove/readd interval, then recover the exact same
                 # address/mask. Old upgraded Unix/TCP sessions must stay dead.
-                front.monitor.close()
-                front.monitor = Mock()
                 front.monitor.recvmsg.side_effect = OSError(errno.ENOBUFS, 'overflow')
-                front.schedule = Mock()
                 front.event()
                 self.assertFalse(basis.alive)
                 fresh = Mock()
                 fresh.recvmsg.side_effect = BlockingIOError()
-                snapshot = b'[{"ifname":"eth7","ifindex":7,"addr_info":[{"family":"inet","local":"192.168.2.1","prefixlen":24}]}]'
-                with patch.object(m.socket, 'socket', return_value=fresh), patch.object(m.subprocess, 'check_output', return_value=snapshot):
+                snapshot = [{"ifname": "eth7", "ifindex": 7, "addr_info": [{"family": "inet", "local": "192.168.2.1", "prefixlen": 24}]}]
+                with patch.object(m.socket, 'socket', return_value=fresh), patch.object(m, 'dump_addresses', return_value=snapshot):
                     await front.reconcile()
                 self.assertTrue(front.trusted_ready)
                 for r in readers:
