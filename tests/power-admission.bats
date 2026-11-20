@@ -4,8 +4,13 @@
 setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; P="$ROOT/mkosi/runtime/power"; }
 
 @test "power admission: broker socket, terminal prompt, fencing, draining and logind submission" {
-  run timeout 180 python3 "$ROOT/tests/power-admission-contract.py"
+  # Its own TMPDIR, so whatever the contracts leave behind is visible.
+  scratch="$(mktemp -d)"
+  run env TMPDIR="$scratch" timeout 180 python3 "$ROOT/tests/power-admission-contract.py"
+  leftovers="$(ls -A "$scratch")"
+  rm -rf "$scratch"
   [ "$status" -eq 0 ]
+  [ -z "$leftovers" ]
 }
 
 @test "power admission: installer stages broker, client, units, group and rule" {
