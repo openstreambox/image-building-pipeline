@@ -143,10 +143,18 @@ Two teardown entry points:
   also releases `wlan0` (no client connection in this path) and clears the
   portal-active + force flags.
 
-`systemctl stop ceralive-provision` runs `ExecStop=ceralive-provision stop` — a
+`systemctl stop ceralive-provision` runs `ExecStop=ceralive-provision service-stop` — a
 link-down + portal-down clean stop that **retains** the AP profile and the factory-reset
 flags so the next boot re-evaluates the trigger and a pending factory reset is not
-silently disarmed. It restores CeraUI to port 80.
+silently disarmed. On a manual stop it restores CeraUI and the button ingress to
+port 80; during shutdown it starts nothing (see *Shutdown cleanup*).
+
+If the AP profile cannot be created or activated, or the portal socket cannot start
+after the AP is up (port 80 on the AP gateway still taken), bring-up is undone: the AP goes down, the portal-active marker is removed,
+CeraUI and the ingress are started again, and `start` fails. The AP profile, the
+force flag and `last-error` stay, so the next boot or trigger tries again. A boot
+that needs no portal also removes a DNS capture an older failed bring-up left
+behind, so later shared connections don't send their DNS to the AP gateway.
 
 ## Port-80 / 443 coexistence
 
@@ -205,3 +213,16 @@ On hardware, after submitting credentials, confirm: the `CeraLive-Setup-*` hotsp
 disappears, `journalctl -t ceralive-provision -t ceralive-portal` shows the join +
 teardown, and CeraUI answers on the device's new IP or selected `.local`
 hostname (`ceralive.local`, `ceralive2.local`, and so on).
+
+### Shutdown cleanup
+
+The provisioning service uses `service-stop` for ExecStop and checks the manager
+state. Only `stopping` selects shutdown cleanup; every other state, empty output
+or a failed query restores the application control plane, as do explicit
+`stop`/`teardown` commands. The state string decides because `is-system-running`
+also returns nonzero for `stopping`. Shutdown cleanup never starts CeraUI or the
+button ingress. Portal stop jobs are queued without waiting during shutdown, and
+NM link-down is bounded to five seconds (three seconds requested from nmcli). The
+unit has a ten-second stop budget. This avoids blocking behind systemd's shutdown
+transaction until its default 90-second timeout; AP profile and retrigger flags
+remain available next boot.

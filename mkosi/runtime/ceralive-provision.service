@@ -19,10 +19,13 @@ ExecStart=/usr/local/sbin/ceralive-provision start
 # Clean stop on shutdown = link-down only (RETAINS the AP profile + the /data flags so
 # the next boot re-evaluates the trigger and a pending factory reset is not disarmed).
 # The Task 14 FULL teardown (delete profile, release wlan0, clear flags) is the
-# explicit `ceralive-provision teardown` verb, NOT this stop.
-ExecStop=/usr/local/sbin/ceralive-provision stop
+# explicit `ceralive-provision teardown` verb, NOT this stop. `service-stop` restores
+# CeraUI and the button ingress on a manual unit stop, but starts nothing while the
+# manager is shutting down (that start would wait behind the shutdown transaction).
+ExecStop=/usr/local/sbin/ceralive-provision service-stop
 # Grace window (<=90s) + NM AP bring-up must fit; never wedge boot on a slow NM.
 TimeoutStartSec=180
+TimeoutStopSec=10
 # A failed bring-up must not loop holding wlan0; the next boot re-evaluates cleanly.
 Restart=no
 
