@@ -273,7 +273,8 @@ class FrontDoor:
         for link in links:
             physical = Path('/sys/class/net', link['ifname'], 'device').exists()
             for addr in link.get('addr_info', []):
-                if addr.get('family') not in ('inet', 'inet6') or 'tentative' in addr.get('flags', []):
+                # `ip -j` reports address flags as boolean keys.
+                if addr.get('family') not in ('inet', 'inet6') or addr.get('tentative') or addr.get('dadfailed'):
                     continue
                 basis = Basis(link, addr, physical)
                 wanted.setdefault(basis.key, basis)

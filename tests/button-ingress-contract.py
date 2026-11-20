@@ -315,6 +315,20 @@ class Scope(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(await box.alive(*session))
             self.assertTrue(await box.alive(*other))
 
+    async def test_tentative_addresses_are_not_bound(self):
+        # As `ip -j` prints them: a new interface's link-local address is
+        # tentative until duplicate detection ends; binding it would fail.
+        fresh = dict(CLAP, addr_info=CLAP['addr_info'] + [
+            dict(family='inet6', local='fe80::2', prefixlen=64, tentative=True),
+            dict(family='inet6', local='fe80::3', prefixlen=64, dadfailed=True, tentative=True)])
+        async with Box([ETH7, fresh]) as box:
+            self.assertIn(('clap-wlan0', '10.42.0.1'), box.ports)
+            self.assertNotIn(('clap-wlan0', 'fe80::2'), box.ports)
+            self.assertNotIn(('clap-wlan0', 'fe80::3'), box.ports)
+            box.links = [ETH7, CLAP]
+            await box.front.reconcile()
+            self.assertNotIn(('clap-wlan0', 'fe80::2'), box.ports)
+
     async def test_failed_dump_withholds_admission_and_keeps_sessions(self):
         async with Box([ETH7, WLAN1]) as box:
             sessions = await self.sessions(box)
