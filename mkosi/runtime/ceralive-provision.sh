@@ -147,7 +147,7 @@ ACTIVE_FLAG="${CERALIVE_PROVISION_ACTIVE_FLAG:-${STATE_DIR}/portal-active}"     
 TEARDOWN_FLAG="${CERALIVE_PROVISION_TEARDOWN_FLAG:-${STATE_DIR}/teardown-requested}"
 SCAN_CACHE="${CERALIVE_PROVISION_SCAN_CACHE:-${STATE_DIR}/scan.txt}"              # SSID list (single-radio: scanned BEFORE AP up)
 ERROR_MARKER="${CERALIVE_PROVISION_ERROR_MARKER:-${STATE_DIR}/last-error}"        # written on a failed join; shown by the portal
-AP_UUID_FILE="${CERALIVE_PROVISION_AP_UUID_FILE:-${STATE_DIR}/ap-uuid}"           # UUID of the setup AP profile this script created
+AP_UUID_FILE="${CERALIVE_PROVISION_AP_UUID_FILE:-${STATE_DIR}/ap-uuid}"           # UUIDs of setup AP profiles this script created, one per line
 UUID_SOURCE="${CERALIVE_UUID_SOURCE:-/proc/sys/kernel/random/uuid}"               # fresh UUID for each setup AP profile
 
 # DNS-capture drop-in: NM's shared-mode dnsmasq reads dnsmasq-shared.d at activation.
@@ -198,23 +198,80 @@ stored_wifi_profile_count() {
 }
 
 # --- the image's own setup AP profiles -----------------------------------------
-# Identity is the UUID bring_up_ap chooses for the profile and records in
-# ${AP_UUID_FILE} before it creates it: every setup-only up/down/delete goes by that
-# UUID, never by connection name, so a user's profile that shares the name is never
-# touched, and a later change to the profile's settings doesn't hide it. Profiles from
-# older runs (no record, or a record since replaced) are recognised only on positive
+# Identity is the UUID bring_up_ap chooses for each profile and records in
+# ${AP_UUID_FILE} before it creates it: every setup-only up/down/delete goes by UUID,
+# never by connection name, so a user's profile that shares the name is never
+# touched, and a later change to the profile's settings doesn't hide it. A UUID stays
+# in the record until NM shows it neither active nor saved, so an activation whose
+# profile is gone, or whose down failed, is never lost; a new bring-up adds its UUID
+# next to any still there. The record is only ever replaced whole (temp file +
+# rename). Profiles from older runs without a record are recognised only on positive
 # NM evidence: our connection name, Wi-Fi type, AP mode, this device's machine-id SSID
 # and the setup gateway address, all as bring_up_ap writes them.
 
-# The recorded UUID, or nothing when none is recorded. Non-zero when the record exists
-# but cannot be read or is not a UUID: identity is then uncertain.
-recorded_ap_uuid() {
+UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+# The recorded UUIDs, one per line; nothing when there is no record. Non-zero when the
+# record exists but is empty, unreadable or holds anything but UUIDs: identity is
+# then uncertain and nobody may treat it as "no setup AP".
+recorded_ap_uuids() {
   [ -e "${AP_UUID_FILE}" ] || return 0
-  local u
-  u="$(cat "${AP_UUID_FILE}" 2>/dev/null)" || return 1
-  [ -z "${u}" ] && return 0
-  [[ "${u}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 1
-  printf '%s\n' "${u}"
+  local content line n=0
+  content="$(cat "${AP_UUID_FILE}" 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    [ -n "${line}" ] || continue
+    [[ "${line}" =~ ${UUID_RE} ]] || return 1
+    n=$((n + 1))
+  done <<<"${content}"
+  [ "${n}" -gt 0 ] || return 1
+  printf '%s\n' "${content}" | awk 'NF && !seen[$0]++'
+}
+
+# Replace the record with the UUIDs in $1 (newline-separated), atomically; an empty
+# list removes it. Non-zero when the new record is not in place.
+write_ap_record() {
+  local uuids tmp
+  uuids="$(printf '%s\n' "$1" | awk 'NF && !seen[$0]++')"
+  if [ -z "${uuids}" ]; then
+    rm -f "${AP_UUID_FILE}" 2>/dev/null
+    [ ! -e "${AP_UUID_FILE}" ]
+    return
+  fi
+  tmp="${AP_UUID_FILE}.tmp.$$"
+  if printf '%s\n' "${uuids}" >"${tmp}" 2>/dev/null && mv -f "${tmp}" "${AP_UUID_FILE}" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "${tmp}" 2>/dev/null
+  return 1
+}
+
+# Whether any connection in AP mode is active on ${AP_IFACE}: 0 = yes, 1 = no, 2 = NM
+# could not be read (or an active connection's mode could not). The setup AP is bound
+# to ${AP_IFACE}, so 1 proves no setup AP is up whatever its UUID was.
+ap_mode_active_on_iface() {
+  local rows uuid dev mode
+  rows="$("${NMCLI}" -t -f UUID,DEVICE connection show --active 2>/dev/null)" || return 2
+  while IFS=: read -r uuid dev; do
+    [ "${dev}" = "${AP_IFACE}" ] && [ -n "${uuid}" ] || continue
+    mode="$("${NMCLI}" -g 802-11-wireless.mode connection show uuid "${uuid}" 2>/dev/null)" || return 2
+    [ "${mode}" = ap ] && return 0
+  done <<<"${rows}"
+  return 1
+}
+
+# An uncertain record (see recorded_ap_uuids) is retired only on the stronger proof
+# that no AP at all is active on ${AP_IFACE}; it is kept aside, not deleted. Returns 0
+# when the record is readable or was retired, non-zero (logged) when it stays.
+settle_uncertain_record() {
+  recorded_ap_uuids >/dev/null && return 0
+  local st=0
+  ap_mode_active_on_iface || st=$?
+  if [ "${st}" -eq 1 ] && mv -f "${AP_UUID_FILE}" "${AP_UUID_FILE}.unreadable" 2>/dev/null; then
+    log "setup AP record ${AP_UUID_FILE} was unreadable; no AP is active on ${AP_IFACE}, so it is set aside (${AP_UUID_FILE}.unreadable)"
+    return 0
+  fi
+  log "ERROR: setup AP record ${AP_UUID_FILE} is unreadable and no AP-free ${AP_IFACE} could be confirmed; keeping it"
+  return 1
 }
 
 # Legacy setup APs in a NAME:UUID:TYPE listing ($1), by the settings fingerprint.
@@ -236,21 +293,26 @@ fingerprint_ap_uuids() {
 # mistake "could not check" for "none".
 setup_ap_uuids() {
   local rec list legacy
-  rec="$(recorded_ap_uuid)" || return 1
+  rec="$(recorded_ap_uuids)" || return 1
   list="$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" || return 1
   legacy="$(fingerprint_ap_uuids "${list}")" || return 1
   {
-    [ -n "${rec}" ] && awk -F: -v u="${rec}" '$2 == u { print $2 }' <<<"${list}"
+    awk -F: 'NR == FNR { r[$0] = 1; next } ($2 in r) { print $2 }' <(printf '%s\n' "${rec}") - <<<"${list}"
     printf '%s\n' "${legacy}"
   } | awk 'NF && !seen[$0]++'
 }
 
 # 0 = a setup AP is active, 1 = none is (an inactive or absent profile counts as gone),
-# 2 = NM or the record could not be read. Only 1 is evidence that the setup no longer
-# holds wlan0. The recorded UUID counts even if NM no longer lists its profile.
+# 2 = NM could not be read. Only 1 is evidence that the setup no longer holds wlan0.
+# Recorded UUIDs count even if NM no longer lists their profile. With an uncertain
+# record, only "no AP active on the interface at all" counts as gone.
 setup_ap_active() {
   local rec uuids active
-  rec="$(recorded_ap_uuid)" || return 2
+  if ! rec="$(recorded_ap_uuids)"; then
+    log "setup AP record ${AP_UUID_FILE} is unreadable; checking ${AP_IFACE} for any active AP instead"
+    ap_mode_active_on_iface
+    return
+  fi
   uuids="$(setup_ap_uuids)" || return 2
   uuids="$(printf '%s\n%s\n' "${rec}" "${uuids}" | awk 'NF && !seen[$0]++')"
   [ -n "${uuids}" ] || return 1
@@ -263,17 +325,22 @@ setup_ap_active() {
 # shutdown path passes a bounded --wait). Best effort: release_marker checks the result.
 down_setup_aps() {
   local rec uuids u
-  rec="$(recorded_ap_uuid 2>/dev/null)" || rec=""
-  uuids="$(setup_ap_uuids 2>/dev/null)" || uuids=""
+  rec="$(recorded_ap_uuids 2>/dev/null)" || rec=""
+  # With an uncertain record, still bring down what the settings fingerprint finds.
+  uuids="$(setup_ap_uuids 2>/dev/null)" \
+    || uuids="$(fingerprint_ap_uuids "$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" 2>/dev/null)" \
+    || uuids=""
   for u in $(printf '%s\n%s\n' "${rec}" "${uuids}" | awk 'NF && !seen[$0]++'); do
     "${NMCLI}" "$@" connection down uuid "${u}" >/dev/null 2>&1 || true
   done
 }
 
-# Delete every setup AP profile by UUID and forget the record once none is left.
-# Non-zero (logged) when NM cannot be read or a delete fails.
+# Delete every setup AP profile by UUID, then drop from the record only UUIDs NM shows
+# neither active nor saved. Non-zero (logged) when NM or the record cannot be read, a
+# delete fails, or a recorded UUID is still active or saved.
 delete_setup_aps() {
   local uuids u rc=0
+  settle_uncertain_record || return 1
   if ! uuids="$(setup_ap_uuids)"; then
     log "ERROR: could not read NetworkManager profiles or ${AP_UUID_FILE}; setup AP profiles not cleaned up"
     return 1
@@ -286,8 +353,29 @@ delete_setup_aps() {
       rc=1
     fi
   done
-  [ "${rc}" -eq 0 ] && rm -f "${AP_UUID_FILE}"
+  prune_ap_record || rc=1
   return "${rc}"
+}
+
+# Keep in the record only the UUIDs NM still shows active or saved. Non-zero when the
+# record or NM cannot be read, the record cannot be rewritten, or any UUID remains.
+prune_ap_record() {
+  local rec list active keep
+  rec="$(recorded_ap_uuids)" || return 1
+  [ -n "${rec}" ] || return 0
+  list="$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" || return 1
+  active="$("${NMCLI}" -t -f UUID connection show --active 2>/dev/null)" || return 1
+  keep="$(awk -F: 'NR == FNR { if (NF) k[$NF] = 1; next } ($0 in k)' \
+            <(printf '%s\n%s\n' "$(cut -d: -f2 <<<"${list}")" "${active}") <(printf '%s\n' "${rec}"))"
+  if ! write_ap_record "${keep}"; then
+    log "ERROR: could not rewrite the setup AP record ${AP_UUID_FILE}"
+    return 1
+  fi
+  if [ -n "${keep}" ]; then
+    log "setup AP ${keep//$'\n'/ } still active or saved; kept in ${AP_UUID_FILE}"
+    return 1
+  fi
+  return 0
 }
 
 # Hand wlan0 back to CeraUI: remove the setup marker only once NM shows no setup AP
@@ -493,11 +581,13 @@ bring_up_ap() {
   # creating it, so no crash can leave a setup AP we cannot identify. The profile is
   # autoconnect=no — it must come up ONLY when the trigger fires, never automatically
   # on a boot where a real uplink exists.
-  delete_setup_aps || log "continuing with a fresh setup AP profile; the old one is cleaned up later"
-  local ap_uuid
+  delete_setup_aps || log "continuing with a fresh setup AP profile; the old one stays recorded until NM shows it gone"
+  # The new UUID joins whatever the record still holds; an uncertain record that could
+  # not be settled stops here, since replacing it would lose track of its activation.
+  local ap_uuid old
+  old="$(recorded_ap_uuids)" || abort_before_ap "setup AP record ${AP_UUID_FILE} is unreadable while an AP may be active on ${AP_IFACE}"
   ap_uuid="$(tr -d '[:space:]' <"${UUID_SOURCE}" 2>/dev/null)"
-  if ! [[ "${ap_uuid}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] \
-     || ! printf '%s\n' "${ap_uuid}" >"${AP_UUID_FILE}"; then
+  if ! [[ "${ap_uuid}" =~ ${UUID_RE} ]] || ! write_ap_record "$(printf '%s\n%s' "${old}" "${ap_uuid}")"; then
     abort_before_ap "could not choose and record a UUID for the setup AP (${AP_UUID_FILE})"
   fi
   "${NMCLI}" connection add \
@@ -534,16 +624,17 @@ stop_ap() {
   fi
   remove_dns_capture
   if [[ "${shutdown}" == 1 ]]; then
-    # Bounded, and only the recorded UUID: no profile reads while the system stops.
-    local rec
-    rec="$(recorded_ap_uuid 2>/dev/null)" || rec=""
-    if [ -n "${rec}" ]; then
+    # Bounded, and only recorded UUIDs: no profile reads while the system stops. The
+    # marker and the record stay; the next boot settles them.
+    local rec u
+    rec="$(recorded_ap_uuids 2>/dev/null)" || rec=""
+    for u in ${rec}; do
       if [ -n "${TIMEOUT_BIN}" ] && command -v "${TIMEOUT_BIN}" >/dev/null 2>&1; then
-        "${TIMEOUT_BIN}" 5 "${NMCLI}" --wait 3 connection down uuid "${rec}" >/dev/null 2>&1 || true
+        "${TIMEOUT_BIN}" 5 "${NMCLI}" --wait 3 connection down uuid "${u}" >/dev/null 2>&1 || true
       else
-        "${NMCLI}" --wait 3 connection down uuid "${rec}" >/dev/null 2>&1 || true
+        "${NMCLI}" --wait 3 connection down uuid "${u}" >/dev/null 2>&1 || true
       fi
-    fi
+    done
     return 0
   fi
   down_setup_aps --wait 3

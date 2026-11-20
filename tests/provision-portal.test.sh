@@ -76,8 +76,13 @@ drop_uuid() { for f in "$P" "$D" "$A"; do grep -v -- "$1" "$f" >"$f.tmp"; mv "$f
 case "$args" in
   *"dev wifi list"*) [ -n "${STUB_SCAN_FILE:-}" ] && cat "$STUB_SCAN_FILE"; exit 0 ;;
   *"-f CONNECTIVITY general status"*) printf "%s\n" "${STUB_CONNECTIVITY:-full}"; exit 0 ;;
+  *"-f UUID,DEVICE connection show --active"*) [ -n "${STUB_NM_READ_RC:-}${STUB_ACTIVE_READ_RC:-}" ] && exit "${STUB_NM_READ_RC:-$STUB_ACTIVE_READ_RC}"
+                                               sed 's/$/:wlan0/' "$A"; exit 0 ;;
   *"-f UUID connection show --active"*) [ -n "${STUB_NM_READ_RC:-}${STUB_ACTIVE_READ_RC:-}" ] && exit "${STUB_NM_READ_RC:-$STUB_ACTIVE_READ_RC}"; cat "$A"; exit 0 ;;
   *"-f NAME,UUID,TYPE connection show"*) [ -n "${STUB_NM_READ_RC:-}" ] && exit "$STUB_NM_READ_RC"; cat "$P"; exit 0 ;;
+  *"-g 802-11-wireless.mode connection show uuid "*) [ -n "${STUB_MODE_READ_RC:-}" ] && exit "$STUB_MODE_READ_RC"
+                             set -- $args; field="$2"; uuid="${!#}"
+                             awk -v u="$uuid" -v f="$field" '$1 == u && $2 == f { sub(/^[^ ]+ [^ ]+ /, ""); print }' "$D"; exit 0 ;;
   *"connection show uuid "*) set -- $args; field="$2"; uuid="${!#}"
                              awk -v u="$uuid" -v f="$field" '$1 == u && $2 == f { sub(/^[^ ]+ [^ ]+ /, ""); print }' "$D"; exit 0 ;;
   *"802-11-wireless.ssid connection show"*) printf "%s\n" "${STUB_CON_SSID:-HomeNet}"; exit 0 ;;
@@ -921,13 +926,88 @@ env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=run
 rc=$?
 [ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] \
                                                  && pass "recorded UUID active without a listed profile → marker kept" || fail "recorded UUID active without a listed profile → marker kept (rc=${rc})"
-# An unreadable or corrupt record is uncertain identity: keep the marker.
-up_ap_model
-printf 'not-a-uuid\n' >"$(state_file ap-uuid)"
-env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running bash "${PROVISION}" stop >"${OUTF}" 2>&1
+# ===========================================================================
+echo "== Scenario T: a recorded UUID is never dropped before NM shows it gone =="
+NEW_UUID="aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+unlist_ap() { grep -v ":${AP_UUID}:" "${NMSTATE}/profiles" >"${NMSTATE}/p.new"; mv "${NMSTATE}/p.new" "${NMSTATE}/profiles"; }
+
+# 1) Stale marker on a no-portal boot: the recorded AP is active but no longer saved,
+#    and its down fails. The record and the marker stay; the boot reports it.
+reset_state; boot_units; seed_setup_ap; echo "${AP_UUID}" >>"${NMSTATE}/active"; unlist_ap
+printf 'ssid=CeraLive-Setup-f00d\n' >"$(state_file portal-active)"
+no_portal_boot STUB_AP_DOWN_RC=10; rc=$?
+[ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] && grep -qx "${AP_UUID}" "$(state_file ap-uuid)" \
+                                                 && pass "stale boot, unlisted active AP: record and marker kept, non-zero" || fail "stale boot, unlisted active AP: record and marker kept, non-zero (rc=${rc})"
+# ...and once NM shows it gone, the next boot clears both.
+: >"${NMSTATE}/active"
+no_portal_boot; rc=$?
+[ "${rc}" -eq 0 ] && [ ! -e "$(state_file portal-active)" ] && [ ! -e "$(state_file ap-uuid)" ] \
+                                                 && pass "stale boot after the AP is gone: record and marker cleared" || fail "stale boot after the AP is gone: record and marker cleared (rc=${rc})"
+
+# 2) Fresh bring-up while the previous setup AP is still active and unsaved, and the
+#    new profile cannot be created: both UUIDs stay recorded and the marker stays.
+reset_state; boot_units; seed_setup_ap; echo "${AP_UUID}" >>"${NMSTATE}/active"; unlist_ap
+printf '%s\n' "${NEW_UUID}" >"${SANDBOX}/uuid-new"; : >"$(state_file force-portal)"
+"${SC[@]}" CERALIVE_UUID_SOURCE="${SANDBOX}/uuid-new" STUB_AP_ADD_RC=2 STUB_AP_DOWN_RC=10 bash "${PROVISION}" start >"${OUTF}" 2>&1
+rc=$?
+[ "${rc}" -ne 0 ] && grep -qx "${AP_UUID}" "$(state_file ap-uuid)" && grep -qx "${NEW_UUID}" "$(state_file ap-uuid)" \
+                                                 && pass "failed bring-up keeps the old active UUID next to the new one" || fail "failed bring-up keeps the old active UUID next to the new one (rc=${rc})"
+[ -e "$(state_file portal-active)" ] && grep -q "setup marker KEPT" "${OUTF}" \
+                                                 && pass "failed bring-up with the old AP still up keeps the marker" || fail "failed bring-up with the old AP still up keeps the marker"
+# Successful bring-up over an old AP that is already gone: only the new UUID is recorded.
+reset_state; boot_units; seed_setup_ap; : >"$(state_file force-portal)"
+"${SC[@]}" CERALIVE_UUID_SOURCE="${SANDBOX}/uuid-new" bash "${PROVISION}" start >/dev/null 2>&1
+[ "$(cat "$(state_file ap-uuid)")" = "${NEW_UUID}" ] && called "nmcli connection up uuid ${NEW_UUID}" \
+                                                 && pass "bring-up over a gone AP records only the new UUID" || fail "bring-up over a gone AP records only the new UUID"
+! ls "$(state_file ap-uuid).tmp."* >/dev/null 2>&1 && pass "record replaced without leftover temp files" || fail "record replaced without leftover temp files"
+
+# 3) Empty, unreadable or malformed record while the setup AP is still active: the
+#    marker stays.
+for rec in empty garbage; do
+  up_ap_model
+  if [ "${rec}" = empty ]; then : >"$(state_file ap-uuid)"; else printf 'not-a-uuid\n' >"$(state_file ap-uuid)"; fi
+  unlist_ap
+  env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running STUB_AP_DOWN_RC=10 bash "${PROVISION}" stop >"${OUTF}" 2>&1
+  rc=$?
+  [ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] && [ -e "$(state_file ap-uuid)" ] \
+                                                 && pass "${rec} record, setup AP still up: marker and record kept, non-zero" || fail "${rec} record, setup AP still up: marker and record kept, non-zero (rc=${rc})"
+done
+# ...and when the active connection's mode cannot be read.
+up_ap_model; : >"$(state_file ap-uuid)"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running STUB_MODE_READ_RC=1 bash "${PROVISION}" stop >/dev/null 2>&1
 rc=$?
 [ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] \
-                                                 && pass "corrupt UUID record → marker kept, non-zero" || fail "corrupt UUID record → marker kept, non-zero (rc=${rc})"
+                                                 && pass "empty record, mode of an active connection unreadable: marker kept" || fail "empty record, mode of an active connection unreadable: marker kept (rc=${rc})"
+# A recorded profile that is saved but cannot be deleted stays recorded.
+reset_state; boot_units; seed_setup_ap
+no_portal_boot STUB_DELETE_RC=1; rc=$?
+[ "${rc}" -ne 0 ] && grep -qx "${AP_UUID}" "$(state_file ap-uuid)" \
+                                                 && pass "undeletable saved setup AP stays recorded" || fail "undeletable saved setup AP stays recorded (rc=${rc})"
+# ...and with NM unreadable, too.
+up_ap_model; : >"$(state_file ap-uuid)"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running STUB_ACTIVE_READ_RC=8 bash "${PROVISION}" stop >/dev/null 2>&1
+rc=$?
+[ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] \
+                                                 && pass "empty record, NM unreadable: marker kept, non-zero" || fail "empty record, NM unreadable: marker kept, non-zero (rc=${rc})"
+# An uncertain record is released only when no AP at all is active on wlan0; it is set
+# aside, not deleted, and a station on wlan0 does not count as an AP.
+up_ap_model; : >"$(state_file ap-uuid)"; echo "${STATION_UUID}" >>"${NMSTATE}/active"
+printf '%s 802-11-wireless.mode infrastructure\n' "${STATION_UUID}" >>"${NMSTATE}/details"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running bash "${PROVISION}" stop >/dev/null 2>&1
+rc=$?
+[ "${rc}" -eq 0 ] && [ ! -e "$(state_file portal-active)" ] \
+                                                 && pass "empty record, no AP on wlan0 (station only): marker released" || fail "empty record, no AP on wlan0 (station only): marker released (rc=${rc})"
+reset_state; boot_units; : >"$(state_file ap-uuid)"; : >"$(state_file force-portal)"
+"${SC[@]}" bash "${PROVISION}" start >/dev/null 2>&1
+rc=$?
+[ "${rc}" -eq 0 ] && [ "$(cat "$(state_file ap-uuid)")" = "${AP_UUID}" ] && [ -e "$(state_file ap-uuid).unreadable" ] \
+                                                 && pass "bring-up sets an uncertain record aside once wlan0 has no AP" || fail "bring-up sets an uncertain record aside once wlan0 has no AP (rc=${rc})"
+reset_state; boot_units; : >"$(state_file ap-uuid)"; : >"$(state_file force-portal)"; echo "${FOREIGN_UUID}" >>"${NMSTATE}/active"
+printf '%s 802-11-wireless.mode ap\n' "${FOREIGN_UUID}" >>"${NMSTATE}/details"
+"${SC[@]}" bash "${PROVISION}" start >"${OUTF}" 2>&1
+rc=$?
+[ "${rc}" -ne 0 ] && ! called "connection add" && [ -e "$(state_file ap-uuid)" ] && [ -e "$(state_file portal-active)" ] && [ -e "${UNITS}/ceralive.service" ] \
+                                                 && pass "bring-up refuses an uncertain record while an AP is up on wlan0 (marker kept, front door back)" || fail "bring-up refuses an uncertain record while an AP is up on wlan0 (rc=${rc})"
 # The UUID is recorded before the profile exists, and a missing UUID source means no AP.
 reset_state; boot_units; : >"$(state_file force-portal)"
 "${SC[@]}" bash "${PROVISION}" start >/dev/null 2>&1
