@@ -59,8 +59,10 @@ MARK_CALL='[ -e "${CERALIVE_PROVISION_ACTIVE_FLAG:-$CERALIVE_PROVISION_STATE_DIR
 #   profiles  NAME:UUID:TYPE rows (`-t -f NAME,UUID,TYPE connection show`)
 #   details   "<uuid> <field> <value>" rows (`-g <field> connection show uuid <uuid>`)
 #   active    active UUIDs (`-t -f UUID connection show --active`)
-# Adding ceralive-ap records it as the image creates it (AP_UUID); up/down/delete and
-# `device disconnect` update the model. Faults: STUB_AP_DOWN_RC (down fails, AP stays
+# Adding ceralive-ap records it with the UUID the script passes (connection.uuid);
+# up/down/delete by UUID and `device disconnect` update the model. Name-based
+# up/down/delete of the setup AP are deliberately not modelled: the script must not
+# issue them, and checks assert that. Faults: STUB_AP_DOWN_RC (down fails, AP stays
 # up), STUB_DELETE_RC (delete fails), STUB_NM_READ_RC (profile/active reads fail),
 # STUB_ACTIVE_READ_RC (only the active-connection read fails).
 cat >"${BIN}/nmcli" <<'STUB'
@@ -82,19 +84,23 @@ case "$args" in
   *"-f NAME,TYPE connection show"*) [ -n "${STUB_PROFILES_FILE:-}" ] && cat "$STUB_PROFILES_FILE"; exit 0 ;;
   *"connection add"*ceralive-ap*)
     [ "${STUB_AP_ADD_RC:-0}" -ne 0 ] && exit "$STUB_AP_ADD_RC"
-    drop_uuid "$AP_UUID"
-    echo "ceralive-ap:$AP_UUID:802-11-wireless" >>"$P"
-    printf '%s 802-11-wireless.mode ap\n%s 802-11-wireless.ssid CeraLive-Setup-f00d\n%s ipv4.addresses 192.168.42.1/24\n' "$AP_UUID" "$AP_UUID" "$AP_UUID" >>"$D"
+    u=""; prev=""; for a in "$@"; do [ "$prev" = connection.uuid ] && u="$a"; prev="$a"; done
+    [ -n "$u" ] || u="$(cat /proc/sys/kernel/random/uuid)"   # NM picks one when none is given
+    cat "$CERALIVE_PROVISION_STATE_DIR/ap-uuid" >"$NMSTATE/record-at-add" 2>/dev/null || : >"$NMSTATE/record-at-add"
+    drop_uuid "$u"
+    echo "ceralive-ap:$u:802-11-wireless" >>"$P"
+    printf '%s 802-11-wireless.mode ap\n%s 802-11-wireless.ssid CeraLive-Setup-f00d\n%s ipv4.addresses 192.168.42.1/24\n' "$u" "$u" "$u" >>"$D"
     exit 0 ;;
-  *"connection up"*) case "$args" in
-                       *ceralive-ap*) rc="${STUB_AP_UP_RC:-0}"; [ "$rc" -eq 0 ] && echo "$AP_UUID" >>"$A"; exit "$rc" ;;
-                       *) exit "${STUB_USER_UP_RC:-0}" ;;
-                     esac ;;
-  *"connection down"*ceralive-ap*) [ -n "${STUB_AP_DOWN_RC:-}" ] && exit "$STUB_AP_DOWN_RC"
-                                   grep -vx -- "$AP_UUID" "$A" >"$A.tmp"; mv "$A.tmp" "$A"; exit 0 ;;
-  *"connection delete uuid "*) [ -n "${STUB_DELETE_RC:-}" ] && exit "$STUB_DELETE_RC"; drop_uuid "${!#}"; exit 0 ;;
-  *"connection delete ceralive-ap"*) [ -n "${STUB_DELETE_RC:-}" ] && exit "$STUB_DELETE_RC"
-                                     for u in $(awk -F: '$1 == "ceralive-ap" { print $2 }' "$P"); do drop_uuid "$u"; done; exit 0 ;;
+  *"connection up uuid "*) u="${!#}"; rc="${STUB_AP_UP_RC:-0}"
+                           grep -q ":$u:" "$P" || exit 10
+                           [ "$rc" -eq 0 ] && echo "$u" >>"$A"; exit "$rc" ;;
+  *"connection up"*) exit "${STUB_USER_UP_RC:-0}" ;;
+  *"connection down uuid "*) [ -n "${STUB_AP_DOWN_RC:-}" ] && exit "$STUB_AP_DOWN_RC"
+                             grep -qx -- "${!#}" "$A" || exit 10
+                             grep -vx -- "${!#}" "$A" >"$A.tmp"; mv "$A.tmp" "$A"; exit 0 ;;
+  *"connection delete uuid "*) [ -n "${STUB_DELETE_RC:-}" ] && exit "$STUB_DELETE_RC"
+                               grep -q ":${!#}:" "$P" || exit 10
+                               drop_uuid "${!#}"; exit 0 ;;
   *"device disconnect"*) : >"$A"; exit 0 ;;
   *"connection add"*) if [ "${STUB_ADD_RC:-0}" -ne 0 ]; then echo "Error: failed to modify 802-11-wireless.ssid: invalid" >&2; exit "$STUB_ADD_RC"; fi
                       echo "Connection 'ceralive-wifi' (00000000-0000-0000-0000-000000000000) successfully added."; exit 0 ;;
@@ -107,7 +113,7 @@ make_stub ip \
   'echo "ip $*" >>"$CALL_LOG"' \
   '[ -n "${STUB_DEFAULT_ROUTE:-}" ] && echo "default via 10.0.0.1"; exit 0'
 
-make_stub systemctl 'echo "systemctl $*" >>"$CALL_LOG"' "${MARK_CALL}" 'exit 0'
+make_stub systemctl 'echo "systemctl $*" >>"$CALL_LOG"' "${MARK_CALL}" '[ "$1" = show ] && [ -n "${STUB_SHOW_RC:-}" ] && exit "$STUB_SHOW_RC"' '[ "$1" = show ] && printf "%s\n" "${STUB_UNIT_STATE:-inactive}"' 'exit 0'
 
 # systemd-run: records the transient-unit launch but does NOT execute it (--no-block).
 make_stub systemd-run 'echo "systemd-run $*" >>"$CALL_LOG"; exit 0'
@@ -145,7 +151,18 @@ MARKER_LOG="${SANDBOX}/marker-calls.log"
 export CALL_LOG MARKER_LOG STUB_SCAN_FILE="${SCAN_SRC}"
 
 NMSTATE="${SANDBOX}/nm"; AP_UUID="5e7a1a5e-0000-4000-8000-0000000000a1"
-export NMSTATE AP_UUID
+UUID_SRC="${SANDBOX}/uuid-source"; printf '%s\n' "${AP_UUID}" >"${UUID_SRC}"
+export NMSTATE AP_UUID CERALIVE_UUID_SOURCE="${UUID_SRC}"
+AP_UP_CALL="nmcli connection up uuid ${AP_UUID}"
+AP_DEL_CALL="nmcli connection delete uuid ${AP_UUID}"
+# The setup AP as a previous bring-up of this script left it: profile + recorded UUID.
+seed_setup_ap() {
+  echo "ceralive-ap:${AP_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+  printf '%s 802-11-wireless.mode ap\n%s 802-11-wireless.ssid CeraLive-Setup-f00d\n%s ipv4.addresses 192.168.42.1/24\n' "${AP_UUID}" "${AP_UUID}" "${AP_UUID}" >>"${NMSTATE}/details"
+  printf '%s\n' "${AP_UUID}" >"$(state_file ap-uuid)"
+}
+# No name-based up/down/delete of the setup AP anywhere in the call log.
+no_name_ops() { ! grep -qE '^nmcli( --wait [0-9]+)? connection (up|down|delete) ceralive-ap( |$)' "${CALL_LOG}"; }
 reset_nm() { rm -rf "${NMSTATE}"; mkdir -p "${NMSTATE}"; : >"${NMSTATE}/profiles"; : >"${NMSTATE}/details"; : >"${NMSTATE}/active"; }
 reset_state() { rm -rf "${STATE}" "${DNSDIR}"; mkdir -p "${STATE}"; : >"${CALL_LOG}"; : >"${MARKER_LOG}"; reset_nm; }
 called()     { grep -qF -- "$1" "${CALL_LOG}"; }
@@ -160,7 +177,9 @@ called "nmcli -g SSID dev wifi list"              && pass "scan performed before
 [ -s "$(state_file scan.txt)" ]                   && pass "scan cached for the portal"   || fail "scan cached for the portal"
 [ -f "${DNSDIR}/ceralive-portal.conf" ]           && pass "DNS capture written"          || fail "DNS capture written"
 grep -qF 'address=/#/192.168.42.1' "${DNSDIR}/ceralive-portal.conf" && pass "DNS wildcard to gateway" || fail "DNS wildcard to gateway"
-called "nmcli connection up ceralive-ap"          && pass "AP profile activated"         || fail "AP profile activated"
+called "${AP_UP_CALL}"                           && pass "AP profile activated by its UUID" || fail "AP profile activated by its UUID"
+grep -qF "connection.uuid ${AP_UUID}" "${CALL_LOG}" && [ "$(cat "$(state_file ap-uuid)")" = "${AP_UUID}" ] \
+                                                 && pass "AP created with the recorded UUID" || fail "AP created with the recorded UUID"
 called "systemctl stop ceralive.service"          && pass "CeraUI stopped (frees port 80)" || fail "CeraUI stopped (frees port 80)"
 called "systemctl start ceralive-portal.socket"   && pass "portal socket started on 80"  || fail "portal socket started on 80"
 [ -f "$(state_file portal-active)" ]              && pass "portal-active marker written" || fail "portal-active marker written"
@@ -245,7 +264,7 @@ grep -qF 'Error: failed to modify' "${NM_LOG}"   && pass "nmcli error logged" ||
 
 # ===========================================================================
 echo "== Scenario D: connect SUCCESS -> all four MAC6 conditions =="
-reset_state
+reset_state; seed_setup_ap
 printf 'portal-active' >"$(state_file portal-active)"
 : >"$(state_file force-portal)"
 env STUB_USER_UP_RC=0 STUB_CONNECTIVITY=full STUB_CON_SSID=HomeNet \
@@ -254,7 +273,7 @@ rc=$?
 [ "${rc}" -eq 0 ]                                && pass "connect worker exits 0 on success" || fail "connect worker exits 0 on success"
 called "connection up ceralive-wifi"             && pass "(b) joined target network"     || fail "(b) joined target network"
 called "nmcli -t -f CONNECTIVITY general status" && pass "(b) join verified by connectivity" || fail "(b) join verified by connectivity"
-called "nmcli connection delete ceralive-ap"     && pass "(a) AP profile deleted"        || fail "(a) AP profile deleted"
+called "${AP_DEL_CALL}"                          && pass "(a) AP profile deleted"        || fail "(a) AP profile deleted"
 called "systemctl stop ceralive-portal.socket"   && pass "(c) portal socket stopped (port 80 freed)" || fail "(c) portal socket stopped"
 called "systemctl start ceralive.service"        && pass "(d) CeraUI restarted on new IP" || fail "(d) CeraUI restarted on new IP"
 ! called "nmcli device disconnect wlan0"         && pass "(b) wlan0 NOT dropped (keep_link)" || fail "(b) wlan0 NOT dropped (keep_link)"
@@ -273,7 +292,7 @@ rc=$?
 called "nmcli connection delete ceralive-wifi"   && pass "bad profile deleted"           || fail "bad profile deleted"
 [ -f "$(state_file last-error)" ]                && pass "error marker written for the portal" || fail "error marker written for the portal"
 grep -qF 'reason=auth_or_timeout' "$(state_file last-error)" && pass "error reason recorded" || fail "error reason recorded"
-called "nmcli connection up ceralive-ap"         && pass "AP re-armed for retry"         || fail "AP re-armed for retry"
+called "${AP_UP_CALL}"                          && pass "AP re-armed for retry"         || fail "AP re-armed for retry"
 called "systemctl start ceralive-portal.socket"  && pass "portal restarted for retry"    || fail "portal restarted for retry"
 [ -f "${DNSDIR}/ceralive-portal.conf" ]          && pass "DNS capture re-installed"      || fail "DNS capture re-installed"
 
@@ -294,16 +313,16 @@ env STUB_TIMEOUT_RC=124 STUB_CON_SSID=HomeNet \
 rc=$?
 [ "${rc}" -ne 0 ]                                && pass "timeout -> connect worker fails closed" || fail "timeout -> connect worker fails closed"
 called "timeout"                                 && pass "outer hard-timeout guard engaged" || fail "outer hard-timeout guard engaged"
-called "nmcli connection up ceralive-ap"         && pass "AP re-armed after timeout"     || fail "AP re-armed after timeout"
+called "${AP_UP_CALL}"                          && pass "AP re-armed after timeout"     || fail "AP re-armed after timeout"
 called "systemctl start ceralive-portal.socket"  && pass "portal restarted after timeout" || fail "portal restarted after timeout"
 
 # ===========================================================================
 echo "== Scenario H: out-of-band teardown verb releases everything =="
-reset_state
+reset_state; seed_setup_ap
 printf 'portal-active' >"$(state_file portal-active)"
 : >"$(state_file teardown-requested)"
 bash "${PROVISION}" teardown >/dev/null 2>&1
-called "nmcli connection delete ceralive-ap"     && pass "(a) AP profile deleted"        || fail "(a) AP profile deleted"
+called "${AP_DEL_CALL}"                          && pass "(a) AP profile deleted"        || fail "(a) AP profile deleted"
 called "nmcli device disconnect wlan0"           && pass "wlan0 released (no client link)" || fail "wlan0 released (no client link)"
 called "systemctl stop ceralive-portal.socket"   && pass "(c) portal stopped"            || fail "(c) portal stopped"
 called "systemctl start ceralive.service"        && pass "(d) CeraUI restored"           || fail "(d) CeraUI restored"
@@ -325,12 +344,19 @@ echo "$m systemctl $*" >>"$MARKER_LOG"
 [ "$1" = --no-block ] && shift
 verb="$1"; shift; unit="${1:-}"
 ap_up() {
-  awk '/^nmcli connection up ceralive-ap/{u=1} /^nmcli connection down ceralive-ap/{u=0} END{exit !u}' "$CALL_LOG"
+  awk '/^nmcli connection up uuid /{u=1} /connection (down|delete) uuid /{u=0} END{exit !u}' "$CALL_LOG"
 }
 case "$verb" in
   is-system-running) printf '%s\n' "${STUB_SYSTEM_STATE-running}"; [ "${STUB_SYSTEM_STATE-running}" = running ]; exit ;;
   cat)   [ -n "${STUB_NO_INGRESS:-}" ] && [ "$unit" = ceralive-button-ingress.service ] && exit 1; exit 0 ;;
-  stop)  for u in "$@"; do rm -f "$UNITS/$u"; done ;;
+  stop)  rc=0
+         for u in "$@"; do
+           case " ${STUB_STOP_FAIL:-} " in *" $u "*) echo "Job for $u failed." >&2; rc=1; continue ;; esac
+           rm -f "$UNITS/$u"
+         done
+         exit "$rc" ;;
+  show)  for u in "$@"; do :; done
+         [ -e "$UNITS/$u" ] && echo active || echo inactive ;;
   start)
     case " ${STUB_START_FAIL:-} " in *" $unit "*) echo "Job for $unit failed." >&2; exit 1 ;; esac
     if [ -n "${STUB_NO_INGRESS:-}" ] && [ "$unit" = ceralive-button-ingress.service ]; then
@@ -352,7 +378,7 @@ STUB
 chmod +x "${BIN}/systemctl-stateful"
 # Who holds 192.168.42.1:80 right now, one unit per line.
 ap80_owners() {
-  awk '/^nmcli connection up ceralive-ap/{u=1} /^nmcli connection down ceralive-ap/{u=0} END{exit !u}' "${CALL_LOG}" || return 0
+  awk '/^nmcli connection up uuid /{u=1} /connection (down|delete) uuid /{u=0} END{exit !u}' "${CALL_LOG}" || return 0
   [ -e "${UNITS}/ceralive-button-ingress.service" ] && echo ceralive-button-ingress.service
   [ -e "${UNITS}/ceralive-portal.socket" ] && echo ceralive-portal.socket
   return 0
@@ -398,7 +424,7 @@ env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/d
     bash "${PROVISION}" start >/dev/null 2>&1
 rc=$?
 [ "${rc}" -ne 0 ]                                && pass "start fails when the portal cannot listen" || fail "start fails when the portal cannot listen (rc=${rc})"
-[ -z "$(ap80_owners)" ] && ! awk '/^nmcli connection up ceralive-ap/{u=1} /^nmcli connection down ceralive-ap/{u=0} END{exit !u}' "${CALL_LOG}" \
+[ -z "$(ap80_owners)" ] && ! awk '/^nmcli connection up uuid /{u=1} /connection (down|delete) uuid /{u=0} END{exit !u}' "${CALL_LOG}" \
                                                  && pass "AP brought down again" || fail "AP brought down again"
 [ ! -e "$(state_file portal-active)" ]           && pass "portal-active marker removed" || fail "portal-active marker removed"
 [ -e "$(state_file force-portal)" ]              && pass "force flag kept for the next try" || fail "force flag kept for the next try"
@@ -537,7 +563,7 @@ echo "== Scenario M: the setup marker covers the whole AP lifetime and nothing m
 with_marker()    { grep -qE -- "^marker $1" "${MARKER_LOG}"; }
 without_marker() { grep -qE -- "^nomarker $1" "${MARKER_LOG}"; }
 AP_ADD='nmcli connection add .*con-name ceralive-ap '
-AP_UP='nmcli connection up ceralive-ap$'
+AP_UP="nmcli connection up uuid ${AP_UUID}\$"
 CERAUI_START='systemctl start ceralive.service$'
 SC=(env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/dev/null)
 
@@ -623,7 +649,7 @@ fail_case "re-arm: portal cannot listen"         rearm STUB_PORTAL_FAIL=1
 reset_state; boot_units; : >"$(state_file force-portal)"
 "${SC[@]}" CERALIVE_PROVISION_ACTIVE_FLAG="${SANDBOX}/missing-dir/portal-active" bash "${PROVISION}" start >/dev/null 2>&1
 rc=$?
-[ "${rc}" -ne 0 ] && ! called "nmcli connection add type wifi ifname wlan0 con-name ceralive-ap" && ! called "nmcli connection up ceralive-ap" && ! called "connection down ceralive-ap" \
+[ "${rc}" -ne 0 ] && ! called "nmcli connection add type wifi ifname wlan0 con-name ceralive-ap" && ! called "connection up uuid" && ! called "connection down" \
                                                  && pass "unwritable marker: no AP profile created or activated" || fail "unwritable marker: no AP profile created or activated (rc=${rc})"
 [ -e "${UNITS}/ceralive.service" ] && [ -e "${UNITS}/ceralive-button-ingress.service" ] \
                                                  && pass "unwritable marker: CeraUI and ingress keep running" || fail "unwritable marker: CeraUI and ingress keep running"
@@ -637,7 +663,7 @@ for verb in stop service-stop; do
   env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running bash "${PROVISION}" "${verb}" >/dev/null 2>&1
   [ ! -e "$(state_file portal-active)" ] && [ -e "$(state_file force-portal)" ] \
                                                  && pass "${verb}: marker cleared, force flag kept" || fail "${verb}: marker cleared, force flag kept"
-  with_marker 'nmcli --wait 3 connection down ceralive-ap$' && without_marker "${CERAUI_START}" && ! with_marker "${CERAUI_START}" \
+  with_marker "nmcli --wait 3 connection down uuid ${AP_UUID}\$" && without_marker "${CERAUI_START}" && ! with_marker "${CERAUI_START}" \
                                                  && pass "${verb}: marker held until the AP is down, gone before CeraUI starts" || fail "${verb}: marker held until the AP is down, gone before CeraUI starts"
 done
 "${SC[@]}" bash "${PROVISION}" start >/dev/null 2>&1
@@ -699,7 +725,7 @@ called "nmcli connection delete uuid ${AP_UUID}" && ! called "nmcli connection d
 reset_state; boot_units; owned_ap
 printf 'ssid=HomeNet\nreason=auth_or_timeout\n' >"$(state_file last-error)"
 no_portal_boot STUB_DELETE_RC=1; rc=$?
-[ "${rc}" -ne 0 ] && [ -e "$(state_file last-error)" ] && grep -q "ERROR: could not delete leftover setup AP profile" "${OUTF}" \
+[ "${rc}" -ne 0 ] && [ -e "$(state_file last-error)" ] && grep -q "ERROR: could not delete setup AP profile" "${OUTF}" \
                                                  && pass "failed leftover delete: non-zero, logged, last-error kept" || fail "failed leftover delete: non-zero, logged, last-error kept (rc=${rc})"
 reset_state; boot_units; owned_ap
 printf 'ssid=HomeNet\nreason=auth_or_timeout\n' >"$(state_file last-error)"
@@ -801,9 +827,120 @@ rc=$?
                                                  && pass "join teardown: unremovable marker → non-zero, logged, no clear claimed" || fail "join teardown: unremovable marker → non-zero, logged, no clear claimed (rc=${rc})"
 ! called "nmcli device disconnect"               && pass "join teardown: joined link kept on failure" || fail "join teardown: joined link kept on failure"
 
+
+# ===========================================================================
+echo "== Scenario Q: no AP change until CeraUI and the ingress are confirmed stopped =="
+for unit in ceralive.service ceralive-button-ingress.service; do
+  reset_state; boot_units; : >"$(state_file force-portal)"
+  "${SC[@]}" STUB_STOP_FAIL="${unit}" bash "${PROVISION}" start >"${OUTF}" 2>&1
+  rc=$?
+  [ "${rc}" -ne 0 ] && grep -q "ERROR: ${unit} did not stop" "${OUTF}" \
+                                                 && pass "${unit} will not stop: bring-up fails and says so" || fail "${unit} will not stop: bring-up fails and says so (rc=${rc})"
+  ! called "connection add" && ! called "connection up uuid" && ! called "connection delete" && ! called "connection down" \
+                                                 && pass "${unit} will not stop: no AP profile touched" || fail "${unit} will not stop: no AP profile touched"
+  [ ! -e "$(state_file portal-active)" ] && [ -e "${UNITS}/ceralive.service" ] && [ -e "${UNITS}/ceralive-button-ingress.service" ] \
+                                                 && pass "${unit} will not stop: marker released, front door running" || fail "${unit} will not stop: marker released, front door running"
+  [ -e "$(state_file force-portal)" ]            && pass "${unit} will not stop: force flag kept for a retry" || fail "${unit} will not stop: force flag kept for a retry"
+done
+# Without the ingress unit on the image, a stopped CeraUI is enough.
+reset_state; boot_units; rm -f "${UNITS}/ceralive-button-ingress.service"; : >"$(state_file force-portal)"
+"${SC[@]}" STUB_NO_INGRESS=1 bash "${PROVISION}" start >/dev/null 2>&1
+rc=$?
+[ "${rc}" -eq 0 ] && called "${AP_UP_CALL}"      && pass "absent ingress unit does not block bring-up" || fail "absent ingress unit does not block bring-up (rc=${rc})"
+# The plain stub reports a unit still active: same refusal.
+reset_state; : >"$(state_file force-portal)"
+env STUB_PROFILES_FILE=/dev/null STUB_UNIT_STATE=deactivating bash "${PROVISION}" start >/dev/null 2>&1
+rc=$?
+[ "${rc}" -ne 0 ] && ! called "connection add"   && pass "a unit still deactivating blocks bring-up" || fail "a unit still deactivating blocks bring-up (rc=${rc})"
+reset_state; : >"$(state_file force-portal)"
+env STUB_PROFILES_FILE=/dev/null STUB_SHOW_RC=1 bash "${PROVISION}" start >/dev/null 2>&1
+rc=$?
+[ "${rc}" -ne 0 ] && ! called "connection add"   && pass "unit state unreadable blocks bring-up" || fail "unit state unreadable blocks bring-up (rc=${rc})"
+
+# ===========================================================================
+echo "== Scenario R: setup-only NM operations go by the setup AP's UUID =="
+# A user's station named ceralive-ap, active on wlan0, survives every setup path.
+add_station_named_ap() { echo "ceralive-ap:${STATION_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+  printf '%s 802-11-wireless.mode infrastructure\n%s 802-11-wireless.ssid HomeNet\n%s ipv4.addresses \n' "${STATION_UUID}" "${STATION_UUID}" "${STATION_UUID}" >>"${NMSTATE}/details"; }
+station_untouched() { # $1=label
+  ! grep -qE "connection (up|down|delete) uuid ${STATION_UUID}" "${CALL_LOG}" && no_name_ops && grep -q ":${STATION_UUID}:" "${NMSTATE}/profiles" \
+                                                 && pass "${1}: same-named station never touched" || fail "${1}: same-named station never touched"
+}
+# Stale marker on a no-portal boot, station active.
+reset_state; boot_units; seed_setup_ap; add_station_named_ap; echo "${STATION_UUID}" >>"${NMSTATE}/active"
+printf 'ssid=CeraLive-Setup-f00d\n' >"$(state_file portal-active)"
+no_portal_boot; rc=$?
+[ "${rc}" -eq 0 ] && called "${AP_DEL_CALL}" && [ ! -e "$(state_file portal-active)" ] && grep -qx "${STATION_UUID}" "${NMSTATE}/active" \
+                                                 && pass "stale teardown: setup AP deleted by UUID, station still active" || fail "stale teardown: setup AP deleted by UUID, station still active (rc=${rc})"
+station_untouched "stale teardown"
+# Bring-up, failed join + re-arm, successful join, stop, teardown verb.
+reset_state; boot_units; seed_setup_ap; add_station_named_ap; : >"$(state_file force-portal)"
+"${SC[@]}" bash "${PROVISION}" start >/dev/null 2>&1
+called "${AP_DEL_CALL}" && called "${AP_UP_CALL}" && pass "bring-up: old setup AP replaced by UUID" || fail "bring-up: old setup AP replaced by UUID"
+station_untouched "bring-up"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=4 STUB_CON_SSID=HomeNet bash "${PROVISION}" connect ceralive-wifi >/dev/null 2>&1
+station_untouched "failed join and re-arm"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running bash "${PROVISION}" stop >/dev/null 2>&1
+station_untouched "stop"
+"${SC[@]}" bash "${PROVISION}" start >/dev/null 2>&1
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=0 STUB_CONNECTIVITY=full STUB_CON_SSID=HomeNet bash "${PROVISION}" connect ceralive-wifi >/dev/null 2>&1
+station_untouched "successful join"
+[ ! -e "$(state_file ap-uuid)" ] && ! grep -q ":${AP_UUID}:" "${NMSTATE}/profiles" \
+                                                 && pass "successful join: setup AP and its record gone" || fail "successful join: setup AP and its record gone"
+reset_state; seed_setup_ap; add_station_named_ap
+printf 'portal-active' >"$(state_file portal-active)"
+bash "${PROVISION}" teardown >/dev/null 2>&1
+station_untouched "teardown verb"
+
+# ===========================================================================
+echo "== Scenario S: the recorded UUID decides, whatever the profile's settings say now =="
+# Settings changed after activation, then the down fails: the AP is still ours and up.
+for verb in stop service-stop; do
+  up_ap_model
+  printf '%s 802-11-wireless.ssid SomethingElse\n' "${AP_UUID}" >"${NMSTATE}/details.new"
+  grep -v "^${AP_UUID} 802-11-wireless.ssid " "${NMSTATE}/details" >>"${NMSTATE}/details.new"; mv "${NMSTATE}/details.new" "${NMSTATE}/details"
+  env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running STUB_AP_DOWN_RC=10 \
+      bash "${PROVISION}" "${verb}" >"${OUTF}" 2>&1
+  rc=$?
+  [ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] && grep -q "ERROR: setup AP still active" "${OUTF}" \
+                                                 && pass "${verb}: changed settings + failed down → marker kept, non-zero" || fail "${verb}: changed settings + failed down → marker kept, non-zero (rc=${rc})"
+done
+# The same changed profile is still cleaned up by its recorded UUID.
+up_ap_model
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running bash "${PROVISION}" stop >/dev/null 2>&1
+printf '%s 802-11-wireless.ssid SomethingElse\n' "${AP_UUID}" >>"${NMSTATE}/details"
+sed -i "/^${AP_UUID} 802-11-wireless.ssid CeraLive/d" "${NMSTATE}/details"
+rm -f "$(state_file force-portal)"; : >"${CALL_LOG}"
+no_portal_boot; rc=$?
+[ "${rc}" -eq 0 ] && called "${AP_DEL_CALL}" && [ ! -e "$(state_file ap-uuid)" ] \
+                                                 && pass "recorded setup AP deleted even with changed settings" || fail "recorded setup AP deleted even with changed settings (rc=${rc})"
+# The recorded UUID still active but no longer listed as a profile: still the setup's.
+up_ap_model
+grep -v ":${AP_UUID}:" "${NMSTATE}/profiles" >"${NMSTATE}/p.new"; mv "${NMSTATE}/p.new" "${NMSTATE}/profiles"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running STUB_AP_DOWN_RC=10 bash "${PROVISION}" stop >"${OUTF}" 2>&1
+rc=$?
+[ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] \
+                                                 && pass "recorded UUID active without a listed profile → marker kept" || fail "recorded UUID active without a listed profile → marker kept (rc=${rc})"
+# An unreadable or corrupt record is uncertain identity: keep the marker.
+up_ap_model
+printf 'not-a-uuid\n' >"$(state_file ap-uuid)"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running bash "${PROVISION}" stop >"${OUTF}" 2>&1
+rc=$?
+[ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] \
+                                                 && pass "corrupt UUID record → marker kept, non-zero" || fail "corrupt UUID record → marker kept, non-zero (rc=${rc})"
+# The UUID is recorded before the profile exists, and a missing UUID source means no AP.
+reset_state; boot_units; : >"$(state_file force-portal)"
+"${SC[@]}" bash "${PROVISION}" start >/dev/null 2>&1
+[ "$(cat "${NMSTATE}/record-at-add" 2>/dev/null)" = "${AP_UUID}" ] && pass "UUID already recorded when the profile is created" || fail "UUID already recorded when the profile is created"
+reset_state; boot_units; : >"$(state_file force-portal)"
+"${SC[@]}" CERALIVE_UUID_SOURCE=/nonexistent bash "${PROVISION}" start >"${OUTF}" 2>&1
+rc=$?
+[ "${rc}" -ne 0 ] && ! called "connection add" && [ ! -e "$(state_file portal-active)" ] && [ -e "${UNITS}/ceralive.service" ] \
+                                                 && pass "no UUID available: no AP, marker released, front door back" || fail "no UUID available: no AP, marker released, front door back (rc=${rc})"
+
 # Upstream's shutdown cases (12056fa, 07c1820): a blocking start during ExecStop
 # waits behind the shutdown transaction; model that by refusing every blocking call.
-reset_state
+reset_state; seed_setup_ap
 printf 'portal-active' >"$(state_file portal-active)"
 : >"$(state_file force-portal)"
 make_stub systemctl 'echo "systemctl $*" >>"$CALL_LOG"' '[ "$1" = --no-block ] || exit 99'
@@ -811,7 +948,7 @@ bash "${PROVISION}" shutdown >/dev/null 2>&1
 called "systemctl --no-block stop ceralive-portal.socket" && pass "shutdown enqueues portal stop" || fail "shutdown enqueues portal stop"
 ! called "systemctl start" && pass "shutdown never starts CeraUI" || fail "shutdown never starts CeraUI"
 ! called "systemctl stop" && pass "shutdown has no blocking stop" || fail "shutdown has no blocking stop"
-called "timeout 5" && pass "shutdown bounds NM cleanup" || fail "shutdown bounds NM cleanup"
+called "timeout 5" && called "connection down uuid ${AP_UUID}" && no_name_ops && pass "shutdown bounds NM cleanup, by UUID" || fail "shutdown bounds NM cleanup, by UUID"
 [ -e "$(state_file portal-active)" ] && pass "shutdown retains portal marker" || fail "shutdown retains portal marker"
 [ -e "$(state_file force-portal)" ] && pass "shutdown retains force flag" || fail "shutdown retains force flag"
 

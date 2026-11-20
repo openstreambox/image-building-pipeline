@@ -36,6 +36,7 @@ All under `/data/ceralive/provision/`:
 | `teardown-requested` | Out-of-band teardown request honored at next service start |
 | `scan.txt` | Cached visible SSIDs (one per line), scanned **before** the AP came up |
 | `last-error` | After a failed join: `ssid=<name>` + `reason=auth_or_timeout` — shown by the portal |
+| `ap-uuid` | UUID of the setup AP profile; chosen and written before the profile is created, removed once it is deleted |
 
 The WiFi credentials themselves are **never** written here — they go only into
 NetworkManager's own `system-connections` store (`/etc/NetworkManager/system-connections`,
@@ -67,8 +68,12 @@ The device's own `ceralive-ap` profile is excluded from the stored-profile count
 3. **Setup marker**: write `portal-active` (see *Setup marker*); if it cannot be
    written, stop here.
 4. **CeraUI and the button ingress stop** (frees `0.0.0.0:80`, and CeraUI issues
-   nothing more for `wlan0`).
-5. **AP up**: NM-native AP (`802-11-wireless.mode ap` + `ipv4.method shared`), SSID
+   nothing more for `wlan0`). Both must then report inactive (an image without the
+   ingress unit reports it inactive); otherwise bring-up stops here, releases the
+   marker, starts them again and fails.
+5. **AP up**: earlier setup AP profiles are deleted by UUID, a fresh UUID is
+   written to `ap-uuid`, and the profile is created with that `connection.uuid`
+   and activated by it. NM-native AP (`802-11-wireless.mode ap` + `ipv4.method shared`), SSID
    `CeraLive-Setup-<short-id>`, passphrase `ceralive-setup`, gateway `192.168.42.1/24`.
 6. **Portal**: `systemctl start ceralive-portal.socket` (binds `192.168.42.1:80`).
 
@@ -152,10 +157,16 @@ flags so the next boot re-evaluates the trigger and a pending factory reset is n
 silently disarmed. On a manual stop it removes the setup marker and restores CeraUI
 and the button ingress to port 80; during shutdown it starts nothing and keeps the
 marker (see *Shutdown cleanup* and *Setup marker*). A later boot that needs no portal
-deletes the AP profile a stop left behind, without touching `wlan0` or CeraUI. It
-deletes only a verified setup AP (connection name, AP mode, this device's
-`CeraLive-Setup-<short-id>` SSID and the `192.168.42.1/24` address), by UUID, so a
-user's station profile that happens to share the name stays. A failed delete or an
+deletes the AP profile a stop left behind, without touching `wlan0` or CeraUI.
+
+Every setup-only NetworkManager operation (up, down, delete, the active check) goes
+by UUID, never by connection name, so a user's profile that happens to share the
+name is never touched. The UUID is the one recorded in `ap-uuid`, which still
+identifies the profile if its settings change later. A profile from an older run
+without that record counts as the setup's only on positive evidence: connection
+name, AP mode, this device's `CeraLive-Setup-<short-id>` SSID and the
+`192.168.42.1/24` address. An unreadable or corrupt `ap-uuid` counts as uncertain,
+so the marker stays. A failed delete or an
 unreadable NetworkManager is logged, `last-error` stays, and the run exits non-zero.
 
 Whenever provisioning hands the front door back (after a join, on `stop`/`teardown`, or
