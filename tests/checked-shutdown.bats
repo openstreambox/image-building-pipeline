@@ -38,6 +38,7 @@ STUB
   export CERALIVE_POWER_HELPER_DIR="$BATS_TEST_TMPDIR/helpers"
   export CERALIVE_RAUC_ACTIVATE_UNIT_DIR="$BATS_TEST_TMPDIR/units"
   export CERALIVE_LOGIND_CONF_DIR="$BATS_TEST_TMPDIR/logind.conf.d"
+  export CERALIVE_POLKIT_RULES_DIR="$BATS_TEST_TMPDIR/rules.d"
   run bash -euc 'source "$1"; enable_service() { :; }; setup_power_policy' _ "$ROOT/mkosi/customize/postinst.d/services.sh"
   [ "$status" -eq 0 ]
   [ "$(stat -c %a "$CERALIVE_POWER_HELPER_DIR/ceralive-power")" = 755 ]
@@ -75,6 +76,7 @@ STUB
   export CERALIVE_POWER_HELPER_DIR="$BATS_TEST_TMPDIR/helpers"
   export CERALIVE_RAUC_ACTIVATE_UNIT_DIR="$BATS_TEST_TMPDIR/units"
   export CERALIVE_LOGIND_CONF_DIR="$BATS_TEST_TMPDIR/logind.conf.d"
+  export CERALIVE_POLKIT_RULES_DIR="$BATS_TEST_TMPDIR/rules.d"
   run bash -euc 'source "$1"; enable_service() { :; }; setup_power_policy' _ "$ROOT/mkosi/customize/postinst.d/services.sh"
   [ "$status" -eq 0 ]
   local policy="$CERALIVE_LOGIND_CONF_DIR/60-ceralive-power-key.conf"
@@ -82,6 +84,24 @@ STUB
   grep -Fxq 'PowerKeyIgnoreInhibited=yes' "$policy"
   grep -Fxq 'HandlePowerKey=poweroff' "$policy"
   grep -Fxq 'HandlePowerKeyLongPress=poweroff' "$policy"
+}
+
+@test "root may override shutdown locks only on purpose, through polkit" {
+  export CERALIVE_RUNTIME_SRC="$ROOT/mkosi/runtime"
+  export CERALIVE_POWER_HELPER_DIR="$BATS_TEST_TMPDIR/helpers"
+  export CERALIVE_LOGIND_CONF_DIR="$BATS_TEST_TMPDIR/logind.conf.d"
+  export CERALIVE_POLKIT_RULES_DIR="$BATS_TEST_TMPDIR/rules.d"
+  run bash -euc 'source "$1"; enable_service() { :; }; setup_power_policy' _ "$ROOT/mkosi/customize/postinst.d/services.sh"
+  [ "$status" -eq 0 ]
+  local rule="$CERALIVE_POLKIT_RULES_DIR/60-ceralive-root-ignore-inhibit.rules"
+  [ "$(stat -c %a "$rule")" = 644 ]
+  cmp "$ROOT/mkosi/runtime/60-ceralive-root-ignore-inhibit.rules" "$rule"
+  # Only the three ignore-inhibit actions, only for root; nothing else is granted.
+  grep -Fq 'subject.user == "root"' "$rule"
+  [ "$(grep -c 'polkit.Result.YES' "$rule")" -eq 1 ]
+  [ "$(grep -oE 'org\.freedesktop\.[a-z0-9.-]+' "$rule" | sort -u | tr '\n' ' ')" = \
+    "org.freedesktop.login1.halt-ignore-inhibit org.freedesktop.login1.power-off-ignore-inhibit org.freedesktop.login1.reboot-ignore-inhibit " ]
+  ! grep -Eq 'Result\.(AUTH|NO)|subject\.isInGroup|subject\.local' "$rule"
 }
 
 @test "TERM to the helper itself reports uncertainty and never retries" {
@@ -101,6 +121,7 @@ STUB
   export CERALIVE_RUNTIME_SRC="$ROOT/mkosi/runtime"
   export CERALIVE_POWER_HELPER_DIR="$BATS_TEST_TMPDIR/helpers"
   export CERALIVE_LOGIND_CONF_DIR="$BATS_TEST_TMPDIR/logind.conf.d"
+  export CERALIVE_POLKIT_RULES_DIR="$BATS_TEST_TMPDIR/rules.d"
   run bash -euc '
     source "$1"
     for fn in $(declare -F | cut -d" " -f3) configure_debug_access configure_ssh_enablement setup_typec_policy setup_fan_curve setup_fan_kickstart setup_led_status setup_cpu_governor setup_hdmirx_edid setup_slot_sync setup_boot_script_sync; do

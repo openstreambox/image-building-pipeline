@@ -1,0 +1,17 @@
+// Let root override shutdown locks on purpose: `systemctl poweroff -i`,
+// `systemctl reboot -i` (and --check-inhibitors=no).
+//
+// While CeraUI streams it holds a logind `block` lock. On systemd 257 logind
+// refuses every plain power request under such a lock, root included, and for
+// `-i` it always asks polkit; polkit then gives root no implicit pass. Without
+// this rule the image had no command-line override short of stopping CeraUI.
+// Plain `poweroff`/`reboot` stay refused while the lock is held, and other
+// users still need an administrator.
+polkit.addRule(function(action, subject) {
+    if (subject.user == "root" &&
+        (action.id == "org.freedesktop.login1.power-off-ignore-inhibit" ||
+         action.id == "org.freedesktop.login1.reboot-ignore-inhibit" ||
+         action.id == "org.freedesktop.login1.halt-ignore-inhibit")) {
+        return polkit.Result.YES;
+    }
+});

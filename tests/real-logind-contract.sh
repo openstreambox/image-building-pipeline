@@ -61,6 +61,13 @@ systemctl reboot >/var/tmp/logind-contract/reboot.log 2>&1 && exit 1
 ! logs "$mark" | grep -q 'The system will reboot now'
 echo 'ok 1 strong inhibitor refuses root reboot without polkit'
 mark="$(cursor)"
+# The power button's completed hold (button.py POWEROFF): the job logind starts
+# after accepting a request, so it passes the held lock without polkit.
+systemctl start --no-block --job-mode=replace-irreversibly poweroff.target >/var/tmp/logind-contract/button.log 2>&1 && exit 1
+grep -q 'poweroff.target is masked' /var/tmp/logind-contract/button.log
+systemd-inhibit --list --no-pager | grep -q contract
+echo 'ok 1b power-button hold reaches poweroff.target while the lock is held'
+mark="$(cursor)"
 python3 /var/tmp/logind-contract/key.py
 logs "$mark" | grep -q 'Powering off'
 logs "$mark" | grep -q 'poweroff.target is masked'

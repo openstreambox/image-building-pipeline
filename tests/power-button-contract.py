@@ -95,6 +95,39 @@ class Gestures(unittest.TestCase):
             self.assertIn(('countdown', 3), self.lights)
             self.assertIn(('cancel', 0), self.lights)
 
+    def test_refused_poweroff_keeps_the_daemon_up(self):
+        calls = []
+        def refused():
+            calls.append(True)
+            raise b.subprocess.CalledProcessError(1, b.POWEROFF)
+        self.g = b.Gestures(lambda *x: self.lights.append(x), refused)
+        self.g.key(1, 0)
+        self.g.tick(3)  # must not raise into serve()
+        self.assertEqual(calls, [True])
+        self.assertIn(('failed', 0), self.lights)
+        self.assertNotIn(('shutdown', 0), self.lights)
+        self.g.tick(4)
+        self.assertEqual(calls, [True])  # one request per hold
+        self.g.key(0, 5)
+        self.g.key(1, 10)
+        self.g.tick(13)
+        self.assertEqual(calls, [True, True])  # the next full hold asks again
+
+    def test_poweroff_request_passes_shutdown_locks(self):
+        seen = []
+        b.request_poweroff(lambda command, **kwargs: seen.append((command, kwargs)))
+        command, kwargs = seen[0]
+        # Not `systemctl poweroff`: logind refuses root under a strong lock.
+        self.assertEqual(command[:2], ['/usr/bin/systemctl', 'start'])
+        self.assertIn('--job-mode=replace-irreversibly', command)
+        self.assertIn('--no-block', command)
+        self.assertEqual(command[-1], 'poweroff.target')
+        self.assertTrue(kwargs['check'])
+        self.assertLessEqual(kwargs['timeout'], 10)
+        main = inspect.getsource(b.main)
+        self.assertIn('request_poweroff', main)
+        self.assertNotIn("'poweroff']", main)
+
     def test_decoder(self):
         decoder = b.Input(self.g)
         def ev(kind, code, value):
