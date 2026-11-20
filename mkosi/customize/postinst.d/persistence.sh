@@ -270,15 +270,19 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
     # the helper of its new slot. Absent and dangling entries are (re)linked on
     # every boot; anything else is left alone: a regular file there was written by
     # a later CeraUI package upgrade and belongs to the CeraUI that now runs.
+    # Optional: a failed unlink or link is logged and the migration goes on, so
+    # it can never hold back the binds that need this script to succeed.
     for f in "$CERAUI_HELPERS"/*; do
         [ -f "$f" ] || continue
-        dest="$DATA/ceralive/$(basename "$f")"
+        dest="$DATA/ceralive/${f##*/}"
         if [ -L "$dest" ] && [ ! -e "$dest" ]; then
-            rm -f "$dest"
+            rm -f -- "$dest" \
+                || { log "WARNING: cannot remove the dangling $dest; CeraUI's helper stays unavailable"; continue; }
         fi
         if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
             log "linking $dest to the image copy $f"
-            ln -s "$f" "$dest"
+            ln -sT -- "$f" "$dest" \
+                || log "WARNING: cannot link $dest to $f; CeraUI's helper stays unavailable"
         fi
     done
 fi

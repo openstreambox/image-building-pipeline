@@ -87,7 +87,10 @@ run_block() { # $1=DATA $2=WORKDIR $3=CERAUI_HELPERS
     echo 'mountpoint() { return 1; }'
     echo 'log() { :; }'
     printf 'DATA=%q\nWORKDIR=%q\nCERAUI_HELPERS=%q\n' "$1" "$2" "$3"
+    printf '%s\n' "${RUN_PRELUDE:-}"
     printf '%s\n' "${block}"
+    # The rest of ceralive-migrate-data (and the binds that need it) runs on.
+    printf 'echo continued >%q\n' "$1/.migrate-continued"
   } >"${runner}"
   bash "${runner}"
 }
@@ -163,6 +166,35 @@ run_block "${B6}/data" "${B6}/opt/ceralive" "${B6}/missing-dir"
   || fail "B6: a link was created without an image copy"
 [[ ! -e "${B6}/data/ceralive/*" ]] || fail "B6: an unmatched glob became a /data entry"
 echo "ceraui-workdir-helpers: B6 nothing kept, nothing linked OK"
+
+# B7: the dangling link cannot be removed. Logged, skipped, migration goes on.
+B7="${TMP}/b7"; new_box "${B7}"
+ln -s /nonexistent/old-place/${HELPER} "${B7}/data/ceralive/${HELPER}"
+RUN_PRELUDE='rm() { return 1; }' run_block "${B7}/data" "${B7}/opt/ceralive" "${B7}/${HELPERS_REL}" \
+  || fail "B7: a failed unlink failed ceralive-migrate-data (every bind would stop)"
+[[ -f "${B7}/data/.migrate-continued" ]] || fail "B7: migration stopped after a failed unlink"
+[[ "$(readlink "${B7}/data/ceralive/${HELPER}")" == /nonexistent/old-place/${HELPER} ]] \
+  || fail "B7: the entry changed although it could not be removed"
+echo "ceraui-workdir-helpers: B7 a failed unlink is non-fatal OK"
+
+# B8: the link cannot be created. Logged, migration goes on.
+B8="${TMP}/b8"; new_box "${B8}"
+RUN_PRELUDE='ln() { return 1; }' run_block "${B8}/data" "${B8}/opt/ceralive" "${B8}/${HELPERS_REL}" \
+  || fail "B8: a failed link failed ceralive-migrate-data (every bind would stop)"
+[[ -f "${B8}/data/.migrate-continued" ]] || fail "B8: migration stopped after a failed link"
+[[ ! -e "${B8}/data/ceralive/${HELPER}" && ! -L "${B8}/data/ceralive/${HELPER}" ]] \
+  || fail "B8: an entry appeared although ln failed"
+[[ -f "${B8}/data/ceralive/setup.json" ]] || fail "B8: the *.json seeding regressed"
+echo "ceraui-workdir-helpers: B8 a failed link is non-fatal OK"
+
+# B9: a directory in the way (ln -sT must not create the link inside it).
+B9="${TMP}/b9"; new_box "${B9}"
+mkdir -p "${B9}/data/ceralive/${HELPER}"
+run_block "${B9}/data" "${B9}/opt/ceralive" "${B9}/${HELPERS_REL}" \
+  || fail "B9: a directory in the way failed ceralive-migrate-data"
+[[ -d "${B9}/data/ceralive/${HELPER}" && -z "$(ls -A "${B9}/data/ceralive/${HELPER}")" ]] \
+  || fail "B9: something was written into a directory in the way"
+echo "ceraui-workdir-helpers: B9 a directory in the way is left alone OK"
 
 # ---------------------------------------------------------------------------
 # Part C — both halves name the same directory

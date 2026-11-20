@@ -170,7 +170,10 @@ install_first_party_apps() {
 # copy, so the backend cannot find it. The copy kept here sits outside the bind;
 # ceralive-migrate-data links /data/ceralive/<name> to it on every boot, the way
 # the seeded "public" link points at /var/www/ceralive, so the helper a box runs
-# is always the one its current slot shipped.
+# is the one its current slot shipped. Exception: once an in-place CeraUI package
+# upgrade writes a regular file there, that file stays and wins over later OTAs.
+# This helper serves CeraUI's captive Wi-Fi sign-in window; the pipeline's own
+# first-boot setup AP (ceralive-provision/ceralive-portal) does not use it.
 # ---------------------------------------------------------------------------
 CERAUI_WORKDIR_HELPERS=(captive-portal-window.py)
 CERAUI_WORKDIR_HELPERS_DIR="/usr/libexec/ceralive/ceraui-workdir"
