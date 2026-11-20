@@ -161,15 +161,23 @@ the earlier call, which no visible property shows. So the broker never clears
 this by itself.
 
 **Explicit recovery.** An operator at their own terminal runs
-`ceralive-poweroff --recover`. The broker prompts there, says the earlier
-outcome is unknown and that a shutdown may still be in flight, and reads the
-typed word `recover`, under the same terminal checks as a power-off. It then
+`ceralive-poweroff --recover`. The broker prompts there, names the request (id
+and action), says its outcome is unknown and that a shutdown may still be in
+flight, and reads the typed word `recover`, under the same terminal checks as a
+power-off. The confirmation clears only the request the prompt named: if that
+one is gone or another took its place, it is refused ("the uncertain request
+changed; run --recover again"). One recovery is checked at a time; another one
+meanwhile is refused with a reason, and every operator gets an answer. It then
 refuses if a shutdown is visibly under way: logind preparing for shutdown, a
 shutdown job queued, or the manager not plainly `running` or `degraded`. Any
 error or empty answer counts as under way. Otherwise it records the request as
 `uncertain` and cleared, drops its fence and the locks, and takes requests
 again. Nothing is resubmitted. The button and CeraUI can't recover. A reboot
-also clears it (`/run` is per boot).
+also clears it (`/run` is per boot). While a request's outcome is unknown,
+every other request, the same action included, is refused with these
+instructions; none joins it. Only a record with exactly `"cleared": true` (and
+the request's id) counts as recovered; any other `cleared` value makes the
+record unreadable.
 
 **Polkit.** The rule `60-ceralive-power-broker.rules` grants the power-off and
 reboot `*-ignore-inhibit` actions only to root in exactly `ceralive-power.service`,

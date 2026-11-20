@@ -642,6 +642,10 @@ def valid_record(record):
     unreadable (lost evidence), never as idle."""
     if not isinstance(record, dict) or not isinstance(record.get('requests', {}), dict):
         return False
+    # `cleared` releases a fence: only a literal true counts, anywhere.
+    entries = [record, *record.get('requests', {}).values()]
+    if any(not isinstance(e, dict) or ('cleared' in e and e['cleared'] is not True) for e in entries):
+        return False
     state = record.get('state')
     if state not in KNOWN_STATES:
         return False
@@ -665,6 +669,7 @@ class Request:
         self.uid = None
         self.tty = None  # [fd, rdev, proc, answer bytes]
         self.confirmed = False  # an operator's typed word, checked on its own terminal
+        self.target = None  # for a recovery: the request its prompt showed
         self.closed = False
 
 
@@ -809,9 +814,12 @@ class Committer(threading.Thread):
             return False
         seen = shutdown_in_flight(self.runner)
         with broker.lock:
-            if broker.committed is not c or c.get('recovering') is not request:
+            if c.get('recovering') is not request:
                 return False
             c['recovering'] = None
+            if broker.committed is not c:
+                broker.answer(request, 'REFUSED the uncertain request changed; run --recover again')
+                return False
             if seen:
                 broker.answer(request, f'REFUSED a shutdown may be in flight ({", ".join(seen)}); not cleared')
                 return False
@@ -963,8 +971,12 @@ class Broker:
         self.committer.hold_unknown(self.committed)
 
     def settled(self, request_id):
+        """The fence of this request may go: its record says it failed, or an
+        operator's recovery of exactly this request was recorded."""
         record = self.records.get(request_id) or {}
-        return record.get('state') == 'failed' or bool(record.get('cleared'))
+        if record.get('id') != request_id:
+            return False
+        return record.get('state') == 'failed' or (record.get('state') == 'uncertain' and record.get('cleared') is True)
 
     def answer(self, request, line):
         """A final line for one client, delivered by the I/O thread."""
@@ -1140,10 +1152,14 @@ class Broker:
             c = self.committed
             if not c or c['stage'] not in ('recovered', 'uncertain'):
                 return self.refuse(request, 'nothing to recover')
+            if c.get('recovering'):
+                return self.refuse(request, f'a recovery of {c["id"]} is already being checked; wait for its answer')
+            request.target = c  # the confirmation clears exactly this request
             why = c.get('why', 'no answer from the system')
         self.prompt(request, request.pidfd,
-                    f"An earlier power request's outcome is unknown ({why}). A shutdown may still be in flight. "
-                    'Clearing it lets updates and new power requests go ahead; it is not resubmitted.')
+                    f"The outcome of power request {c['id']} ({c['action']}) is unknown ({why}). A shutdown may "
+                    'still be in flight. Clearing it lets updates and new power requests go ahead; it is not '
+                    'resubmitted.')
 
     def prompt(self, request, pidfd, text):
         if len(self.prompts) >= MAX_PROMPTS:
@@ -1207,8 +1223,10 @@ class Broker:
         clears the request and answers."""
         with self.lock:
             c = self.committed
-            if not c or c['stage'] not in ('recovered', 'uncertain'):
-                return self.refuse(request, 'nothing to recover')
+            if c is None or c is not getattr(request, 'target', None) or c['stage'] not in ('recovered', 'uncertain'):
+                return self.refuse(request, 'the uncertain request changed; run --recover again')
+            if c.get('recovering'):
+                return self.refuse(request, f'a recovery of {c["id"]} is already being checked; wait for its answer')
             c['recovering'] = request
             request.deadline = self.clock() + 120
             self.waiters.append(request)  # answered by the committer
@@ -1223,7 +1241,7 @@ class Broker:
             if c['stage'] == 'failing':
                 return self.refuse(request, f'the last request was refused by logind ({c["failure"]}) and could not be '
                                             'recorded yet; nothing is submitted until it is')
-            if c['stage'] == 'recovered':
+            if c['stage'] in ('recovered', 'uncertain'):
                 return self.refuse(request, self.unknown_reason(c))
             if c['action'] != request.action:
                 return self.refuse(request, f'{c["action"]} already pending')

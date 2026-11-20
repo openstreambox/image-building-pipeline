@@ -203,6 +203,12 @@ class Harness(unittest.TestCase):
         pid, master = pty.fork()
         if pid == 0:
             os.close(out_r)
+            # A real client is its own process: drop the copies of the broker's
+            # lock descriptors this fork inherited (a flock lives as long as any
+            # copy of its descriptor).
+            for fd in list(self.broker.locks.values()):
+                if fd is not None:
+                    os.close(fd)
             if before_connect:
                 before_connect()
             conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -1286,6 +1292,89 @@ class RecheckFive(Harness):
                 self.restart_with(state=bad)
                 self.assertIsNotNone(self.broker.committed, 'a malformed record became idle')
                 self.assertEqual(Path(self.state).read_bytes(), bad)
+
+
+class RecheckSix(RecheckFive):
+    """Sixth re-check: a recovery confirms the request it showed, one at a time;
+    unknown outcomes refuse joins; only a literal cleared: true is stale."""
+
+    # RecheckFive's tests are not run again here.
+    for name in [n for n in vars(RecheckFive) if n.startswith('test_')]:
+        locals()[name] = None
+    del name
+
+    def prompt_recover(self):
+        pid, master, out = self.operator_on_pty(b'RECOVER\n')
+        seen = []
+        self.assertTrue(self.pump(lambda: seen.append(self.read_master(master)) or 'press Enter' in ''.join(seen)))
+        return master, out, ''.join(seen)
+
+    def answers(self, out):
+        got = []
+        self.pump(lambda: got.append(self.read_pipe(out)) or any(w in ''.join(got) for w in ('RECOVERED', 'REFUSED')))
+        return ''.join(got)
+
+    def test_an_old_prompt_never_clears_a_later_unknown_request(self):
+        self.restart_with(fence='aaaaaaaaaaaa')
+        master_a, out_a, prompt = self.prompt_recover()  # shows request A, left open
+        self.assertIn('aaaaaaaaaaaa', prompt)
+        _, got = self.recover_on_pty()  # another terminal clears A
+        self.assertIn('RECOVERED aaaaaaaaaaaa', got)
+        self.system.logind = 'noreply'
+        _, admitted = self.as_unit('ceralive.service')
+        b = admitted[0].split()[2]
+        self.assertTrue(self.pump(lambda: self.broker.committed and self.broker.committed['stage'] == 'uncertain'))
+        self.assertEqual(self.broker.committed['id'], b)
+        os.write(master_a, b'recover\n')  # the old confirmation, for A
+        got = self.answers(out_a)
+        self.assertIn('REFUSED', got)
+        self.assertIn('changed', got)
+        self.assertEqual(self.broker.committed['id'], b, 'a confirmation for A cleared B')
+        self.assertEqual(Path(self.fence).read_text().strip(), b)
+
+    def test_one_recovery_at_a_time_and_every_operator_gets_an_answer(self):
+        self.restart_with(fence='aaaaaaaaaaaa')
+        master_1, out_1, _ = self.prompt_recover()
+        master_2, out_2, _ = self.prompt_recover()
+        os.write(master_1, b'recover\n')
+        os.write(master_2, b'recover\n')
+        for _ in range(20):  # both answers read before the committer runs
+            self.broker.step(0.02)
+            self.broker.deliver()
+        got_1, got_2 = self.answers(out_1), self.answers(out_2)
+        self.pump(lambda: False, rounds=5)
+        got_1 += self.read_pipe(out_1)
+        got_2 += self.read_pipe(out_2)
+        finals = [g for g in (got_1, got_2) if 'RECOVERED' in g or 'REFUSED' in g]
+        self.assertEqual(len(finals), 2, f'an operator got no answer: {got_1!r} / {got_2!r}')
+        self.assertEqual(sum('RECOVERED' in g for g in (got_1, got_2)), 1)
+        self.assertIsNone(self.broker.committed)
+
+    def test_a_no_reply_request_refuses_every_other_request(self):
+        self.system.logind = 'noreply'
+        self.as_unit('ceralive.service')
+        self.pump(lambda: self.broker.committed and self.broker.committed['stage'] == 'uncertain')
+        for unit, action in (('ceralive.service', b'POWEROFF\n'), ('ceralive-button.service', b'POWEROFF\n'),
+                             ('ceralive.service', b'REBOOT\n')):
+            _, got = self.as_unit(unit, action)
+            self.assertTrue(got[0].startswith('REFUSED'), (unit, got))
+            self.assertIn('ceralive-poweroff --recover', got[0])
+        self.assertEqual(self.broker.waiters, [])
+
+    def test_only_a_literal_cleared_true_makes_a_fence_stale(self):
+        for cleared in ('false', 1, 'true', [True]):
+            with self.subTest(cleared=cleared):
+                entry = {'state': 'uncertain', 'id': 'aaaaaaaaaaaa', 'action': 'poweroff', 'origin': 'ceraui',
+                         'time': int(time.time()), 'cleared': cleared}
+                self.restart_with(state=json.dumps(dict(entry, requests={'aaaaaaaaaaaa': entry})).encode(),
+                                  fence='aaaaaaaaaaaa')
+                self.assertIsNotNone(self.broker.committed, 'a non-boolean cleared value released the fence')
+                self.assertTrue(os.path.exists(self.fence))
+        entry = dict(entry, cleared=True)
+        self.restart_with(state=json.dumps(dict(entry, state='idle', requests={'aaaaaaaaaaaa': entry})).encode(),
+                          fence='aaaaaaaaaaaa')
+        self.assertIsNone(self.broker.committed)
+        self.assertFalse(os.path.exists(self.fence))
 
 
 class Parsing(unittest.TestCase):
