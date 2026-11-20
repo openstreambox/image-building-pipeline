@@ -55,9 +55,11 @@ An admitted request is held in the broker, upstream of logind, until the writers
 have settled. A separate thread does this, so slow checks never delay admission
 or a terminal prompt.
 
-1. The power fence `/run/ceralive-power/fence` is written first. RAUC's
-   pre-install handler (`/usr/lib/rauc/ceralive-pre-install`, set in every
-   generated `system.conf`) refuses an install while it exists. RAUC runs that
+1. The broker's power fence `/run/ceralive-power/fence.d/broker` is written
+   first. RAUC's pre-install handler (`/usr/lib/rauc/ceralive-pre-install`, set
+   in every `system.conf` the image can carry, the inline fallback in
+   `mkosi.postinst.chroot` included) refuses an install while any fence exists in
+   `fence.d`. RAUC runs that
    handler in its install worker after mounting the bundle and before writing
    any slot, whoever started the install: the CLI, a direct D-Bus call or the
    hawkBit updater. An install either became visible to the checks below or is
@@ -70,26 +72,40 @@ or a terminal prompt.
    take dpkg while an update holds the update lock, so it never wedges an update
    between its apt phases.
 3. It waits until no RAUC install runs and no writer is executing:
-   - RAUC's `Installer.Operation` is `idle`, and nothing is mounted under RAUC's
-     mount prefix (`/mnt/rauc/`). The second check is the authoritative one:
-     RAUC 1.15.2 reports `idle` after rejecting a competing install while the
-     first one still runs, but that install keeps its bundle mounted until it has
-     finished. An unreadable answer counts as busy.
+   - RAUC's `Installer.Operation` is `idle`, and nothing is mounted below RAUC's
+     mount prefix in RAUC's own mount namespace. The packaged unit runs
+     `rauc --mount=/run/rauc/mnt service` with `MountFlags=slave`, so its bundle
+     mounts never show up in PID 1's mount table. The broker asks D-Bus for the
+     owner of `de.pengutronix.rauc`, takes the prefix from that process's command
+     line (else `mount-prefix=` in `system.conf`, else `/mnt/rauc`) and reads
+     `/proc/<pid>/mountinfo`. The prefix itself is a mount point there
+     (systemd binds the `RuntimeDirectory=` in) and doesn't count. The mount check
+     is the authoritative one: RAUC 1.15.2 reports `idle` after rejecting a
+     competing install while the first one still runs, but that install keeps
+     its bundle mounted until it has finished. An unreadable answer counts as
+     busy.
    - No writer unit is executing: `ceralive-software-update`,
      `ceralive-os-stage-guard`, `ceralive-slot-sync`, `ceralive-boot-script-sync`,
      `ceralive-kernel-stage-*` and `ceralive-rauc-arm@*`. A unit kept active after
      it finished (`RemainAfterExit=yes`, sub-state `exited`) is a receipt, not work.
    - No slot activation holds its lock.
-4. It calls logind directly with `dbus-send`: `PowerOffWithFlags` or
+4. It records `submitting` first; if that can't be written, nothing is sent.
+   Then it calls logind directly with `dbus-send`: `PowerOffWithFlags` or
    `RebootWithFlags` with `SD_LOGIND_SKIP_INHIBITORS`. There is no `systemctl` and
    no fallback to a direct target start. The D-Bus error name decides: a typed
    refusal (`AccessDenied`, `ServiceUnknown`, a masked unit, …) is `failed`, and
-   the fence goes. No reply, a timeout, a lost connection or an error without a
+   the broker's fence goes (only its own; the drain's fence stays). No reply, a timeout, a lost connection or an error without a
    name is `uncertain`: the fence stays and nothing is retried.
 
-Each admitted request gets an id, published with its state in
-`/run/ceralive-power/state.json` and returned to the client
-(`ADMITTED poweroff <id>`). States: `admitted`, `waiting` (with what it waits
+The admission lock only guards the request record. The probes, the locks and
+the logind call run outside it, so a slow check never holds up a new client.
+
+Each admitted request gets an id. Its state is written to
+`/run/ceralive-power/requests/<id>.json` (the last 32 are kept) and to
+`/run/ceralive-power/state.json` (the latest request), and the id goes back to
+the client (`ADMITTED poweroff <id>`) only after that write. A request that
+can't be recorded is refused. A reader that tracks an id reads its own record,
+so a newer request can't hide an older one's result. States: `admitted`, `waiting` (with what it waits
 for), `stuck` after 15 minutes (still waiting, never cut), `submitting`,
 `submitted`, `failed`, `uncertain`.
 
@@ -118,8 +134,9 @@ the update and slot units, slot activation, boot-script sync, NetworkManager and
 ModemManager. Per-attempt units order themselves before it: CeraUI's
 `ceralive-kernel-stage-<id>.service` and the image's `ceralive-rauc-arm@.service`
 carry `Before=ceralive-write-drain.service`. Stop order is the reverse, so during
-any shutdown its `ExecStop` runs first. It writes the power fence, then returns
-only when no write runs (the same checks as above, plus dpkg's lock holder). That
+any shutdown its `ExecStop` runs first. It writes its own fence,
+`fence.d/shutdown`, and doesn't continue until that write has succeeded (until
+then it counts as busy and retries). Then it returns only when no write runs (the same checks as above, plus dpkg's lock holder). That
 covers paths that don't use the broker: logind's own power-key handling (the
 daemon-down fallback, where a short tap powers off) and a plain root `poweroff` on
 an idle box. Networking stays up meanwhile, which a streamed RAUC install needs.
@@ -158,7 +175,12 @@ unreadable state waits like a shutdown.
   real power-off with a 10 s forced target deadline (the install is cut), then one
   with the image's drop-ins (the drain waits for the install).
 - `CERALIVE_RAUC_TEST_CONTAINER=<name> tests/real-rauc-admission.sh` checks the
-  RAUC side against the RAUC a container ships, also the image's own 1.15.2
-  package in an arm64 container under qemu. It covers the bundle mount as the
-  witness when RAUC reports `idle` after rejecting a competing install, and a
-  fenced direct D-Bus install refused before writing.
+  RAUC side against the RAUC a container ships, started through its packaged unit
+  (`--mount=/run/rauc/mnt`, `MountFlags=slave`). It uses the broker's own witness:
+  it must see the bundle mount when RAUC reports `idle` after rejecting a
+  competing install, while PID 1's mount table shows nothing. It also covers a
+  fenced direct D-Bus install refused before writing, and the same install
+  retried and succeeding once the fence is gone. Under qemu-user, systemd can't
+  set up the unit's mount namespace (226/NAMESPACE), so run it natively: the
+  image's `rauc-service` package with RAUC 1.15.2 built for the host from the
+  same sources.

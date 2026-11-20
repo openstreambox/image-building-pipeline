@@ -67,7 +67,7 @@ if [ ! -f /var/tmp/test.raucb ]; then
 fi
 printf '[system]\ncompatible=power-test-test\nbootloader=noop\nbundle-formats=plain\ndata-directory=/var/tmp/rauc/data\n[keyring]\npath=/etc/rauc/keyring.pem\n[handlers]\npre-install=/usr/lib/rauc/ceralive-pre-install\npost-install=/usr/local/bin/slow-post-install\n[slot.rootfs.0]\ndevice=/var/tmp/slot0.img\ntype=raw\nbootname=A\n[slot.rootfs.1]\ndevice=/var/tmp/slot1.img\ntype=raw\nbootname=B\n' > /etc/rauc/system.conf
 printf '#!/bin/sh\nsleep 25\n' > /usr/local/bin/slow-post-install; chmod 0755 /usr/local/bin/slow-post-install
-printf '[Service]\nExecStart=\nExecStart=/usr/bin/rauc service --override-boot-slot=A\n' > /etc/systemd/system/rauc.service.d/test.conf
+printf '[Service]\nExecStart=\nExecStart=/usr/bin/rauc --mount=/run/rauc/mnt --override-boot-slot=A service\n' > /etc/systemd/system/rauc.service.d/test.conf
 systemctl daemon-reload
 systemctl restart polkit systemd-logind
 systemctl restart rauc
@@ -130,12 +130,13 @@ set -euo pipefail
 pass=0
 ok() { echo "ok $((pass+=1)) $1"; }
 fail() { echo "not ok $1: $2"; exit 1; }
+witness() { python3 -I -c 'import importlib.machinery as m, importlib.util as u; l=m.SourceFileLoader("b","/usr/libexec/ceralive/ceralive-power-broker"); s=u.spec_from_loader("b",l); b=u.module_from_spec(s); l.exec_module(b); print(" ".join(b.rauc_mounts()))'; }
 active() { systemctl show -p ActiveState --value "$1.target"; }
 reset() {
   systemctl stop poweroff.target reboot.target 2>/dev/null || true
   systemctl stop ceralive-power.service
   # A restarted broker recovers its last request; each check starts clean.
-  rm -f /run/ceralive-power/state.json /run/ceralive-power/fence
+  rm -f /run/ceralive-power/state.json /run/ceralive-power/requests/* /run/ceralive-power/fence.d/*
   systemctl reset-failed ceralive-power.service 2>/dev/null || true
   systemctl start ceralive-power.service; sleep 0.5
 }
@@ -255,10 +256,10 @@ systemd-run -q --unit=ceralive-slot-sync sleep 12
 systemd-run -q --unit=ceralive-button -p StandardOutput=file:/run/power-test-out /usr/local/bin/power-test-request POWEROFF
 sleep 2
 grep -q 'ceralive-slot-sync.service' /run/ceralive-power/state.json || fail "fence wait" "$(cat /run/ceralive-power/state.json)"
-[ -e /run/ceralive-power/fence ] || fail "fence" "no fence file while waiting"
+[ -e /run/ceralive-power/fence.d/broker ] || fail "fence" "no broker fence while waiting"
 before="$(sha256sum /var/tmp/slot1.img | cut -d' ' -f1)"
 busctl call de.pengutronix.rauc / de.pengutronix.rauc.Installer InstallBundle 'sa{sv}' /var/tmp/test.raucb 0 >/dev/null
-for i in $(seq 1 40); do [ "$(busctl get-property de.pengutronix.rauc / de.pengutronix.rauc.Installer Operation)" = 's "idle"' ] && ! grep -q ' /mnt/rauc/' /proc/1/mountinfo && break; sleep 0.5; done
+for i in $(seq 1 40); do [ "$(busctl get-property de.pengutronix.rauc / de.pengutronix.rauc.Installer Operation)" = 's "idle"' ] && [ -z "$(witness)" ] && break; sleep 0.5; done
 error="$(busctl get-property de.pengutronix.rauc / de.pengutronix.rauc.Installer LastError)"
 [[ "$error" == *Pre-install* ]] || fail "fenced install" "$error"
 [ "$(sha256sum /var/tmp/slot1.img | cut -d' ' -f1)" = "$before" ] || fail "fenced install" "slot written"
@@ -280,6 +281,9 @@ sleep 3
 grep -q '"waiting"' /run/ceralive-power/state.json || fail "worker wait" "$(cat /run/ceralive-power/state.json)"
 [ "$(active poweroff)" = inactive ] || fail "worker cut" "target started while installing"
 if flock -n -x /run/lock/ceralive-update.lock true; then fail "fence" "a new writer got the update lock"; fi
+[ -n "$(witness)" ] || fail "witness" "the broker's witness sees no RAUC mount while installing"
+pid1="$(awk '$5 ~ "^/run/rauc/mnt/" {print $5}' /proc/1/mountinfo | tr '\n' ' ')"
+echo "# RAUC mounts: broker witness [$(witness)], PID 1 namespace [${pid1}]"
 ok "a detached RAUC worker holds the request back and new writers are fenced: $(cat /run/ceralive-power/state.json)"
 for i in $(seq 1 90); do [ "$(active poweroff)" = active ] && break; sleep 1; done
 [ "$(P)" = 's "idle"' ] && [ "$(active poweroff)" = active ] || fail "worker drain" "target not started after the install"
@@ -301,7 +305,7 @@ rm -f /etc/systemd/system/poweroff.target.d/70-power-test-short.conf
 if [ "$1" = short ]; then
   printf '[Unit]\nJobTimeoutSec=10s\nJobTimeoutAction=poweroff-force\n' > /etc/systemd/system/poweroff.target.d/70-power-test-short.conf
 fi
-rm -f /run/ceralive-power/fence
+rm -f /run/ceralive-power/fence.d/*
 systemctl daemon-reload
 systemctl enable --now ceralive-write-drain.service >/dev/null 2>&1
 systemctl show -p JobTimeoutUSec --value poweroff.target > /var/tmp/power-test-jobtimeout
@@ -334,8 +338,9 @@ if [[ "${1:-}" == --shutdown ]]; then
   # key handling) while a detached RAUC worker still installs (~25 s).
   # Negative control: a 10 s forced deadline on poweroff.target cuts it.
   shutdown_round control short
-  [[ "$order" != *Installation*succeeded* ]] && (( stopped < 22 )) \
-    || { echo "not ok control: a 10 s forced deadline did not cut the install ($stopped s, $order)"; exit 1; }
+  if [[ "$order" == *Installation*succeeded* ]] || (( stopped >= 22 )); then
+    echo "not ok control: a 10 s forced deadline did not cut the install ($stopped s, $order)"; exit 1
+  fi
   echo "ok control: with a 10 s forced target deadline the install is cut (container gone after $stopped s, no success logged)"
   # The image's drop-ins: no forced deadline; the drain holds until the write is done.
   shutdown_round image none

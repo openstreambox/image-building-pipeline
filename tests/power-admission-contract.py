@@ -6,6 +6,7 @@ answered by a fake command runner. The real-logind behaviour is covered by the
 opt-in tests/real-power-admission.sh.
 """
 import fcntl
+import json
 import importlib.util
 import os
 import pty
@@ -34,6 +35,7 @@ class FakeSystem:
         self.installing = False
         self.units = []
         self.receipts = []
+        self.rauc_pid = None
         self.system_state = 'running'
         self.logind = 'ok'  # ok | refuse | hang
         self.calls = []
@@ -43,6 +45,10 @@ class FakeSystem:
         out = lambda code=0, stdout='', stderr='': subprocess.CompletedProcess(argv, code, stdout, stderr)
         if argv[:1] == ['busctl'] and 'get-property' in argv:
             return out(0, 's "installing"\n' if self.installing else 's "idle"\n')
+        if argv[:1] == ['busctl'] and 'GetConnectionUnixProcessID' in argv:
+            if self.rauc_pid is None:
+                return out(1, '', 'Call failed: The name de.pengutronix.rauc does not have an owner (NameHasNoOwner)\n')
+            return out(0, f'u {self.rauc_pid}\n')
         if argv[:1] == ['dbus-send']:
             if self.logind == 'hang':
                 raise subprocess.TimeoutExpired(argv, timeout)
@@ -72,20 +78,27 @@ class FakeSystem:
 class Harness(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix='broker-')
-        self.paths = {name: os.path.join(self.dir, name) for name in ('update.lock', 'lock-frontend', 'activate.lock', 'mountinfo')}
+        self.paths = {name: os.path.join(self.dir, name) for name in ('update.lock', 'lock-frontend', 'activate.lock')}
         for path in self.paths.values():
             Path(path).touch()
-        self.fence = os.path.join(self.dir, 'fence')
+        self.fence_dir = os.path.join(self.dir, 'fence.d')
+        self.fence = os.path.join(self.fence_dir, 'broker')
         self.state = os.path.join(self.dir, 'state.json')
+        self.proc = os.path.join(self.dir, 'proc')
+        os.makedirs(os.path.join(self.proc, '4242'))
+        Path(self.proc, '4242', 'cmdline').write_bytes(b'/usr/bin/rauc\0--mount=/run/rauc/mnt\0service\0')
+        Path(self.proc, '4242', 'mountinfo').write_text('')
         self.patches = [
             patch.object(broker, 'UPDATE_LOCK', self.paths['update.lock']),
             patch.object(broker, 'DPKG_LOCK', self.paths['lock-frontend']),
             patch.object(broker, 'ACTIVATION_LOCK', self.paths['activate.lock']),
             # Unprivileged tests can't read PID 1's namespace; same host namespace.
             patch.object(broker, 'SYSTEM_MOUNT_NS', '/proc/self/ns/mnt'),
-            patch.object(broker, 'SYSTEM_MOUNTINFO', self.paths['mountinfo']),
-            patch.object(broker, 'FENCE_FILE', self.fence),
+            patch.object(broker, 'PROC_ROOT', self.proc),
+            patch.object(broker, 'RAUC_SYSTEM_CONF', os.path.join(self.dir, 'system.conf')),
+            patch.object(broker, 'FENCE_DIR', self.fence_dir),
             patch.object(broker, 'STATE_FILE', self.state),
+            patch.object(broker, 'REQUESTS_DIR', os.path.join(self.dir, 'requests')),
             patch.object(broker, 'RUN_DIR', self.dir),
         ]
         for p in self.patches:
@@ -531,13 +544,125 @@ class ReviewFindings(Harness):
             os.close(holder)
 
     def test_a_rauc_mount_counts_as_installing_even_when_rauc_says_idle(self):
-        Path(self.paths['mountinfo']).write_text('36 25 0:31 / /mnt/rauc/bundle ro,relatime - squashfs /dev/loop3 ro\n')
+        # The packaged unit: --mount=/run/rauc/mnt and MountFlags=slave, so the
+        # bundle mount exists only in RAUC's own namespace, never in PID 1's.
+        self.system.rauc_pid = 4242
+        Path(self.proc, '4242', 'mountinfo').write_text('36 25 0:31 / /run/rauc/mnt/bundle ro,relatime - squashfs /dev/loop3 ro\n')
         self.admit_button()
         self.pump(lambda: False, rounds=10)
         self.assertEqual(self.system.submissions(), [])
         self.assertIn('rauc mounts', self.state_json())
-        Path(self.paths['mountinfo']).write_text('')
+        Path(self.proc, '4242', 'mountinfo').write_text('')
         self.assertTrue(self.pump(lambda: self.system.submissions()))
+
+    def test_the_mount_prefix_follows_rauc(self):
+        self.system.rauc_pid = 4242
+        Path(self.proc, '4242', 'mountinfo').write_text('36 25 0:31 / /mnt/rauc/bundle ro - squashfs /dev/loop3 ro\n')
+        self.assertEqual(broker.rauc_mounts(self.system), [], 'RAUC was started with --mount=/run/rauc/mnt')
+        Path(self.proc, '4242', 'cmdline').write_bytes(b'/usr/bin/rauc\0service\0')
+        self.assertEqual(broker.rauc_mounts(self.system), ['/mnt/rauc/bundle'], 'default prefix')
+        Path(self.dir, 'system.conf').write_text('[system]\nmount-prefix=/srv/rauc\n')
+        Path(self.proc, '4242', 'mountinfo').write_text('36 25 0:31 / /srv/rauc/bundle ro - squashfs /dev/loop3 ro\n')
+        self.assertEqual(broker.rauc_mounts(self.system), ['/srv/rauc/bundle'], 'system.conf prefix')
+
+    def test_the_prefix_itself_is_not_an_install(self):
+        # With RuntimeDirectory=rauc/mnt and its own namespace, systemd bind-mounts
+        # the prefix itself into RAUC's namespace for the whole life of the
+        # service. Only mounts below it belong to an install.
+        self.system.rauc_pid = 4242
+        Path(self.proc, '4242', 'mountinfo').write_text(
+            '7162 7149 0:146 / /run rw - tmpfs tmpfs rw\n'
+            '7169 7162 0:146 /rauc/mnt /run/rauc/mnt rw - tmpfs tmpfs rw\n'
+            '7170 7162 0:146 /systemd/propagate/rauc.service /run/systemd/incoming ro - tmpfs tmpfs rw\n')
+        self.assertEqual(broker.rauc_mounts(self.system), [])
+        self.admit_button()
+        self.assertTrue(self.pump(lambda: self.system.submissions()))
+
+    def test_an_unreadable_rauc_namespace_counts_as_busy(self):
+        self.system.rauc_pid = 4243  # no /proc entry
+        self.assertTrue(broker.rauc_mounts(self.system))
+        self.system.rauc_pid = None
+        self.assertEqual(broker.rauc_mounts(self.system), [])
+
+    def test_a_broker_failure_never_removes_the_shutdown_fence(self):
+        os.makedirs(self.fence_dir, exist_ok=True)
+        Path(self.fence_dir, 'shutdown').write_text('shutdown\n')
+        self.system.logind = 'refuse'
+        self.admit_button()
+        self.pump(lambda: self.broker.committed is None)
+        self.assertFalse(os.path.exists(self.fence))
+        self.assertTrue(os.path.exists(os.path.join(self.fence_dir, 'shutdown')))
+        self.broker.release()
+        self.broker = self.new_broker()  # idle recovery
+        self.assertTrue(os.path.exists(os.path.join(self.fence_dir, 'shutdown')))
+
+    def test_the_admission_lock_is_free_while_writers_are_probed(self):
+        import threading
+        seen = []
+        original = self.system.__call__
+        def try_lock():
+            got = self.broker.lock.acquire(timeout=0.5)
+            seen.append(got)
+            if got:
+                self.broker.lock.release()
+        def slow(argv, timeout):
+            if argv[:2] == ['systemctl', 'list-units']:
+                # The I/O thread, as an incoming admission would.
+                other = threading.Thread(target=try_lock)
+                other.start()
+                other.join(2)
+            return original(argv, timeout)
+        self.system.installing = True
+        self.admit_button()
+        self.broker.runner = slow
+        self.broker.committer.runner = slow
+        thread = threading.Thread(target=self.broker.committer.step)
+        thread.start()
+        thread.join(5)
+        self.assertTrue(seen and all(seen), 'the committer held the admission lock while probing')
+
+    def test_nothing_is_submitted_without_a_recorded_submitting_state(self):
+        self.system.installing = True
+        self.admit_button()
+        self.pump(lambda: '"waiting"' in self.state_json())
+        self.system.installing = False
+        real = broker.write_json
+        def failing(path, record):
+            if record.get('state') == 'submitting':
+                raise OSError(28, 'No space left on device')
+            return real(path, record)
+        with patch.object(broker, 'write_json', failing):
+            self.pump(lambda: False, rounds=5)
+        self.assertEqual(self.system.submissions(), [])
+        self.assertTrue(self.pump(lambda: self.system.submissions()))
+
+    def test_an_unrecorded_admission_is_refused(self):
+        real = broker.write_json
+        def failing(path, record):
+            if record.get('state') == 'admitted':
+                raise OSError(28, 'No space left on device')
+            return real(path, record)
+        with patch.object(broker, 'write_json', failing), \
+             patch.object(broker, 'system_unit', lambda pidfd: 'ceralive-button.service'), \
+             patch.object(broker, 'peer_identity', lambda c, real=broker.peer_identity: (lambda r: (r[0], 0, r[2], r[3]))(real(c))):
+            conn = self.connect()
+            got = []
+            self.pump(lambda: got.extend(self.lines(conn)) or bool(got))
+        self.assertEqual(got[0], 'REFUSED could not record the request')
+        self.assertIsNone(self.broker.committed)
+
+    def test_each_request_keeps_its_own_result(self):
+        self.system.logind = 'refuse'
+        self.admit_button()
+        self.pump(lambda: self.broker.committed is None)
+        failed = json.loads(self.state_json())
+        self.system.logind = 'ok'
+        self.system.installing = True
+        self.admit_button()  # a newer request replaces state.json
+        self.pump(lambda: '"waiting"' in self.state_json())
+        record = json.loads(Path(self.dir, 'requests', failed['id'] + '.json').read_text())
+        self.assertEqual(record['state'], 'failed')
+        self.assertNotEqual(json.loads(self.state_json())['id'], failed['id'])
 
     def test_the_install_fence_exists_from_admission_and_goes_with_a_failure(self):
         self.system.installing = True
@@ -647,8 +772,7 @@ class Drain(unittest.TestCase):
         system.system_state = 'stopping'
         system.receipts = ['ceralive-os-stage-guard.service', 'ceralive-software-update.service']
         with patch.object(broker, 'DPKG_LOCK', '/nonexistent/lock-frontend'), \
-             patch.object(broker, 'SYSTEM_MOUNTINFO', '/dev/null'), \
-             patch.object(broker, 'FENCE_FILE', tempfile.mktemp()), \
+             patch.object(broker, 'FENCE_DIR', tempfile.mkdtemp()), \
              patch.object(broker, 'ACTIVATION_LOCK', tempfile.mktemp()):
             self.assertEqual(broker.drain(sleep=lambda s: self.fail('waited on a receipt'), runner=system), 0)
 
@@ -661,8 +785,7 @@ class Drain(unittest.TestCase):
             ticks.append(1)
             system.installing = len(ticks) < 3
         with patch.object(broker, 'DPKG_LOCK', '/nonexistent/lock-frontend'), \
-             patch.object(broker, 'SYSTEM_MOUNTINFO', '/dev/null'), \
-             patch.object(broker, 'FENCE_FILE', tempfile.mktemp()), \
+             patch.object(broker, 'FENCE_DIR', tempfile.mkdtemp()), \
              patch.object(broker, 'ACTIVATION_LOCK', tempfile.mktemp()):
             broker.drain(sleep=sleep, now=lambda: len(ticks), runner=system)
         self.assertEqual(len(ticks), 3)
@@ -670,14 +793,29 @@ class Drain(unittest.TestCase):
     def test_the_drain_fences_new_installs_first(self):
         system = FakeSystem()
         system.system_state = 'stopping'
-        fence = tempfile.mktemp()
+        fences = tempfile.mkdtemp()
         with patch.object(broker, 'DPKG_LOCK', '/nonexistent/lock-frontend'), \
-             patch.object(broker, 'SYSTEM_MOUNTINFO', '/dev/null'), \
-             patch.object(broker, 'FENCE_FILE', fence), \
+             patch.object(broker, 'FENCE_DIR', fences), \
              patch.object(broker, 'ACTIVATION_LOCK', tempfile.mktemp()):
             broker.drain(sleep=lambda s: None, runner=system)
-        self.assertTrue(os.path.exists(fence))
-        os.unlink(fence)
+        self.assertTrue(os.path.exists(os.path.join(fences, 'shutdown')))
+
+    def test_the_drain_holds_the_shutdown_until_its_fence_is_written(self):
+        system = FakeSystem()
+        system.system_state = 'stopping'
+        fences = os.path.join(tempfile.mkdtemp(), 'fence.d')
+        Path(fences).write_text('not a directory')  # the fence can't be created
+        ticks = []
+        def sleep(_):
+            ticks.append(1)
+            if len(ticks) == 3:
+                os.unlink(fences)  # now it can
+        with patch.object(broker, 'DPKG_LOCK', '/nonexistent/lock-frontend'), \
+             patch.object(broker, 'FENCE_DIR', fences), \
+             patch.object(broker, 'ACTIVATION_LOCK', tempfile.mktemp()):
+            broker.drain(sleep=sleep, now=lambda: len(ticks), runner=system)
+        self.assertEqual(len(ticks), 3)
+        self.assertTrue(os.path.exists(os.path.join(fences, 'shutdown')))
 
     def test_unreadable_rauc_counts_as_busy_and_absent_service_as_idle(self):
         absent = lambda argv, t: subprocess.CompletedProcess(argv, 1, '', 'Call failed: The name de.pengutronix.rauc was not provided by any .service files\n')

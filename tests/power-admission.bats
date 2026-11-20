@@ -83,12 +83,23 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; P="$ROOT/mkosi/runtime/po
 @test "power admission: RAUC refuses to start writing while a power-off is pending" {
   local h="$ROOT/mkosi/runtime/rauc/ceralive-pre-install"
   [ -x "$h" ]
-  CERALIVE_POWER_FENCE="$BATS_TEST_TMPDIR/fence" run "$h"
+  local d="$BATS_TEST_TMPDIR/fence.d"
+  CERALIVE_POWER_FENCE_DIR="$d" run "$h"
   [ "$status" -eq 0 ]
-  touch "$BATS_TEST_TMPDIR/fence"
-  CERALIVE_POWER_FENCE="$BATS_TEST_TMPDIR/fence" run "$h"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"refused before writing"* ]]
+  mkdir -p "$d"
+  CERALIVE_POWER_FENCE_DIR="$d" run "$h"
+  [ "$status" -eq 0 ]
+  for owner in broker shutdown; do
+    echo x > "$d/$owner"
+    CERALIVE_POWER_FENCE_DIR="$d" run "$h"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"pending ($owner)"*"refused before writing"* ]]
+    rm "$d/$owner"
+  done
+  # A fence being written (atomic rename pending) doesn't count on its own.
+  echo x > "$d/broker.new"
+  CERALIVE_POWER_FENCE_DIR="$d" run "$h"
+  [ "$status" -eq 0 ]
   # Every place that writes RAUC's system.conf runs it, and installs it.
   for f in mkosi/platform/boot/install-boot.sh mkosi/customize/rauc-setup.sh \
       mkosi/platform/x86/install-x86-boot.sh mkosi/platform/x86/install-x86-grub.sh mkosi/runtime/rauc/system.conf; do
@@ -120,4 +131,23 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; P="$ROOT/mkosi/runtime/po
   grep -E '^After=' "$P/ceralive-write-drain.service" | grep -qw ceralive-boot-script-sync.service
   grep -E '^After=' "$P/ceralive-write-drain.service" | grep -qw ceralive-rauc-activate.service
   grep -qx 'Before=ceralive-write-drain.service' "$ROOT/mkosi/runtime/ceralive-rauc-arm@.service"
+}
+
+@test "power admission: every RAUC config source runs the pre-install fence, and every handler installer installs it" {
+  cd "$ROOT"
+  # Every tracked file outside tests and docs that configures the post-install
+  # handler also configures the pre-install fence, right before it.
+  local sources installers f
+  sources="$(git grep -l -e 'post-install=/usr/lib/rauc/ceralive-post-install' -- ':!tests/*' ':!docs/*')"
+  [ "$(printf '%s\n' "$sources" | grep -c .)" -ge 6 ]
+  for f in $sources; do
+    grep -B1 -x 'post-install=/usr/lib/rauc/ceralive-post-install' "$f" | grep -qx 'pre-install=/usr/lib/rauc/ceralive-pre-install' \
+      || { echo "no pre-install fence in $f"; return 1; }
+  done
+  # Every place that installs the post-install handler installs the fence too.
+  installers="$(git grep -l -E 'install .*ceralive-post-install' -- ':!tests/*' ':!docs/*')"
+  [ "$(printf '%s\n' "$installers" | grep -c .)" -ge 5 ]
+  for f in $installers; do
+    grep -Eq 'install .*ceralive-pre-install' "$f" || { echo "pre-install handler not installed by $f"; return 1; }
+  done
 }
