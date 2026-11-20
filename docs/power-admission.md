@@ -125,18 +125,36 @@ agree:
 - `submitting` is written before logind is called; if that write fails, nothing
   is sent.
 - A failure is let go only once it is recorded under its id. Until then the
-  request stays (`failing`, retried), and nothing newer can replace it.
-- A finished request (`failed`, `submitted`) is kept for 24 hours; anything
-  else is never dropped. A reader that tracks an id, like CeraUI, reads
+  request stays (`failing`, retried each second) and nothing newer can replace
+  it. Clients waiting on it get `FAILED … (not recorded yet …)` at once and are
+  disconnected; new requests are refused with the reason ("refused by logind
+  … could not be recorded yet"). The fence and the locks are already released,
+  so updates aren't held. A failure that stays unrecordable (say `/run` is
+  full) is repaired by freeing the space; a broker restarted meanwhile finds
+  `submitting` and reports `uncertain` without resubmitting.
+- A finished request (`failed`, `submitted`) is kept for 24 hours of boot time
+  (`CLOCK_BOOTTIME`, with the boot id; a wall-clock correction doesn't age it);
+  anything else is never dropped. A reader that tracks an id, like CeraUI, reads
   `requests[<id>]`, so newer requests can't hide its result.
 
 States: `admitted`, `waiting` (with what it waits for), `stuck` after 15 minutes
 (still waiting, never cut), `submitting`, `submitted`, `failed`, `uncertain`.
 
 **Broker restart.** A restarted broker reads that file and keeps its
-`requests`. A request that wasn't
-submitted yet keeps waiting. One that may have reached logind is reported
-`uncertain`, keeps its fence and is never submitted again.
+`requests`. A request that wasn't submitted yet keeps waiting. One that may
+have reached logind is reported `uncertain`, keeps its fence and is never
+submitted again.
+
+Only a start with no record and no broker fence is idle. Lost evidence is not:
+- A record that exists but can't be read is never written over.
+- A broker fence that survived without a record of its request (or whose
+  request isn't recorded as `failed`) means a request got past admission.
+
+In both cases the broker keeps (or restores) its fence and the update lock,
+reports `uncertain` when it can write, and refuses new requests with the reason.
+Once nothing shuts down (logind not preparing for shutdown, no shutdown job
+queued, the manager not stopping) and no writer runs for 60 s, it records the
+lost request as `uncertain` and takes requests again. It never resubmits.
 
 **Polkit.** The rule `60-ceralive-power-broker.rules` grants the power-off and
 reboot `*-ignore-inhibit` actions only to root in exactly `ceralive-power.service`,
@@ -173,6 +191,17 @@ action after 30 minutes (`JobTimeoutSec=30min`, `JobTimeoutAction=*-force`), so
 unit keeps its own stop timeout, so only a running write can hold a shutdown this
 long. Cutting a stuck write is a separate decision: holding the power button until
 the PMIC cuts power, about 10 s.
+
+**When the broker refuses.** While a failure can't be recorded, or after a
+restart that lost a request's record (above), the broker refuses new requests,
+the button's hold included: the running button daemon sends its hold to the
+broker and does nothing else with it. Other ways to power off then:
+- logind's own key handling (the short tap) only applies once the button
+  daemon is down and has handed the key back to logind. The shutdown then goes
+  through the drain, which must first write its own fence (`fence.d/shutdown`).
+  If storage also refuses that write, the drain keeps waiting on purpose;
+- root on the box (`systemctl poweroff`), which also goes through the drain;
+- holding the power button until the PMIC cuts power, the last resort.
 
 Only a system state that says the box is up (`running`, `degraded`, `starting`, …)
 makes a manual `systemctl stop ceralive-write-drain` return at once. An empty or

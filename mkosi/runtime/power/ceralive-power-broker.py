@@ -68,10 +68,17 @@ STATE_FILE = os.path.join(RUN_DIR, 'state.json')
 # One fence file per owner: the broker's for its request, the drain's for the
 # shutdown. RAUC's pre-install handler refuses while any of them exists.
 FENCE_DIR = os.environ.get('CERALIVE_POWER_FENCE_DIR', os.path.join(RUN_DIR, 'fence.d'))
-# A finished request's record is kept this long, so whoever submitted it can
-# still read its result; one still in progress is never dropped.
+# A finished request's record is kept this long in boot time (CLOCK_BOOTTIME,
+# which wall-clock corrections don't move), so whoever submitted it can still
+# read its result; one still in progress is never dropped.
 KEEP_FINISHED_S = 86400
 FINISHED_STATES = ('failed', 'submitted')
+BOOT_ID_FILE = '/proc/sys/kernel/random/boot_id'
+# After a restart that lost the record of a request, nothing new is admitted
+# until no shutdown and no write has been seen for this long.
+RESOLVE_S = 60
+SHUTDOWN_TARGETS = ('poweroff.target', 'reboot.target', 'halt.target', 'kexec.target',
+                    'shutdown.target', 'final.target')
 UPDATE_LOCK = os.environ.get('CERALIVE_UPDATE_LOCK_PATH', '/run/lock/ceralive-update.lock')
 DPKG_LOCK = os.environ.get('CERALIVE_DPKG_LOCK_PATH', '/var/lib/dpkg/lock-frontend')
 ACTIVATION_LOCK = os.environ.get('CERALIVE_ACTIVATION_LOCK', '/run/lock/ceralive-rauc-activate.lock')
@@ -102,6 +109,18 @@ ACTIVE_STATES = ('admitted', 'waiting', 'stuck', 'submitting', 'submitted', 'unc
 
 def log(message):
     print(message, flush=True)
+
+
+def boot_clock():
+    return time.clock_gettime(time.CLOCK_BOOTTIME)
+
+
+def boot_id():
+    try:
+        with open(BOOT_ID_FILE) as source:
+            return source.read().strip()
+    except OSError:
+        return ''
 
 
 # --- the shared writer check (broker and shutdown drain) ---------------------
@@ -307,6 +326,31 @@ def activation_busy(path=None):
         os.close(fd)
 
 
+def shutdown_in_flight(runner=run):
+    """What says a power action is already under way: logind preparing for
+    shutdown (its delay phase), a queued shutdown job, or the manager stopping.
+    Unreadable answers count."""
+    seen = []
+    try:
+        out = runner(['busctl', '--system', '--timeout=5', 'get-property', 'org.freedesktop.login1',
+                      '/org/freedesktop/login1', 'org.freedesktop.login1.Manager', 'PreparingForShutdown'], 10)
+        if out.returncode != 0 or out.stdout.split() != ['b', 'false']:
+            seen.append('logind preparing for shutdown' if out.stdout.split() == ['b', 'true']
+                        else '(logind state unreadable)')
+        out = runner(['systemctl', 'list-jobs', '--no-legend', '--plain'], 10)
+        if out.returncode != 0:
+            seen.append('(job queue unreadable)')
+        else:
+            seen += [f'{fields[1]} queued' for fields in (line.split() for line in out.stdout.splitlines())
+                     if len(fields) > 1 and fields[1] in SHUTDOWN_TARGETS]
+        out = runner(['systemctl', 'is-system-running'], 10)
+        if out.stdout.strip() == 'stopping':
+            seen.append('the system is stopping')
+    except (OSError, subprocess.SubprocessError) as error:
+        seen.append(f'(shutdown state unreadable: {error})')
+    return seen
+
+
 def busy_writers(runner=run, check_dpkg=True):
     busy = []
     rauc = rauc_busy(runner)
@@ -330,6 +374,18 @@ def put_fence(owner, content):
     with open(temp, 'w') as out:
         out.write(content + '\n')
     os.replace(temp, path)
+
+
+def read_fence(owner):
+    """The id in the owner's fence, None when there is none, 'unknown' when
+    one exists but can't be read."""
+    try:
+        with open(os.path.join(FENCE_DIR, owner)) as source:
+            return source.read().strip() or 'unknown'
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return 'unknown'
 
 
 def drop_fence(owner):
@@ -561,11 +617,16 @@ def write_json(path, record):
         log(f'state directory not synced: {error}')
 
 
-def kept_records(records, now, current=None):
-    """Finished requests are kept for KEEP_FINISHED_S; the rest always."""
-    return {key: value for key, value in records.items()
-            if key == current or value.get('state') not in FINISHED_STATES
-            or now - int(value.get('time', 0)) < KEEP_FINISHED_S}
+def kept_records(records, boot, now, current=None):
+    """Finished requests of this boot are kept for KEEP_FINISHED_S of boot
+    time; the rest always (also a record without boot time)."""
+    def keep(key, value):
+        if key == current or value.get('state') not in FINISHED_STATES or 'boottime' not in value:
+            return True
+        if value.get('boot_id') != boot:
+            return False
+        return now - float(value['boottime']) < KEEP_FINISHED_S
+    return {key: value for key, value in records.items() if keep(key, value)}
 
 
 class Request:
@@ -637,8 +698,12 @@ class Committer(threading.Thread):
             c = broker.committed
             if c and c['stage'] == 'failing':
                 return broker.fail(c['failure'])  # not recorded yet: try again
-            if not c or c['stage'] not in ('fence', 'drain'):
+            if c and c['stage'] == 'recovered':
+                pass
+            elif not c or c['stage'] not in ('fence', 'drain'):
                 return False
+        if c['stage'] == 'recovered':
+            return self.settle_recovered(c)
         if c['stage'] == 'fence':
             put_fence('broker', c['id'])  # raises: retried on the next step
             with broker.lock:
@@ -690,6 +755,34 @@ class Committer(threading.Thread):
                 broker.fail(detail)
         return True
 
+    def settle_recovered(self, c):
+        """A request whose record was lost: it may have reached logind. It
+        keeps its fence and the update lock, and nothing new is admitted, until
+        nothing is shutting down and nothing writes for RESOLVE_S. Then it is
+        recorded as uncertain (never resubmitted) and new requests are taken."""
+        seen = busy_writers(runner=self.runner, check_dpkg='dpkg' not in self.locks)
+        seen += shutdown_in_flight(self.runner)
+        broker = self.broker
+        with broker.lock:
+            if broker.committed is not c:
+                return False
+            if seen:
+                c['quiet_since'] = None
+                return False
+            if c['quiet_since'] is None:
+                c['quiet_since'] = self.clock()
+                return False
+            if self.clock() - c['quiet_since'] < RESOLVE_S:
+                return False
+            detail = f'{c["why"]}; no shutdown or write seen for {RESOLVE_S} s, so new requests are taken again'
+            if not broker.publish('uncertain', detail=detail, replace_unreadable=True):
+                return False
+            broker.state_unreadable = False
+            broker.committed = None
+            self.release()
+            drop_fence('broker')
+        return True
+
     def run(self):
         while not self.stop_requested:
             try:
@@ -711,6 +804,7 @@ class Broker:
         self.prompts = {}  # tty rdev -> Request
         self.committed = None
         self.records = {}  # what state.json holds under "requests"
+        self.state_unreadable = False  # never written over until resolved
         self.waiters = []
         self.outbox = queue.Queue()
         self.wake_r, self.wake_w = os.pipe()
@@ -732,23 +826,26 @@ class Broker:
         self.committer.release()
 
     # state published for CeraUI, the button light and operators
-    def publish(self, state, request=None, notify=True, **extra):
+    def publish(self, state, request=None, notify=True, replace_unreadable=False, **extra):
         """The one writer of the broker's record (call with the lock held): the
         new state of `request` (default: the committed one) becomes the latest
         and its entry under "requests", in one atomic replacement of
         state.json. Nothing in memory changes unless that write happened, so
         what a client is told and what a restarted broker reads agree. Returns
         False when it couldn't be recorded."""
+        if self.state_unreadable and not replace_unreadable:
+            log(f'state not recorded ({state}): the earlier record was unreadable and is kept')
+            return False
         request = request if request is not None else self.committed
-        now = int(time.time())
-        record = {'state': state, 'time': now}
+        boot, uptime = boot_id(), boot_clock()
+        record = {'state': state, 'time': int(time.time()), 'boot_id': boot, 'boottime': int(uptime)}
         if request:
             record.update({k: request[k] for k in ('id', 'action', 'origin')})
         record.update(extra)
         records = dict(self.records)
         if record.get('id'):
             records[record['id']] = record
-        records = kept_records(records, now, record.get('id'))
+        records = kept_records(records, boot, uptime, record.get('id'))
         try:
             write_json(STATE_FILE, dict(record, requests=records))
         except OSError as error:
@@ -770,13 +867,18 @@ class Broker:
         """A restarted broker never forgets an admitted request: one not yet
         submitted keeps waiting; one that may have reached logind is reported
         uncertain, keeps its fence and is not submitted again."""
+        fence = read_fence('broker')
         try:
             with open(STATE_FILE) as source:
                 record = json.load(source)
+        except FileNotFoundError:
+            record = {}
         except (OSError, ValueError):
-            record = {}
+            record = None
         if not isinstance(record, dict):
-            record = {}
+            # Never written over: it may hold a request that reached logind.
+            self.state_unreadable = True
+            return self.recover_unknown(fence or 'unknown', "the broker's record is unreadable")
         requests = record.get('requests')
         if isinstance(requests, dict):
             self.records = {k: v for k, v in requests.items() if isinstance(v, dict)}
@@ -796,8 +898,25 @@ class Broker:
                 self.committer.take_update()
                 self.publish('uncertain', detail='the broker restarted after submitting; not resubmitted')
             return
+        if fence is not None and (self.records.get(fence) or {}).get('state') != 'failed':
+            # The fence is written after admission: a request got this far, and
+            # its record is gone.
+            return self.recover_unknown(fence, 'an install fence survived without its record')
         drop_fence('broker')
         self.publish('idle')
+
+    def recover_unknown(self, request_id, why):
+        """Evidence of a request without its record: it may have reached logind.
+        Keep the fence and the update lock, report uncertain (when the record can
+        be written) and admit nothing until settle_recovered clears it."""
+        self.committed = {'id': request_id, 'action': 'unknown', 'origin': 'unknown', 'since': self.clock(),
+                          'escalated': False, 'stage': 'recovered', 'why': why, 'quiet_since': None}
+        try:
+            put_fence('broker', request_id)
+        except OSError as error:
+            log(f'install fence not restored: {error}')
+        self.committer.take_update()
+        self.publish('uncertain', detail=f'{why}; nothing new is taken until no shutdown or write is seen for {RESOLVE_S} s')
 
     def fail(self, detail):
         """A definite failure. The request is let go only once its failure is
@@ -806,6 +925,13 @@ class Broker:
         failed = self.committed
         failed['stage'], failed['failure'] = 'failing', detail
         if not self.publish('failed', notify=False, detail=detail):
+            if not failed.get('told'):
+                # Whoever waits learns the outcome now, not only once it is written.
+                failed['told'] = True
+                self.notify('failed', f'{detail} (not recorded yet; the broker keeps this request until it is)')
+                for request in list(self.waiters):
+                    self.outbox.put((request, None))
+                self.poke()
             return False
         self.committed = None
         self.notify('failed', detail)
@@ -1001,7 +1127,11 @@ class Broker:
             if c is None:
                 return self.refuse(request, 'nothing pending to join')
             if c['stage'] == 'failing':
-                return self.refuse(request, 'the last request is still being recorded; try again')
+                return self.refuse(request, f'the last request was refused by logind ({c["failure"]}) and could not be '
+                                            'recorded yet; nothing is submitted until it is')
+            if c['stage'] == 'recovered':
+                return self.refuse(request, f"an earlier request's outcome is unknown ({c['why']}); new requests are "
+                                            f'taken once no shutdown or write is seen for {RESOLVE_S} s')
             if c['action'] != request.action:
                 return self.refuse(request, f'{c["action"]} already pending')
             self.send(request, f'PENDING {c["action"]} {c["id"]}')

@@ -293,6 +293,23 @@ print(t[-1] if t else 0)')"
 target_at="$(systemctl show -p ActiveEnterTimestampMonotonic --value poweroff.target)"
 [ "$done_at" -gt 0 ] && [ "$target_at" -gt "$done_at" ] || fail "worker order" "install done $done_at, target $target_at"
 ok "submitted only after the install finished (install done at ${done_at} us, target at ${target_at} us): $(cat /run/power-test-out)"
+
+# A restart that lost the record while the broker's fence survived: uncertain,
+# fence kept, nothing admitted until a quiet minute, then taken again.
+reset; lock
+systemctl stop ceralive-power.service
+echo 0123456789ab > /run/ceralive-power/fence.d/broker
+rm -f /run/ceralive-power/state.json
+systemctl start ceralive-power.service; sleep 1
+grep -q '"uncertain"' /run/ceralive-power/state.json && [ -e /run/ceralive-power/fence.d/broker ] \
+  || fail "lost record" "$(cat /run/ceralive-power/state.json)"
+out="$(as_unit ceralive.service POWEROFF)"
+[[ "$out" == REFUSED*unknown* && "$(active poweroff)" = inactive ]] || fail "lost record" "admitted: $out"
+ok "a surviving fence without its record is uncertain, keeps the fence and admits nothing: $out"
+for i in $(seq 1 90); do [ ! -e /run/ceralive-power/fence.d/broker ] && break; sleep 1; done
+out="$(as_unit ceralive.service POWEROFF)"
+[[ "$out" == *SUBMITTED* && "$(active poweroff)" = active ]] || fail "lost record" "not taken again: $out"
+ok "after a quiet minute it is recorded uncertain and new requests are taken ($i s): $out"
 unlock; reset
 echo "1..$pass"
 INNER

@@ -39,6 +39,8 @@ class FakeSystem:
         self.rauc_pids = []  # successive owners, one per lookup (the last one stays)
         self.on_lookup = None
         self.rauc_unit = 'inactive'
+        self.preparing = False  # logind's PreparingForShutdown
+        self.jobs = []  # queued systemd jobs, as `systemctl list-jobs` rows
         self.system_state = 'running'
         self.logind = 'ok'  # ok | refuse | hang
         self.calls = []
@@ -46,8 +48,12 @@ class FakeSystem:
     def __call__(self, argv, timeout):
         self.calls.append(argv)
         out = lambda code=0, stdout='', stderr='': subprocess.CompletedProcess(argv, code, stdout, stderr)
+        if argv[:1] == ['busctl'] and 'PreparingForShutdown' in argv:
+            return out(0, 'b true\n' if self.preparing else 'b false\n')
         if argv[:1] == ['busctl'] and 'get-property' in argv:
             return out(0, 's "installing"\n' if self.installing else 's "idle"\n')
+        if argv[:2] == ['systemctl', 'list-jobs']:
+            return out(0, ''.join(f'{i} {unit} start waiting\n' for i, unit in enumerate(self.jobs, 1)))
         if argv[:1] == ['busctl'] and 'GetConnectionUnixProcessID' in argv:
             if self.on_lookup:
                 self.on_lookup()
@@ -1004,11 +1010,12 @@ class RecheckThree(Harness):
         self.assertEqual((self.persisted(first) or {}).get('state'), 'failed')
 
     def test_only_finished_records_older_than_a_day_are_dropped(self):
-        now = int(time.time())
-        Path(self.state).write_text(json.dumps({'state': 'idle', 'time': now, 'requests': {
-            'aaaaaaaaaaaa': {'state': 'failed', 'time': now - 2 * 86400, 'id': 'aaaaaaaaaaaa'},
-            'bbbbbbbbbbbb': {'state': 'failed', 'time': now - 3600, 'id': 'bbbbbbbbbbbb'},
-            'cccccccccccc': {'state': 'uncertain', 'time': now - 2 * 86400, 'id': 'cccccccccccc'},
+        now, boot = broker.boot_clock(), broker.boot_id()
+        at = lambda age: {'time': int(time.time()), 'boot_id': boot, 'boottime': now - age}
+        Path(self.state).write_text(json.dumps({'state': 'idle', 'time': int(time.time()), 'requests': {
+            'aaaaaaaaaaaa': {'state': 'failed', 'id': 'aaaaaaaaaaaa', **at(2 * 86400)},
+            'bbbbbbbbbbbb': {'state': 'failed', 'id': 'bbbbbbbbbbbb', **at(3600)},
+            'cccccccccccc': {'state': 'uncertain', 'id': 'cccccccccccc', **at(2 * 86400)},
         }}))
         self.broker.release()
         self.broker = self.new_broker()
@@ -1046,6 +1053,142 @@ class RecheckThree(Harness):
                 self.system.rauc_pids = [4242, None]
                 self.system.rauc_unit = unit
                 self.assertEqual(broker.rauc_installing(self.system), busy)
+
+
+class RecheckFour(Harness):
+    """Fourth re-check: recovery keeps evidence, an unrecorded failure is told,
+    retention follows boot time."""
+
+    def as_unit(self, unit, action=b'POWEROFF\n', keep=False):
+        with patch.object(broker, 'system_unit', lambda pidfd: unit), \
+             patch.object(broker, 'peer_identity', lambda c, real=broker.peer_identity: (lambda r: (r[0], 0, r[2], r[3]))(real(c))):
+            conn = self.connect(action)
+            got = []
+            self.pump(lambda: got.extend(self.lines(conn)) or bool(got))
+        return conn, got
+
+    def restart_with(self, state=None, fence=None):
+        self.broker.release()
+        for path in (self.state, self.fence):
+            if os.path.exists(path):
+                os.unlink(path)
+        if state is not None:
+            Path(self.state).write_bytes(state)
+        if fence is not None:
+            os.makedirs(self.fence_dir, exist_ok=True)
+            Path(self.fence).write_text(fence + '\n')
+        self.broker = self.new_broker()
+
+    # P1: recovery never turns lost evidence into idle
+    def test_a_surviving_fence_without_state_is_uncertain_not_idle(self):
+        self.restart_with(fence='abcabcabcabc')
+        self.assertTrue(os.path.exists(self.fence), 'the fence of an unknown request was removed')
+        record = json.loads(self.state_json())
+        self.assertEqual(record['state'], 'uncertain')
+        self.assertEqual(record['id'], 'abcabcabcabc')
+        _, got = self.as_unit('ceralive-button.service')
+        self.assertTrue(got[0].startswith('REFUSED'), got)
+        self.assertIn('unknown', got[0])
+        self.pump(lambda: False, rounds=5)
+        self.assertEqual(self.system.submissions(), [])
+
+    def test_unreadable_state_is_never_written_over(self):
+        for fence in ('abcabcabcabc', None):
+            with self.subTest(fence=fence):
+                garbage = b'{"state": "submitting", "id": "abcab'
+                self.restart_with(state=garbage, fence=fence)
+                self.assertEqual(Path(self.state).read_bytes(), garbage)
+                if fence:
+                    self.assertTrue(os.path.exists(self.fence))
+                _, got = self.as_unit('ceralive.service')
+                self.assertTrue(got[0].startswith('REFUSED'), got)
+                self.assertEqual(Path(self.state).read_bytes(), garbage)
+                self.assertEqual(self.system.submissions(), [])
+
+    def test_a_fresh_start_is_idle(self):
+        self.restart_with()
+        self.assertEqual(json.loads(self.state_json())['state'], 'idle')
+        _, got = self.as_unit('ceralive.service')
+        self.assertTrue(got[0].startswith('ADMITTED'), got)
+
+    def test_a_fence_whose_request_is_recorded_failed_is_stale(self):
+        now = int(time.time())
+        record = {'state': 'failed', 'time': now, 'id': 'abcabcabcabc', 'action': 'poweroff', 'origin': 'button'}
+        self.restart_with(state=json.dumps(dict(record, requests={'abcabcabcabc': record})).encode(), fence='abcabcabcabc')
+        self.assertFalse(os.path.exists(self.fence))
+        self.assertIsNone(self.broker.committed)
+
+    def test_recovered_uncertainty_clears_only_after_a_quiet_minute(self):
+        self.restart_with(fence='abcabcabcabc')
+        for noise in ('preparing', 'job', 'installing'):
+            with self.subTest(noise=noise):
+                self.system.preparing = noise == 'preparing'
+                self.system.jobs = ['poweroff.target'] if noise == 'job' else []
+                self.system.installing = noise == 'installing'
+                for _ in range(4):
+                    self.clock[0] += 30
+                    self.pump(lambda: False, rounds=2)
+                self.assertIsNotNone(self.broker.committed, f'cleared while {noise}')
+                self.assertTrue(os.path.exists(self.fence))
+        self.system.preparing, self.system.jobs, self.system.installing = False, [], False
+        self.pump(lambda: False, rounds=2)
+        self.clock[0] += 30
+        self.pump(lambda: False, rounds=2)
+        self.assertIsNotNone(self.broker.committed, 'cleared before a full quiet minute')
+        self.clock[0] += 31
+        self.assertTrue(self.pump(lambda: self.broker.committed is None))
+        self.assertFalse(os.path.exists(self.fence))
+        self.assertEqual(self.persisted('abcabcabcabc')['state'], 'uncertain')
+        _, got = self.as_unit('ceralive.service')
+        self.assertTrue(got[0].startswith('ADMITTED'), got)
+
+    # P2: an unrecorded failure is told, not hidden
+    def block_failed_writes(self):
+        real = broker.write_json
+        def failing(path, record):
+            if record.get('state') == 'failed':
+                raise OSError(28, 'No space left on device')
+            return real(path, record)
+        return patch.object(broker, 'write_json', failing)
+
+    def test_waiters_learn_a_failure_that_could_not_be_recorded(self):
+        self.system.logind = 'refuse'
+        with self.block_failed_writes():
+            conn, got = self.as_unit('ceralive.service')
+            self.assertTrue(got[0].startswith('ADMITTED'), got)
+            self.pump(lambda: got.extend(self.lines(conn)) or any(l.startswith('FAILED') for l in got), rounds=50)
+        failed = [l for l in got if l.startswith('FAILED')]
+        self.assertTrue(failed, f'a waiter saw only {got}')
+        self.assertIn('not recorded', failed[0])
+
+    def test_new_requests_during_an_unrecorded_failure_are_told_why(self):
+        self.system.logind = 'refuse'
+        with self.block_failed_writes():
+            self.as_unit('ceralive-button.service')
+            self.pump(lambda: self.broker.committed and self.broker.committed['stage'] == 'failing')
+            _, got = self.as_unit('ceralive.service')
+        self.assertTrue(got[0].startswith('REFUSED'), got)
+        self.assertIn('refused by logind', got[0])
+        self.assertIn('could not be recorded', got[0])
+
+    # P3: a finished result is kept for 24 h of boot time, whatever the wall clock does
+    def test_retention_follows_boot_time_not_the_wall_clock(self):
+        boot = [5000.0]
+        wall = [time.time()]
+        with patch.object(broker, 'boot_clock', lambda: boot[0], create=True), \
+             patch.object(broker.time, 'time', lambda: wall[0]):
+            self.system.logind = 'refuse'
+            _, got = self.as_unit('ceralive.service')
+            first = got[0].split()[2]
+            self.pump(lambda: self.broker.committed is None)
+            wall[0] += 3 * 86400  # the clock is corrected forward by three days
+            self.as_unit('ceralive.service')
+            self.pump(lambda: self.broker.committed is None)
+            self.assertEqual((self.persisted(first) or {}).get('state'), 'failed', 'pruned after a wall-clock step')
+            boot[0] += 86400 + 1
+            self.as_unit('ceralive.service')
+            self.pump(lambda: self.broker.committed is None)
+            self.assertIsNone(self.persisted(first), 'kept beyond 24 h of boot time')
 
 
 class Parsing(unittest.TestCase):
