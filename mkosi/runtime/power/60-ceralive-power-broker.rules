@@ -1,0 +1,24 @@
+// Only the power admission broker may skip shutdown block locks.
+//
+// While CeraUI streams it holds a logind `block` lock, and on systemd 257
+// logind refuses every plain power request under such a lock, root included.
+// The broker (ceralive-power.service) admits a power-off or reboot only for
+// the button's hold, an action CeraUI admitted, or an operator who typed the
+// confirmation on their own terminal, waits for running writes, then asks
+// logind with SKIP_INHIBITORS. That is the one place this override is granted.
+//
+// For these three actions every other subject gets NO, including root shells
+// and daemons (`systemctl poweroff -i` is refused while a block lock is held).
+// Without a block lock logind does not ask for them, and plain root power
+// requests follow ordinary authorization. `subject.system_unit` comes from the
+// D-Bus pidfd; without it the request is refused.
+polkit.addRule(function(action, subject) {
+    if (action.id != "org.freedesktop.login1.power-off-ignore-inhibit" &&
+        action.id != "org.freedesktop.login1.reboot-ignore-inhibit" &&
+        action.id != "org.freedesktop.login1.halt-ignore-inhibit")
+        return polkit.Result.NOT_HANDLED;
+    if (subject.user == "root" && subject.system_unit == "ceralive-power.service" &&
+        action.id != "org.freedesktop.login1.halt-ignore-inhibit")
+        return polkit.Result.YES;
+    return polkit.Result.NO;
+});

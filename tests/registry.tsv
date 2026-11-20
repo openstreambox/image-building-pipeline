@@ -273,6 +273,10 @@ tests/reset-evidence.bats	bats	unit	default-bats	Reset evidence persistence and 
 tests/fixtures/tmpfiles-clock.c	fixture	support	not-executed	Test-only realtime jump for tmpfiles retention regression; compiled with cc by reset-evidence.bats
 tests/checked-shutdown.bats	bats	unit	default-bats	planned power actions honor shutdown inhibitors
 tests/real-logind-contract.sh	shell	privileged	opt-in	CERALIVE_LOGIND_TEST_CONTAINER names an exclusive disposable systemd 257 container
+tests/power-admission.bats	bats	unit	default-bats	Power admission broker installer, unit, rule and drain contracts
+tests/power-admission-contract.py	helper	support	invoked-by-suite	Broker socket, terminal prompt, fencing and logind submission tests driven by power-admission.bats
+tests/real-power-admission.sh	shell	privileged	opt-in	CERALIVE_POWER_TEST_CONTAINER names an exclusive disposable systemd 257 container with polkitd
+tests/real-rauc-admission.sh	shell	privileged	opt-in	CERALIVE_RAUC_TEST_CONTAINER names a disposable systemd container with the RAUC under test and its packaged unit
 tests/fixtures/logind/input-ioctl.c	fixture	support	not-executed	synthetic evdev ioctl boundary for real logind
 tests/fixtures/logind/mock-logind.sh	fixture	support	not-executed	private sysfs and FIFO input fixture
 tests/fixtures/logind/key.py	fixture	support	not-executed	short and long synthetic power-key events

@@ -83,3 +83,8 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; }
   run python3 "$ROOT/tests/power-button-contract.py" Gestures.test_refused_poweroff_keeps_the_daemon_up Gestures.test_unanswered_poweroff_is_reported_not_raised
   [ "$status" -eq 0 ]
 }
+
+@test "power button: a completed hold goes to the power broker; refusal or silence is a failure" {
+  run python3 "$ROOT/tests/power-button-contract.py" Gestures.test_hold_is_handed_to_the_power_broker Gestures.test_broker_refusal_or_silence_is_a_reported_failure
+  [ "$status" -eq 0 ]
+}

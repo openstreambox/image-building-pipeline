@@ -190,6 +190,44 @@ setup_power_policy() {
     || die 'power policy source missing'
   install -D -m 0644 "$src/60-ceralive-power-key.conf" "${CERALIVE_LOGIND_CONF_DIR:-/etc/systemd/logind.conf.d}/60-ceralive-power-key.conf"
   install -D -m 0755 "$src/ceralive-power.sh" "${CERALIVE_POWER_HELPER_DIR:-/usr/libexec/ceralive}/ceralive-power"
+  setup_power_admission
+}
+
+# The one supported path for a deliberate power-off or reboot: the button's
+# hold, CeraUI's admitted action and an operator's confirmed command go through
+# the broker, which waits for running writes and then asks logind. The drain
+# unit makes every other shutdown wait for running writes too.
+setup_power_admission() {
+  local src="${CERALIVE_RUNTIME_SRC:?}/power" root="${CERALIVE_POWER_ROOT:-}" file
+  for file in ceralive-power-broker.py ceralive-poweroff ceralive-power.socket ceralive-power.service \
+      ceralive-write-drain.service ceralive-power.sysusers.conf 60-ceralive-power-broker.rules \
+      60-ceralive-wait-for-writes.conf; do
+    [[ -f "$src/$file" ]] || die "power admission source missing: $file"
+  done
+  install -D -m 0755 "$src/ceralive-power-broker.py" "$root/usr/libexec/ceralive/ceralive-power-broker"
+  install -D -m 0755 "$src/ceralive-poweroff" "$root/usr/bin/ceralive-poweroff"
+  ln -sfn ceralive-poweroff "$root/usr/bin/ceralive-reboot"
+  for file in ceralive-power.socket ceralive-power.service ceralive-write-drain.service; do
+    install -D -m 0644 "$src/$file" "$root/etc/systemd/system/$file"
+  done
+  install -D -m 0644 "$src/ceralive-power.sysusers.conf" "$root/usr/lib/sysusers.d/ceralive-power.conf"
+  for file in poweroff.target reboot.target halt.target; do
+    install -D -m 0644 "$src/60-ceralive-wait-for-writes.conf" "$root/etc/systemd/system/$file.d/60-ceralive-wait-for-writes.conf"
+  done
+  install -D -m 0644 "$src/60-ceralive-power-broker.rules" "$root/etc/polkit-1/rules.d/60-ceralive-power-broker.rules"
+  setup_power_operators
+  enable_service ceralive-power.socket
+  enable_service ceralive-power.service
+  enable_service ceralive-write-drain.service
+}
+
+# The operator group exists at build time so the socket's group resolves on
+# first boot; the login user is its first member.
+setup_power_operators() {
+  getent group ceralive-power >/dev/null || groupadd --system ceralive-power
+  if id -u ceralive >/dev/null 2>&1; then
+    usermod -aG ceralive-power ceralive
+  fi
 }
 
 # The unit is installed on both architectures from one source; x86's GRUB ESP
