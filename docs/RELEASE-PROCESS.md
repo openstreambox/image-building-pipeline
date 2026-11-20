@@ -249,8 +249,9 @@ that proven commit. This keeps tag execution on the same build steps proven
 on the release branch even though the reusable workflow is read from master.
 
 There is no version-bump automation in this repo. Section 1 defines the OS CalVer
-input and tag rule; the resulting rootfs stamp is distinct from the bundle's
-`BUNDLE_VERSION` diagnostic (§4).
+input and tag rule. The rootfs stamp is what update admission compares; the
+bundle's `BUNDLE_VERSION` (§4) only labels the installed slot, and takes the
+same CalVer when it is set.
 
 A workflow rerun for an existing tag always checks out that tag's original SHA.
 If a release fix lands after the tag, rotate any affected secret first; rerunning
@@ -629,7 +630,9 @@ commit. Never move or rerun an older tag expecting it to pick up new code.
 The orchestrator's stage 8 calls [`lib/build-bundle.sh`](../lib/build-bundle.sh)
 to produce `images/<board>/<ts>.raucb` (+ `.sha256`), stamped with the
 board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`) and a
-`BUNDLE_VERSION` (git short SHA by default). The signing contract:
+`BUNDLE_VERSION`: the OS CalVer when `CERALIVE_OS_RELEASE_VERSION` is set,
+otherwise the git short SHA. The manifest's `[update] build` field carries the
+full pipeline commit either way. The signing contract:
 
 - **Leaf key only, never root.** The bundle is signed with the injected release
   `leaf-signing.key` + `chain.pem` (the intermediate chain; the leaf certificate is
