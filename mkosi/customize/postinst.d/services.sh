@@ -186,12 +186,12 @@ setup_dpkg_recovery() {
 # Power-key safety and the optional maintenance entrypoint apply without RAUC.
 setup_power_policy() {
   local src="${CERALIVE_RUNTIME_SRC:-}"
-  [[ -n "$src" && -f "$src/60-ceralive-power-key.conf" && -f "$src/ceralive-power.sh" && -f "$src/60-ceralive-power-override.rules" ]] \
+  [[ -n "$src" && -f "$src/60-ceralive-power-key.conf" && -f "$src/ceralive-power.sh" && -f "$src/60-ceralive-root-ignore-inhibit.rules" ]] \
     || die 'power policy source missing'
   install -D -m 0644 "$src/60-ceralive-power-key.conf" "${CERALIVE_LOGIND_CONF_DIR:-/etc/systemd/logind.conf.d}/60-ceralive-power-key.conf"
   install -D -m 0755 "$src/ceralive-power.sh" "${CERALIVE_POWER_HELPER_DIR:-/usr/libexec/ceralive}/ceralive-power"
-  # Deliberate `-i` override from a terminal; inert if polkitd is ever absent.
-  install -D -m 0644 "$src/60-ceralive-power-override.rules" "${CERALIVE_POLKIT_RULES_DIR:-/etc/polkit-1/rules.d}/60-ceralive-power-override.rules"
+  # Root's explicit `-i` override; inert if polkitd is ever absent.
+  install -D -m 0644 "$src/60-ceralive-root-ignore-inhibit.rules" "${CERALIVE_POLKIT_RULES_DIR:-/etc/polkit-1/rules.d}/60-ceralive-root-ignore-inhibit.rules"
 }
 
 # The unit is installed on both architectures from one source; x86's GRUB ESP
