@@ -75,28 +75,120 @@ def bound_socket(family, name, address, port, factory=socket.socket, index=0):
         raise
 
 
-class Generation:
-    def __init__(self):
-        self.number = 0
-        self.writers = set()
-        self.listeners = []
+# rtnetlink multicast messages on the subscribed link/address groups.
+RTM_NEWLINK, RTM_DELLINK, RTM_NEWADDR, RTM_DELADDR = 16, 17, 20, 21
+IFLA_IFNAME, IFLA_MASTER, IFLA_LINKINFO, IFLA_INFO_KIND = 3, 10, 18, 1
+IFA_ADDRESS, IFA_LOCAL, IFA_FLAGS = 1, 2, 8
+IFF_UP, ARPHRD_ETHER = 0x1, 1
+IFA_F_DADFAILED, IFA_F_TENTATIVE = 0x08, 0x40
 
-    def invalidate(self):
-        self.number += 1
-        for listener in self.listeners:
+
+def attributes(data, offset):
+    found = {}
+    while offset + 4 <= len(data):
+        length, kind = struct.unpack_from('=HH', data, offset)
+        if length < 4 or offset + length > len(data):
+            raise ValueError('netlink attribute')
+        found.setdefault(kind & 0x3fff, data[offset + 4:offset + length])
+        offset += (length + 3) & ~3
+    return found
+
+
+def identity(link):
+    """Link facts a trust basis depends on, from an `ip -j -d` dump entry."""
+    return (link['ifname'], 'UP' in link.get('flags', []), link.get('link_type') == 'ether',
+            bool(link.get('master')), link.get('linkinfo', {}).get('info_kind'))
+
+
+def parse_event(kind, body):
+    """One rtnetlink event as (index, deleted, family, address, prefixlen, unusable, identity).
+
+    Link events carry family None and the new link identity (None for
+    non-generic link families). Address events carry identity None. Anything
+    unexpected raises ValueError so the caller treats it as lost history.
+    """
+    if kind in (RTM_NEWLINK, RTM_DELLINK):
+        if len(body) < 16:
+            raise ValueError('short link message')
+        family, _, link_type, index, flags, _ = struct.unpack_from('=BBHiII', body)
+        found = attributes(body, 16)
+        current = None
+        if family == socket.AF_UNSPEC:
+            if IFLA_IFNAME not in found:
+                raise ValueError('link without name')
+            master = found.get(IFLA_MASTER, b'')
+            info = attributes(found.get(IFLA_LINKINFO, b''), 0).get(IFLA_INFO_KIND)
+            current = (found[IFLA_IFNAME].split(b'\0', 1)[0].decode(), bool(flags & IFF_UP),
+                       link_type == ARPHRD_ETHER, len(master) >= 4 and struct.unpack_from('=I', master)[0] != 0,
+                       info.split(b'\0', 1)[0].decode() if info else None)
+        return index, kind == RTM_DELLINK, None, None, None, False, current
+    if kind in (RTM_NEWADDR, RTM_DELADDR):
+        if len(body) < 8:
+            raise ValueError('short address message')
+        family, prefixlen, flags, _, index = struct.unpack_from('=BBBBI', body)
+        found = attributes(body, 8)
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            return None
+        raw = found.get(IFA_LOCAL) or found.get(IFA_ADDRESS)
+        if raw is None or len(raw) != (4 if family == socket.AF_INET else 16):
+            raise ValueError('address payload')
+        if len(found.get(IFA_FLAGS, b'')) >= 4:
+            flags = struct.unpack_from('=I', found[IFA_FLAGS])[0]
+        return (index, kind == RTM_DELADDR, family, ipaddress.ip_address(raw), prefixlen,
+                bool(flags & (IFA_F_TENTATIVE | IFA_F_DADFAILED)), None)
+    raise ValueError('unexpected netlink message')
+
+
+class Basis:
+    """One exact listener address and everything accepted through it."""
+    def __init__(self, link, addr, physical):
+        self.name, self.index = link['ifname'], link['ifindex']
+        self.family = socket.AF_INET if addr['family'] == 'inet' else socket.AF_INET6
+        self.local = addr['local']
+        self.address = ipaddress.ip_address(self.local)
+        self.prefixlen = addr['prefixlen']
+        self.cidr = f"{self.local}/{self.prefixlen}"
+        self.identity = identity(link)
+        self.direct = eligible(link, physical) and self.family == socket.AF_INET
+        self.key = (self.index, self.family, self.address, self.prefixlen, self.identity, physical)
+        self.alive = True
+        self.listeners = {}
+        self.writers = set()
+        self.tasks = set()
+
+    def affected(self, event):
+        index, deleted, family, address, prefixlen, unusable, current = event
+        if index != self.index:
+            return False
+        if family is None:
+            # Link removal, rename, down, enslavement, type/kind change, or a
+            # non-generic (for example bridge port) message for this link.
+            return deleted or current != self.identity
+        if family != self.family or address != self.address:
+            return False
+        return deleted or unusable or prefixlen != self.prefixlen
+
+    def retire(self):
+        self.alive = False
+        for listener in self.listeners.values():
             listener.close()
         for writer in self.writers:
             writer.close()
+        for task in self.tasks:
+            task.cancel()
         self.listeners.clear()
         self.writers.clear()
+        self.tasks.clear()
 
 
 class FrontDoor:
     def __init__(self, contexts):
-        self.state = Generation()
+        self.bases = {}
+        self.epoch = 0
         self.contexts = contexts
         self.tasks = set()
         self.trusted_ready = False
+        self.dirty = False
         self.backend_address = ('127.0.0.1', 18080)
         self.unix_path = UNIX
         self.monitor = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE)
@@ -129,8 +221,13 @@ class FrontDoor:
             try:
                 data, _, flags, _ = self.monitor.recvmsg(262144)
                 changed = True
+                # Any change withholds new trusted admission until a fresh,
+                # synchronized snapshot; established sessions are judged below.
+                self.trusted_ready = False
+                self.dirty = True
                 if not data or flags & socket.MSG_TRUNC:
                     raise OSError('netlink truncated')
+                events = []
                 offset = 0
                 while offset < len(data):
                     if len(data) - offset < 16:
@@ -139,88 +236,127 @@ class FrontDoor:
                     # NLMSG_ERROR/OVERRUN and NLM_F_DUMP_INTR lose continuity.
                     if length < 16 or offset + length > len(data) or kind in (2, 4) or message_flags & 0x10:
                         raise OSError('netlink event history unavailable')
+                    events.append(parse_event(kind, data[offset + 16:offset + length]))
                     offset += (length + 3) & ~3
+                # Retire exactly the bases an event touches, in the same
+                # callback that observed it. Removal then readdition of the
+                # same address retires on the removal and never revives.
+                for event in events:
+                    if event is not None:
+                        for basis in tuple(self.bases.values()):
+                            if basis.affected(event):
+                                self.retire(basis)
             except BlockingIOError:
                 return changed
-            except OSError:
-                # ENOBUFS/overflow or uncertain message: same full invalidation.
+            except (OSError, ValueError, struct.error):
+                # ENOBUFS/overflow or an uncertain message: history is lost,
+                # so no basis can be shown unchanged. Full invalidation.
                 self.needs_subscription = True
                 self.event_fence()
                 return True
 
     def event(self):
         if self.drain_events():
-            self.event_fence()
             self.schedule()
 
     def schedule(self):
         if self.pending is None or self.pending.done():
             self.pending = asyncio.create_task(self.reconcile())
 
+    def retire(self, basis):
+        if self.bases.get(basis.key) is basis:
+            del self.bases[basis.key]
+        basis.retire()
+
+    def snapshot(self, links):
+        wanted = {}
+        for link in links:
+            physical = Path('/sys/class/net', link['ifname'], 'device').exists()
+            for addr in link.get('addr_info', []):
+                if addr.get('family') not in ('inet', 'inet6') or 'tentative' in addr.get('flags', []):
+                    continue
+                basis = Basis(link, addr, physical)
+                wanted.setdefault(basis.key, basis)
+        return wanted
+
     async def reconcile(self):
-        self.event_fence()
+        self.trusted_ready = False
+        self.dirty = False
         failed = False
         try:
             if self.needs_subscription:
                 self.resubscribe()
             # Synchronous bounded dumps: no application handler runs between
-            # snapshot and event drain. Queued events discard the whole snapshot.
+            # snapshot and event drain. Queued events discard the snapshot;
+            # the drain has already retired whatever they touched.
             links = json.loads(subprocess.check_output(['/usr/sbin/ip', '-j', '-d', 'address', 'show'], timeout=3))
             if self.drain_events():
                 return
-            generation = self.state.number
-            for link in links:
-                name, index = link['ifname'], link['ifindex']
-                direct = eligible(link, Path('/sys/class/net', name, 'device').exists())
-                for addr in link.get('addr_info', []):
-                    if addr.get('family') not in ('inet', 'inet6') or 'tentative' in addr.get('flags', []):
+            wanted = self.snapshot(links)
+            # Converge: a basis absent from the snapshot (address, mask, link
+            # identity or eligibility differ) is retired; unchanged bases keep
+            # their listeners and sessions.
+            for key, basis in tuple(self.bases.items()):
+                if key not in wanted:
+                    self.retire(basis)
+            for key, basis in wanted.items():
+                self.bases.setdefault(key, basis)
+            epoch = self.epoch
+            for basis in tuple(self.bases.values()):
+                for port, context in self.contexts:
+                    if not basis.alive or port in basis.listeners:
                         continue
-                    family = socket.AF_INET if addr['family'] == 'inet' else socket.AF_INET6
-                    local = addr['local']
-                    cidr = f"{local}/{addr['prefixlen']}"
-                    for port, context in self.contexts:
-                        try:
-                            sock = bound_socket(family, name, local, port, index=index)
-                            server = await asyncio.start_server(
-                                lambda r, w, n=name, c=cidr, d=direct and family == socket.AF_INET, g=generation: self.accept(r, w, n, c, d, g),
-                                sock=sock, ssl=context, limit=HEADER_LIMIT,
-                                **({'ssl_handshake_timeout': 5} if context else {}))
-                            if generation != self.state.number:
-                                server.close()
-                                return
-                            self.state.listeners.append(server)
-                        except OSError:
-                            failed = True
-                            logging.exception('listener unavailable for %s:%s', name, port)
-            if self.drain_events():
-                self.event_fence()
-            else:
+                    try:
+                        sock = bound_socket(basis.family, basis.name, basis.local, port, index=basis.index)
+                        server = await asyncio.start_server(
+                            lambda r, w, b=basis: self.accept(r, w, b),
+                            sock=sock, ssl=context, limit=HEADER_LIMIT,
+                            **({'ssl_handshake_timeout': 5} if context else {}))
+                        if epoch != self.epoch:
+                            server.close()
+                            return
+                        if not basis.alive:
+                            server.close()
+                            continue
+                        basis.listeners[port] = server
+                    except OSError:
+                        failed = True
+                        logging.exception('listener unavailable for %s %s:%s', basis.name, basis.local, port)
+            if not self.drain_events() and not self.dirty:
                 self.trusted_ready = not failed
         except (OSError, ValueError, KeyError, subprocess.SubprocessError):
-            self.needs_subscription = True
-            self.event_fence()
+            # A failed dump is not lost event history: established sessions
+            # stay judged by the continuous event stream, and trusted admission
+            # stays withheld until a later snapshot succeeds.
+            self.trusted_ready = False
             logging.exception('listener reconciliation unavailable')
         finally:
-            asyncio.get_running_loop().call_later(2, self.retry)
+            loop = asyncio.get_running_loop()
+            loop.call_later(2, self.retry)
+            if self.dirty:
+                loop.call_later(0.1, self.schedule)
 
     def event_fence(self):
         self.trusted_ready = False
-        self.state.invalidate()
+        self.epoch += 1
+        for basis in tuple(self.bases.values()):
+            self.retire(basis)
         for task in tuple(self.tasks):
             task.cancel()
 
     def retry(self):
         # Retry partial bind/dump failures; unchanged snapshots need no churn.
-        if not self.state.listeners or not self.trusted_ready:
+        if not self.bases or not self.trusted_ready:
             self.schedule()
 
-    async def accept(self, reader, writer, name, cidr, direct, generation):
+    async def accept(self, reader, writer, basis):
         task = asyncio.current_task()
-        if len(self.tasks) >= MAX_CONNECTIONS or generation != self.state.number:
+        if len(self.tasks) >= MAX_CONNECTIONS or not basis.alive:
             writer.close()
             return
         self.tasks.add(task)
-        self.state.writers.add(writer)
+        basis.tasks.add(task)
+        basis.writers.add(writer)
         backend = None
         pumps = []
         async def pump(source, sink):
@@ -236,10 +372,9 @@ class FrontDoor:
             peer = writer.get_extra_info('peername')[0]
             local = writer.get_extra_info('sockname')[0]
             if self.drain_events():
-                self.event_fence()
                 self.schedule()
-            trusted = privileged(head, direct and self.trusted_ready, peer, cidr)
-            if generation != self.state.number:
+            trusted = privileged(head, basis.direct and self.trusted_ready, peer, basis.cidr)
+            if not basis.alive:
                 return
             if trusted:
                 try:
@@ -247,7 +382,7 @@ class FrontDoor:
                 except (OSError, asyncio.TimeoutError):
                     trusted = False
             if trusted:
-                evidence = json.dumps(dict(version=1, peer=peer, interface=name, local=local), separators=(',', ':'))
+                evidence = json.dumps(dict(version=1, peer=peer, interface=basis.name, local=local), separators=(',', ':'))
                 raw = raw[:-2] + b'X-Ceralive-Button-Path: ' + evidence.encode() + b'\r\n\r\n'
             else:
                 upstream, backend = await asyncio.wait_for(asyncio.open_connection(*self.backend_address, limit=HEADER_LIMIT), 3)
@@ -256,11 +391,10 @@ class FrontDoor:
                 if head[2].get('upgrade', '').lower() != 'websocket':
                     lines = raw[:-4].split(b'\r\n')
                     raw = b'\r\n'.join([lines[0]] + [x for x in lines[1:] if not x.lower().startswith(b'connection:')]) + b'\r\nConnection: close\r\n\r\n'
-            self.state.writers.add(backend)
+            basis.writers.add(backend)
             if self.drain_events():
-                self.event_fence()
                 self.schedule()
-            if generation != self.state.number:
+            if not basis.alive:
                 return
             backend.write(raw)
             await asyncio.wait_for(backend.drain(), 5)
@@ -286,7 +420,8 @@ class FrontDoor:
             for w in (writer, backend):
                 if w:
                     w.close()
-                    self.state.writers.discard(w)
+                    basis.writers.discard(w)
+            basis.tasks.discard(task)
             self.tasks.discard(task)
             await asyncio.gather(*pumps, return_exceptions=True)
 

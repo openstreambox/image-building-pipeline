@@ -20,15 +20,30 @@ and unknown links stay password-only. Incoming VPN packets addressed to a LAN
 address cannot reach the device-bound LAN listener. Routed physical networks
 outside the listener's subnet also remain password-only.
 
-The netlink subscription precedes the initial snapshot. Every link/address
-event, truncated read or overflow unconditionally closes listeners and both
-sides of accepted connections, cancels handlers, and advances a generation.
-On ENOBUFS, overflow, truncation, interrupted/inconsistent dumps or any loss
-of event continuity, retire **all** trusted connections immediately. Rebuild
-from a fresh netlink subscription established before a complete address dump;
-withhold privileged forwarding until that dump is synchronized with events.
-An identical address and mask after a lost remove/readd interval cannot prove
-continuity and must never preserve or revive pre-loss evidence.
+The netlink subscription precedes the initial snapshot. Each listener address
+is a trust basis: interface index, name, admin-up state, link type, master,
+link kind, address family, address and prefix length. Both sides of every
+accepted connection belong to the basis it arrived on. Each link/address event
+is parsed in the callback that reads it, and a basis is retired (listeners
+closed, both sides of its connections closed, handlers cancelled) when an
+event removes its link or address, changes any of those link facts (including
+down, rename and enslavement), changes its prefix length, marks its address
+tentative or failed, or is a non-generic link message for its interface. A
+removal followed by readdition retires on the removal and never revives.
+Events elsewhere, including new interfaces, other addresses on the same
+interface and carrier changes, leave established sessions open.
+Every event still withholds new trusted admission until a fresh dump is
+synchronized with the event stream. That dump also retires any basis it no
+longer contains and binds new ones without touching unchanged listeners.
+On ENOBUFS, overflow, truncation, interrupted/inconsistent dumps, an unknown or
+malformed message or any other loss of event continuity, retire **all** bases
+and their connections immediately. Rebuild from a fresh netlink subscription
+established before a complete address dump; withhold privileged forwarding
+until that dump is synchronized with events. An identical address and mask
+after a lost remove/readd interval cannot prove continuity and must never
+preserve or revive pre-loss evidence. A failed dump is not lost history: it
+keeps established sessions, which the continuous event stream still covers,
+and withholds trusted admission until a later dump succeeds.
 Only a drained, current snapshot enables trusted admission. A failed bind
 withholds trusted admission globally and retries reconciliation. Address
 removal/readdition, mask changes, renames and interface identity changes cannot
@@ -82,11 +97,16 @@ backend is stopped; never remove the fence under a running wildcard backend.
 
 ## Qualification
 
-`tests/button-ingress-contract.py` uses synthetic identities/socket failures
-and real Unix/TCP transports. `tests/button-ingress-kernel.py` runs in disposable
+`tests/button-ingress-contract.py` uses synthetic identities/socket failures,
+synthetic rtnetlink messages and real Unix/TCP transports; it checks that
+established trusted and ordinary sessions survive unrelated link/address
+changes and close on changes to their own basis or on lost history. `tests/button-ingress-kernel.py` runs in disposable
 network namespaces, accepts a direct veth path then refuses overlapping-address
 packets arriving on a second veth. This verifies the real SO_BINDTODEVICE
-operation; a veth is deliberately not production-eligible. The Bats wrapper
+operation; a veth is deliberately not production-eligible. It then runs the
+front door on real kernel rtnetlink events: a session survives a new interface,
+another address, removal of another interface and its own MTU change, and
+closes on removal of its own address and on its link going down. The Bats wrapper
 requires passwordless isolated namespaces when CERALIVE_RUN_BUTTON_NETNS=required.
 It skips with a reason otherwise. No physical board is required.
 
