@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 """Run only inside a disposable root network namespace; no host networking."""
+import asyncio
 import importlib.util
+import os
 import pathlib
 import socket
 import subprocess
@@ -11,6 +13,82 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 def run(*args):
     subprocess.run(args, check=True, stdout=subprocess.DEVNULL)
+
+async def session_scope(pid, run):
+    """Real kernel rtnetlink messages drive the front door's session scope."""
+    front = m.FrontDoor([(18889, None)])
+    async def echo(reader, writer):
+        await reader.readuntil(b'\r\n\r\n')
+        writer.write(b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n')
+        while data := await reader.read(65536):
+            writer.write(data)
+            await writer.drain()
+        writer.close()
+    backend = await asyncio.start_server(echo, '127.0.0.1', 0)
+    front.backend_address = backend.sockets[0].getsockname()[:2]
+    runner = asyncio.create_task(front.run())
+    async def until(check, what):
+        for _ in range(100):
+            if check():
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError('timed out waiting for ' + what)
+    def bound(name, local):
+        return any(b.name == name and b.local == local and 18889 in b.listeners for b in front.bases.values())
+    async def connect():
+        own = os.open('/proc/self/ns/net', os.O_RDONLY)
+        theirs = os.open(f'/proc/{pid}/ns/net', os.O_RDONLY)
+        try:
+            os.setns(theirs, os.CLONE_NEWNET)
+            sock = socket.socket()
+        finally:
+            os.setns(own, os.CLONE_NEWNET)
+            os.close(own)
+            os.close(theirs)
+        sock.setblocking(False)
+        await asyncio.wait_for(asyncio.get_running_loop().sock_connect(sock, ('192.0.2.1', 18889)), 2)
+        before = set(front.tasks)
+        reader, writer = await asyncio.open_connection(sock=sock)
+        writer.write(b'GET /ws HTTP/1.1\r\nHost: box.local\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n')
+        assert (await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'), 2)).startswith(b'HTTP/1.1 101 ')
+        task, = set(front.tasks) - before
+        return reader, writer, task
+    async def alive(reader, writer, task):
+        writer.write(b'ping')
+        await writer.drain()
+        return await asyncio.wait_for(reader.readexactly(4), 2) == b'ping' and not task.done()
+    try:
+        await until(lambda: front.trusted_ready and bound('lan0', '192.0.2.1'), 'initial listeners')
+        session = await connect()
+        assert await alive(*session)
+        for command in (['ip', 'link', 'add', 'clap0', 'type', 'dummy'],
+                        ['ip', 'addr', 'add', '198.51.100.1/24', 'dev', 'clap0'],
+                        ['ip', 'link', 'set', 'clap0', 'up'],
+                        ['ip', 'addr', 'add', '192.0.2.50/24', 'dev', 'lan0'],
+                        ['ip', 'link', 'del', 'vpn0'],
+                        # A link message for the session's own interface with
+                        # unchanged name, state, type, master and kind.
+                        ['ip', 'link', 'set', 'lan0', 'mtu', '1400']):
+            run(*command)
+        await until(lambda: front.trusted_ready and bound('clap0', '198.51.100.1') and not bound('vpn0', '192.0.2.1'),
+                    'reconciled unrelated changes')
+        assert await alive(*session), 'unrelated change closed the session'
+        run('ip', 'addr', 'del', '192.0.2.1/24', 'dev', 'lan0')
+        await until(lambda: session[2].done(), 'own address removal to close the session')
+        assert not bound('lan0', '192.0.2.1')
+        run('ip', 'addr', 'add', '192.0.2.1/24', 'dev', 'lan0')
+        await until(lambda: front.trusted_ready and bound('lan0', '192.0.2.1'), 'readded listener')
+        session[1].close()
+        session = await connect()
+        assert await alive(*session)
+        run('ip', 'link', 'set', 'lan0', 'down')
+        await until(lambda: session[2].done(), 'own link down to close the session')
+        session[1].close()
+    finally:
+        runner.cancel()
+        await asyncio.gather(runner, return_exceptions=True)
+        backend.close()
+
 
 child = subprocess.Popen(['unshare', '-n', 'sleep', '60'])
 try:
@@ -63,6 +141,9 @@ try:
     client('python3', '-c', probe.replace('18888', '18080'), 'no')
     backend.close()
     print('actual SO_BINDTODEVICE: direct accepted, overlapping wrong-device ingress refused')
+    client('ip', 'route', 'replace', '192.0.2.1/32', 'dev', 'client0')
+    asyncio.run(session_scope(child.pid, run))
+    print('real netlink: unrelated link/address changes and an own MTU change keep a session; own address removal and link down close it')
 finally:
     child.terminate()
     child.wait()

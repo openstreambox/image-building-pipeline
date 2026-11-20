@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; }
-@test "button ingress: interface identity, hostile metadata, device bind and generation fences" {
+@test "button ingress: interface identity, hostile metadata, device bind and session scope" {
   run python3 "$ROOT/tests/button-ingress-contract.py"
   [ "$status" -eq 0 ]
 }
