@@ -2,8 +2,8 @@
 
 ## Fork boundary
 
-Pull request checks use GitHub-hosted `ubuntu-latest`, `ubuntu-24.04` or
-`ubuntu-22.04` runners, a read-only token, no secrets and no environments.
+Pull request checks use GitHub-hosted `ubuntu-latest`, `ubuntu-26.04`,
+`ubuntu-24.04` or `ubuntu-22.04` runners, a read-only token, no secrets and no environments.
 They cannot call reusable workflows. No workflow uses `pull_request_target`,
 `workflow_run` or `issue_comment`. Checkouts never persist credentials;
 third-party actions outside `actions` and `CERALIVE` use full commit SHAs.

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-HOSTED = {"ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04"}
+HOSTED = {"ubuntu-latest", "ubuntu-26.04", "ubuntu-24.04", "ubuntu-22.04"}
 RUNNER_FILES = {
     "kernel-release.yml", "publish-release.yml", "real-build-audit.yml",
     "release-candidate-build.yml", "runner-admission-probe.yml",
