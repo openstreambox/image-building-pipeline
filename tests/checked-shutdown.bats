@@ -38,7 +38,8 @@ STUB
   export CERALIVE_POWER_HELPER_DIR="$BATS_TEST_TMPDIR/helpers"
   export CERALIVE_RAUC_ACTIVATE_UNIT_DIR="$BATS_TEST_TMPDIR/units"
   export CERALIVE_LOGIND_CONF_DIR="$BATS_TEST_TMPDIR/logind.conf.d"
-  run bash -euc 'source "$1"; enable_service() { :; }; setup_power_policy' _ "$ROOT/mkosi/customize/postinst.d/services.sh"
+  export CERALIVE_POWER_ROOT="$BATS_TEST_TMPDIR/root"
+  run bash -euc 'source "$1"; enable_service() { :; }; setup_power_operators() { :; }; setup_power_policy' _ "$ROOT/mkosi/customize/postinst.d/services.sh"
   [ "$status" -eq 0 ]
   [ "$(stat -c %a "$CERALIVE_POWER_HELPER_DIR/ceralive-power")" = 755 ]
   cmp "$ROOT/mkosi/runtime/ceralive-power.sh" "$CERALIVE_POWER_HELPER_DIR/ceralive-power"
@@ -75,7 +76,8 @@ STUB
   export CERALIVE_POWER_HELPER_DIR="$BATS_TEST_TMPDIR/helpers"
   export CERALIVE_RAUC_ACTIVATE_UNIT_DIR="$BATS_TEST_TMPDIR/units"
   export CERALIVE_LOGIND_CONF_DIR="$BATS_TEST_TMPDIR/logind.conf.d"
-  run bash -euc 'source "$1"; enable_service() { :; }; setup_power_policy' _ "$ROOT/mkosi/customize/postinst.d/services.sh"
+  export CERALIVE_POWER_ROOT="$BATS_TEST_TMPDIR/root"
+  run bash -euc 'source "$1"; enable_service() { :; }; setup_power_operators() { :; }; setup_power_policy' _ "$ROOT/mkosi/customize/postinst.d/services.sh"
   [ "$status" -eq 0 ]
   local policy="$CERALIVE_LOGIND_CONF_DIR/60-ceralive-power-key.conf"
   [ "$(stat -c %a "$policy")" = 644 ]

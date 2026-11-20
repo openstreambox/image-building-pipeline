@@ -7,11 +7,12 @@ KEY_POWER (116) without grabbing the input device. It offers:
 | --- | --- |
 | Tap under 500 ms | Status hook only |
 | Two taps, releases at most 400 ms apart | One confirmation, only for an active request |
-| Continuous hold for 3 s | Clean `systemctl poweroff`; release before the deadline cancels |
+| Continuous hold for 3 s | Power-off through the power admission broker (`power-admission.md`): passes CeraUI's stream lock, waits for a running update; release before the deadline cancels. A refused or unanswered request is logged and shown as `failed`; the daemon keeps running and the next hold asks again |
 | Hardware hold around 10 s | Existing PMIC behaviour; no registers or firmware changed |
 
-There is **no shorter shutdown path**, including when live. The same full
-three-second hold is required in both states. Repeat events do not extend a
+While the daemon owns the key there is **no shorter shutdown path**, including
+when live. The same full three-second hold is required in both states (once it
+has handed the key back, logind's fallback below applies). Repeat events do not extend a
 hold. Lost events cancel it and require release before rearming. Unplugging the
 input device fails the service, so systemd retries discovery. The timer uses a
 monotonic clock. Evdev is explicitly switched to CLOCK_MONOTONIC; physical
@@ -38,9 +39,13 @@ uses a fixed five-second `LONG_PRESS_DURATION`; no logind hold-time option
 exists there. The daemon starts a `systemd-inhibit --what=handle-power-key`
 child and waits for its post-acquisition readiness before serving. Closing the
 child's stdin and waiting for its exit releases ownership without stopping the
-confirmation server. If it is absent, logind
-still ignores taps and powers off after its own five-second hold, provided the
-kernel delivers the hold. No evdev exclusive grab is used. Behaviour across a
+confirmation server. If it is absent, logind handles the key itself. Both drop-ins
+are installed and `60-ceralive-power-key.conf` sorts after `60-ceralive-button.conf`,
+so its `HandlePowerKey=poweroff`, `HandlePowerKeyLongPress=poweroff` and
+`PowerKeyIgnoreInhibited=yes` win: while the daemon is down, a short tap powers the
+box off (`systemd-analyze cat-config systemd/logind.conf` shows the order). That
+is the current fallback, kept until the supervisor power-key design settles. That
+shutdown still waits for running writes (`ceralive-write-drain.service`). No evdev exclusive grab is used. Behaviour across a
 service crash or logind restart while a key is down requires a bench check.
 
 The service uses Python's standard library only. `python3` moves from the debug
@@ -53,9 +58,10 @@ After three consecutive final-hold key-state query errors, the daemon latches
 an input-failed state, logs an error, cancels any confirmation and releases its
 inhibitor child. It never authorizes another hold or confirmation until an
 administrator restarts it after fixing input. A successful query before the
-threshold resets the count. Uncertain holds always remain denied. Release the
-key, then start a fresh five-second hold for logind's fallback; handing ownership
-back does not promise that a press already in progress is replayed. The stock
+threshold resets the count. Uncertain holds always remain denied. After the
+handover, logind's fallback applies: with the shipped drop-ins a fresh short tap
+powers the box off. Handing ownership back does not replay a press already in
+progress, so release the key and press it again. The stock
 logind handover and physical shutdown still need both-board qualification.
 The host tests exercise synthetic input failures and inhibitor-child lifetime;
 they do not emulate or qualify the real logind timer.
@@ -110,8 +116,8 @@ name, `/proc/bus/input/devices` entry, stable udev path and measured timings:
 
 - [ ] Identify which `/dev/input/event*` exposes the RK806 power key. Record
   `evtest` KEY_POWER down/up/repeat events and any SYN_DROPPED; confirm discovery.
-- [ ] With service stopped, confirm logind receives a held key: tap stays on,
-  release before five seconds cancels, continuous hold cleanly powers off.
+- [ ] With service stopped, confirm logind receives the key: with the current
+  drop-in order a short tap cleanly powers off (`60-ceralive-power-key.conf`).
 - [ ] With service running, verify the inhibitor is present; tap shows status
   after the light hook is wired and never shuts down. No duplicate logind action.
 - [ ] Measure double-tap acceptance either side of 400 ms, with no client,

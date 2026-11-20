@@ -95,6 +95,70 @@ class Gestures(unittest.TestCase):
             self.assertIn(('countdown', 3), self.lights)
             self.assertIn(('cancel', 0), self.lights)
 
+    def test_refused_poweroff_keeps_the_daemon_up(self):
+        calls = []
+        def refused():
+            calls.append(True)
+            raise b.subprocess.CalledProcessError(1, ['/usr/bin/systemctl', 'poweroff'])
+        self.g = b.Gestures(lambda *x: self.lights.append(x), refused)
+        self.g.key(1, 0)
+        self.g.tick(3)  # must not raise into serve()
+        self.assertEqual(calls, [True])
+        self.assertIn(('failed', 0), self.lights)
+        self.assertNotIn(('shutdown', 0), self.lights)
+        self.g.tick(4)
+        self.assertEqual(calls, [True])  # one request per hold
+        self.g.key(0, 5)
+        self.g.key(1, 10)
+        self.g.tick(13)
+        self.assertEqual(calls, [True, True])  # the next full hold asks again
+
+    def test_unanswered_poweroff_is_reported_not_raised(self):
+        def hung():
+            raise b.subprocess.TimeoutExpired(['/usr/bin/systemctl', 'poweroff'], 10)
+        self.g = b.Gestures(lambda *x: self.lights.append(x), hung)
+        self.g.key(1, 0)
+        self.g.tick(3)
+        self.assertIn(('failed', 0), self.lights)
+
+    def broker_reply(self, reply):
+        directory = tempfile.mkdtemp()
+        path = directory + '/request.sock'
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(path)
+        server.listen(1)
+        seen = []
+        def answer():
+            conn, _ = server.accept()
+            seen.append(conn.recv(64))
+            if reply is not None:
+                conn.sendall(reply)
+            conn.close()
+        import threading
+        thread = threading.Thread(target=answer)
+        thread.start()
+        return path, seen, thread, server
+
+    def test_hold_is_handed_to_the_power_broker(self):
+        path, seen, thread, server = self.broker_reply(b'ADMITTED poweroff\n')
+        b.request_poweroff(path)
+        thread.join(2)
+        server.close()
+        self.assertEqual(seen, [b'POWEROFF\n'])
+        main = inspect.getsource(b.main)
+        self.assertIn('request_poweroff', main)
+        self.assertNotIn('systemctl', main)
+
+    def test_broker_refusal_or_silence_is_a_reported_failure(self):
+        for reply in (b'REFUSED unverifiable caller\n', b'', None):
+            path, seen, thread, server = self.broker_reply(reply)
+            with self.assertRaises(OSError):
+                b.request_poweroff(path, timeout=1)
+            thread.join(2)
+            server.close()
+        with self.assertRaises(OSError):
+            b.request_poweroff('/nonexistent/request.sock')
+
     def test_decoder(self):
         decoder = b.Input(self.g)
         def ev(kind, code, value):
