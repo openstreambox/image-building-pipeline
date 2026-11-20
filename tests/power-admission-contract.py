@@ -123,7 +123,12 @@ class Harness(unittest.TestCase):
         ]
         for p in self.patches:
             p.start()
-        self.sock_path = os.path.join(self.dir, 'request.sock')
+        # A socket path stops at 107 bytes and TMPDIR can be long: bind and
+        # connect through a descriptor of this directory, a short path that
+        # resolves to it in this process and in children that inherit it.
+        self.dir_fd = os.open(self.dir, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, self.dir_fd)
+        self.sock_path = f'/proc/self/fd/{self.dir_fd}/request.sock'
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listener.bind(self.sock_path)
         self.listener.listen(8)
@@ -438,7 +443,7 @@ class Client(Harness):
         env = dict(os.environ, CERALIVE_POWER_SOCKET=self.sock_path)
         with patch.object(broker, 'system_unit', lambda pidfd: unit), \
              patch.object(broker, 'peer_identity', lambda c, real=broker.peer_identity: (lambda r: (r[0], 0, r[2], r[3]))(real(c))):
-            proc = subprocess.Popen([sys.executable, '-I', client, '--no-wait'], env=env,
+            proc = subprocess.Popen([sys.executable, '-I', client, '--no-wait'], env=env, pass_fds=(self.dir_fd,),
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             self.pump(lambda: proc.poll() is not None, rounds=300)
         out, _ = proc.communicate(timeout=5)
