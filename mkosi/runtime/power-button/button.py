@@ -53,7 +53,15 @@ class Gestures:
             if elapsed >= 3 and authorize() and self.down == pressed and self.down is not None:
                 self.fired = True
                 self.tap = None
-                self.poweroff()
+                try:
+                    self.poweroff()
+                except (OSError, subprocess.SubprocessError):
+                    # Stay up: a refused or unanswered request is reported, the
+                    # next full hold asks again, and a crash would only leave
+                    # the key without its handler during the restart.
+                    logging.exception('Power-off request failed')
+                    self.light('failed', 0)
+                    return
                 self.light('shutdown', 0)
 
     def key(self, value, now, current_time=None):
