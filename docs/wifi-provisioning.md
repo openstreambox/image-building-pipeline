@@ -149,6 +149,12 @@ flags so the next boot re-evaluates the trigger and a pending factory reset is n
 silently disarmed. On a manual stop it restores CeraUI and the button ingress to
 port 80; during shutdown it starts nothing (see *Shutdown cleanup*).
 
+Whenever provisioning hands the front door back (after a join, on `stop`/`teardown`, or
+when it undoes a failed bring-up), a CeraUI or ingress unit that does not start is
+logged as an error and the command exits non-zero; the log never claims a restore that
+did not happen. A joined Wi-Fi link stays up either way. An image without the ingress
+unit counts as fully restored once CeraUI is up.
+
 If the AP profile cannot be created or activated, or the portal socket cannot start
 after the AP is up (port 80 on the AP gateway still taken), bring-up is undone: the AP goes down, the portal-active marker is removed,
 CeraUI and the ingress are started again, and `start` fails. The AP profile, the

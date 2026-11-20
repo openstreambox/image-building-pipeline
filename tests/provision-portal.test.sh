@@ -282,9 +282,13 @@ ap_up() {
 }
 case "$verb" in
   is-system-running) printf '%s\n' "${STUB_SYSTEM_STATE-running}"; [ "${STUB_SYSTEM_STATE-running}" = running ]; exit ;;
-  cat)   exit 0 ;;
+  cat)   [ -n "${STUB_NO_INGRESS:-}" ] && [ "$unit" = ceralive-button-ingress.service ] && exit 1; exit 0 ;;
   stop)  for u in "$@"; do rm -f "$UNITS/$u"; done ;;
   start)
+    case " ${STUB_START_FAIL:-} " in *" $unit "*) echo "Job for $unit failed." >&2; exit 1 ;; esac
+    if [ -n "${STUB_NO_INGRESS:-}" ] && [ "$unit" = ceralive-button-ingress.service ]; then
+      echo "Unit $unit not found." >&2; exit 5
+    fi
     if [ "$unit" = ceralive-portal.socket ] && [ -n "${STUB_PORTAL_FAIL:-}" ]; then
       echo "Failed to listen on 192.168.42.1:80: Address already in use" >&2; exit 1
     fi
@@ -405,6 +409,77 @@ env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=run
 [ -e "${UNITS}/ceralive.service" ] && [ -e "${UNITS}/ceralive-button-ingress.service" ] \
                                                  && pass "manual unit stop restores CeraUI and the ingress" || fail "manual unit stop restores CeraUI and the ingress"
 [ ! -e "${UNITS}/ceralive-portal.socket" ]       && pass "manual unit stop stops the portal" || fail "manual unit stop stops the portal"
+
+# ===========================================================================
+echo "== Scenario L: a front door that does not come back is reported, never claimed =="
+BOTH="ceralive.service ceralive-button-ingress.service"
+up_ap() { # fresh box with the portal up
+  reset_state; boot_units; : >"$(state_file force-portal)"
+  env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/dev/null bash "${PROVISION}" start >/dev/null 2>&1
+}
+OUTF="${SANDBOX}/provision.out"
+
+# Join succeeds, both restores fail: non-zero, logged, the joined link stays, no false claim.
+up_ap; : >"${CALL_LOG}"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=0 STUB_CONNECTIVITY=full STUB_CON_SSID=HomeNet \
+    STUB_START_FAIL="${BOTH}" bash "${PROVISION}" connect ceralive-wifi >"${OUTF}" 2>&1
+rc=$?
+[ "${rc}" -ne 0 ]                                && pass "join: failed restore exits non-zero" || fail "join: failed restore exits non-zero"
+grep -q "ERROR: could not start ceralive.service" "${OUTF}" && grep -q "ERROR: could not start ceralive-button-ingress.service" "${OUTF}" \
+                                                 && pass "join: both failed starts logged" || fail "join: both failed starts logged"
+! grep -q "CeraUI on port 80" "${OUTF}"          && pass "join: no claim that CeraUI is on port 80" || fail "join: no claim that CeraUI is on port 80"
+! called "nmcli device disconnect"               && pass "join: the joined Wi-Fi link is kept" || fail "join: the joined Wi-Fi link is kept"
+[ ! -e "$(state_file portal-active)" ]           && pass "join: provisioning state still cleared" || fail "join: provisioning state still cleared"
+
+# Join succeeds on an image without the ingress unit: that is a full restore.
+up_ap
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=0 STUB_CONNECTIVITY=full STUB_CON_SSID=HomeNet \
+    STUB_NO_INGRESS=1 bash "${PROVISION}" connect ceralive-wifi >"${OUTF}" 2>&1
+rc=$?
+[ "${rc}" -eq 0 ] && grep -q "CeraUI on port 80" "${OUTF}" \
+                                                 && pass "join: an absent ingress unit is not a failure" || fail "join: an absent ingress unit is not a failure (rc=${rc})"
+! grep -q "ERROR" "${OUTF}"                      && pass "join: no error logged for an absent ingress" || fail "join: no error logged for an absent ingress"
+
+# Only the ingress fails (present unit): still a failure.
+up_ap
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=0 STUB_CONNECTIVITY=full STUB_CON_SSID=HomeNet \
+    STUB_START_FAIL=ceralive-button-ingress.service bash "${PROVISION}" connect ceralive-wifi >"${OUTF}" 2>&1
+[ $? -ne 0 ]                                     && pass "join: a present ingress that fails to start is reported" || fail "join: a present ingress that fails to start is reported"
+
+# Manual stop (verb and unit stop), both restores fail.
+for verb in stop service-stop; do
+  up_ap
+  env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running STUB_START_FAIL="${BOTH}" \
+      bash "${PROVISION}" "${verb}" >"${OUTF}" 2>&1
+  rc=$?
+  [ "${rc}" -ne 0 ] && grep -q "restore FAILED" "${OUTF}" \
+                                                 && pass "${verb}: failed restore exits non-zero and says so" || fail "${verb}: failed restore exits non-zero and says so (rc=${rc})"
+done
+# Manual stop without the ingress unit restores fully.
+up_ap
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running STUB_NO_INGRESS=1 \
+    bash "${PROVISION}" service-stop >"${OUTF}" 2>&1
+[ $? -eq 0 ] && grep -q "; CeraUI restored" "${OUTF}" \
+                                                 && pass "service-stop: an absent ingress unit is not a failure" || fail "service-stop: an absent ingress unit is not a failure"
+# Shutdown starts nothing, so it has nothing to fail.
+up_ap
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=stopping STUB_START_FAIL="${BOTH}" \
+    bash "${PROVISION}" service-stop >"${OUTF}" 2>&1
+[ $? -eq 0 ]                                     && pass "shutdown: exits 0 (starts nothing)" || fail "shutdown: exits 0 (starts nothing)"
+
+# Abort path: the log says what the restore achieved.
+reset_state; boot_units; : >"$(state_file force-portal)"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/dev/null STUB_PORTAL_FAIL=1 \
+    STUB_START_FAIL=ceralive.service bash "${PROVISION}" start >"${OUTF}" 2>&1
+rc=$?
+[ "${rc}" -ne 0 ] && grep -q "restore FAILED" "${OUTF}" && ! grep -q "CeraUI restored" "${OUTF}" \
+                                                 && pass "abort: a failed restore is logged as failed" || fail "abort: a failed restore is logged as failed"
+reset_state; boot_units; : >"$(state_file force-portal)"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/dev/null STUB_PORTAL_FAIL=1 STUB_NO_INGRESS=1 \
+    bash "${PROVISION}" start >"${OUTF}" 2>&1
+rc=$?
+[ "${rc}" -ne 0 ] && grep -q "CeraUI restored" "${OUTF}" && ! grep -q "restore FAILED" "${OUTF}" \
+                                                 && pass "abort: a full restore without the ingress unit is logged as restored" || fail "abort: a full restore without the ingress unit is logged as restored"
 
 # Upstream's shutdown cases (12056fa, 07c1820): a blocking start during ExecStop
 # waits behind the shutdown transaction; model that by refusing every blocking call.
