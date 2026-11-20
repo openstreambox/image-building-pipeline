@@ -86,6 +86,7 @@ class FakeModem(threading.Thread):
         self.read_error = self.ignore_write = self.cfun_silent = False
         self.cfun_reply = 'OK'
         self.hooks = {}          # command -> callable run after the reply
+        self.before = {}         # command -> callable run before the reply is sent
         self.commands, self.stop = [], threading.Event()
 
     def reply(self, text):
@@ -109,6 +110,9 @@ class FakeModem(threading.Thread):
                 if not command:
                     continue
                 self.commands.append(command)
+                early = self.before.get(command)
+                if early:
+                    early()
                 if self.echo:
                     self.reply(command + '\r\n')
                 if command == 'AT+QCFG="usbspeed"':
@@ -574,8 +578,9 @@ class UsbSpeed(unittest.TestCase):
         self.mm(extra={'on_list_touch': [str(self.data / 'modem-usbspeed.disabled')]})
         self.assertUntouched(self.invoke())
 
-    def test_stream_starting_after_the_read_stops_before_the_write(self):
-        self.modem.hooks['AT+QCFG="usbspeed"'] = self.stream_starts
+    def test_stream_starting_during_the_read_stops_before_the_write(self):
+        # `before`: the stream exists by the time the script has the reply.
+        self.modem.before['AT+QCFG="usbspeed"'] = self.stream_starts
         done = self.invoke()
         self.assertEqual(self.modem.commands, ['AT+QCFG="usbspeed"'])
         self.assertEqual(self.modem.stored, '312')
@@ -583,8 +588,8 @@ class UsbSpeed(unittest.TestCase):
         self.assertIsNone(self.marker())
         self.assertIn('nothing written, released', done.stdout)
 
-    def test_stream_starting_after_the_write_stops_before_the_reset(self):
-        self.modem.hooks['AT+QCFG="usbspeed","20"'] = self.stream_starts
+    def test_stream_starting_during_the_write_stops_before_the_reset(self):
+        self.modem.before['AT+QCFG="usbspeed","20"'] = self.stream_starts
         self.invoke()
         self.assertNotIn('AT+CFUN=1,1', self.modem.commands)
         self.assertEqual(self.modem.stored, '20')

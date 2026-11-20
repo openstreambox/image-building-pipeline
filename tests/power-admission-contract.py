@@ -5,12 +5,14 @@ operator prompt and real flock/fcntl locks; only systemd, logind and RAUC are
 answered by a fake command runner. The real-logind behaviour is covered by the
 opt-in tests/real-power-admission.sh.
 """
+import atexit
 import fcntl
 import json
 import importlib.util
 import os
 import pty
 import select
+import shutil
 import socket
 import subprocess
 import sys
@@ -22,6 +24,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN = tempfile.mkdtemp(prefix='power-admission-')
+atexit.register(shutil.rmtree, RUN, ignore_errors=True)
 os.environ['CERALIVE_POWER_RUN_DIR'] = RUN
 spec = importlib.util.spec_from_file_location('broker', ROOT / 'mkosi/runtime/power/ceralive-power-broker.py')
 broker = importlib.util.module_from_spec(spec)
@@ -93,6 +96,8 @@ class FakeSystem:
 class Harness(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix='broker-')
+        # Cleanups run after tearDown, so the broker and listener are gone first.
+        self.addCleanup(shutil.rmtree, self.dir)
         self.paths = {name: os.path.join(self.dir, name) for name in ('update.lock', 'lock-frontend', 'activate.lock')}
         for path in self.paths.values():
             Path(path).touch()
@@ -118,7 +123,12 @@ class Harness(unittest.TestCase):
         ]
         for p in self.patches:
             p.start()
-        self.sock_path = os.path.join(self.dir, 'request.sock')
+        # A socket path stops at 107 bytes and TMPDIR can be long: bind and
+        # connect through a descriptor of this directory, a short path that
+        # resolves to it in this process and in children that inherit it.
+        self.dir_fd = os.open(self.dir, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, self.dir_fd)
+        self.sock_path = f'/proc/self/fd/{self.dir_fd}/request.sock'
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listener.bind(self.sock_path)
         self.listener.listen(8)
@@ -433,7 +443,7 @@ class Client(Harness):
         env = dict(os.environ, CERALIVE_POWER_SOCKET=self.sock_path)
         with patch.object(broker, 'system_unit', lambda pidfd: unit), \
              patch.object(broker, 'peer_identity', lambda c, real=broker.peer_identity: (lambda r: (r[0], 0, r[2], r[3]))(real(c))):
-            proc = subprocess.Popen([sys.executable, '-I', client, '--no-wait'], env=env,
+            proc = subprocess.Popen([sys.executable, '-I', client, '--no-wait'], env=env, pass_fds=(self.dir_fd,),
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             self.pump(lambda: proc.poll() is not None, rounds=300)
         out, _ = proc.communicate(timeout=5)
@@ -777,6 +787,7 @@ class ReviewFindings(Harness):
 class Drain(unittest.TestCase):
     def setUp(self):
         proc = tempfile.mkdtemp(prefix='drain-proc-')
+        self.addCleanup(shutil.rmtree, proc)
         os.makedirs(os.path.join(proc, '4242'))
         Path(proc, '4242', 'cmdline').write_bytes(b'/usr/bin/rauc\0service\0')
         Path(proc, '4242', 'mountinfo').write_text('')
@@ -784,6 +795,16 @@ class Drain(unittest.TestCase):
         self.proc = patch.object(broker, 'PROC_ROOT', proc)
         self.proc.start()
         self.addCleanup(self.proc.stop)
+
+    def scratch_dir(self):
+        """A new empty directory, removed after the test."""
+        path = tempfile.mkdtemp(prefix='drain-')
+        self.addCleanup(shutil.rmtree, path)
+        return path
+
+    def scratch_path(self):
+        """A path that does not exist yet, in a directory removed after the test."""
+        return os.path.join(self.scratch_dir(), 'activate.lock')
 
     @staticmethod
     def fake():
@@ -831,8 +852,8 @@ class Drain(unittest.TestCase):
         system.system_state = 'stopping'
         system.receipts = ['ceralive-os-stage-guard.service', 'ceralive-software-update.service']
         with patch.object(broker, 'DPKG_LOCK', '/nonexistent/lock-frontend'), \
-             patch.object(broker, 'FENCE_DIR', tempfile.mkdtemp()), \
-             patch.object(broker, 'ACTIVATION_LOCK', tempfile.mktemp()):
+             patch.object(broker, 'FENCE_DIR', self.scratch_dir()), \
+             patch.object(broker, 'ACTIVATION_LOCK', self.scratch_path()):
             self.assertEqual(broker.drain(sleep=lambda s: self.fail('waited on a receipt'), runner=system), 0)
 
     def test_an_unreadable_system_state_waits_like_a_shutdown(self):
@@ -844,25 +865,25 @@ class Drain(unittest.TestCase):
             ticks.append(1)
             system.installing = len(ticks) < 3
         with patch.object(broker, 'DPKG_LOCK', '/nonexistent/lock-frontend'), \
-             patch.object(broker, 'FENCE_DIR', tempfile.mkdtemp()), \
-             patch.object(broker, 'ACTIVATION_LOCK', tempfile.mktemp()):
+             patch.object(broker, 'FENCE_DIR', self.scratch_dir()), \
+             patch.object(broker, 'ACTIVATION_LOCK', self.scratch_path()):
             broker.drain(sleep=sleep, now=lambda: len(ticks), runner=system)
         self.assertEqual(len(ticks), 3)
 
     def test_the_drain_fences_new_installs_first(self):
         system = self.fake()
         system.system_state = 'stopping'
-        fences = tempfile.mkdtemp()
+        fences = self.scratch_dir()
         with patch.object(broker, 'DPKG_LOCK', '/nonexistent/lock-frontend'), \
              patch.object(broker, 'FENCE_DIR', fences), \
-             patch.object(broker, 'ACTIVATION_LOCK', tempfile.mktemp()):
+             patch.object(broker, 'ACTIVATION_LOCK', self.scratch_path()):
             broker.drain(sleep=lambda s: None, runner=system)
         self.assertTrue(os.path.exists(os.path.join(fences, 'shutdown')))
 
     def test_the_drain_holds_the_shutdown_until_its_fence_is_written(self):
         system = self.fake()
         system.system_state = 'stopping'
-        fences = os.path.join(tempfile.mkdtemp(), 'fence.d')
+        fences = os.path.join(self.scratch_dir(), 'fence.d')
         Path(fences).write_text('not a directory')  # the fence can't be created
         ticks = []
         def sleep(_):
@@ -871,7 +892,7 @@ class Drain(unittest.TestCase):
                 os.unlink(fences)  # now it can
         with patch.object(broker, 'DPKG_LOCK', '/nonexistent/lock-frontend'), \
              patch.object(broker, 'FENCE_DIR', fences), \
-             patch.object(broker, 'ACTIVATION_LOCK', tempfile.mktemp()):
+             patch.object(broker, 'ACTIVATION_LOCK', self.scratch_path()):
             broker.drain(sleep=sleep, now=lambda: len(ticks), runner=system)
         self.assertEqual(len(ticks), 3)
         self.assertTrue(os.path.exists(os.path.join(fences, 'shutdown')))
