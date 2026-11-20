@@ -257,13 +257,32 @@ stop_ceraui() {
   "${SYSTEMCTL}" stop "${CERAUI_SERVICE}"  >/dev/null 2>&1 || true
 }
 start_ceraui() {
-  "${SYSTEMCTL}" start "${CERAUI_SERVICE}"  >/dev/null 2>&1 || true
-  "${SYSTEMCTL}" start "${INGRESS_SERVICE}" >/dev/null 2>&1 || true
+  "${SYSTEMCTL}" start "${CERAUI_SERVICE}" >/dev/null 2>&1 \
+    || log "WARN: could not start ${CERAUI_SERVICE}; the web UI stays down until it is started"
+  if ! "${SYSTEMCTL}" start "${INGRESS_SERVICE}" >/dev/null 2>&1; then
+    # Images without the button ingress have no such unit; that is not a failure.
+    if "${SYSTEMCTL}" cat "${INGRESS_SERVICE}" >/dev/null 2>&1; then
+      log "WARN: could not start ${INGRESS_SERVICE}; ports 80/443 stay closed until it is started"
+    fi
+  fi
 }
 
 start_portal_socket() {
-  "${SYSTEMCTL}" start "${PORTAL_SOCKET}" >/dev/null 2>&1 \
-    || log "WARN: could not start ${PORTAL_SOCKET} (portal will be unreachable)"
+  "${SYSTEMCTL}" start "${PORTAL_SOCKET}" >/dev/null 2>&1 && return 0
+  log "ERROR: could not start ${PORTAL_SOCKET} (nothing would answer on ${AP_GW}:80)"
+  return 1
+}
+
+# Undo a half-done handoff: an AP whose portal cannot listen would leave the box with
+# no control plane at all (CeraUI and the ingress already stopped). Drop the AP and its
+# marker and bring the normal front door back. The AP profile, the force flag and the
+# last-error marker stay, so the next boot (or the next trigger) tries again.
+abort_ap_handoff() {
+  stop_portal_socket
+  remove_dns_capture
+  "${NMCLI}" connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
+  rm -f "${ACTIVE_FLAG}"
+  start_ceraui
 }
 
 # Stop the listener (frees port 80) AND any in-flight per-connection instances.
@@ -305,21 +324,35 @@ bring_up_ap() {
 
   # Hand port 80 from CeraUI to the captive portal.
   stop_ceraui
-  start_portal_socket
+  if ! start_portal_socket; then
+    abort_ap_handoff
+    die "captive portal could not take ${AP_GW}:80; AP dropped, CeraUI restored, retry flags kept"
+  fi
   log "provisioning AP active — captive portal on ${AP_GW}:80 (marker ${ACTIVE_FLAG})"
 }
 
 # --- clean link-down only (service ExecStop / shutdown) ------------------------
 # The AP profile + the /data flags are RETAINED so the next boot re-evaluates the
-# trigger; the factory-reset force flag is NOT cleared here. The portal listener is
-# stopped and CeraUI is restored to port 80 so a manual `systemctl stop
-# ceralive-provision` does not leave the device with no reachable control plane.
+# trigger; the factory-reset force flag is NOT cleared here. A manual `stop` (and a
+# manual unit stop) restores CeraUI and the ingress so the device keeps a reachable
+# control plane. During shutdown (arg 1 = 1) nothing is started: a synchronous start
+# from ExecStop would wait behind the shutdown transaction that is stopping those
+# units. Portal stops are only queued then, and the NM link-down is bounded.
 stop_ap() {
-  log "stopping provisioning AP link (profile + flags retained; portal down, CeraUI restored)"
-  stop_portal_socket
+  local shutdown="${1:-0}"
+  log "stopping provisioning AP link (profile + flags retained; shutdown=${shutdown})"
+  if [[ "${shutdown}" == 1 ]]; then
+    "${SYSTEMCTL}" --no-block stop "${PORTAL_SOCKET}" "${PORTAL_SERVICE_GLOB}" >/dev/null 2>&1 || true
+  else
+    stop_portal_socket
+  fi
   remove_dns_capture
-  "${NMCLI}" connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
-  start_ceraui
+  if [ -n "${TIMEOUT_BIN}" ] && command -v "${TIMEOUT_BIN}" >/dev/null 2>&1; then
+    "${TIMEOUT_BIN}" 5 "${NMCLI}" --wait 3 connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
+  else
+    "${NMCLI}" --wait 3 connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${shutdown}" != 1 ]]; then start_ceraui; fi
 }
 
 # --- TEARDOWN: full provisioning-mode exit (MAC6 end-state) --------------------
@@ -406,11 +439,22 @@ connect_target() {
 main() {
   local cmd="${1:-start}"
   case "${cmd}" in
+    service-stop)
+      # ExecStop. Only a manager that is stopping selects shutdown cleanup: every
+      # other state, empty output or a failed query is a manual unit stop, which
+      # restores the control plane. (is-system-running also exits nonzero for
+      # "stopping", so the state string decides, not the exit code.)
+      case "$("${SYSTEMCTL}" is-system-running 2>/dev/null || true)" in
+        stopping) stop_ap 1 ;;
+        *)        stop_ap ;;
+      esac
+      exit 0 ;;
+    shutdown) stop_ap 1;     exit 0 ;;
     stop)     stop_ap;       exit 0 ;;
     teardown) teardown_ap 0; exit 0 ;;
     connect)  connect_target "${2:-}" ;;   # exits inside (success 0 / failure 1)
     start)    ;;
-    *)        die "unknown command: ${cmd} (use: start | stop | teardown | connect <con>)" ;;
+    *)        die "unknown command: ${cmd} (use: start | stop | service-stop | shutdown | teardown | connect <con>)" ;;
   esac
 
   # Out-of-band teardown request (alt exit path): honor it and exit.

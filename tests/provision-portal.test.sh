@@ -275,13 +275,19 @@ UNITS="${SANDBOX}/units"
 cat >"${BIN}/systemctl-stateful" <<'STUB'
 #!/usr/bin/env bash
 echo "systemctl $*" >>"$CALL_LOG"
-verb="$1"; unit="$2"
+[ "$1" = --no-block ] && shift
+verb="$1"; shift; unit="${1:-}"
 ap_up() {
   awk '/^nmcli connection up ceralive-ap/{u=1} /^nmcli connection down ceralive-ap/{u=0} END{exit !u}' "$CALL_LOG"
 }
 case "$verb" in
-  stop)  rm -f "$UNITS/$unit" ;;
+  is-system-running) printf '%s\n' "${STUB_SYSTEM_STATE-running}"; [ "${STUB_SYSTEM_STATE-running}" = running ]; exit ;;
+  cat)   exit 0 ;;
+  stop)  for u in "$@"; do rm -f "$UNITS/$u"; done ;;
   start)
+    if [ "$unit" = ceralive-portal.socket ] && [ -n "${STUB_PORTAL_FAIL:-}" ]; then
+      echo "Failed to listen on 192.168.42.1:80: Address already in use" >&2; exit 1
+    fi
     if [ "$unit" = ceralive-portal.socket ] && [ -e "$UNITS/ceralive-button-ingress.service" ] && ap_up; then
       echo "Failed to listen on 192.168.42.1:80: Address already in use" >&2; exit 1
     fi
@@ -329,6 +335,91 @@ env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/d
 env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" bash "${PROVISION}" stop >/dev/null 2>&1
 [ -e "${UNITS}/ceralive-button-ingress.service" ] && pass "button ingress restored by stop" || fail "button ingress restored by stop"
 [ ! -e "${UNITS}/ceralive-portal.socket" ]       && pass "portal socket stopped by stop" || fail "portal socket stopped by stop"
+
+# ===========================================================================
+echo "== Scenario J: a portal that cannot listen never leaves the box without a front door =="
+reset_state; boot_units
+: >"$(state_file force-portal)"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/dev/null STUB_PORTAL_FAIL=1 \
+    bash "${PROVISION}" start >/dev/null 2>&1
+rc=$?
+[ "${rc}" -ne 0 ]                                && pass "start fails when the portal cannot listen" || fail "start fails when the portal cannot listen (rc=${rc})"
+[ -z "$(ap80_owners)" ] && ! awk '/^nmcli connection up ceralive-ap/{u=1} /^nmcli connection down ceralive-ap/{u=0} END{exit !u}' "${CALL_LOG}" \
+                                                 && pass "AP brought down again" || fail "AP brought down again"
+[ ! -e "$(state_file portal-active)" ]           && pass "portal-active marker removed" || fail "portal-active marker removed"
+[ -e "$(state_file force-portal)" ]              && pass "force flag kept for the next try" || fail "force flag kept for the next try"
+[ -e "${UNITS}/ceralive.service" ]               && pass "CeraUI restored" || fail "CeraUI restored"
+[ -e "${UNITS}/ceralive-button-ingress.service" ] && pass "button ingress restored" || fail "button ingress restored"
+[ -z "$(ls -A "${DNSDIR}" 2>/dev/null)" ]        && pass "DNS capture removed" || fail "DNS capture removed"
+
+# The re-arm after a failed join takes the same way out, and keeps last-error.
+reset_state; boot_units
+: >"$(state_file force-portal)"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/dev/null \
+    bash "${PROVISION}" start >/dev/null 2>&1
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=4 STUB_CON_SSID=HomeNet STUB_PORTAL_FAIL=1 \
+    bash "${PROVISION}" connect ceralive-wifi >/dev/null 2>&1
+[ ! -e "$(state_file portal-active)" ]           && pass "re-arm: portal-active marker removed" || fail "re-arm: portal-active marker removed"
+[ -e "$(state_file last-error)" ]                && pass "re-arm: last-error kept" || fail "re-arm: last-error kept"
+[ -e "${UNITS}/ceralive.service" ] && [ -e "${UNITS}/ceralive-button-ingress.service" ] \
+                                                 && pass "re-arm: CeraUI and ingress restored" || fail "re-arm: CeraUI and ingress restored"
+
+# ===========================================================================
+echo "== Scenario K: ExecStop restores the front door on a manual stop, starts nothing at shutdown =="
+grep -qx 'ExecStop=/usr/local/sbin/ceralive-provision service-stop' "${PROVISION%.sh}.service" \
+                                                 && pass "unit uses service-stop" || fail "unit uses service-stop"
+grep -qx 'TimeoutStopSec=10' "${PROVISION%.sh}.service" && pass "unit has a 10 s stop budget" || fail "unit has a 10 s stop budget"
+reset_state; boot_units
+: >"$(state_file force-portal)"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/dev/null bash "${PROVISION}" start >/dev/null 2>&1
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=stopping bash "${PROVISION}" service-stop >/dev/null 2>&1
+[ ! -e "${UNITS}/ceralive.service" ] && [ ! -e "${UNITS}/ceralive-button-ingress.service" ] \
+                                                 && pass "shutdown starts neither CeraUI nor the ingress" || fail "shutdown starts neither CeraUI nor the ingress"
+[ ! -e "${UNITS}/ceralive-portal.socket" ]       && pass "shutdown stops the portal (queued)" || fail "shutdown stops the portal (queued)"
+[ -e "$(state_file portal-active)" ] && [ -e "$(state_file force-portal)" ] \
+                                                 && pass "shutdown keeps marker and force flag" || fail "shutdown keeps marker and force flag"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/dev/null bash "${PROVISION}" start >/dev/null 2>&1
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running bash "${PROVISION}" service-stop >/dev/null 2>&1
+[ -e "${UNITS}/ceralive.service" ] && [ -e "${UNITS}/ceralive-button-ingress.service" ] \
+                                                 && pass "manual unit stop restores CeraUI and the ingress" || fail "manual unit stop restores CeraUI and the ingress"
+[ ! -e "${UNITS}/ceralive-portal.socket" ]       && pass "manual unit stop stops the portal" || fail "manual unit stop stops the portal"
+
+# Upstream's shutdown cases (12056fa, 07c1820): a blocking start during ExecStop
+# waits behind the shutdown transaction; model that by refusing every blocking call.
+reset_state
+printf 'portal-active' >"$(state_file portal-active)"
+: >"$(state_file force-portal)"
+make_stub systemctl 'echo "systemctl $*" >>"$CALL_LOG"' '[ "$1" = --no-block ] || exit 99'
+bash "${PROVISION}" shutdown >/dev/null 2>&1
+called "systemctl --no-block stop ceralive-portal.socket" && pass "shutdown enqueues portal stop" || fail "shutdown enqueues portal stop"
+! called "systemctl start" && pass "shutdown never starts CeraUI" || fail "shutdown never starts CeraUI"
+! called "systemctl stop" && pass "shutdown has no blocking stop" || fail "shutdown has no blocking stop"
+called "timeout 5" && pass "shutdown bounds NM cleanup" || fail "shutdown bounds NM cleanup"
+[ -e "$(state_file portal-active)" ] && pass "shutdown retains portal marker" || fail "shutdown retains portal marker"
+[ -e "$(state_file force-portal)" ] && pass "shutdown retains force flag" || fail "shutdown retains force flag"
+
+make_stub systemctl \
+  'echo "systemctl $*" >>"$CALL_LOG"' \
+  'if [ "$1" = is-system-running ]; then printf "%s\n" "${STUB_SYSTEM_STATE-running}"; exit "${STUB_SYSTEM_RC:-0}"; fi' \
+  'exit 0'
+reset_state
+STUB_SYSTEM_STATE=stopping bash "${PROVISION}" service-stop >/dev/null 2>&1
+! called "systemctl start" && pass "service shutdown never restarts CeraUI" || fail "service shutdown never restarts CeraUI"
+called "systemctl --no-block stop" && pass "service shutdown queues portal stop" || fail "service shutdown queues portal stop"
+for system_state in running degraded starting initializing maintenance offline unknown ''; do
+  reset_state
+  STUB_SYSTEM_STATE="${system_state}" bash "${PROVISION}" service-stop >/dev/null 2>&1
+  called "systemctl start ceralive.service" && called "systemctl start ceralive-button-ingress.service" \
+    && pass "unit stop restores CeraUI and ingress (state=${system_state:-empty})" || fail "unit stop restores CeraUI and ingress (state=${system_state:-empty})"
+done
+reset_state
+STUB_SYSTEM_STATE='' STUB_SYSTEM_RC=1 bash "${PROVISION}" service-stop >/dev/null 2>&1
+called "systemctl start ceralive.service" && pass "unit stop restores CeraUI when manager query fails" || fail "unit stop restores CeraUI when manager query fails"
+# is-system-running also returns nonzero for a valid stopping state.
+reset_state
+STUB_SYSTEM_STATE=stopping STUB_SYSTEM_RC=1 bash "${PROVISION}" service-stop >/dev/null 2>&1
+! called "systemctl start" && pass "nonzero stopping state never restarts CeraUI" || fail "nonzero stopping state never restarts CeraUI"
+called "systemctl --no-block stop ceralive-portal.socket ceralive-portal@*.service" && pass "nonzero stopping state queues listener and instances" || fail "nonzero stopping state queues listener and instances"
 
 echo
 if [ "${FAILED}" -eq 0 ]; then
