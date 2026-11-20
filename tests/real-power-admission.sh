@@ -136,7 +136,7 @@ reset() {
   systemctl stop poweroff.target reboot.target 2>/dev/null || true
   systemctl stop ceralive-power.service
   # A restarted broker recovers its last request; each check starts clean.
-  rm -f /run/ceralive-power/state.json /run/ceralive-power/requests/* /run/ceralive-power/fence.d/*
+  rm -f /run/ceralive-power/state.json /run/ceralive-power/fence.d/*
   systemctl reset-failed ceralive-power.service 2>/dev/null || true
   systemctl start ceralive-power.service; sleep 0.5
 }

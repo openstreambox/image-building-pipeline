@@ -21,15 +21,21 @@ Admitted intent is held here, upstream of logind, until the writers settle:
   2. the shared update lock, then dpkg's frontend lock, fence the update units
      and package installs;
   3. no RAUC install is running: Installer.Operation is idle *and* nothing is
-     mounted under RAUC's mount prefix (an install keeps its bundle mounted
-     until it has finished; RAUC can report idle while a rejected competing
-     install unwinds), no writer unit is executing, no slot activation runs.
+     mounted below RAUC's mount prefix in RAUC's own namespace, both read from
+     one stable bus owner (an install keeps its bundle mounted until it has
+     finished; RAUC can report idle while a rejected competing install
+     unwinds), no writer unit is executing, no slot activation runs.
 Only then the broker asks logind over D-Bus (PowerOffWithFlags /
 RebootWithFlags with SKIP_INHIBITORS). There is no systemctl and no direct
 target start. A typed D-Bus refusal is a failure; no reply, a timeout or a lost
 connection is uncertain and is never retried. A waiting request is reported as
 stuck after ESCALATE_S and keeps waiting: cutting a write is not this broker's
 decision.
+
+Its state lives in one record, state.json, which only Broker.publish writes,
+whole and atomically: the latest request at the top level, every request of
+this boot by id under "requests". An admission is that one write, and a request
+changes in memory only after its write happened.
 
 `drain` is the same writer check used at shutdown by ceralive-write-drain.service,
 which is ordered after the writer units, so any shutdown path (also logind's own
@@ -55,12 +61,17 @@ import time
 import uuid
 
 RUN_DIR = os.environ.get('CERALIVE_POWER_RUN_DIR', '/run/ceralive-power')
+# The broker's one persisted record: the latest request at the top level, and
+# every request of this boot under "requests" by id. Written whole, atomically,
+# by Broker.publish only.
 STATE_FILE = os.path.join(RUN_DIR, 'state.json')
-REQUESTS_DIR = os.path.join(RUN_DIR, 'requests')
 # One fence file per owner: the broker's for its request, the drain's for the
 # shutdown. RAUC's pre-install handler refuses while any of them exists.
 FENCE_DIR = os.environ.get('CERALIVE_POWER_FENCE_DIR', os.path.join(RUN_DIR, 'fence.d'))
-KEEP_REQUESTS = 32
+# A finished request's record is kept this long, so whoever submitted it can
+# still read its result; one still in progress is never dropped.
+KEEP_FINISHED_S = 86400
+FINISHED_STATES = ('failed', 'submitted')
 UPDATE_LOCK = os.environ.get('CERALIVE_UPDATE_LOCK_PATH', '/run/lock/ceralive-update.lock')
 DPKG_LOCK = os.environ.get('CERALIVE_DPKG_LOCK_PATH', '/var/lib/dpkg/lock-frontend')
 ACTIVATION_LOCK = os.environ.get('CERALIVE_ACTIVATION_LOCK', '/run/lock/ceralive-rauc-activate.lock')
@@ -151,23 +162,21 @@ def rauc_mount_prefix(pid):
     return RAUC_DEFAULT_MOUNT_PREFIX
 
 
-def rauc_mounts(runner=run):
-    """Mounts RAUC holds under its prefix, seen from RAUC's own mount namespace
-    (the packaged unit runs with MountFlags=slave, so they never reach PID 1).
-    An install keeps its bundle mounted from before its pre-install handler
-    until it has finished. Anything unreadable counts as a mount."""
-    try:
-        pid = rauc_process(runner)
-    except (OSError, subprocess.SubprocessError) as error:
-        return [f'(RAUC process unknown: {error})']
-    if pid is None:
-        return []
-    try:
-        prefix = rauc_mount_prefix(pid).rstrip('/') + '/'
-        with open(f'{PROC_ROOT}/{pid}/mountinfo') as source:
-            lines = source.read().splitlines()
-    except OSError:
-        return ['(RAUC mount table unreadable)']
+def process_start(pid):
+    """(pid, start time): a process identity that a reused pid doesn't share."""
+    with open(f'{PROC_ROOT}/{pid}/stat', 'rb') as source:
+        data = source.read()
+    return pid, int(data[data.rindex(b')') + 2:].split()[19])
+
+
+def mounts_of(pid):
+    """Mounts below RAUC's prefix in the namespace of process `pid` (the
+    packaged unit runs with MountFlags=slave, so they never reach PID 1). An
+    install keeps its bundle mounted from before its pre-install handler until
+    it has finished. Raises OSError when unreadable."""
+    prefix = rauc_mount_prefix(pid).rstrip('/') + '/'
+    with open(f'{PROC_ROOT}/{pid}/mountinfo') as source:
+        lines = source.read().splitlines()
     # Only mounts below the prefix: systemd bind-mounts the prefix itself
     # (RuntimeDirectory=rauc/mnt) into the namespace for the service's lifetime.
     points = []
@@ -178,8 +187,66 @@ def rauc_mounts(runner=run):
     return points
 
 
+def rauc_mounts(runner=run):
+    """Mounts the current RAUC owner holds under its prefix. Anything
+    unreadable counts as a mount."""
+    try:
+        pid = rauc_process(runner)
+    except (OSError, subprocess.SubprocessError) as error:
+        return [f'(RAUC process unknown: {error})']
+    if pid is None:
+        return []
+    try:
+        return mounts_of(pid)
+    except OSError:
+        return ['(RAUC mount table unreadable)']
+
+
+def rauc_unit_state(runner=run):
+    try:
+        out = runner(['systemctl', 'show', '--property=ActiveState', '--value', 'rauc.service'], 10)
+    except (OSError, subprocess.SubprocessError):
+        return 'unknown'
+    return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else 'unknown'
+
+
+def rauc_busy(runner=run, attempts=3):
+    """What says a RAUC install may run, or '' when none can. RAUC's Operation
+    and its mount table are read between two lookups of the bus owner, and count
+    only when both lookups found the same process (pid and start time); a
+    changing owner is looked at again, and one that never holds still is busy.
+    Without a bus owner, rauc.service must be inactive: a worker tearing down
+    after the name is gone may still hold its bundle. With the fence in place, a
+    RAUC that starts later can't write: its install passes the pre-install
+    handler after mounting."""
+    for _ in range(attempts):
+        try:
+            pid = rauc_process(runner)
+            if pid is None:
+                unit = rauc_unit_state(runner)
+                if unit in ('inactive', 'failed') and rauc_process(runner) is None:
+                    return ''
+                if unit in ('inactive', 'failed'):
+                    continue  # it came up meanwhile
+                return f'os-install (rauc.service {unit} without its bus name)'
+            before = process_start(pid)
+            operation = rauc_operation_busy(runner)
+            mounts = mounts_of(pid)
+            again = rauc_process(runner)
+            if again is None or process_start(again) != before:
+                continue
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError) as error:
+            return f'os-install (RAUC unreadable: {error})'
+        if operation:
+            return 'os-install (rauc.service)'
+        if mounts:
+            return 'os-install (rauc mounts)'
+        return ''
+    return 'os-install (RAUC owner changing)'
+
+
 def rauc_installing(runner=run):
-    return rauc_operation_busy(runner) or bool(rauc_mounts(runner))
+    return bool(rauc_busy(runner))
 
 
 def executing_writer_units(runner=run):
@@ -242,10 +309,9 @@ def activation_busy(path=None):
 
 def busy_writers(runner=run, check_dpkg=True):
     busy = []
-    if rauc_operation_busy(runner):
-        busy.append('os-install (rauc.service)')
-    elif rauc_mounts(runner):
-        busy.append('os-install (rauc mounts)')
+    rauc = rauc_busy(runner)
+    if rauc:
+        busy.append(rauc)
     busy.extend(executing_writer_units(runner))
     if check_dpkg:
         holder = dpkg_lock_holder()
@@ -475,25 +541,31 @@ def submit_to_logind(action, runner=run):
 # --- the broker ------------------------------------------------------------------
 
 def write_json(path, record):
+    """Replace `path` atomically. Raises unless the rename happened; after it,
+    the new content is what anyone (also a restarted broker) reads."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temp = path + '.new'
     with open(temp, 'w') as out:
         json.dump(record, out)
+        out.flush()
+        os.fsync(out.fileno())
     os.chmod(temp, 0o644)
     os.replace(temp, path)
-
-
-def prune_requests(keep=KEEP_REQUESTS):
     try:
-        names = [n for n in os.listdir(REQUESTS_DIR) if n.endswith('.json')]
-    except OSError:
-        return
-    names.sort(key=lambda n: os.stat(os.path.join(REQUESTS_DIR, n)).st_mtime)
-    for name in names[:-keep]:
+        directory = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY)
         try:
-            os.unlink(os.path.join(REQUESTS_DIR, name))
-        except OSError:
-            pass
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as error:
+        log(f'state directory not synced: {error}')
+
+
+def kept_records(records, now, current=None):
+    """Finished requests are kept for KEEP_FINISHED_S; the rest always."""
+    return {key: value for key, value in records.items()
+            if key == current or value.get('state') not in FINISHED_STATES
+            or now - int(value.get('time', 0)) < KEEP_FINISHED_S}
 
 
 class Request:
@@ -506,6 +578,7 @@ class Request:
         self.pidfd = None
         self.uid = None
         self.tty = None  # [fd, rdev, proc, answer bytes]
+        self.confirmed = False  # an operator's typed word, checked on its own terminal
         self.closed = False
 
 
@@ -562,6 +635,8 @@ class Committer(threading.Thread):
         broker = self.broker
         with broker.lock:
             c = broker.committed
+            if c and c['stage'] == 'failing':
+                return broker.fail(c['failure'])  # not recorded yet: try again
             if not c or c['stage'] not in ('fence', 'drain'):
                 return False
         if c['stage'] == 'fence':
@@ -635,6 +710,7 @@ class Broker:
         self.requests = {}
         self.prompts = {}  # tty rdev -> Request
         self.committed = None
+        self.records = {}  # what state.json holds under "requests"
         self.waiters = []
         self.outbox = queue.Queue()
         self.wake_r, self.wake_w = os.pipe()
@@ -656,29 +732,39 @@ class Broker:
         self.committer.release()
 
     # state published for CeraUI, the button light and operators
-    def publish(self, state, **extra):
-        """Record the state, and the request's own result under its id (kept
-        until KEEP_REQUESTS newer ones exist, so a later request never hides an
-        earlier failure). Returns False when it couldn't be recorded."""
-        record = {'state': state, 'time': int(time.time())}
-        if self.committed:
-            record.update({k: self.committed[k] for k in ('id', 'action', 'origin')})
+    def publish(self, state, request=None, notify=True, **extra):
+        """The one writer of the broker's record (call with the lock held): the
+        new state of `request` (default: the committed one) becomes the latest
+        and its entry under "requests", in one atomic replacement of
+        state.json. Nothing in memory changes unless that write happened, so
+        what a client is told and what a restarted broker reads agree. Returns
+        False when it couldn't be recorded."""
+        request = request if request is not None else self.committed
+        now = int(time.time())
+        record = {'state': state, 'time': now}
+        if request:
+            record.update({k: request[k] for k in ('id', 'action', 'origin')})
         record.update(extra)
-        ok = True
+        records = dict(self.records)
+        if record.get('id'):
+            records[record['id']] = record
+        records = kept_records(records, now, record.get('id'))
         try:
-            write_json(STATE_FILE, record)
-            if record.get('id'):
-                write_json(os.path.join(REQUESTS_DIR, record['id'] + '.json'), record)
-                prune_requests()
+            write_json(STATE_FILE, dict(record, requests=records))
         except OSError as error:
-            ok = False
-            log(f'state not recorded: {error}')
-        line = state.upper() + (' ' + extra['detail'] if extra.get('detail') else '')
+            log(f'state not recorded ({state}): {error}')
+            return False
+        self.records = records
+        if notify:
+            self.notify(state, extra.get('detail'))
+        log(f'state {record}')
+        return True
+
+    def notify(self, state, detail=None):
+        line = state.upper() + (' ' + detail if detail else '')
         for request in list(self.waiters):
             self.outbox.put((request, line))
         self.poke()
-        log(f'state {record}')
-        return ok
 
     def recover(self):
         """A restarted broker never forgets an admitted request: one not yet
@@ -689,6 +775,11 @@ class Broker:
                 record = json.load(source)
         except (OSError, ValueError):
             record = {}
+        if not isinstance(record, dict):
+            record = {}
+        requests = record.get('requests')
+        if isinstance(requests, dict):
+            self.records = {k: v for k, v in requests.items() if isinstance(v, dict)}
         state = record.get('state')
         if state in ACTIVE_STATES and record.get('id') and record.get('action') in ('poweroff', 'reboot'):
             self.committed = {'id': record['id'], 'action': record['action'], 'origin': record.get('origin', 'unknown'),
@@ -709,12 +800,19 @@ class Broker:
         self.publish('idle')
 
     def fail(self, detail):
+        """A definite failure. The request is let go only once its failure is
+        recorded under its id; until then it stays (stage `failing`, retried by
+        the committer) and no newer request can replace it."""
         failed = self.committed
+        failed['stage'], failed['failure'] = 'failing', detail
+        if not self.publish('failed', notify=False, detail=detail):
+            return False
         self.committed = None
-        self.publish('failed', detail=detail, id=failed['id'], action=failed['action'], origin=failed['origin'])
+        self.notify('failed', detail)
         for request in list(self.waiters):
             self.outbox.put((request, None))
         self.poke()
+        return True
 
     def poke(self):
         try:
@@ -835,9 +933,10 @@ class Broker:
         if not is_operator(uid, gid):
             return self.refuse(request, 'not an operator')
         with self.lock:
-            pending = self.committed is not None
-        if pending:
-            return self.join_committed(request)
+            # Looked up and joined under one lock. Joining only follows a request
+            # already admitted; it never creates one.
+            if self.committed is not None:
+                return self.join_committed(request)
         if len(self.prompts) >= MAX_PROMPTS:
             return self.refuse(request, 'too many confirmations pending')
         try:
@@ -892,29 +991,37 @@ class Broker:
         if typed != request.action:
             return self.refuse(request, 'not confirmed')
         self.close_tty(request)
+        request.confirmed = True
         self.commit(request)
 
     def join_committed(self, request):
+        """Follow the pending request, or refuse. Never creates one."""
         with self.lock:
             c = self.committed
             if c is None:
-                return self.commit(request)
+                return self.refuse(request, 'nothing pending to join')
+            if c['stage'] == 'failing':
+                return self.refuse(request, 'the last request is still being recorded; try again')
             if c['action'] != request.action:
                 return self.refuse(request, f'{c["action"]} already pending')
             self.send(request, f'PENDING {c["action"]} {c["id"]}')
             self.waiters.append(request)
 
     def commit(self, request):
+        """Create the request: only for a service origin or an operator whose
+        typed word was checked on their own terminal."""
+        if request.origin not in ('button', 'ceraui') and not request.confirmed:
+            return self.refuse(request, 'not confirmed')
         with self.lock:
             if self.committed:
                 return self.join_committed(request)
-            self.committed = {'id': uuid.uuid4().hex[:12], 'action': request.action, 'origin': request.origin,
-                              'since': self.clock(), 'stage': 'fence', 'escalated': False}
-            # Durable before it's acknowledged.
-            if not self.publish('admitted', detail=f'{request.action} {self.committed["id"]}'):
-                self.committed = None
+            c = {'id': uuid.uuid4().hex[:12], 'action': request.action, 'origin': request.origin,
+                 'since': self.clock(), 'stage': 'fence', 'escalated': False}
+            # Recorded (one atomic write) before it exists here or is acknowledged.
+            if not self.publish('admitted', request=c, detail=f'{request.action} {c["id"]}'):
                 return self.refuse(request, 'could not record the request')
-            log(f'admitted {request.action} from {request.origin} (uid {request.uid}) as {self.committed["id"]}')
+            self.committed = c
+            log(f'admitted {request.action} from {request.origin} (uid {request.uid}) as {c["id"]}')
             self.waiters.append(request)
             self.outbox.put((request, f'ADMITTED {request.action} {self.committed["id"]}'))
             self.poke()

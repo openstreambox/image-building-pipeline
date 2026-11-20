@@ -36,6 +36,9 @@ class FakeSystem:
         self.units = []
         self.receipts = []
         self.rauc_pid = None
+        self.rauc_pids = []  # successive owners, one per lookup (the last one stays)
+        self.on_lookup = None
+        self.rauc_unit = 'inactive'
         self.system_state = 'running'
         self.logind = 'ok'  # ok | refuse | hang
         self.calls = []
@@ -46,6 +49,10 @@ class FakeSystem:
         if argv[:1] == ['busctl'] and 'get-property' in argv:
             return out(0, 's "installing"\n' if self.installing else 's "idle"\n')
         if argv[:1] == ['busctl'] and 'GetConnectionUnixProcessID' in argv:
+            if self.on_lookup:
+                self.on_lookup()
+            if self.rauc_pids:
+                self.rauc_pid = self.rauc_pids.pop(0) if len(self.rauc_pids) > 1 else self.rauc_pids[0]
             if self.rauc_pid is None:
                 return out(1, '', 'Call failed: The name de.pengutronix.rauc does not have an owner (NameHasNoOwner)\n')
             return out(0, f'u {self.rauc_pid}\n')
@@ -65,6 +72,8 @@ class FakeSystem:
             rows = [f'{unit} loaded active running x' for unit in self.units]
             rows += [f'{unit} loaded active exited x' for unit in self.receipts]
             return out(0, ''.join(row + '\n' for row in rows))
+        if argv[:2] == ['systemctl', 'show'] and 'rauc.service' in argv:
+            return out(0, self.rauc_unit + '\n')
         if argv[:2] == ['systemctl', 'is-system-running']:
             return out(0, self.system_state + '\n')
         if argv[:2] == ['systemctl', 'is-active']:
@@ -88,6 +97,7 @@ class Harness(unittest.TestCase):
         os.makedirs(os.path.join(self.proc, '4242'))
         Path(self.proc, '4242', 'cmdline').write_bytes(b'/usr/bin/rauc\0--mount=/run/rauc/mnt\0service\0')
         Path(self.proc, '4242', 'mountinfo').write_text('')
+        self.rauc_proc(4242, start=777)
         self.patches = [
             patch.object(broker, 'UPDATE_LOCK', self.paths['update.lock']),
             patch.object(broker, 'DPKG_LOCK', self.paths['lock-frontend']),
@@ -98,7 +108,6 @@ class Harness(unittest.TestCase):
             patch.object(broker, 'RAUC_SYSTEM_CONF', os.path.join(self.dir, 'system.conf')),
             patch.object(broker, 'FENCE_DIR', self.fence_dir),
             patch.object(broker, 'STATE_FILE', self.state),
-            patch.object(broker, 'REQUESTS_DIR', os.path.join(self.dir, 'requests')),
             patch.object(broker, 'RUN_DIR', self.dir),
         ]
         for p in self.patches:
@@ -108,6 +117,8 @@ class Harness(unittest.TestCase):
         self.listener.bind(self.sock_path)
         self.listener.listen(8)
         self.system = FakeSystem()
+        self.system.rauc_pid = 4242  # RAUC's service runs, idle
+        self.system.rauc_unit = 'active'
         self.clock = [1000.0]
         self.broker = self.new_broker()
         self.children = []
@@ -128,6 +139,27 @@ class Harness(unittest.TestCase):
         self.listener.close()
         for p in self.patches:
             p.stop()
+
+    def rauc_proc(self, pid, start, mounts=()):
+        os.makedirs(os.path.join(self.proc, str(pid)), exist_ok=True)
+        Path(self.proc, str(pid), 'cmdline').write_bytes(b'/usr/bin/rauc\0--mount=/run/rauc/mnt\0service\0')
+        Path(self.proc, str(pid), 'mountinfo').write_text(
+            ''.join(f'36 25 0:31 / {m} ro - squashfs /dev/loop3 ro\n' for m in mounts))
+        Path(self.proc, str(pid), 'stat').write_text(
+            f'{pid} (rauc) S 1 {pid} {pid} 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 3 0 {start} 1000 100\n')
+
+    def persisted(self, request_id):
+        """The broker's persisted record of one request, as CeraUI reads it."""
+        try:
+            document = json.loads(self.state_json())
+        except (OSError, ValueError):
+            return None
+        if isinstance(document.get('requests'), dict):
+            return document['requests'].get(request_id)
+        try:
+            return json.loads(Path(self.dir, 'requests', request_id + '.json').read_text())
+        except OSError:
+            return None
 
     def new_broker(self):
         return broker.Broker(self.listener, runner=self.system, clock=lambda: self.clock[0], start_committer=False)
@@ -660,8 +692,7 @@ class ReviewFindings(Harness):
         self.system.installing = True
         self.admit_button()  # a newer request replaces state.json
         self.pump(lambda: '"waiting"' in self.state_json())
-        record = json.loads(Path(self.dir, 'requests', failed['id'] + '.json').read_text())
-        self.assertEqual(record['state'], 'failed')
+        self.assertEqual(self.persisted(failed['id'])['state'], 'failed')
         self.assertNotEqual(json.loads(self.state_json())['id'], failed['id'])
 
     def test_the_install_fence_exists_from_admission_and_goes_with_a_failure(self):
@@ -732,13 +763,29 @@ class ReviewFindings(Harness):
 
 
 class Drain(unittest.TestCase):
-    def test_manual_stop_returns_at_once(self):
+    def setUp(self):
+        proc = tempfile.mkdtemp(prefix='drain-proc-')
+        os.makedirs(os.path.join(proc, '4242'))
+        Path(proc, '4242', 'cmdline').write_bytes(b'/usr/bin/rauc\0service\0')
+        Path(proc, '4242', 'mountinfo').write_text('')
+        Path(proc, '4242', 'stat').write_text('4242 (rauc) S 1 4242 4242 0 -1 0 0 0 0 0 0 0 0 0 20 0 3 0 777 1 1\n')
+        self.proc = patch.object(broker, 'PROC_ROOT', proc)
+        self.proc.start()
+        self.addCleanup(self.proc.stop)
+
+    @staticmethod
+    def fake():
         system = FakeSystem()
+        system.rauc_pid, system.rauc_unit = 4242, 'active'
+        return system
+
+    def test_manual_stop_returns_at_once(self):
+        system = self.fake()
         system.installing = True
         self.assertEqual(broker.drain(sleep=lambda s: self.fail('waited'), runner=system), 0)
 
     def test_shutdown_waits_for_rauc_and_units_then_continues(self):
-        system = FakeSystem()
+        system = self.fake()
         system.system_state = 'stopping'
         system.installing = True
         system.units = ['ceralive-kernel-stage-7.service']
@@ -754,7 +801,7 @@ class Drain(unittest.TestCase):
         self.assertEqual(len(ticks), 5)
 
     def test_drain_has_no_deadline_and_warns_once(self):
-        system = FakeSystem()
+        system = self.fake()
         system.system_state = 'stopping'
         system.installing = True
         clock = [0]
@@ -768,7 +815,7 @@ class Drain(unittest.TestCase):
         self.assertEqual(len(walls), 1)
 
     def test_a_retained_finished_unit_is_not_work(self):
-        system = FakeSystem()
+        system = self.fake()
         system.system_state = 'stopping'
         system.receipts = ['ceralive-os-stage-guard.service', 'ceralive-software-update.service']
         with patch.object(broker, 'DPKG_LOCK', '/nonexistent/lock-frontend'), \
@@ -777,7 +824,7 @@ class Drain(unittest.TestCase):
             self.assertEqual(broker.drain(sleep=lambda s: self.fail('waited on a receipt'), runner=system), 0)
 
     def test_an_unreadable_system_state_waits_like_a_shutdown(self):
-        system = FakeSystem()
+        system = self.fake()
         system.system_state = ''
         system.installing = True
         ticks = []
@@ -791,7 +838,7 @@ class Drain(unittest.TestCase):
         self.assertEqual(len(ticks), 3)
 
     def test_the_drain_fences_new_installs_first(self):
-        system = FakeSystem()
+        system = self.fake()
         system.system_state = 'stopping'
         fences = tempfile.mkdtemp()
         with patch.object(broker, 'DPKG_LOCK', '/nonexistent/lock-frontend'), \
@@ -801,7 +848,7 @@ class Drain(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(fences, 'shutdown')))
 
     def test_the_drain_holds_the_shutdown_until_its_fence_is_written(self):
-        system = FakeSystem()
+        system = self.fake()
         system.system_state = 'stopping'
         fences = os.path.join(tempfile.mkdtemp(), 'fence.d')
         Path(fences).write_text('not a directory')  # the fence can't be created
@@ -818,10 +865,187 @@ class Drain(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(fences, 'shutdown')))
 
     def test_unreadable_rauc_counts_as_busy_and_absent_service_as_idle(self):
-        absent = lambda argv, t: subprocess.CompletedProcess(argv, 1, '', 'Call failed: The name de.pengutronix.rauc was not provided by any .service files\n')
+        def absent(argv, t):
+            if argv[:2] == ['systemctl', 'show']:
+                return subprocess.CompletedProcess(argv, 0, 'inactive\n', '')
+            return subprocess.CompletedProcess(argv, 1, '', 'Call failed: The name de.pengutronix.rauc was not provided by any .service files\n')
         broken = lambda argv, t: subprocess.CompletedProcess(argv, 1, '', 'Failed to connect to bus\n')
         self.assertFalse(broker.rauc_installing(absent))
         self.assertTrue(broker.rauc_installing(broken))
+
+
+class RecheckThree(Harness):
+    """Third re-check: joins never create, one consistent record, a stable RAUC owner."""
+
+    def as_unit(self, unit, action=b'POWEROFF\n'):
+        with patch.object(broker, 'system_unit', lambda pidfd: unit), \
+             patch.object(broker, 'peer_identity', lambda c, real=broker.peer_identity: (lambda r: (r[0], 0, r[2], r[3]))(real(c))):
+            conn = self.connect(action)
+            got = []
+            self.pump(lambda: got.extend(self.lines(conn)) or bool(got))
+        return conn, got
+
+    # P1: a join must never create a request without the operator's confirmation
+    def test_a_request_ending_between_lookup_and_join_never_admits_an_unconfirmed_operator(self):
+        self.system.installing = True
+        self.as_unit('ceralive-button.service')
+        first = self.broker.committed['id']
+        inner = self.broker.lock
+        armed = []
+
+        class RacingLock:
+            """The committer records a failure right after the I/O thread's
+            first look at the pending request."""
+            def __init__(self):
+                self.depth = 0
+            def acquire(self, *a, **k):
+                got = inner.acquire(*a, **k)
+                if got:
+                    self.depth += 1
+                return got
+            def release(self):
+                self.depth -= 1
+                inner.release()
+                if self.depth == 0 and armed:
+                    armed.clear()
+                    with inner:
+                        test.broker.fail('refused by logind')
+            __enter__ = acquire
+            def __exit__(self, *exc):
+                self.release()
+
+        test = self
+        self.broker.lock = RacingLock()
+        with patch.object(broker, 'is_operator', lambda uid, gid: armed.append(1) or True):
+            pid, master, out = self.operator_on_pty()
+            self.pump(lambda: self.broker.committed is None and 'FAILED' in self.read_pipe(out) or self.broker.committed not in (None,) and self.broker.committed['id'] != first, rounds=100)
+            self.pump(lambda: False, rounds=10)
+        self.broker.lock = inner
+        if self.broker.committed is not None:
+            self.assertEqual(self.broker.committed['id'], first, 'a new request was created without a typed confirmation')
+        self.assertEqual(self.system.submissions(), [])
+        self.assertEqual(self.persisted(first)['state'], 'failed')
+
+    def test_commit_requires_a_service_origin_or_a_confirmed_terminal(self):
+        a, b = socket.socketpair()
+        request = broker.Request(a, 0)
+        request.action, request.origin, request.uid = 'poweroff', 'terminal', 1000
+        self.broker.commit(request)
+        self.assertIsNone(self.broker.committed)
+        self.assertTrue(b.recv(100).startswith(b'REFUSED'))
+        b.close()
+
+    # P1: what the client is told and what a restarted broker resumes agree
+    def test_every_admission_write_boundary_leaves_answer_and_record_in_agreement(self):
+        real_replace, real_fsync = os.replace, os.fsync
+        state = self.state
+        def nth(n, real):
+            calls = []
+            def failing(*a, **k):
+                if real is real_replace and a[1] != state:
+                    return real(*a, **k)  # only writes of the broker's record count
+                calls.append(1)
+                if len(calls) == n:
+                    raise OSError(28, 'No space left on device')
+                return real(*a, **k)
+            return failing
+        boundaries = {'first rename': ('replace', 1), 'second rename': ('replace', 2),
+                      'first fsync': ('fsync', 1), 'second fsync': ('fsync', 2)}
+        for name, (call, n) in boundaries.items():
+            with self.subTest(boundary=name):
+                self.broker.release()
+                for leftover in (self.state, self.fence):
+                    if os.path.exists(leftover):
+                        os.unlink(leftover)
+                self.broker = self.new_broker()
+                self.system.installing = True
+                target = 'replace' if call == 'replace' else 'fsync'
+                with patch.object(broker.os, target, nth(n, real_replace if target == 'replace' else real_fsync)):
+                    _, got = self.as_unit('ceralive.service')
+                admitted = bool(got) and got[0].startswith('ADMITTED')
+                self.broker.release()
+                self.broker = self.new_broker()
+                resumed = self.broker.committed is not None
+                self.assertEqual(admitted, resumed, f'told {got}, a restart resumes: {resumed}')
+
+    def test_a_failure_is_recorded_before_a_newer_request_can_replace_it(self):
+        self.system.logind = 'refuse'
+        real = broker.write_json
+        blocked = [True]
+        def failing(path, record):
+            if blocked[0] and record.get('state') == 'failed':
+                raise OSError(28, 'No space left on device')
+            return real(path, record)
+        with patch.object(broker, 'write_json', failing):
+            self.as_unit('ceralive-button.service')
+            first = json.loads(self.state_json())['id']
+            self.pump(lambda: len(self.system.submissions()) == 1)
+            self.pump(lambda: False, rounds=5)
+            self.system.logind = 'ok'
+            self.system.installing = True
+            _, got = self.as_unit('ceralive.service')
+            if got and got[0].startswith('ADMITTED'):
+                self.assertEqual(self.persisted(first)['state'], 'failed', 'a newer request replaced an unrecorded failure')
+            blocked[0] = False
+            self.pump(lambda: (self.persisted(first) or {}).get('state') == 'failed')
+        self.assertEqual(self.persisted(first)['state'], 'failed')
+        _, got = self.as_unit('ceralive.service')
+        self.assertTrue(got[0].startswith(('ADMITTED', 'PENDING')), got)
+
+    # CeraUI's reservation: a failure stays readable by id
+    def test_a_failure_outlives_many_newer_requests(self):
+        self.system.logind = 'refuse'
+        _, got = self.as_unit('ceralive.service')
+        first = got[0].split()[2]
+        self.pump(lambda: self.broker.committed is None)
+        for _ in range(40):
+            self.as_unit('ceralive.service')
+            self.pump(lambda: self.broker.committed is None)
+        self.assertEqual((self.persisted(first) or {}).get('state'), 'failed')
+
+    def test_only_finished_records_older_than_a_day_are_dropped(self):
+        now = int(time.time())
+        Path(self.state).write_text(json.dumps({'state': 'idle', 'time': now, 'requests': {
+            'aaaaaaaaaaaa': {'state': 'failed', 'time': now - 2 * 86400, 'id': 'aaaaaaaaaaaa'},
+            'bbbbbbbbbbbb': {'state': 'failed', 'time': now - 3600, 'id': 'bbbbbbbbbbbb'},
+            'cccccccccccc': {'state': 'uncertain', 'time': now - 2 * 86400, 'id': 'cccccccccccc'},
+        }}))
+        self.broker.release()
+        self.broker = self.new_broker()
+        self.as_unit('ceralive.service')
+        requests = json.loads(self.state_json())['requests']
+        self.assertNotIn('aaaaaaaaaaaa', requests)
+        self.assertIn('bbbbbbbbbbbb', requests)
+        self.assertIn('cccccccccccc', requests)
+        self.assertIn(self.broker.committed['id'], requests)
+
+    # P2: RAUC's Operation and mounts are read from one stable owner
+    def test_an_owner_change_mid_check_is_observed_again(self):
+        self.rauc_proc(4343, start=900, mounts=['/run/rauc/mnt/bundle'])
+        self.system.rauc_pids = [4242, 4343]
+        self.assertTrue(broker.rauc_installing(self.system))
+
+    def test_an_owner_that_never_holds_still_counts_as_busy(self):
+        self.rauc_proc(4343, start=900)
+        self.system.rauc_pids = [4242, 4343] * 20
+        self.assertTrue(broker.rauc_installing(self.system))
+
+    def test_a_reused_pid_is_not_the_same_owner(self):
+        lookups = []
+        def restart():
+            lookups.append(1)
+            if len(lookups) == 2:  # RAUC restarted under the same pid, mid-install
+                self.rauc_proc(4242, start=999, mounts=['/run/rauc/mnt/bundle'])
+        self.system.on_lookup = restart
+        self.assertTrue(broker.rauc_installing(self.system))
+
+    def test_a_lost_bus_name_while_the_unit_still_runs_is_busy(self):
+        self.system.rauc_pids = [4242, None]
+        for unit, busy in (('deactivating', True), ('active', True), ('activating', True), ('inactive', False), ('failed', False)):
+            with self.subTest(unit=unit):
+                self.system.rauc_pids = [4242, None]
+                self.system.rauc_unit = unit
+                self.assertEqual(broker.rauc_installing(self.system), busy)
 
 
 class Parsing(unittest.TestCase):

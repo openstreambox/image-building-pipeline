@@ -37,7 +37,9 @@ systemctl restart rauc
 systemctl is-active --quiet rauc || { systemctl status rauc --no-pager | tail -5; exit 1; }
 op() { busctl get-property de.pengutronix.rauc / de.pengutronix.rauc.Installer Operation; }
 pid1_mounts() { awk '$5 ~ "^/run/rauc/mnt/|^/mnt/rauc/" {print $5}' /proc/1/mountinfo | tr '\n' ' '; }
-witness() { python3 -I -c 'import importlib.util as u; s=u.spec_from_file_location("b","/var/tmp/power-broker.py"); m=u.module_from_spec(s); s.loader.exec_module(m); print(" ".join(m.rauc_mounts()))'; }
+broker() { python3 -I -c 'import importlib.util as u; s=u.spec_from_file_location("b","/var/tmp/power-broker.py"); m=u.module_from_spec(s); s.loader.exec_module(m); '"$1"; }
+witness() { broker 'print(" ".join(m.rauc_mounts()))'; }
+verdict() { broker 'print(m.rauc_busy())'; }  # the broker's whole RAUC check: stable owner, Operation, mounts
 echo "# $(rauc --version); rauc.service MainPID $(systemctl show -p MainPID --value rauc)"
 first="$(bundle a)"; second="$(bundle b)"
 (rauc install "$first" > /var/tmp/install-a.log 2>&1 &)
@@ -48,11 +50,12 @@ busctl call de.pengutronix.rauc / de.pengutronix.rauc.Installer InstallBundle 's
 sleep 1
 running="$(pgrep -f "rauc install $first" >/dev/null && echo yes || echo no)"
 seen="$(witness)"
-echo "# after a rejected competing install: Operation=$(op), PID 1 mounts=[$(pid1_mounts)], broker witness=[$seen], first install running=$running"
-[ "$running" = yes ] && [ -n "$seen" ] || { echo "not ok 1 the running install left no witness"; exit 1; }
-echo "ok 1 the broker's witness (RAUC's own namespace) sees the running install while RAUC reports $(op)"
+said="$(verdict)"
+echo "# after a rejected competing install: Operation=$(op), PID 1 mounts=[$(pid1_mounts)], broker witness=[$seen], verdict=[$said], first install running=$running"
+[ "$running" = yes ] && [ -n "$seen" ] && [ -n "$said" ] || { echo "not ok 1 the running install left no witness"; exit 1; }
+echo "ok 1 the broker's witness (RAUC's own namespace) sees the running install while RAUC reports $(op); its check says: $said"
 for _ in $(seq 1 90); do pgrep -f "rauc install $first" >/dev/null || break; sleep 1; done
-[ -z "$(witness)" ] || { echo "not ok 1b mounts left after the install"; exit 1; }
+[ -z "$(witness)" ] && [ -z "$(verdict)" ] || { echo "not ok 1b mounts left after the install: $(verdict)"; exit 1; }
 echo "ok 1b the witness clears when the install has finished: $(tail -1 /var/tmp/install-a.log)"
 third="$(bundle c)"
 before="$(sha256sum /var/tmp/slot1.img | cut -d' ' -f1)"

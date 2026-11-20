@@ -44,7 +44,11 @@ password prompt.
 ## One commit at a time
 
 Only one action is committed. A matching second request reports `PENDING` and
-follows it; a conflicting one is refused. A client that disconnects after
+follows it; a conflicting one is refused. An operator's request is looked up
+and joined under one lock, and joining never creates a request: if nothing is
+pending, the operator goes through the typed-word prompt. Only the button,
+CeraUI, or an operator whose word was checked on their own terminal can create
+one. A client that disconnects after
 admission does not cancel or resubmit anything. Up to 32 connections and 4
 operator prompts are served at once; the button and CeraUI are still accepted
 when operators fill the socket.
@@ -79,7 +83,14 @@ or a terminal prompt.
      owner of `de.pengutronix.rauc`, takes the prefix from that process's command
      line (else `mount-prefix=` in `system.conf`, else `/mnt/rauc`) and reads
      `/proc/<pid>/mountinfo`. The prefix itself is a mount point there
-     (systemd binds the `RuntimeDirectory=` in) and doesn't count. The mount check
+     (systemd binds the `RuntimeDirectory=` in) and doesn't count. `Operation`
+     and the mount table are read between two owner lookups and count only when
+     both found the same process (pid and start time). A changed owner is looked
+     at again; one that never holds still counts as busy. Without a bus owner,
+     `rauc.service` must be `inactive` or `failed`: a worker tearing down after
+     its name is gone may still hold its bundle. A RAUC that starts after the
+     fence can't write, because its install passes the pre-install handler
+     after mounting. The mount check
      is the authoritative one: RAUC 1.15.2 reports `idle` after rejecting a
      competing install while the first one still runs, but that install keeps
      its bundle mounted until it has finished. An unreadable answer counts as
@@ -94,22 +105,36 @@ or a terminal prompt.
    `RebootWithFlags` with `SD_LOGIND_SKIP_INHIBITORS`. There is no `systemctl` and
    no fallback to a direct target start. The D-Bus error name decides: a typed
    refusal (`AccessDenied`, `ServiceUnknown`, a masked unit, …) is `failed`, and
-   the broker's fence goes (only its own; the drain's fence stays). No reply, a timeout, a lost connection or an error without a
-   name is `uncertain`: the fence stays and nothing is retried.
+   the broker's fence goes (only its own; the drain's fence stays). No reply, a
+   timeout, a lost connection or an error without a name is `uncertain`: the
+   fence stays and nothing is retried.
 
 The admission lock only guards the request record. The probes, the locks and
 the logind call run outside it, so a slow check never holds up a new client.
 
-Each admitted request gets an id. Its state is written to
-`/run/ceralive-power/requests/<id>.json` (the last 32 are kept) and to
-`/run/ceralive-power/state.json` (the latest request), and the id goes back to
-the client (`ADMITTED poweroff <id>`) only after that write. A request that
-can't be recorded is refused. A reader that tracks an id reads its own record,
-so a newer request can't hide an older one's result. States: `admitted`, `waiting` (with what it waits
-for), `stuck` after 15 minutes (still waiting, never cut), `submitting`,
-`submitted`, `failed`, `uncertain`.
+**The record.** `/run/ceralive-power/state.json` is the broker's one persisted
+state. The latest request sits at the top level (`state`, `id`, `action`,
+`origin`, `detail`), and every request of this boot sits under `requests` by
+id. One function writes it, under the broker's lock, as one atomic replacement
+(temporary file, fsync, rename). Nothing changes in memory unless the rename
+happened, so what a client is told and what a restarted broker reads always
+agree:
+- An admission is that one write. If it fails, the client gets `REFUSED` and
+  the file is unchanged. Only after it does the id go back to the client
+  (`ADMITTED poweroff <id>`).
+- `submitting` is written before logind is called; if that write fails, nothing
+  is sent.
+- A failure is let go only once it is recorded under its id. Until then the
+  request stays (`failing`, retried), and nothing newer can replace it.
+- A finished request (`failed`, `submitted`) is kept for 24 hours; anything
+  else is never dropped. A reader that tracks an id, like CeraUI, reads
+  `requests[<id>]`, so newer requests can't hide its result.
 
-**Broker restart.** A restarted broker reads that file. A request that wasn't
+States: `admitted`, `waiting` (with what it waits for), `stuck` after 15 minutes
+(still waiting, never cut), `submitting`, `submitted`, `failed`, `uncertain`.
+
+**Broker restart.** A restarted broker reads that file and keeps its
+`requests`. A request that wasn't
 submitted yet keeps waiting. One that may have reached logind is reported
 `uncertain`, keeps its fence and is never submitted again.
 
