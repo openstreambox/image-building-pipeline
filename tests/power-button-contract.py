@@ -121,6 +121,44 @@ class Gestures(unittest.TestCase):
         self.g.tick(3)
         self.assertIn(('failed', 0), self.lights)
 
+    def broker_reply(self, reply):
+        directory = tempfile.mkdtemp()
+        path = directory + '/request.sock'
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(path)
+        server.listen(1)
+        seen = []
+        def answer():
+            conn, _ = server.accept()
+            seen.append(conn.recv(64))
+            if reply is not None:
+                conn.sendall(reply)
+            conn.close()
+        import threading
+        thread = threading.Thread(target=answer)
+        thread.start()
+        return path, seen, thread, server
+
+    def test_hold_is_handed_to_the_power_broker(self):
+        path, seen, thread, server = self.broker_reply(b'ADMITTED poweroff\n')
+        b.request_poweroff(path)
+        thread.join(2)
+        server.close()
+        self.assertEqual(seen, [b'POWEROFF\n'])
+        main = inspect.getsource(b.main)
+        self.assertIn('request_poweroff', main)
+        self.assertNotIn('systemctl', main)
+
+    def test_broker_refusal_or_silence_is_a_reported_failure(self):
+        for reply in (b'REFUSED unverifiable caller\n', b'', None):
+            path, seen, thread, server = self.broker_reply(reply)
+            with self.assertRaises(OSError):
+                b.request_poweroff(path, timeout=1)
+            thread.join(2)
+            server.close()
+        with self.assertRaises(OSError):
+            b.request_poweroff('/nonexistent/request.sock')
+
     def test_decoder(self):
         decoder = b.Input(self.g)
         def ev(kind, code, value):

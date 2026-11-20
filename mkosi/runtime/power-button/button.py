@@ -12,6 +12,33 @@ import sys
 import time
 
 EVENT = struct.Struct('@llHHi')  # native Linux input_event (arm64 and amd64)
+BROKER = '/run/ceralive-power/request.sock'
+
+
+class PowerRequestRefused(OSError):
+    pass
+
+
+def request_poweroff(path=BROKER, timeout=5):
+    """Hand the completed hold to the power admission broker.
+
+    The broker is the one supported path for a deliberate power-off: it lets the
+    hold pass CeraUI's stream lock, waits for a running update to finish and
+    then asks logind. It identifies this daemon by its unit, so the request
+    carries no claim of its own. Admission is the answer; the shutdown follows."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(timeout)
+        conn.connect(path)
+        conn.sendall(b'POWEROFF\n')
+        reply = b''
+        while b'\n' not in reply:
+            data = conn.recv(256)
+            if not data:
+                break
+            reply += data
+    word = reply.split(b'\n', 1)[0].decode(errors='replace')
+    if word.split(' ', 1)[0] not in ('ADMITTED', 'PENDING'):
+        raise PowerRequestRefused(word or 'no answer from the power broker')
 
 
 class Gestures:
@@ -335,8 +362,7 @@ def main():
     ownership = PowerKeyOwnership()
     try:
         serve(device, '/run/ceralive-button/control.sock', light_stub,
-              lambda: subprocess.run(['/usr/bin/systemctl', 'poweroff'], check=True, timeout=10),
-              release_ownership=ownership.release)
+              request_poweroff, release_ownership=ownership.release)
     finally:
         ownership.release()
 

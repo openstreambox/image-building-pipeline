@@ -1,0 +1,74 @@
+#!/usr/bin/python3 -I
+"""Ask the power broker for a confirmed power-off or reboot (ceralive-reboot).
+
+Run it from your own terminal as the login user (or as root on root's own
+terminal). The broker asks for confirmation on that terminal, waits for a
+running update to finish, then powers off. The prompt is the broker's; this
+client only shows what the broker reports.
+"""
+import os
+import socket
+import sys
+
+SOCKET = os.environ.get('CERALIVE_POWER_SOCKET', '/run/ceralive-power/request.sock')
+action = 'REBOOT' if os.path.basename(sys.argv[0]).endswith('reboot') else 'POWEROFF'
+# --no-wait (for services such as CeraUI): print the broker's first answer as
+# is and exit 0 only when the request was admitted or is already pending.
+no_wait = sys.argv[1:] == ['--no-wait']
+if len(sys.argv) > 1 and not no_wait:
+    print(__doc__.strip(), file=sys.stderr)
+    sys.exit(64)
+try:
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    conn.connect(SOCKET)
+    conn.sendall(action.encode() + b'\n')
+except OSError as error:
+    print(f'The power broker is not available ({error.strerror}).', file=sys.stderr)
+    sys.exit(75)
+messages = {
+    'ADMITTED': 'Confirmed.',
+    'PENDING': 'Already requested; following it.',
+    'WAITING': 'Waiting for a running update to finish:',
+    'STUCK': 'Still waiting after 15 minutes for:',
+    'SUBMITTING': 'Asking the system to shut down.',
+    'SUBMITTED': 'Shutting down.',
+    'UNCERTAIN': 'No answer from the system; not retried:',
+    'FAILED': 'Refused by the system:',
+    'REFUSED': 'Not done:',
+}
+if no_wait:
+    conn.settimeout(15)
+    reply = b''
+    try:
+        while b'\n' not in reply:
+            data = conn.recv(4096)
+            if not data:
+                break
+            reply += data
+    except OSError:
+        pass
+    line = reply.split(b'\n', 1)[0].decode(errors='replace').strip() or 'NOANSWER'
+    print(line)
+    sys.exit(0 if line.split(' ', 1)[0] in ('ADMITTED', 'PENDING') else 1)
+status = 1
+buffer = b''
+while True:
+    try:
+        data = conn.recv(4096)
+    except KeyboardInterrupt:
+        print('\nStopped following. An admitted request still goes ahead.')
+        sys.exit(130)
+    if not data:
+        break
+    buffer += data
+    while b'\n' in buffer:
+        line, buffer = buffer.split(b'\n', 1)
+        word, _, detail = line.decode(errors='replace').partition(' ')
+        if word in ('ADMITTED', 'PENDING') and detail:
+            detail = ''
+        print(messages.get(word, word), detail, flush=True)
+        if word == 'SUBMITTED':
+            status = 0
+        elif word in ('REFUSED', 'FAILED', 'UNCERTAIN'):
+            status = 1
+sys.exit(status)

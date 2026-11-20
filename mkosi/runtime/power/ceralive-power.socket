@@ -1,0 +1,14 @@
+[Unit]
+Description=Admission socket for deliberate power-off and reboot requests
+
+[Socket]
+ListenStream=/run/ceralive-power/request.sock
+SocketUser=root
+SocketGroup=ceralive-power
+SocketMode=0660
+DirectoryMode=0755
+Accept=no
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

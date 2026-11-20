@@ -7,7 +7,7 @@ KEY_POWER (116) without grabbing the input device. It offers:
 | --- | --- |
 | Tap under 500 ms | Status hook only |
 | Two taps, releases at most 400 ms apart | One confirmation, only for an active request |
-| Continuous hold for 3 s | Clean `systemctl poweroff`; release before the deadline cancels. A refused or unanswered request is logged and shown as `failed`; the daemon keeps running and the next hold asks again |
+| Continuous hold for 3 s | Power-off through the power admission broker (`power-admission.md`): passes CeraUI's stream lock, waits for a running update; release before the deadline cancels. A refused or unanswered request is logged and shown as `failed`; the daemon keeps running and the next hold asks again |
 | Hardware hold around 10 s | Existing PMIC behaviour; no registers or firmware changed |
 
 There is **no shorter shutdown path**, including when live. The same full
@@ -43,7 +43,8 @@ are installed and `60-ceralive-power-key.conf` sorts after `60-ceralive-button.c
 so its `HandlePowerKey=poweroff`, `HandlePowerKeyLongPress=poweroff` and
 `PowerKeyIgnoreInhibited=yes` win: while the daemon is down, a short tap powers the
 box off (`systemd-analyze cat-config systemd/logind.conf` shows the order). That
-is the current fallback, kept until the supervisor power-key design settles. No evdev exclusive grab is used. Behaviour across a
+is the current fallback, kept until the supervisor power-key design settles. That
+shutdown still waits for running writes (`ceralive-write-drain.service`). No evdev exclusive grab is used. Behaviour across a
 service crash or logind restart while a key is down requires a bench check.
 
 The service uses Python's standard library only. `python3` moves from the debug

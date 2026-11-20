@@ -1,0 +1,23 @@
+[Unit]
+Description=Hold shutdown until running system writes finish
+# Stop order is the reverse of start order: everything listed here stops only
+# after this unit's ExecStop returned, i.e. after RAUC and the update units are
+# idle, and with networking still up for a streamed RAUC install. Any shutdown
+# path gets this, including logind's own power-key handling.
+After=rauc.service ceralive-software-update.service ceralive-os-stage-guard.service ceralive-slot-sync.service
+After=NetworkManager.service ModemManager.service network-online.target dbus.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/bin/python3 -I /usr/libexec/ceralive/ceralive-power-broker drain
+# No deadline: an unfinished write is never cut by a timer. The drain reports
+# a stuck writer after 15 minutes; cutting it is a separate physical decision
+# (holding the power button until the PMIC cuts power).
+TimeoutStopSec=infinity
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target
