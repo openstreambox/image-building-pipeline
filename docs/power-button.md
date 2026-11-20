@@ -7,7 +7,7 @@ KEY_POWER (116) without grabbing the input device. It offers:
 | --- | --- |
 | Tap under 500 ms | Status hook only |
 | Two taps, releases at most 400 ms apart | One confirmation, only for an active request |
-| Continuous hold for 3 s | Clean poweroff, also during a stream; release before the deadline cancels |
+| Continuous hold for 3 s | Clean `systemctl poweroff`; release before the deadline cancels |
 | Hardware hold around 10 s | Existing PMIC behaviour; no registers or firmware changed |
 
 There is **no shorter shutdown path**, including when live. The same full
@@ -42,18 +42,6 @@ confirmation server. If it is absent, logind
 still ignores taps and powers off after its own five-second hold, provided the
 kernel delivers the hold. No evdev exclusive grab is used. Behaviour across a
 service crash or logind restart while a key is down requires a bench check.
-
-A completed hold starts `poweroff.target` with `--job-mode=replace-irreversibly
---no-block`, the job logind itself starts once it accepts a power request. It
-does not go through `systemctl poweroff`: on systemd 257 logind refuses that
-even for root while any strong `block` lock is held, and CeraUI holds one while
-it streams or carries client traffic. The hold therefore gets the same policy
-as logind's own power key (`PowerKeyIgnoreInhibited=yes` in
-`60-ceralive-power-key.conf`): a deliberate press on the box always powers it
-off cleanly. A request that still fails is logged and shown as `failed`; the
-daemon keeps running and the next full hold asks again. Before this, a refused
-request raised out of the event loop, so the service restarted and the key did
-nothing while a stream was protected.
 
 The service uses Python's standard library only. `python3` moves from the debug
 delta to the shared image list, because minimal Python alone does not supply

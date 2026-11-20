@@ -13,19 +13,6 @@ import time
 
 EVENT = struct.Struct('@llHHi')  # native Linux input_event (arm64 and amd64)
 
-# A completed hold is the same deliberate act as logind's own power key, which
-# this image lets pass shutdown locks (PowerKeyIgnoreInhibited=yes). Plain
-# `systemctl poweroff` asks logind instead, and on systemd 257 logind refuses
-# even root while any strong `block` lock is held, such as CeraUI's lock while
-# it streams. So start the job logind itself starts once it accepts a request:
-# the same clean shutdown transaction, without the lock check.
-POWEROFF = ['/usr/bin/systemctl', 'start', '--no-block',
-            '--job-mode=replace-irreversibly', 'poweroff.target']
-
-
-def request_poweroff(run=subprocess.run):
-    run(POWEROFF, check=True, timeout=10)
-
 
 class Gestures:
     def __init__(self, light, poweroff):
@@ -66,14 +53,7 @@ class Gestures:
             if elapsed >= 3 and authorize() and self.down == pressed and self.down is not None:
                 self.fired = True
                 self.tap = None
-                try:
-                    self.poweroff()
-                except (OSError, subprocess.SubprocessError):
-                    # Stay up: the next full hold asks again, and a crash would
-                    # only hand the key to logind for the restart window.
-                    logging.exception('Power-off request failed')
-                    self.light('failed', 0)
-                    return
+                self.poweroff()
                 self.light('shutdown', 0)
 
     def key(self, value, now, current_time=None):
@@ -347,7 +327,8 @@ def main():
     ownership = PowerKeyOwnership()
     try:
         serve(device, '/run/ceralive-button/control.sock', light_stub,
-              request_poweroff, release_ownership=ownership.release)
+              lambda: subprocess.run(['/usr/bin/systemctl', 'poweroff'], check=True, timeout=10),
+              release_ownership=ownership.release)
     finally:
         ownership.release()
 

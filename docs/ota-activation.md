@@ -174,20 +174,12 @@ The disposable kernel runner uses the same plain root shutdown path.
 CeraUI holds a logind **block** inhibitor while encoder or client-carrying
 protection is active, including uncertain startup and cleanup. A delay would
 expire during a long session. Plain `reboot`, `systemctl reboot` and scheduled
-`shutdown` are refused while that lock is held. Skipping a strong block with
-`systemctl poweroff -i` (or `--check-inhibitors=no`) makes logind ask polkit even
-for root, and polkit 126 then gives root no implicit pass. The image ships
-polkitd (pulled in by the modem stack), so `60-ceralive-root-ignore-inhibit.rules`
-grants exactly the three `org.freedesktop.login1.*-ignore-inhibit` actions to
-root and nothing else: as root, `systemctl poweroff -i` and `systemctl reboot -i`
-are the deliberate override, while plain commands keep refusing during a stream.
-An interactive root shell is told so by systemctl itself. `--force` bypasses
-logind entirely and is not the supported procedure. The power button's
-completed hold starts `poweroff.target` directly, the same policy as the logind
-power key below (see `power-button.md`).
+`shutdown` are refused while that lock is held. The systemctl `-i` hint is not a
+working override on this systemd 257 image: skipping a strong block needs polkit,
+which is not installed. `--force` and direct target activation bypass logind;
+they are not the supported procedure.
 
-The emergency override CeraUI shows, which also works without polkit, is
-**as root**:
+The supported emergency override, also shown by CeraUI, is **as root**:
 
 ```sh
 systemctl stop ceralive

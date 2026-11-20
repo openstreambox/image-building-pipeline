@@ -78,8 +78,3 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; }
   run python3 "$ROOT/tests/power-button-contract.py" Socket.test_persistent_ioctl_failure_relinquishes_ownership
   [ "$status" -eq 0 ]
 }
-
-@test "power button: a full hold passes shutdown locks and a refused request never stops the daemon" {
-  run python3 "$ROOT/tests/power-button-contract.py" Gestures.test_poweroff_request_passes_shutdown_locks Gestures.test_refused_poweroff_keeps_the_daemon_up
-  [ "$status" -eq 0 ]
-}
