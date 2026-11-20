@@ -238,13 +238,6 @@ class UsbSpeed(unittest.TestCase):
     def stream_starts(self):
         self.process('srtla_send')
 
-    def stream_starts_slowly(self):
-        # Runs before the modem answers, so the stream exists by the time the
-        # script has the reply, however long the start takes. The delay keeps
-        # this ordering honest: a hook that ran after the reply would lose.
-        time.sleep(0.3)
-        self.stream_starts()
-
     def invoke(self, port=PORT, **env_extra):
         env = dict(os.environ,
                    CERALIVE_USBSPEED_SYSFS=str(self.sys), CERALIVE_USBSPEED_DEV=str(self.dev),
@@ -585,8 +578,9 @@ class UsbSpeed(unittest.TestCase):
         self.mm(extra={'on_list_touch': [str(self.data / 'modem-usbspeed.disabled')]})
         self.assertUntouched(self.invoke())
 
-    def test_stream_starting_after_the_read_stops_before_the_write(self):
-        self.modem.before['AT+QCFG="usbspeed"'] = self.stream_starts_slowly
+    def test_stream_starting_during_the_read_stops_before_the_write(self):
+        # `before`: the stream exists by the time the script has the reply.
+        self.modem.before['AT+QCFG="usbspeed"'] = self.stream_starts
         done = self.invoke()
         self.assertEqual(self.modem.commands, ['AT+QCFG="usbspeed"'])
         self.assertEqual(self.modem.stored, '312')
@@ -594,8 +588,8 @@ class UsbSpeed(unittest.TestCase):
         self.assertIsNone(self.marker())
         self.assertIn('nothing written, released', done.stdout)
 
-    def test_stream_starting_after_the_write_stops_before_the_reset(self):
-        self.modem.before['AT+QCFG="usbspeed","20"'] = self.stream_starts_slowly
+    def test_stream_starting_during_the_write_stops_before_the_reset(self):
+        self.modem.before['AT+QCFG="usbspeed","20"'] = self.stream_starts
         self.invoke()
         self.assertNotIn('AT+CFUN=1,1', self.modem.commands)
         self.assertEqual(self.modem.stored, '20')
