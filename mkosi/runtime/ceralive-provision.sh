@@ -54,6 +54,9 @@
 #   ceralive.service before binding the portal (Restart=always does NOT re-fire on an
 #   explicit stop), and teardown STARTS it again so CeraUI re-binds 80 on the new
 #   uplink IP (MAC6 condition d). The portal owns port 80 only while the AP is up.
+#   With the button ingress, CeraUI moves to 18080 and ceralive-button-ingress.service
+#   owns :80/:443 per address, including 192.168.42.1%wlan0 once the AP is up; it is
+#   stopped and started together with CeraUI for the same reason.
 #
 # CREDENTIAL HANDOFF (the captive-portal handoff problem): the portal POST handler
 #   writes the user's WiFi profile via nmcli (credentials land ONLY in NM's own
@@ -106,6 +109,12 @@ MACHINE_ID_FILE="${CERALIVE_MACHINE_ID_FILE:-/etc/machine-id}"
 # HANDOFF). Stopped while the AP window is up so the portal can take 80; restarted on
 # teardown. Override in tests to point at a stub.
 CERAUI_SERVICE="${CERALIVE_CERAUI_SERVICE:-ceralive.service}"
+
+# Browser front door (button-ingress). It binds :80/:443 on every eligible address,
+# including the AP gateway once wlan0 takes it, so it must leave with CeraUI or the
+# portal socket fails with EADDRINUSE. Absent on images without the ingress; the
+# stop/start below then fail quietly.
+INGRESS_SERVICE="${CERALIVE_INGRESS_SERVICE:-ceralive-button-ingress.service}"
 
 # Captive-portal serving units. The socket is started imperatively when the AP comes
 # up and stopped on teardown — installed but NOT enabled at boot.
@@ -236,10 +245,21 @@ write_dns_capture() {
 
 remove_dns_capture() { rm -f "${DNS_CAPTURE_FILE}"; }
 
-# Stopping CeraUI frees 0.0.0.0:80 for the portal's 192.168.42.1:80; an explicit stop
-# is not reversed by ceralive.service's Restart=always.
-stop_ceraui()  { "${SYSTEMCTL}" stop  "${CERAUI_SERVICE}" >/dev/null 2>&1 || true; }
-start_ceraui() { "${SYSTEMCTL}" start "${CERAUI_SERVICE}" >/dev/null 2>&1 || true; }
+# Stopping CeraUI and the ingress frees every :80 listener that could cover the
+# portal's 192.168.42.1:80 (CeraUI's own 0.0.0.0:80 on images without the ingress,
+# the ingress's device-bound 192.168.42.1%wlan0:80 with it). An explicit stop is not
+# reversed by Restart=always/on-failure, and nothing socket- or path-activates the
+# ingress. Its PartOf=ceralive-tls-firstboot.service only propagates try-restart,
+# which leaves a stopped unit stopped. Nothing needs button confirmation while the
+# AP is up: CeraUI itself is stopped.
+stop_ceraui() {
+  "${SYSTEMCTL}" stop "${INGRESS_SERVICE}" >/dev/null 2>&1 || true
+  "${SYSTEMCTL}" stop "${CERAUI_SERVICE}"  >/dev/null 2>&1 || true
+}
+start_ceraui() {
+  "${SYSTEMCTL}" start "${CERAUI_SERVICE}"  >/dev/null 2>&1 || true
+  "${SYSTEMCTL}" start "${INGRESS_SERVICE}" >/dev/null 2>&1 || true
+}
 
 start_portal_socket() {
   "${SYSTEMCTL}" start "${PORTAL_SOCKET}" >/dev/null 2>&1 \

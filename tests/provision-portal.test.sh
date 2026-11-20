@@ -14,6 +14,8 @@
 #   (d) CeraUI reachable on new IP   — ceralive.service (re)started
 #   + wrong-passphrase retry path returns to AP mode
 #   + hard-timeout path returns to AP mode (never headless-dead)
+#   + only the portal listens on 192.168.42.1:80 while the AP is up (button ingress
+#     and CeraUI stopped, both restored on teardown)
 #
 # Run: tests/provision-portal.test.sh   (also gated via tests/postinst-wiring.bats)
 #
@@ -242,6 +244,71 @@ called "systemctl stop ceralive-portal.socket"   && pass "(c) portal stopped"   
 called "systemctl start ceralive.service"        && pass "(d) CeraUI restored"           || fail "(d) CeraUI restored"
 [ ! -e "$(state_file portal-active)" ]           && pass "portal-active cleared"         || fail "portal-active cleared"
 [ ! -e "$(state_file teardown-requested)" ]      && pass "teardown-requested flag cleared" || fail "teardown-requested flag cleared"
+
+# ===========================================================================
+echo "== Scenario I: nothing but the portal listens on 192.168.42.1:80 after bring-up =="
+# A stateful systemctl models which units are active and who holds the AP gateway's
+# port 80: the button ingress binds :80 on every eligible address, so once the AP
+# gives wlan0 192.168.42.1 it holds 192.168.42.1%wlan0:80 while it runs. Starting the
+# portal socket then fails with EADDRINUSE, as on hardware.
+UNITS="${SANDBOX}/units"
+cat >"${BIN}/systemctl-stateful" <<'STUB'
+#!/usr/bin/env bash
+echo "systemctl $*" >>"$CALL_LOG"
+verb="$1"; unit="$2"
+ap_up() {
+  awk '/^nmcli connection up ceralive-ap/{u=1} /^nmcli connection down ceralive-ap/{u=0} END{exit !u}' "$CALL_LOG"
+}
+case "$verb" in
+  stop)  rm -f "$UNITS/$unit" ;;
+  start)
+    if [ "$unit" = ceralive-portal.socket ] && [ -e "$UNITS/ceralive-button-ingress.service" ] && ap_up; then
+      echo "Failed to listen on 192.168.42.1:80: Address already in use" >&2; exit 1
+    fi
+    : >"$UNITS/$unit" ;;
+esac
+exit 0
+STUB
+chmod +x "${BIN}/systemctl-stateful"
+# Who holds 192.168.42.1:80 right now, one unit per line.
+ap80_owners() {
+  awk '/^nmcli connection up ceralive-ap/{u=1} /^nmcli connection down ceralive-ap/{u=0} END{exit !u}' "${CALL_LOG}" || return 0
+  [ -e "${UNITS}/ceralive-button-ingress.service" ] && echo ceralive-button-ingress.service
+  [ -e "${UNITS}/ceralive-portal.socket" ] && echo ceralive-portal.socket
+  return 0
+}
+boot_units() { rm -rf "${UNITS}"; mkdir -p "${UNITS}"; : >"${UNITS}/ceralive.service"; : >"${UNITS}/ceralive-button-ingress.service"; }
+
+reset_state; boot_units
+: >"$(state_file force-portal)"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/dev/null \
+    bash "${PROVISION}" start >/dev/null 2>&1
+OWNERS="$(ap80_owners)"
+[ "${OWNERS}" = "ceralive-portal.socket" ]       && pass "portal is the only listener on 192.168.42.1:80" || fail "portal is the only listener on 192.168.42.1:80 (got: ${OWNERS//$'\n'/, })"
+[ ! -e "${UNITS}/ceralive-button-ingress.service" ] && pass "button ingress stopped while the AP is up" || fail "button ingress stopped while the AP is up"
+[ ! -e "${UNITS}/ceralive.service" ]             && pass "CeraUI stopped while the AP is up" || fail "CeraUI stopped while the AP is up"
+
+# Failed join re-arms the AP: the ingress stays down and the portal comes back alone.
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=4 STUB_CON_SSID=HomeNet \
+    bash "${PROVISION}" connect ceralive-wifi >/dev/null 2>&1
+OWNERS="$(ap80_owners)"
+[ "${OWNERS}" = "ceralive-portal.socket" ]       && pass "re-armed portal is the only listener on 192.168.42.1:80" || fail "re-armed portal is the only listener on 192.168.42.1:80 (got: ${OWNERS//$'\n'/, })"
+
+# Successful join tears down: the portal is gone, CeraUI and the ingress are back.
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=0 STUB_CONNECTIVITY=full STUB_CON_SSID=HomeNet \
+    bash "${PROVISION}" connect ceralive-wifi >/dev/null 2>&1
+[ ! -e "${UNITS}/ceralive-portal.socket" ]       && pass "portal socket stopped after the join" || fail "portal socket stopped after the join"
+[ -e "${UNITS}/ceralive-button-ingress.service" ] && pass "button ingress restarted after the join" || fail "button ingress restarted after the join"
+[ -e "${UNITS}/ceralive.service" ]               && pass "CeraUI restarted after the join" || fail "CeraUI restarted after the join"
+
+# A plain service stop (shutdown or manual) also hands the front door back.
+reset_state; boot_units
+: >"$(state_file force-portal)"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE=/dev/null \
+    bash "${PROVISION}" start >/dev/null 2>&1
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" bash "${PROVISION}" stop >/dev/null 2>&1
+[ -e "${UNITS}/ceralive-button-ingress.service" ] && pass "button ingress restored by stop" || fail "button ingress restored by stop"
+[ ! -e "${UNITS}/ceralive-portal.socket" ]       && pass "portal socket stopped by stop" || fail "portal socket stopped by stop"
 
 echo
 if [ "${FAILED}" -eq 0 ]; then
