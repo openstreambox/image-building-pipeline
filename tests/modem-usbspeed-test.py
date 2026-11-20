@@ -86,6 +86,7 @@ class FakeModem(threading.Thread):
         self.read_error = self.ignore_write = self.cfun_silent = False
         self.cfun_reply = 'OK'
         self.hooks = {}          # command -> callable run after the reply
+        self.before = {}         # command -> callable run before the reply is sent
         self.commands, self.stop = [], threading.Event()
 
     def reply(self, text):
@@ -109,6 +110,9 @@ class FakeModem(threading.Thread):
                 if not command:
                     continue
                 self.commands.append(command)
+                early = self.before.get(command)
+                if early:
+                    early()
                 if self.echo:
                     self.reply(command + '\r\n')
                 if command == 'AT+QCFG="usbspeed"':
@@ -233,6 +237,13 @@ class UsbSpeed(unittest.TestCase):
 
     def stream_starts(self):
         self.process('srtla_send')
+
+    def stream_starts_slowly(self):
+        # Runs before the modem answers, so the stream exists by the time the
+        # script has the reply, however long the start takes. The delay keeps
+        # this ordering honest: a hook that ran after the reply would lose.
+        time.sleep(0.3)
+        self.stream_starts()
 
     def invoke(self, port=PORT, **env_extra):
         env = dict(os.environ,
@@ -575,7 +586,7 @@ class UsbSpeed(unittest.TestCase):
         self.assertUntouched(self.invoke())
 
     def test_stream_starting_after_the_read_stops_before_the_write(self):
-        self.modem.hooks['AT+QCFG="usbspeed"'] = self.stream_starts
+        self.modem.before['AT+QCFG="usbspeed"'] = self.stream_starts_slowly
         done = self.invoke()
         self.assertEqual(self.modem.commands, ['AT+QCFG="usbspeed"'])
         self.assertEqual(self.modem.stored, '312')
@@ -584,7 +595,7 @@ class UsbSpeed(unittest.TestCase):
         self.assertIn('nothing written, released', done.stdout)
 
     def test_stream_starting_after_the_write_stops_before_the_reset(self):
-        self.modem.hooks['AT+QCFG="usbspeed","20"'] = self.stream_starts
+        self.modem.before['AT+QCFG="usbspeed","20"'] = self.stream_starts_slowly
         self.invoke()
         self.assertNotIn('AT+CFUN=1,1', self.modem.commands)
         self.assertEqual(self.modem.stored, '20')
