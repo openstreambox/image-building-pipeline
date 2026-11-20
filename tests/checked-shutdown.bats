@@ -86,22 +86,27 @@ STUB
   grep -Fxq 'HandlePowerKeyLongPress=poweroff' "$policy"
 }
 
-@test "root may override shutdown locks only on purpose, through polkit" {
+@test "the power override is granted only to administrators at a terminal, through polkit" {
   export CERALIVE_RUNTIME_SRC="$ROOT/mkosi/runtime"
   export CERALIVE_POWER_HELPER_DIR="$BATS_TEST_TMPDIR/helpers"
   export CERALIVE_LOGIND_CONF_DIR="$BATS_TEST_TMPDIR/logind.conf.d"
   export CERALIVE_POLKIT_RULES_DIR="$BATS_TEST_TMPDIR/rules.d"
   run bash -euc 'source "$1"; enable_service() { :; }; setup_power_policy' _ "$ROOT/mkosi/customize/postinst.d/services.sh"
   [ "$status" -eq 0 ]
-  local rule="$CERALIVE_POLKIT_RULES_DIR/60-ceralive-root-ignore-inhibit.rules"
+  local rule="$CERALIVE_POLKIT_RULES_DIR/60-ceralive-power-override.rules"
   [ "$(stat -c %a "$rule")" = 644 ]
-  cmp "$ROOT/mkosi/runtime/60-ceralive-root-ignore-inhibit.rules" "$rule"
-  # Only the three ignore-inhibit actions, only for root; nothing else is granted.
-  grep -Fq 'subject.user == "root"' "$rule"
+  cmp "$ROOT/mkosi/runtime/60-ceralive-power-override.rules" "$rule"
+  # Only login1 power actions: the three overrides, the plain actions and their
+  # multiple-session variants. Nothing else is named.
+  [ "$(grep -oE '"org\.freedesktop\.[a-z0-9.-]+"' "$rule" | tr -d '"' | sort | tr '\n' ' ')" = \
+    "org.freedesktop.login1.halt org.freedesktop.login1.halt-ignore-inhibit org.freedesktop.login1.halt-multiple-sessions org.freedesktop.login1.power-off org.freedesktop.login1.power-off-ignore-inhibit org.freedesktop.login1.power-off-multiple-sessions org.freedesktop.login1.reboot org.freedesktop.login1.reboot-ignore-inhibit org.freedesktop.login1.reboot-multiple-sessions " ]
+  # Root or the sudo group, an interactive login unit, a controlling terminal.
+  grep -Fq 'subject.user != "root" && !subject.isInGroup("sudo")' "$rule"
+  grep -Fq 'var ceraliveTerminalUnit = /^(session-[A-Za-z0-9]+\.scope|ssh\.service|tailscaled\.service)$/;' "$rule"
+  grep -Fq 'if (!ceraliveHasTerminal(subject.pid))' "$rule"
+  # One grant, everything else falls through to polkit's defaults.
   [ "$(grep -c 'polkit.Result.YES' "$rule")" -eq 1 ]
-  [ "$(grep -oE 'org\.freedesktop\.[a-z0-9.-]+' "$rule" | sort -u | tr '\n' ' ')" = \
-    "org.freedesktop.login1.halt-ignore-inhibit org.freedesktop.login1.power-off-ignore-inhibit org.freedesktop.login1.reboot-ignore-inhibit " ]
-  ! grep -Eq 'Result\.(AUTH|NO)|subject\.isInGroup|subject\.local' "$rule"
+  ! grep -Eq 'Result\.(AUTH_SELF|NO\b)|ceralive\.service' <(grep -v '^//' "$rule")
 }
 
 @test "TERM to the helper itself reports uncertainty and never retries" {

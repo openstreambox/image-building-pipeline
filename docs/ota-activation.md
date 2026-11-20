@@ -177,12 +177,28 @@ expire during a long session. Plain `reboot`, `systemctl reboot` and scheduled
 `shutdown` are refused while that lock is held. Skipping a strong block with
 `systemctl poweroff -i` (or `--check-inhibitors=no`) makes logind ask polkit even
 for root, and polkit 126 then gives root no implicit pass. The image ships
-polkitd (pulled in by the modem stack), so `60-ceralive-root-ignore-inhibit.rules`
-grants exactly the three `org.freedesktop.login1.*-ignore-inhibit` actions to
-root and nothing else: as root, `systemctl poweroff -i` and `systemctl reboot -i`
-are the deliberate override, while plain commands keep refusing during a stream.
-An interactive root shell is told so by systemctl itself. `--force` bypasses
-logind entirely and is not the supported procedure. The power button's
+polkitd (pulled in by the modem stack), and `60-ceralive-power-override.rules`
+answers that question for a person at a terminal:
+
+- **Who:** root, or a member of `sudo` (the `ceralive` login user). The
+  Tailscale SSH user reaches root through its sudoers drop-in.
+- **Where from:** a logind session scope (`session-*.scope`: OpenSSH with PAM,
+  console), `ssh.service`, or `tailscaled.service` (Tailscale SSH shells, which
+  run without a logind session because tailscaled is not root). The unit comes
+  from polkit's `subject.system_unit`; an unknown unit is refused.
+- **How:** the calling process must have a controlling terminal, so `ssh box
+  'systemctl poweroff -i'` without a terminal, timers and daemons are refused.
+- **What:** the three `org.freedesktop.login1.*-ignore-inhibit` actions, plus,
+  for `sudo` members, the plain `power-off`, `reboot`, `halt` actions and their
+  `-multiple-sessions` variants, which would otherwise ask for a password a
+  remote session cannot give.
+- **Never:** CeraUI (`ceralive.service`, root, no terminal), the web front,
+  other services or user services; they fail the unit or terminal check and
+  fall through to polkit's defaults, which refuse non-interactively.
+
+Plain `poweroff` and `reboot` keep refusing during a stream for everyone, and an
+interactive shell is told why by systemctl itself, with the `-i` hint. `--force`
+bypasses logind entirely and is not the supported procedure. The power button's
 completed hold starts `poweroff.target` directly, the same policy as the logind
 power key below (see `power-button.md`).
 
