@@ -155,7 +155,39 @@ install_first_party_apps() {
       || die "ceralive-device did not install ceralive.service"
     systemctl enable ceralive.service
     log "enabled ceralive.service for multi-user boot"
+    keep_ceraui_workdir_helpers
   fi
+}
+
+# ---------------------------------------------------------------------------
+# keep_ceraui_workdir_helpers [root] — keep an image-owned copy of the programs
+# CeraUI runs from its working directory, outside that directory.
+#
+# CeraUI starts its captive-portal sign-in helper as
+# `python3 -I <WorkingDirectory>/captive-portal-window.py`, and the .deb installs
+# it under /opt/ceralive. On the device /data/ceralive is bind-mounted over
+# /opt/ceralive (customize/postinst.d/persistence.sh), which hides the rootfs
+# copy, so the backend cannot find it. The copy kept here sits outside the bind;
+# ceralive-migrate-data links /data/ceralive/<name> to it on every boot, the way
+# the seeded "public" link points at /var/www/ceralive, so the helper a box runs
+# is the one its current slot shipped. Exception: once an in-place CeraUI package
+# upgrade writes a regular file there, that file stays and wins over later OTAs.
+# This helper serves CeraUI's captive Wi-Fi sign-in window; the pipeline's own
+# first-boot setup AP (ceralive-provision/ceralive-portal) does not use it.
+# ---------------------------------------------------------------------------
+CERAUI_WORKDIR_HELPERS=(captive-portal-window.py)
+CERAUI_WORKDIR_HELPERS_DIR="/usr/libexec/ceralive/ceraui-workdir"
+keep_ceraui_workdir_helpers() {
+  local root="${1:-}" name src
+  for name in "${CERAUI_WORKDIR_HELPERS[@]}"; do
+    src="${root}/opt/ceralive/${name}"
+    if [[ ! -f "${src}" ]]; then
+      log "ceralive-device ships no /opt/ceralive/${name}; nothing to keep outside the /data bind"
+      continue
+    fi
+    install -D -m 0755 "${src}" "${root}${CERAUI_WORKDIR_HELPERS_DIR}/${name}"
+    log "kept /opt/ceralive/${name} at ${CERAUI_WORKDIR_HELPERS_DIR}/${name} (the /data bind hides the original)"
+  done
 }
 
 # ---------------------------------------------------------------------------
