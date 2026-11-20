@@ -2,6 +2,8 @@
 Description=Manage staged RAUC activation (%i)
 Wants=rauc.service
 After=rauc.service dbus.service
+# A shutdown waits for a running activation (ceralive-write-drain.service).
+Before=ceralive-write-drain.service
 RequiresMountsFor=/data /boot
 
 [Service]

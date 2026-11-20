@@ -1,0 +1,22 @@
+[Unit]
+Description=Admission broker for deliberate power-off and reboot requests
+Requires=ceralive-power.socket
+After=ceralive-power.socket dbus.service systemd-logind.service
+# A power request must always find the broker: never give up restarting it.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# One long-running instance: the polkit rule matches this exact unit, and no
+# per-connection instances can exhaust a socket trigger limit.
+ExecStart=/usr/bin/python3 -I /usr/libexec/ceralive/ceralive-power-broker
+Restart=always
+RestartSec=1s
+StandardOutput=journal
+UMask=0022
+NoNewPrivileges=yes
+ProtectHome=read-only
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

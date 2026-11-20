@@ -174,12 +174,16 @@ The disposable kernel runner uses the same plain root shutdown path.
 CeraUI holds a logind **block** inhibitor while encoder or client-carrying
 protection is active, including uncertain startup and cleanup. A delay would
 expire during a long session. Plain `reboot`, `systemctl reboot` and scheduled
-`shutdown` are refused while that lock is held. The systemctl `-i` hint is not a
-working override on this systemd 257 image: skipping a strong block needs polkit,
-which is not installed. `--force` and direct target activation bypass logind;
-they are not the supported procedure.
+`shutdown` are refused while that lock is held, and so is `systemctl poweroff -i`:
+logind asks polkit for it even for root, and the image's rule answers `no` to
+everyone but the power admission broker. A deliberate power-off or reboot during a
+stream goes through that broker (`ceralive-poweroff` / `ceralive-reboot` with a
+typed confirmation, the button's hold, or CeraUI's admitted action), which waits for
+running writes first; see `power-admission.md`. `--force` and direct target
+activation bypass logind; they are not the supported procedure.
 
-The supported emergency override, also shown by CeraUI, is **as root**:
+The emergency override CeraUI shows, which works without the broker, is
+**as root**:
 
 ```sh
 systemctl stop ceralive

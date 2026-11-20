@@ -160,6 +160,7 @@ install_rootfs() {
 
   mkdir -p "${root}/etc/rauc"
   install -D -m 0755 "${SCRIPT_DIR}/../../runtime/rauc/ceralive-post-install" "${root}/usr/lib/rauc/ceralive-post-install"
+  install -D -m 0755 "${SCRIPT_DIR}/../../runtime/rauc/ceralive-pre-install" "${root}/usr/lib/rauc/ceralive-pre-install"
   log "writing ${root}/etc/rauc/system.conf (bootloader=grub, compatible=${COMPATIBLE}, grubenv=${GRUBENV_DEVICE_PATH}, single_slot=${SINGLE_SLOT_FALLBACK})"
   {
     cat <<EOF
@@ -182,6 +183,7 @@ grubenv=${GRUBENV_DEVICE_PATH}
 boot-attempts=${BOOT_ATTEMPTS}
 
 [handlers]
+pre-install=/usr/lib/rauc/ceralive-pre-install
 post-install=/usr/lib/rauc/ceralive-post-install
 
 [keyring]
