@@ -118,6 +118,8 @@ die()  { log "FATAL: $*"; exit 1; }
 # --- config / test seams (overridable for the offline proof harness) ----------
 NMCLI="${NMCLI:-nmcli}"
 IP_BIN="${IP_BIN:-ip}"
+IW_BIN="${IW_BIN:-iw}"
+SYSFS_NET="${CERALIVE_SYSFS_NET:-/sys/class/net}"
 SYSTEMCTL="${SYSTEMCTL:-systemctl}"
 SYSTEMD_RUN="${SYSTEMD_RUN:-systemd-run}"
 TIMEOUT_BIN="${TIMEOUT_BIN:-timeout}"   # set empty to skip the outer hard-timeout wrapper
@@ -245,18 +247,38 @@ write_ap_record() {
   return 1
 }
 
-# Whether any connection in AP mode is active on ${AP_IFACE}: 0 = yes, 1 = no, 2 = NM
-# could not be read (or an active connection's mode could not). The setup AP is bound
-# to ${AP_IFACE}, so 1 proves no setup AP is up whatever its UUID was.
+# Active and activating connection UUIDs, one per line. The query names an active-only
+# field (ACTIVE-PATH): with UUID alone nmcli prints only rows that still have a saved
+# profile, and an active setup AP whose profile is gone would be missing from both
+# lists. Non-zero when NM cannot be read.
+active_uuids() {
+  local rows
+  rows="$("${NMCLI}" -t -f UUID,ACTIVE-PATH connection show --active 2>/dev/null)" || return 1
+  awk -F: '$1 != "" { print $1 }' <<<"${rows}"
+}
+
+# Whether ${AP_IFACE} is an AP right now, from live state rather than profiles:
+# 0 = it is (kernel type AP, AP/VLAN or P2P-GO), 1 = positive evidence it is not (the
+# interface does not exist, or NM has it settled - unmanaged, unavailable,
+# disconnected or connected - and the kernel reports a station-side type), 2 =
+# anything ambiguous: NM or iw unreadable, NM still activating or deactivating, or a
+# blank or unknown type. The setup AP is bound to ${AP_IFACE}, so 1 proves no setup AP
+# is up whatever its UUID was.
 ap_mode_active_on_iface() {
-  local rows uuid dev mode
-  rows="$("${NMCLI}" -t -f UUID,DEVICE connection show --active 2>/dev/null)" || return 2
-  while IFS=: read -r uuid dev; do
-    [ "${dev}" = "${AP_IFACE}" ] && [ -n "${uuid}" ] || continue
-    mode="$("${NMCLI}" -g 802-11-wireless.mode connection show uuid "${uuid}" 2>/dev/null)" || return 2
-    [ "${mode}" = ap ] && return 0
-  done <<<"${rows}"
-  return 1
+  local state info type
+  [ -e "${SYSFS_NET}/${AP_IFACE}" ] || return 1
+  state="$("${NMCLI}" -g GENERAL.STATE device show "${AP_IFACE}" 2>/dev/null)" || return 2
+  case "${state%% *}" in
+    10|20|30|100) ;;
+    *) return 2 ;;
+  esac
+  info="$("${IW_BIN}" dev "${AP_IFACE}" info 2>/dev/null)" || return 2
+  type="$(awk '$1 == "type" { $1 = ""; sub(/^ +/, ""); print; exit }' <<<"${info}")"
+  case "${type}" in
+    AP|AP/VLAN|P2P-GO) return 0 ;;
+    managed|monitor|P2P-client|P2P-device) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 # An uncertain record (see recorded_ap_uuids) is retired only on the stronger proof
@@ -316,7 +338,7 @@ setup_ap_active() {
   uuids="$(setup_ap_uuids)" || return 2
   uuids="$(printf '%s\n%s\n' "${rec}" "${uuids}" | awk 'NF && !seen[$0]++')"
   [ -n "${uuids}" ] || return 1
-  active="$("${NMCLI}" -t -f UUID connection show --active 2>/dev/null)" || return 2
+  active="$(active_uuids)" || return 2
   grep -qxF -f <(printf '%s\n' "${uuids}") <<<"${active}" && return 0
   return 1
 }
@@ -364,7 +386,7 @@ prune_ap_record() {
   rec="$(recorded_ap_uuids)" || return 1
   [ -n "${rec}" ] || return 0
   list="$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" || return 1
-  active="$("${NMCLI}" -t -f UUID connection show --active 2>/dev/null)" || return 1
+  active="$(active_uuids)" || return 1
   keep="$(awk -F: 'NR == FNR { if (NF) k[$NF] = 1; next } ($0 in k)' \
             <(printf '%s\n%s\n' "$(cut -d: -f2 <<<"${list}")" "${active}") <(printf '%s\n' "${rec}"))"
   if ! write_ap_record "${keep}"; then
@@ -386,7 +408,7 @@ release_marker() {
   setup_ap_active || st=$?
   case "${st}" in
     0) log "ERROR: setup AP still active on ${AP_IFACE}; keeping the setup marker (CeraUI keeps off ${AP_IFACE})"; return 1 ;;
-    2) log "ERROR: could not read NetworkManager to confirm the setup AP is down; keeping the setup marker"; return 1 ;;
+    2) log "ERROR: could not confirm the setup AP is down (NetworkManager or ${AP_IFACE} state unreadable or ambiguous); keeping the setup marker"; return 1 ;;
   esac
   if ! rm -f "${ACTIVE_FLAG}" 2>/dev/null || [ -e "${ACTIVE_FLAG}" ]; then
     log "ERROR: could not remove the setup marker ${ACTIVE_FLAG}; CeraUI keeps deferring ${AP_IFACE}"

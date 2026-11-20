@@ -76,9 +76,16 @@ drop_uuid() { for f in "$P" "$D" "$A"; do grep -v -- "$1" "$f" >"$f.tmp"; mv "$f
 case "$args" in
   *"dev wifi list"*) [ -n "${STUB_SCAN_FILE:-}" ] && cat "$STUB_SCAN_FILE"; exit 0 ;;
   *"-f CONNECTIVITY general status"*) printf "%s\n" "${STUB_CONNECTIVITY:-full}"; exit 0 ;;
-  *"-f UUID,DEVICE connection show --active"*) [ -n "${STUB_NM_READ_RC:-}${STUB_ACTIVE_READ_RC:-}" ] && exit "${STUB_NM_READ_RC:-$STUB_ACTIVE_READ_RC}"
-                                               sed 's/$/:wlan0/' "$A"; exit 0 ;;
-  *"-f UUID connection show --active"*) [ -n "${STUB_NM_READ_RC:-}${STUB_ACTIVE_READ_RC:-}" ] && exit "${STUB_NM_READ_RC:-$STUB_ACTIVE_READ_RC}"; cat "$A"; exit 0 ;;
+  # NM 1.52.1's projections: a UUID-only request prints only active rows that still
+  # have a saved profile; naming an active field (ACTIVE-PATH) prints every active or
+  # activating connection, orphans included.
+  *"-f UUID,ACTIVE-PATH connection show --active"*) [ -n "${STUB_NM_READ_RC:-}${STUB_ACTIVE_READ_RC:-}" ] && exit "${STUB_NM_READ_RC:-$STUB_ACTIVE_READ_RC}"
+                                                    n=0; while read -r u; do n=$((n+1)); [ -n "$u" ] && echo "$u:/org/freedesktop/NetworkManager/ActiveConnection/$n"; done <"$A"; exit 0 ;;
+  *"-f UUID connection show --active"*) [ -n "${STUB_NM_READ_RC:-}${STUB_ACTIVE_READ_RC:-}" ] && exit "${STUB_NM_READ_RC:-$STUB_ACTIVE_READ_RC}"
+                                        while read -r u; do grep -q ":$u:" "$P" && echo "$u"; done <"$A"; exit 0 ;;
+  *"-g GENERAL.STATE device show"*) [ -n "${STUB_DEV_READ_RC:-}" ] && exit "$STUB_DEV_READ_RC"
+                                    if [ -n "${STUB_DEV_STATE:-}" ]; then echo "$STUB_DEV_STATE"
+                                    elif [ -s "$A" ]; then echo "100 (connected)"; else echo "30 (disconnected)"; fi; exit 0 ;;
   *"-f NAME,UUID,TYPE connection show"*) [ -n "${STUB_NM_READ_RC:-}" ] && exit "$STUB_NM_READ_RC"; cat "$P"; exit 0 ;;
   *"-g 802-11-wireless.mode connection show uuid "*) [ -n "${STUB_MODE_READ_RC:-}" ] && exit "$STUB_MODE_READ_RC"
                              set -- $args; field="$2"; uuid="${!#}"
@@ -114,6 +121,26 @@ exit 0
 STUB
 chmod +x "${BIN}/nmcli"
 
+# iw: the kernel's view of wlan0. By default it follows the NM model's ground truth (an
+# active connection whose stored mode is ap makes wlan0 type AP); STUB_IW_TYPE overrides
+# it (set but empty prints no type line), STUB_IW_RC makes it fail.
+cat >"${BIN}/iw" <<'STUB'
+#!/usr/bin/env bash
+echo "iw $*" >>"$CALL_LOG"
+[ -n "${STUB_IW_RC:-}" ] && exit "$STUB_IW_RC"
+printf 'Interface %s\n\tifindex 3\n' "$2"
+if [ -n "${STUB_IW_TYPE+x}" ]; then
+  [ -n "$STUB_IW_TYPE" ] && printf '\ttype %s\n' "$STUB_IW_TYPE"
+  exit 0
+fi
+t=managed
+while read -r u; do
+  [ -n "$u" ] && grep -qx "$u 802-11-wireless.mode ap" "$NMSTATE/details" && t=AP
+done <"$NMSTATE/active"
+printf '\ttype %s\n' "$t"
+STUB
+chmod +x "${BIN}/iw"
+
 make_stub ip \
   'echo "ip $*" >>"$CALL_LOG"' \
   '[ -n "${STUB_DEFAULT_ROUTE:-}" ] && echo "default via 10.0.0.1"; exit 0'
@@ -141,7 +168,8 @@ make_stub busctl \
   'esac'
 
 export PATH="${BIN}:${PATH}"
-export NMCLI="${BIN}/nmcli" IP_BIN="${BIN}/ip" SYSTEMCTL="${BIN}/systemctl"
+SYSNET="${SANDBOX}/sysnet"; mkdir -p "${SYSNET}/wlan0"
+export NMCLI="${BIN}/nmcli" IP_BIN="${BIN}/ip" SYSTEMCTL="${BIN}/systemctl" IW_BIN="${BIN}/iw" CERALIVE_SYSFS_NET="${SYSNET}"
 export SYSTEMD_RUN="${BIN}/systemd-run" TIMEOUT_BIN="${BIN}/timeout"
 export CERALIVE_BUSCTL="${BIN}/busctl" CERALIVE_TIMEOUT="${BIN}/timeout"
 export CERALIVE_MACHINE_ID_FILE="${MACHINE_ID}"
@@ -783,7 +811,7 @@ for verb in stop service-stop; do
   env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running STUB_NM_READ_RC=8 \
       bash "${PROVISION}" "${verb}" >"${OUTF}" 2>&1
   rc=$?
-  [ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] && grep -q "ERROR: could not read NetworkManager" "${OUTF}" \
+  [ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] && grep -q "ERROR: could not confirm the setup AP is down" "${OUTF}" \
                                                  && pass "${verb}: NM unreadable → marker kept, non-zero, logged" || fail "${verb}: NM unreadable → marker kept, non-zero, logged (rc=${rc})"
   # Only the active-connection read fails: still no evidence, marker kept.
   up_ap_model
@@ -985,10 +1013,10 @@ no_portal_boot STUB_DELETE_RC=1; rc=$?
                                                  && pass "undeletable saved setup AP stays recorded" || fail "undeletable saved setup AP stays recorded (rc=${rc})"
 # ...and with NM unreadable, too.
 up_ap_model; : >"$(state_file ap-uuid)"
-env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running STUB_ACTIVE_READ_RC=8 bash "${PROVISION}" stop >/dev/null 2>&1
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running STUB_DEV_READ_RC=8 bash "${PROVISION}" stop >/dev/null 2>&1
 rc=$?
 [ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] \
-                                                 && pass "empty record, NM unreadable: marker kept, non-zero" || fail "empty record, NM unreadable: marker kept, non-zero (rc=${rc})"
+                                                 && pass "empty record, wlan0 device state unreadable: marker kept, non-zero" || fail "empty record, wlan0 device state unreadable: marker kept, non-zero (rc=${rc})"
 # An uncertain record is released only when no AP at all is active on wlan0; it is set
 # aside, not deleted, and a station on wlan0 does not count as an AP.
 up_ap_model; : >"$(state_file ap-uuid)"; echo "${STATION_UUID}" >>"${NMSTATE}/active"
@@ -1017,6 +1045,59 @@ reset_state; boot_units; : >"$(state_file force-portal)"
 rc=$?
 [ "${rc}" -ne 0 ] && ! called "connection add" && [ ! -e "$(state_file portal-active)" ] && [ -e "${UNITS}/ceralive.service" ] \
                                                  && pass "no UUID available: no AP, marker released, front door back" || fail "no UUID available: no AP, marker released, front door back (rc=${rc})"
+
+
+# ===========================================================================
+echo "== Scenario U: activity comes from NM's active objects and wlan0's live state =="
+# An active setup AP whose profile is gone appears only when an active field is named.
+reset_state; boot_units; seed_setup_ap; echo "${AP_UUID}" >>"${NMSTATE}/active"; unlist_ap
+"${NMCLI}" -t -f UUID connection show --active >"${SANDBOX}/proj-uuid" 2>/dev/null
+"${NMCLI}" -t -f UUID,ACTIVE-PATH connection show --active >"${SANDBOX}/proj-path" 2>/dev/null
+[ ! -s "${SANDBOX}/proj-uuid" ] && grep -q "^${AP_UUID}:" "${SANDBOX}/proj-path" \
+                                                 && pass "stub models NM 1.52.1: orphan only in the active-field projection" || fail "stub models NM 1.52.1: orphan only in the active-field projection"
+: >"${CALL_LOG}"
+printf 'ssid=CeraLive-Setup-f00d\n' >"$(state_file portal-active)"
+no_portal_boot STUB_AP_DOWN_RC=10; rc=$?
+[ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] && grep -qx "${AP_UUID}" "$(state_file ap-uuid)" \
+                                                 && pass "orphaned active setup AP: stale boot keeps marker and record" || fail "orphaned active setup AP: stale boot keeps marker and record (rc=${rc})"
+grep -q "connection show --active" "${CALL_LOG}" && ! grep -qE -- "-f UUID connection show --active" "${CALL_LOG}" \
+                                                 && pass "active checks always name an active field" || fail "active checks always name an active field"
+
+# Uncertain record: only positive live evidence of "no AP on wlan0" releases.
+uncertain_stop() { # extra env; empty record, setup AP left up by a failed down unless said otherwise
+  up_ap_model; : >"$(state_file ap-uuid)"
+  env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running "$@" bash "${PROVISION}" stop >"${OUTF}" 2>&1
+}
+# The probe: the active connection's mode reads blank, but wlan0 is an AP.
+up_ap_model; : >"$(state_file ap-uuid)"
+grep -v "^${AP_UUID} 802-11-wireless.mode " "${NMSTATE}/details" >"${NMSTATE}/d.new"; mv "${NMSTATE}/d.new" "${NMSTATE}/details"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_SYSTEM_STATE=running STUB_AP_DOWN_RC=10 STUB_IW_TYPE=AP bash "${PROVISION}" stop >/dev/null 2>&1
+rc=$?
+[ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] \
+                                                 && pass "blank profile mode but wlan0 is an AP: marker kept" || fail "blank profile mode but wlan0 is an AP: marker kept (rc=${rc})"
+uncertain_stop STUB_IW_TYPE=""; rc=$?
+[ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] && grep -q "could not confirm the setup AP is down" "${OUTF}" \
+                                                 && pass "blank kernel type: marker kept as ambiguous" || fail "blank kernel type: marker kept as ambiguous (rc=${rc})"
+uncertain_stop STUB_IW_TYPE=AP; rc=$?
+[ "${rc}" -ne 0 ] && grep -q "ERROR: setup AP still active" "${OUTF}" \
+                                                 && pass "kernel type AP: reported as an active AP" || fail "kernel type AP: reported as an active AP (rc=${rc})"
+uncertain_stop STUB_IW_TYPE="mesh point"; rc=$?
+[ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] && pass "unclassified kernel type: marker kept" || fail "unclassified kernel type: marker kept (rc=${rc})"
+uncertain_stop STUB_IW_RC=237; rc=$?
+[ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] && pass "iw unreadable: marker kept" || fail "iw unreadable: marker kept (rc=${rc})"
+uncertain_stop STUB_DEV_STATE="70 (ip-config)" STUB_IW_TYPE=managed; rc=$?
+[ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] && pass "wlan0 still activating: marker kept" || fail "wlan0 still activating: marker kept (rc=${rc})"
+uncertain_stop STUB_DEV_STATE="110 (deactivating)" STUB_IW_TYPE=managed; rc=$?
+[ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] && pass "wlan0 deactivating: marker kept" || fail "wlan0 deactivating: marker kept (rc=${rc})"
+uncertain_stop STUB_IW_TYPE=P2P-GO; rc=$?
+[ "${rc}" -ne 0 ] && [ -e "$(state_file portal-active)" ] && grep -q "ERROR: setup AP still active" "${OUTF}" && pass "wlan0 a P2P group owner: marker kept" || fail "wlan0 a P2P group owner: marker kept (rc=${rc})"
+# Positive evidence: settled device, station-side type, or no wlan0 at all.
+uncertain_stop; rc=$?
+[ "${rc}" -eq 0 ] && [ ! -e "$(state_file portal-active)" ] && pass "AP down, wlan0 disconnected and managed: marker released" || fail "AP down, wlan0 disconnected and managed: marker released (rc=${rc})"
+rmdir "${SYSNET}/wlan0"
+uncertain_stop STUB_IW_RC=237 STUB_DEV_READ_RC=8; rc=$?
+mkdir -p "${SYSNET}/wlan0"
+[ "${rc}" -eq 0 ] && [ ! -e "$(state_file portal-active)" ] && pass "no wlan0 at all: marker released" || fail "no wlan0 at all: marker released (rc=${rc})"
 
 # Upstream's shutdown cases (12056fa, 07c1820): a blocking start during ExecStop
 # waits behind the shutdown transaction; model that by refusing every blocking call.

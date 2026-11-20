@@ -166,9 +166,18 @@ identifies the profile if its settings change later. A profile from an older run
 without that record counts as the setup's only on positive evidence: connection
 name, AP mode, this device's `CeraLive-Setup-<short-id>` SSID and the
 `192.168.42.1/24` address. An empty, unreadable or malformed `ap-uuid` counts as
-uncertain, never as "no setup AP": the marker then goes only if NetworkManager shows
-no AP-mode connection active on `wlan0` at all, and only that same proof lets a
-later run set the record aside (as `ap-uuid.unreadable`) and start a fresh one. A failed delete or an
+uncertain, never as "no setup AP". The marker then goes only on live evidence that
+`wlan0` is not an AP: the interface doesn't exist, or NetworkManager has it in a
+settled state (unmanaged, unavailable, disconnected or connected) and
+`iw dev wlan0 info` reports a station-side type. A blank or unknown type, a device
+still activating or deactivating, or anything unreadable keeps the marker. Only that
+same proof lets a later run set the record aside (as `ap-uuid.unreadable`) and start
+a fresh one.
+
+Whether a recorded setup AP is still active comes from
+`nmcli -t -f UUID,ACTIVE-PATH connection show --active`. Naming an active field makes
+nmcli list every active or activating connection, including one whose saved profile
+is gone; a UUID-only request lists only rows that still have a profile. A failed delete or an
 unreadable NetworkManager is logged, `last-error` stays, and the run exits non-zero.
 
 Whenever provisioning hands the front door back (after a join, on `stop`/`teardown`, or
