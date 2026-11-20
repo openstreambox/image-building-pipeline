@@ -54,6 +54,9 @@
 #   ceralive.service before binding the portal (Restart=always does NOT re-fire on an
 #   explicit stop), and teardown STARTS it again so CeraUI re-binds 80 on the new
 #   uplink IP (MAC6 condition d). The portal owns port 80 only while the AP is up.
+#   With the button ingress, CeraUI moves to 18080 and ceralive-button-ingress.service
+#   owns :80/:443 per address, including 192.168.42.1%wlan0 once the AP is up; it is
+#   stopped and started together with CeraUI for the same reason.
 #
 # CREDENTIAL HANDOFF (the captive-portal handoff problem): the portal POST handler
 #   writes the user's WiFi profile via nmcli (credentials land ONLY in NM's own
@@ -106,6 +109,12 @@ MACHINE_ID_FILE="${CERALIVE_MACHINE_ID_FILE:-/etc/machine-id}"
 # HANDOFF). Stopped while the AP window is up so the portal can take 80; restarted on
 # teardown. Override in tests to point at a stub.
 CERAUI_SERVICE="${CERALIVE_CERAUI_SERVICE:-ceralive.service}"
+
+# Browser front door (button-ingress). It binds :80/:443 on every eligible address,
+# including the AP gateway once wlan0 takes it, so it must leave with CeraUI or the
+# portal socket fails with EADDRINUSE. Absent on images without the ingress; the
+# stop/start below then fail quietly.
+INGRESS_SERVICE="${CERALIVE_INGRESS_SERVICE:-ceralive-button-ingress.service}"
 
 # Captive-portal serving units. The socket is started imperatively when the AP comes
 # up and stopped on teardown — installed but NOT enabled at boot.
@@ -236,14 +245,59 @@ write_dns_capture() {
 
 remove_dns_capture() { rm -f "${DNS_CAPTURE_FILE}"; }
 
-# Stopping CeraUI frees 0.0.0.0:80 for the portal's 192.168.42.1:80; an explicit stop
-# is not reversed by ceralive.service's Restart=always.
-stop_ceraui()  { "${SYSTEMCTL}" stop  "${CERAUI_SERVICE}" >/dev/null 2>&1 || true; }
-start_ceraui() { "${SYSTEMCTL}" start "${CERAUI_SERVICE}" >/dev/null 2>&1 || true; }
+# Stopping CeraUI and the ingress frees every :80 listener that could cover the
+# portal's 192.168.42.1:80 (CeraUI's own 0.0.0.0:80 on images without the ingress,
+# the ingress's device-bound 192.168.42.1%wlan0:80 with it). An explicit stop is not
+# reversed by Restart=always/on-failure, and nothing socket- or path-activates the
+# ingress. Its PartOf=ceralive-tls-firstboot.service only propagates try-restart,
+# which leaves a stopped unit stopped. Nothing needs button confirmation while the
+# AP is up: CeraUI itself is stopped.
+stop_ceraui() {
+  "${SYSTEMCTL}" stop "${INGRESS_SERVICE}" >/dev/null 2>&1 || true
+  "${SYSTEMCTL}" stop "${CERAUI_SERVICE}"  >/dev/null 2>&1 || true
+}
+# Returns non-zero when CeraUI or a present ingress unit did not start, after logging
+# which one. An image without the ingress unit is fine (nothing to restore there).
+start_ceraui() {
+  local rc=0
+  if ! "${SYSTEMCTL}" start "${CERAUI_SERVICE}" >/dev/null 2>&1; then
+    log "ERROR: could not start ${CERAUI_SERVICE}; the web UI stays down until it is started"
+    rc=1
+  fi
+  if ! "${SYSTEMCTL}" start "${INGRESS_SERVICE}" >/dev/null 2>&1; then
+    if "${SYSTEMCTL}" cat "${INGRESS_SERVICE}" >/dev/null 2>&1; then
+      log "ERROR: could not start ${INGRESS_SERVICE}; ports 80/443 stay closed until it is started"
+      rc=1
+    fi
+  fi
+  return "${rc}"
+}
+# One word for log lines: what the restore actually achieved.
+restore_result() { if [ "$1" -eq 0 ]; then printf 'CeraUI restored'; else printf 'CeraUI/ingress restore FAILED'; fi; }
 
 start_portal_socket() {
-  "${SYSTEMCTL}" start "${PORTAL_SOCKET}" >/dev/null 2>&1 \
-    || log "WARN: could not start ${PORTAL_SOCKET} (portal will be unreachable)"
+  "${SYSTEMCTL}" start "${PORTAL_SOCKET}" >/dev/null 2>&1 && return 0
+  log "ERROR: could not start ${PORTAL_SOCKET} (nothing would answer on ${AP_GW}:80)"
+  return 1
+}
+
+# Undo a half-done handoff: an AP that cannot come up, or whose portal cannot listen,
+# would leave the box with no control plane at all on the re-arm path (CeraUI and the
+# ingress already stopped) and the DNS capture in place for every later shared link. Drop the AP and its
+# marker and bring the normal front door back. The AP profile, the force flag and the
+# last-error marker stay, so the next boot (or the next trigger) tries again.
+abort_ap_handoff() {
+  stop_portal_socket
+  remove_dns_capture
+  "${NMCLI}" connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
+  rm -f "${ACTIVE_FLAG}"
+  start_ceraui
+}
+# abort_ap_handoff, then exit 1 with a log line that says what actually happened.
+abort_and_die() { # $1=what failed
+  local rc=0
+  abort_ap_handoff || rc=$?
+  die "$1; AP dropped, $(restore_result "${rc}"), retry flags kept"
 }
 
 # Stop the listener (frees port 80) AND any in-flight per-connection instances.
@@ -273,10 +327,10 @@ bring_up_ap() {
       802-11-wireless.mode ap 802-11-wireless.band bg \
       ipv4.method shared ipv4.addresses "${AP_GW}/${AP_PREFIX}" \
       wifi-sec.key-mgmt wpa-psk wifi-sec.psk "${AP_PASSPHRASE}" \
-    || die "failed to create AP connection profile '${AP_CON_NAME}'"
+    || abort_and_die "failed to create AP connection profile '${AP_CON_NAME}'"
 
   "${NMCLI}" connection up "${AP_CON_NAME}" \
-    || die "failed to activate AP connection '${AP_CON_NAME}' on ${AP_IFACE}"
+    || abort_and_die "failed to activate AP connection '${AP_CON_NAME}' on ${AP_IFACE}"
 
   mkdir -p "${STATE_DIR}"
   # Marker consumed by the captive portal and the teardown contract.
@@ -285,21 +339,36 @@ bring_up_ap() {
 
   # Hand port 80 from CeraUI to the captive portal.
   stop_ceraui
-  start_portal_socket
+  start_portal_socket || abort_and_die "captive portal could not take ${AP_GW}:80"
   log "provisioning AP active — captive portal on ${AP_GW}:80 (marker ${ACTIVE_FLAG})"
 }
 
 # --- clean link-down only (service ExecStop / shutdown) ------------------------
 # The AP profile + the /data flags are RETAINED so the next boot re-evaluates the
-# trigger; the factory-reset force flag is NOT cleared here. The portal listener is
-# stopped and CeraUI is restored to port 80 so a manual `systemctl stop
-# ceralive-provision` does not leave the device with no reachable control plane.
+# trigger; the factory-reset force flag is NOT cleared here. A manual `stop` (and a
+# manual unit stop) restores CeraUI and the ingress so the device keeps a reachable
+# control plane. During shutdown (arg 1 = 1) nothing is started: a synchronous start
+# from ExecStop would wait behind the shutdown transaction that is stopping those
+# units. Portal stops are only queued then, and the NM link-down is bounded.
 stop_ap() {
-  log "stopping provisioning AP link (profile + flags retained; portal down, CeraUI restored)"
-  stop_portal_socket
+  local shutdown="${1:-0}"
+  log "stopping provisioning AP link (profile + flags retained; shutdown=${shutdown})"
+  if [[ "${shutdown}" == 1 ]]; then
+    "${SYSTEMCTL}" --no-block stop "${PORTAL_SOCKET}" "${PORTAL_SERVICE_GLOB}" >/dev/null 2>&1 || true
+  else
+    stop_portal_socket
+  fi
   remove_dns_capture
-  "${NMCLI}" connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
-  start_ceraui
+  if [ -n "${TIMEOUT_BIN}" ] && command -v "${TIMEOUT_BIN}" >/dev/null 2>&1; then
+    "${TIMEOUT_BIN}" 5 "${NMCLI}" --wait 3 connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
+  else
+    "${NMCLI}" --wait 3 connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
+  fi
+  [[ "${shutdown}" == 1 ]] && return 0
+  local rc=0
+  start_ceraui || rc=$?
+  log "provisioning AP link stopped; $(restore_result "${rc}")"
+  return "${rc}"
 }
 
 # --- TEARDOWN: full provisioning-mode exit (MAC6 end-state) --------------------
@@ -323,9 +392,16 @@ teardown_ap() {
 
   rm -f "${ACTIVE_FLAG}" "${FORCE_FLAG}" "${TEARDOWN_FLAG}" "${ERROR_MARKER}"
 
-  # (d) CeraUI reachable on the new IP — restart so it re-binds port 80.
-  start_ceraui
-  log "provisioning mode cleared (AP profile deleted, flags cleared, CeraUI on port 80)"
+  # (d) CeraUI reachable on the new IP — restart so it re-binds port 80. A failed
+  # start is reported (non-zero), but the joined link and the cleared state stay.
+  local rc=0
+  start_ceraui || rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    log "provisioning mode cleared (AP profile deleted, flags cleared, CeraUI on port 80)"
+  else
+    log "ERROR: provisioning mode cleared (AP profile deleted, flags cleared) but CeraUI/ingress did not start"
+  fi
+  return "${rc}"
 }
 
 # --- credential-handoff worker (detached; runs in its own transient unit) ------
@@ -369,7 +445,7 @@ connect_target() {
     log "joined target network (${con}) — finalising provisioning teardown"
     rm -f "${ERROR_MARKER}"
     teardown_ap 1     # KEEP_LINK: wlan0 is carrying the new client connection
-    exit 0
+    exit $?
   fi
 
   # FAILURE / TIMEOUT — wrong passphrase, no DHCP, or a wedged join. Delete the bad
@@ -386,30 +462,44 @@ connect_target() {
 main() {
   local cmd="${1:-start}"
   case "${cmd}" in
-    stop)     stop_ap;       exit 0 ;;
-    teardown) teardown_ap 0; exit 0 ;;
+    service-stop)
+      # ExecStop. Only a manager that is stopping selects shutdown cleanup: every
+      # other state, empty output or a failed query is a manual unit stop, which
+      # restores the control plane. (is-system-running also exits nonzero for
+      # "stopping", so the state string decides, not the exit code.)
+      case "$("${SYSTEMCTL}" is-system-running 2>/dev/null || true)" in
+        stopping) stop_ap 1; exit 0 ;;
+        *)        stop_ap;   exit $? ;;
+      esac ;;
+    shutdown) stop_ap 1;     exit 0 ;;
+    stop)     stop_ap;       exit $? ;;
+    teardown) teardown_ap 0; exit $? ;;
     connect)  connect_target "${2:-}" ;;   # exits inside (success 0 / failure 1)
     start)    ;;
-    *)        die "unknown command: ${cmd} (use: start | stop | teardown | connect <con>)" ;;
+    *)        die "unknown command: ${cmd} (use: start | stop | service-stop | shutdown | teardown | connect <con>)" ;;
   esac
 
   # Out-of-band teardown request (alt exit path): honor it and exit.
   if [ -e "${TEARDOWN_FLAG}" ]; then
     log "teardown-requested flag present (${TEARDOWN_FLAG}) → exiting provisioning mode"
     teardown_ap 0
-    exit 0
+    exit $?
   fi
 
+  local rc=0
   if should_start_portal; then
     bring_up_ap
   else
     if [ -e "${ACTIVE_FLAG}" ]; then
       log "stale portal marker but portal no longer required → tearing down"
-      teardown_ap
+      teardown_ap || rc=$?
     fi
+    # A capture left by an older failed bring-up would send every later shared
+    # connection's DNS to the AP gateway.
+    [ -e "${DNS_CAPTURE_FILE}" ] && { log "removing a stale DNS capture"; remove_dns_capture; }
     log "provisioning portal not started"
   fi
-  exit 0
+  exit "${rc}"
 }
 
 main "$@"
