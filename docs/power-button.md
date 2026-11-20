@@ -10,8 +10,9 @@ KEY_POWER (116) without grabbing the input device. It offers:
 | Continuous hold for 3 s | Power-off through the power admission broker (`power-admission.md`): passes CeraUI's stream lock, waits for a running update; release before the deadline cancels. A refused or unanswered request is logged and shown as `failed`; the daemon keeps running and the next hold asks again |
 | Hardware hold around 10 s | Existing PMIC behaviour; no registers or firmware changed |
 
-There is **no shorter shutdown path**, including when live. The same full
-three-second hold is required in both states. Repeat events do not extend a
+While the daemon owns the key there is **no shorter shutdown path**, including
+when live. The same full three-second hold is required in both states (once it
+has handed the key back, logind's fallback below applies). Repeat events do not extend a
 hold. Lost events cancel it and require release before rearming. Unplugging the
 input device fails the service, so systemd retries discovery. The timer uses a
 monotonic clock. Evdev is explicitly switched to CLOCK_MONOTONIC; physical
@@ -57,9 +58,10 @@ After three consecutive final-hold key-state query errors, the daemon latches
 an input-failed state, logs an error, cancels any confirmation and releases its
 inhibitor child. It never authorizes another hold or confirmation until an
 administrator restarts it after fixing input. A successful query before the
-threshold resets the count. Uncertain holds always remain denied. Release the
-key, then start a fresh five-second hold for logind's fallback; handing ownership
-back does not promise that a press already in progress is replayed. The stock
+threshold resets the count. Uncertain holds always remain denied. After the
+handover, logind's fallback applies: with the shipped drop-ins a fresh short tap
+powers the box off. Handing ownership back does not replay a press already in
+progress, so release the key and press it again. The stock
 logind handover and physical shutdown still need both-board qualification.
 The host tests exercise synthetic input failures and inhibitor-child lifetime;
 they do not emulate or qualify the real logind timer.
