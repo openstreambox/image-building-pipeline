@@ -47,6 +47,7 @@ JOURNAL_GC_SCRIPT() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/journald/ceralive
 JOURNAL_GC_UNIT()   { printf '%s' "$PIPELINE_DIR/mkosi/runtime/journald/ceralive-journal-gc.service"; }
 JOURNALD_DROPIN()   { printf '%s' "$PIPELINE_DIR/mkosi/runtime/journald/10-ceralive-journal.conf"; }
 JOURNAL_FLUSH_DROPIN() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/journald/10-ceralive-journal-flush.conf"; }
+JOURNAL_THP_UNIT()  { printf '%s' "$PIPELINE_DIR/mkosi/runtime/journald/ceralive-journal-thp.service"; }
 RUNTIME_EXECUTOR()  { printf '%s' "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"; }
 
 # A board whose /data already holds a valid identity, seeded exactly as the
@@ -77,14 +78,18 @@ id_of() { tr -d '\n' <"$1"; }
 @test "journald retention: the drop-in is installed where journald reads it" {
   local dropin_dir="$BATS_TEST_TMPDIR/journald.conf.d"
   local flush_dropin_dir="$BATS_TEST_TMPDIR/systemd-journal-flush.service.d"
+  local unit_dir="$BATS_TEST_TMPDIR/units"
 
   run env CERALIVE_RUNTIME_SRC="$PIPELINE_DIR/mkosi/runtime" \
     JOURNALD_DROPIN_DIR="$dropin_dir" \
     JOURNAL_FLUSH_DROPIN_DIR="$flush_dropin_dir" \
+    JOURNALD_THP_UNIT_DIR="$unit_dir" \
     bash -c "source '$POSTINST_ENTRY'; setup_journald_retention"
   [ "$status" -eq 0 ]
   [ -f "$dropin_dir/10-ceralive-journal.conf" ]
   [ -f "$flush_dropin_dir/10-ceralive-persistence.conf" ]
+  [ -f "$unit_dir/ceralive-journal-thp.service" ]
+  cmp -s "$(JOURNAL_THP_UNIT)" "$unit_dir/ceralive-journal-thp.service"
 
   # journald.conf.d files are read in lexical order; a 10- prefix is what keeps
   # this ahead of anything a package might drop in later.
@@ -115,6 +120,33 @@ id_of() { tr -d '\n' <"$1"; }
   # decorative.
   local burst; burst="$(sed -n 's/^RateLimitBurst=//p' "$conf")"
   [ "$burst" -lt 10000 ]
+}
+
+@test "journal THP: the flush pulls in a madvise switch that runs before journald maps the journal" {
+  local unit flush
+  unit="$(JOURNAL_THP_UNIT)"
+  flush="$(JOURNAL_FLUSH_DROPIN)"
+
+  # Measured: with THP=always the mmapped system.journal sat in 2 MiB folios and
+  # writeback rewrote 4 MiB of card every ~30 s for a few entries.
+  grep -Fxq "ExecStart=/bin/sh -c 'echo madvise > /sys/kernel/mm/transparent_hugepage/enabled'" "$unit"
+  # The kernel's own readback decides success: a knob that refused the write
+  # fails the unit (visible in systemctl --failed and the journal) instead of
+  # leaving journald on huge pages silently.
+  grep -Fxq 'ExecStartPost=/bin/grep -Fq [madvise] /sys/kernel/mm/transparent_hugepage/enabled' "$unit"
+  grep -Eq '^Type=oneshot$' "$unit"
+  grep -Eq '^RemainAfterExit=yes$' "$unit"
+  # Before sysinit.target, so no default dependencies; skipped on a kernel
+  # without THP instead of failing.
+  grep -Eq '^DefaultDependencies=no$' "$unit"
+  grep -Eq '^Before=.*\bsystemd-journal-flush\.service\b' "$unit"
+  grep -Fxq 'ConditionPathExists=/sys/kernel/mm/transparent_hugepage/enabled' "$unit"
+  # Pulled in by the flush drop-in, softly, so a skipped unit never blocks the
+  # flush; it has no [Install] section of its own.
+  grep -Fxq 'Wants=ceralive-journal-thp.service' "$flush"
+  grep -Fxq 'After=ceralive-journal-thp.service' "$flush"
+  ! grep -Eq '^Requires=.*ceralive-journal-thp' "$flush"
+  ! grep -Eq '^\[Install\]' "$unit"
 }
 
 @test "machine-id + journal-gc: both scripts and units install, and both units are enabled" {
