@@ -6454,11 +6454,16 @@ with the card.
   removes the key. If the note cannot be written the key stays for the next
   run. Every exit before the keyed `up` leaves tailscaled as the attempt found
   it: a daemon that was not running (or activating) is stopped again and
-  checked; if it does not stop, the key stays for the next run. Before
-  starting a daemon that was not running, the unit writes `started-tailscaled`
-  (synced); it is removed once a stop is confirmed or when the keyed `up` runs,
-  so a later attempt still stops a daemon an earlier one could not. A failed
-  start is stopped again too. A node key with `NoState` or `Starting` (still
+  checked; if it does not stop, the key stays for the next run. Right after
+  starting a daemon that was not running (a failed start included), the unit
+  writes the unit's `InvocationID` to `started-tailscaled` (synced); it is
+  removed once a stop is confirmed or when the keyed `up` runs, so a later
+  attempt still stops a daemon an earlier one could not. A later attempt treats
+  a running daemon as its own only while its `InvocationID` still matches; a
+  daemon that exited and was started again (the owner turned remote access on)
+  gets a new one, so the record is dropped and that daemon is left running. If
+  the ID cannot be read or stored, the attempt stops the daemon and keeps the
+  key. A failed start is stopped again too. A node key with `NoState` or `Starting` (still
   connecting; the login may have expired meanwhile) is asked again at the next
   attempt without the keyed `up`. `NeedsLogin` (expired or logged out) and
   `NeedsMachineAuth` use the key as before. Moving a box to another tailnet is

@@ -196,13 +196,19 @@ enroll_env() {
   mkdir -p "$T/boot" "$T/bin" "$T/state"
   # $TS_INACTIVE: tailscaled was not running before this run (switched off on the
   # card); `start` and `stop` then change what `is-active` says ($T/up), and
-  # $TS_STOP_FAIL makes `stop` leave it running.
+  # $TS_STOP_FAIL makes `stop` leave it running. $T/up holds the running
+  # invocation: a start from inactive gets a new one, as with systemd's
+  # InvocationID; an already running daemon keeps its own.
   cat >"$T/bin/systemctl" <<STUB
 #!/bin/sh
 echo "systemctl \$*" >>"$T/calls"
 case "\$*" in
   *is-active*) if [ -z "\$TS_INACTIVE" ] || [ -e "$T/up" ]; then echo active; exit 0; fi; echo inactive; exit 3;;
-  "start tailscaled.service") : >"$T/up"; [ -z "\$TS_START_FAIL" ] || exit 1;;
+  "show -p InvocationID --value tailscaled.service")
+    if [ -e "$T/up" ]; then cat "$T/up"; elif [ -z "\$TS_INACTIVE" ]; then echo 0wner0; else echo; fi;;
+  "start tailscaled.service")
+    if [ ! -e "$T/up" ]; then n=\$(( \$(cat "$T/invocations" 2>/dev/null || echo 0) + 1 )); echo "\$n" >"$T/invocations"; echo "inv\$n" >"$T/up"; fi
+    [ -z "\$TS_START_FAIL" ] || exit 1;;
   "stop tailscaled.service") [ -n "\$TS_STOP_FAIL" ] || rm -f "$T/up";;
 esac
 exit 0
@@ -260,7 +266,7 @@ no_key_anywhere() { # the key text appears in no file on BOOT, in no output, no 
 }
 no_leftovers() { [ -z "$(cd "$T/enroll" && ls -A | grep -E '^\.(claimed|pending\.|status\.|up-key\.)')" ]; }
 fresh() { # wipe the per-scenario state inside this test's own tmpdir
-  rm -rf "${T:?}/enroll" "${T:?}/state" "${T:?}/calls" "${T:?}/used" "${T:?}/syncs" "${T:?}/bin" "${T:?}/up"
+  rm -rf "${T:?}/enroll" "${T:?}/state" "${T:?}/calls" "${T:?}/used" "${T:?}/syncs" "${T:?}/bin" "${T:?}/up" "${T:?}/invocations"
 }
 
 @test "enrollment takes the key off BOOT, joins with Tailscale SSH and the file's name, then pins auto-update off" {
@@ -453,7 +459,7 @@ systemctl_stopped() { grep -qx 'systemctl stop tailscaled.service' "$T/calls"; }
   enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1 TS_STOP_FAIL=1
   [ "$status" -ne 0 ]
   [ -e "$T/up" ]
-  [ -e "$T/enroll/started-tailscaled" ]
+  [ "$(cat "$T/enroll/started-tailscaled")" = "$(cat "$T/up")" ]
   # the stop works now; the daemon this enrollment started is still running
   enroll CERALIVE_TS_NOW=1200 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1
   [ "$status" -eq 0 ]
@@ -473,6 +479,96 @@ systemctl_stopped() { grep -qx 'systemctl stop tailscaled.service' "$T/calls"; }
   [ ! -e "$T/up" ]
   [ ! -e "$T/enroll/started-tailscaled" ]
   [ -e "$T/enroll/pending-authkey" ]
+}
+
+@test "the record names the invocation it started, and an independent restart by the owner is left running" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1 TS_STOP_FAIL=1
+  [ "$status" -ne 0 ]
+  [ "$(cat "$T/enroll/started-tailscaled")" = inv1 ]
+  # the daemon this enrollment started exits on its own, then the owner turns
+  # remote access on: a new invocation
+  rm -f "$T/up"
+  TS_INACTIVE=1 "$T/bin/systemctl" start tailscaled.service
+  [ "$(cat "$T/up")" = inv2 ]
+  enroll CERALIVE_TS_NOW=1200 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1
+  [ "$status" -eq 0 ]
+  # the owner's daemon keeps running; the old record is gone
+  [ "$(grep -c 'systemctl stop tailscaled.service' "$T/calls")" -eq 1 ]
+  [ "$(cat "$T/up")" = inv2 ]
+  [ ! -e "$T/enroll/started-tailscaled" ]
+  [[ "$output" == *"leaving it running"* ]]
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 2 0 already-joined" ]
+  lacks -i 'switched off' "$T/boot/TAILSCALE-KEY-NOT-USED.txt"
+  lacks ' up ' "$T/calls"
+}
+
+@test "a record without an invocation, or from before a restart, never stops a running daemon" {
+  local content
+  for content in "" "inv7" "not a valid id!"; do
+    fresh; enroll_env
+    printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+    : >"$T/state/tailscaled.state"
+    mkdir -p "$T/enroll"; chmod 700 "$T/enroll"
+    printf '%s\n' "$content" >"$T/enroll/started-tailscaled"
+    echo inv3 >"$T/up"
+    enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1
+    [ "$status" -eq 0 ]
+    lacks 'systemctl stop tailscaled.service' "$T/calls"
+    [ "$(cat "$T/up")" = inv3 ]
+    [ ! -e "$T/enroll/started-tailscaled" ]
+  done
+}
+
+@test "a record left while the daemon is down is replaced by the invocation this attempt starts" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  mkdir -p "$T/enroll"; chmod 700 "$T/enroll"
+  echo inv0 >"$T/enroll/started-tailscaled"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1 TS_STOP_FAIL=1
+  [ "$status" -ne 0 ]
+  [ "$(cat "$T/enroll/started-tailscaled")" = inv1 ]
+  enroll CERALIVE_TS_NOW=1200 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1
+  [ "$status" -eq 0 ]
+  [ ! -e "$T/up" ]
+  [ ! -e "$T/enroll/started-tailscaled" ]
+}
+
+@test "a failed start that cannot be stopped is recorded by invocation and stopped by the next attempt" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_INACTIVE=1 TS_START_FAIL=1 TS_STOP_FAIL=1
+  [ "$status" -ne 0 ]
+  [ -e "$T/up" ]
+  [ "$(cat "$T/enroll/started-tailscaled")" = inv1 ]
+  [ -e "$T/enroll/pending-authkey" ]
+  # still the same invocation: stopped this time, even though the start fails again
+  enroll CERALIVE_TS_NOW=1200 TS_INACTIVE=1 TS_START_FAIL=1
+  [ "$status" -ne 0 ]
+  [ "$(grep -c 'systemctl stop tailscaled.service' "$T/calls")" -eq 2 ]
+  [ ! -e "$T/up" ]
+  [ ! -e "$T/enroll/started-tailscaled" ]
+  [ -e "$T/enroll/pending-authkey" ]
+}
+
+@test "a started daemon whose invocation cannot be recorded is stopped and the key kept" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  # systemctl answers no InvocationID
+  sed -i 's|then cat "'"$T"'/up"; elif|then echo; elif|' "$T/bin/systemctl"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not record which tailscaled"* ]]
+  systemctl_stopped
+  [ ! -e "$T/up" ]
+  [ ! -e "$T/enroll/started-tailscaled" ]
+  [ -e "$T/enroll/pending-authkey" ]
+  [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 retry" ]
+  lacks ' up ' "$T/calls"
 }
 
 @test "a keyed up keeps the daemon it started and clears the duty to stop it" {

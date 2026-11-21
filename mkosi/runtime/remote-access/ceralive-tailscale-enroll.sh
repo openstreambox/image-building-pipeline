@@ -50,7 +50,9 @@
 #    the status reads "joined … already-joined"; the note is on BOOT before
 #    the key goes. Every exit before the keyed up leaves tailscaled as it was
 #    found (one that was not running is stopped again); started-tailscaled
-#    keeps that duty across attempts until a stop is confirmed or a keyed up runs. Moving the box is an explicit
+#    keeps that duty across attempts until a stop is confirmed or a keyed up
+#    runs, and only for the systemd invocation it names: a daemon started again
+#    since (by the owner) is left running. Moving the box is an explicit
 #    step: remove it from its tailnet (admin console, or Forget on the card),
 #    then add the key again. A login that is still connecting (NoState or
 #    Starting) is asked again at the next attempt. An expired, logged-out or
@@ -394,6 +396,23 @@ daemon_up() {
   (( rc == 0 )) || [[ "$state" == activating || "$state" == reloading ]]
 }
 
+# The systemd invocation of the running tailscaled (InvocationID), empty when
+# none can be read. A new one is assigned every time the unit starts from
+# inactive, so a daemon started by someone else never matches an older record.
+invocation() {
+  "${SYSTEMCTL}" show -p InvocationID --value tailscaled.service 2>/dev/null | head -n1 | tr -cd '[:alnum:]' || true
+}
+
+# started-tailscaled holds the invocation an attempt started and could not stop
+# again; only a daemon still in that invocation is this enrollment's to stop.
+read_started() {
+  regular "${STARTED}" || return 0
+  local id=""
+  read -r id <"${STARTED}" || true
+  [[ "$id" =~ ^[A-Za-z0-9]{1,64}$ ]] && echo "$id"
+  return 0
+}
+
 # Every exit before the keyed up leaves tailscaled as this attempt found it: a
 # daemon that was not running (the owner switched remote access off) is
 # stopped again, and that is checked.
@@ -470,22 +489,46 @@ enroll_pending() {
   (( delay > 1800 )) && delay=1800
   write_status pending "$attempts" "$((NOW + delay))" trying
   # started-tailscaled: an earlier attempt started a daemon that was not
-  # running and could not stop it again, so it still counts as not running.
-  local was_active=0
-  if daemon_up && ! present "${STARTED}"; then
-    was_active=1
-  elif ! present "${STARTED}"; then
-    if ! { : >"${STARTED}" && sync "${ENROLL}"; }; then
-      log 4 "could not record that this attempt starts tailscaled; trying again later"
-      write_status pending "$attempts" "$((NOW + delay))" retry || true
-      return 1
+  # running and could not stop it again. While that same invocation runs, it
+  # still counts as not running. Any other running daemon (it exited and the
+  # owner started it again) is the owner's: the record goes and the daemon is
+  # left alone.
+  local was_active=0 started=""
+  started="$(read_started)"
+  if daemon_up; then
+    if [[ -z "$started" || "$(invocation)" != "$started" ]]; then
+      was_active=1
+      started=""
+      if present "${STARTED}"; then
+        log 5 "tailscaled was started again since an earlier attempt started it; leaving it running"
+      fi
     fi
+  else
+    started=""   # that daemon is gone; this attempt records the one it starts
+  fi
+  if [[ -z "$started" ]] && present "${STARTED}"; then
+    rm -f -- "${STARTED}"
+    sync "${ENROLL}" 2>/dev/null || true
   fi
   # Any state that appears from now on, where none existed, is ours to clean up.
   if [[ ! -e "${TS_STATE}/tailscaled.state" && ! -L "${TS_STATE}/tailscaled.state" ]]; then
     : >"${OURS}"
   fi
-  if ! "${SYSTEMCTL}" start tailscaled.service; then
+  local start_rc=0
+  "${SYSTEMCTL}" start tailscaled.service || start_rc=$?
+  # A daemon this attempt started (a failed start can leave it activating) is
+  # recorded by its invocation before anything else can fail, so a later
+  # attempt can still stop it if this one cannot.
+  if (( was_active == 0 )) && daemon_up && [[ -z "$started" ]]; then
+    started="$(invocation)"
+    if [[ -z "$started" ]] || ! put_synced "${STARTED}" "$started" .started; then
+      log 4 "could not record which tailscaled this attempt started; stopping it and trying again later"
+      settle_back || true
+      write_status pending "$attempts" "$((NOW + delay))" retry || true
+      return 1
+    fi
+  fi
+  if (( start_rc != 0 )); then
     log 4 "tailscaled did not start (attempt ${attempts}/${MAX_ATTEMPTS})"
     settle_back || true   # a failed start can leave it activating
     if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not start after ${attempts} attempts"; fi
