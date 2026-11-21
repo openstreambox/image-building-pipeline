@@ -358,6 +358,94 @@ class Operator(Harness):
         self.assertIn(rdev, self.broker.prompts)
 
 
+class NamespacedTerminal(Operator):
+    """A shell in another mount namespace that still uses the system's devpts,
+    like a Tailscale SSH session (tailscaled.service has its own namespace from
+    ReadOnlyPaths=, and its sessions inherit it): its terminal is proven by the
+    open file itself. A private devpts instance, whose pty numbers can collide
+    with a system terminal, is still refused."""
+
+    def setUp(self):
+        if not hasattr(os, 'unshare'):
+            self.skipTest('os.unshare needs Python 3.12')
+        probe = subprocess.run(['unshare', '-Urm', 'true'], capture_output=True)
+        if probe.returncode != 0:
+            self.skipTest('unprivileged user namespaces are not available')
+        super().setUp()
+
+    @staticmethod
+    def own_mount_namespace():
+        os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS)
+
+    def test_a_shell_in_another_mount_namespace_on_the_system_devpts_is_prompted(self):
+        pid, master, out = self.operator_on_pty(before_connect=self.own_mount_namespace)
+        self.assertTrue(self.pump(lambda: 'Type poweroff' in self.read_master(master)),
+                        'no prompt: ' + self.read_pipe(out))
+        os.write(master, b'poweroff\n')
+        self.assertTrue(self.pump(lambda: self.system.submissions()))
+
+    def test_its_redirected_standard_streams_are_no_proof(self):
+        def namespaced_without_terminal_fds():
+            self.own_mount_namespace()
+            null = os.open(os.devnull, os.O_RDWR)
+            for fd in (0, 1, 2):
+                os.dup2(null, fd)
+        pid, master, out = self.operator_on_pty(before_connect=namespaced_without_terminal_fds)
+        self.assertTrue(self.pump(lambda: 'another mount namespace' in self.read_pipe(out)))
+        self.assertIsNone(self.broker.committed)
+
+    def test_a_terminal_of_a_private_devpts_instance_is_refused(self):
+        # A system terminal of this user with the number the private one gets:
+        # taken for the caller's, the prompt would go there.
+        sys_master, sys_slave = os.openpty()
+        self.addCleanup(os.close, sys_master)
+        self.addCleanup(os.close, sys_slave)
+        number = int(os.ttyname(sys_slave).rsplit('/', 1)[1])
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(r)
+                uid, gid = os.getuid(), os.getgid()
+                self.own_mount_namespace()
+                Path('/proc/self/setgroups').write_text('deny')
+                Path('/proc/self/uid_map').write_text(f'0 {uid} 1')
+                Path('/proc/self/gid_map').write_text(f'0 {gid} 1')
+                subprocess.run(['mount', '-t', 'devpts', '-o', 'newinstance,ptmxmode=0666', 'devpts', '/dev/pts'],
+                               check=True, capture_output=True)
+                subprocess.run(['mount', '--bind', '/dev/pts/ptmx', '/dev/ptmx'], check=True, capture_output=True)
+                for fd in list(self.broker.locks.values()):
+                    if fd is not None:
+                        os.close(fd)
+                held = []
+                while True:  # numbered from 0 in the private instance
+                    master, slave = os.openpty()
+                    held.append((master, slave))
+                    if int(os.ttyname(slave).rsplit('/', 1)[1]) >= number:
+                        break
+                os.setsid()
+                fcntl.ioctl(slave, __import__('termios').TIOCSCTTY, 0)
+                for fd in (0, 1, 2):
+                    os.dup2(slave, fd)
+                conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                conn.connect(self.sock_path)
+                conn.sendall(b'POWEROFF\n')
+                while True:
+                    data = conn.recv(4096)
+                    if not data:
+                        break
+                    os.write(w, data)
+            finally:
+                os._exit(0)
+        os.close(w)
+        self.children.append((pid, None))
+        os.set_blocking(r, False)
+        self.addCleanup(os.close, r)
+        self.assertTrue(self.pump(lambda: 'another mount namespace' in self.read_pipe(r)))
+        self.assertIsNone(self.broker.committed)
+        self.assertNotIn('Type poweroff', self.read_master(sys_master), 'prompted on another terminal')
+
+
 class Origins(Harness):
     def as_unit(self, unit, uid=0):
         return [patch.object(broker, 'system_unit', lambda pidfd: unit),
