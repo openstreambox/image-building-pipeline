@@ -57,7 +57,12 @@ static `Condition`):
    (`full`/`limited`/`portal`) or a default route appears, an uplink exists → **do not
    start**. Otherwise → **start**.
 
-The device's own `ceralive-ap` profile is excluded from the stored-profile count.
+The device's own setup AP is excluded from the stored-profile count. It is recognised
+the same way cleanup recognises it (the UUID recorded in `ap-uuid`, or the settings
+fingerprint below), not by its name, so a user's station profile that happens to be
+called `ceralive-ap` counts as a saved network. If the setup AP's identity cannot be
+read (NetworkManager or `ap-uuid` unreadable), every profile called `ceralive-ap` is
+left out, as older images did.
 
 ## Bring-up (`bring_up_ap`)
 

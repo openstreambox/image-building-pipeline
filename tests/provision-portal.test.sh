@@ -722,9 +722,16 @@ station_named_ap() { echo "ceralive-ap:${STATION_UUID}:802-11-wireless" >>"${NMS
                printf '%s 802-11-wireless.mode infrastructure\n%s 802-11-wireless.ssid HomeNet\n%s ipv4.addresses \n' "${STATION_UUID}" "${STATION_UUID}" "${STATION_UUID}" >>"${NMSTATE}/details"; }
 foreign_ap() { echo "ceralive-ap:${FOREIGN_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
                printf '%s 802-11-wireless.mode ap\n%s 802-11-wireless.ssid SomeoneElse\n%s ipv4.addresses 192.168.42.1/24\n' "${FOREIGN_UUID}" "${FOREIGN_UUID}" "${FOREIGN_UUID}" >>"${NMSTATE}/details"; }
-printf 'ceralive-ap:802-11-wireless\nHomeNet:802-11-wireless\n' >"${SANDBOX}/profiles-left.txt"
+HOME_UUID="0000a0a0-0000-4000-8000-0000000000e5"
+# A boot with a saved user network (HomeNet) next to whatever the case seeded.
 no_portal_boot() { # extra env for the run
-  env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_PROFILES_FILE="${SANDBOX}/profiles-left.txt" "$@" \
+  grep -q '^HomeNet:' "${NMSTATE}/profiles" || echo "HomeNet:${HOME_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+  env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" "$@" \
+      bash "${PROVISION}" start >"${OUTF}" 2>&1
+}
+# A boot with no uplink and a short grace window: only stored profiles keep setup down.
+offline_boot() { # extra env for the run
+  env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_CONNECTIVITY=none CERALIVE_PROVISION_GRACE=2 CERALIVE_PROVISION_POLL=1 "$@" \
       bash "${PROVISION}" start >"${OUTF}" 2>&1
 }
 OUTF="${SANDBOX}/provision.out"
@@ -775,6 +782,29 @@ printf 'ssid=HomeNet\nreason=auth_or_timeout\n' >"$(state_file last-error)"
 no_portal_boot STUB_NM_READ_RC=8; rc=$?
 [ "${rc}" -ne 0 ] && [ -e "$(state_file last-error)" ] && ! called "nmcli connection delete" \
                                                  && pass "unreadable NM: non-zero, nothing deleted, last-error kept" || fail "unreadable NM: non-zero, nothing deleted, last-error kept (rc=${rc})"
+
+# The stored-profile count tells the two apart the same way: a user's station called
+# ceralive-ap is a saved network and keeps setup down at once; the image's setup AP,
+# whether recognised by its settings or by the recorded UUID (even renamed), is not.
+reset_state; boot_units; station_named_ap
+offline_boot; rc=$?
+[ "${rc}" -eq 0 ] && ! called "${AP_UP_CALL}" && grep -q "found 1 stored WiFi profile" "${OUTF}" \
+                                                 && pass "station profile named ceralive-ap alone suppresses the portal" || fail "station profile named ceralive-ap alone suppresses the portal (rc=${rc})"
+reset_state; boot_units; owned_ap
+offline_boot; rc=$?
+[ "${rc}" -eq 0 ] && called "${AP_UP_CALL}"      && pass "setup AP alone (by its settings) does not suppress the portal" || fail "setup AP alone (by its settings) does not suppress the portal (rc=${rc})"
+reset_state; boot_units
+echo "setup-renamed:${AP_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+printf '%s\n' "${AP_UUID}" >"$(state_file ap-uuid)"
+offline_boot; rc=$?
+[ "${rc}" -eq 0 ] && called "${AP_UP_CALL}"      && pass "recorded setup AP under another name does not suppress the portal" || fail "recorded setup AP under another name does not suppress the portal (rc=${rc})"
+# Setup AP identity unreadable (malformed record): the count falls back to leaving out
+# every profile called ceralive-ap, as before.
+reset_state; boot_units; station_named_ap
+printf 'not-a-uuid\n' >"$(state_file ap-uuid)"
+offline_boot
+grep -q "leaving out every profile called ceralive-ap" "${OUTF}" && grep -q "no stored WiFi profiles" "${OUTF}" \
+                                                 && pass "unreadable setup AP identity: count falls back to the name" || fail "unreadable setup AP identity: count falls back to the name"
 
 # No setup AP at all: nothing deleted, exit 0.
 reset_state; boot_units

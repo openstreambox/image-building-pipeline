@@ -174,7 +174,7 @@ DNS_CAPTURE_DIR="${CERALIVE_DNSMASQ_SHARED_DIR:-/etc/NetworkManager/dnsmasq-shar
 DNS_CAPTURE_FILE="${DNS_CAPTURE_DIR}/ceralive-portal.conf"
 
 # AP identity / addressing.
-AP_CON_NAME="${CERALIVE_AP_CON_NAME:-ceralive-ap}"   # NM profile name — EXCLUDED from the stored-profile count
+AP_CON_NAME="${CERALIVE_AP_CON_NAME:-ceralive-ap}"   # NM profile name; the setup AP (by UUID) is EXCLUDED from the stored-profile count
 AP_IFACE="${CERALIVE_AP_IFACE:-wlan0}"
 AP_GW="${CERALIVE_AP_GATEWAY:-192.168.42.1}"
 AP_PREFIX="${CERALIVE_AP_PREFIX:-24}"
@@ -204,12 +204,26 @@ ap_ssid() {
 
 # --- stored WiFi profile count (EXCLUDING our own AP profile) ------------------
 # A real user WiFi profile means the device can rejoin an uplink, so the portal must
-# NOT start (EC4). Our own ${AP_CON_NAME} profile is excluded — it is created by THIS
-# script and must never suppress its own re-trigger. With $1 = 1 the portal's
-# ${USER_CON_NAME} is left out as well: its join is still pending (header §PENDING JOIN).
+# NOT start (EC4). Our own setup AP is excluded — it is created by THIS script and must
+# never suppress its own re-trigger. It is recognised the way cleanup recognises it
+# (setup_ap_uuids: recorded UUID or settings fingerprint), so a user's station profile
+# that happens to be called ${AP_CON_NAME} still counts. If that identity cannot be
+# read, every profile called ${AP_CON_NAME} is excluded, as before. Type and UUID are
+# the last two fields (they never contain ':'; a name may, escaped). With $1 = 1 the
+# portal's ${USER_CON_NAME} is left out as well: its join is still pending (header
+# §PENDING JOIN).
 stored_wifi_profile_count() {
-  local skip=""
+  local skip="" list ap
   [ "${1:-0}" = 1 ] && skip="${USER_CON_NAME}"
+  if list="$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" \
+      && ap="$(setup_ap_uuids 2>/dev/null)"; then
+    awk -F: -v skip="${skip}" '
+        NR == FNR { if (NF) s[$0] = 1; next }
+        NF >= 3 && $NF == "802-11-wireless" && !($(NF-1) in s) && !(skip != "" && NF == 3 && $1 == skip) { n++ }
+        END { print n + 0 }' <(printf '%s\n' "${ap}") - <<<"${list}"
+    return
+  fi
+  log "could not identify the setup AP profile; leaving out every profile called ${AP_CON_NAME}" >&2
   "${NMCLI}" -t -f NAME,TYPE connection show 2>/dev/null \
     | awk -F: -v ap="${AP_CON_NAME}" -v skip="${skip}" '
         $2 == "802-11-wireless" && $1 != ap && !(skip != "" && $1 == skip) { n++ }
