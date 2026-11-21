@@ -12,7 +12,8 @@
 #   * suppress_unusable_boot_units
 #                              the seven stock units this image cannot use
 #   * configure_ntp, setup_boot_healthcheck, pin_system_locale,
-#     setup_avahi_restart, setup_cerastream_ordering, setup_rtmp_gateway
+#     setup_avahi_restart, setup_cerastream_ordering, setup_ceralive_watchdog_margin,
+#     setup_rtmp_gateway
 #
 # NOT to be confused with customize/services.sh one directory up: that is a
 # run-all.sh module (an ENTRY the mkosi hooks dispatch), while this is a library
@@ -578,6 +579,26 @@ setup_cerastream_ordering() {
   local dropin_dir="${CERASTREAM_ORDERING_DROPIN_DIR:-/etc/systemd/system/ceralive.service.d}"
   mkdir -p "${dropin_dir}"
   install -m 0644 "${src}/ceralive-cerastream-ordering.dropin.conf" "${dropin_dir}/30-cerastream-ordering.conf"
+}
+
+# ---------------------------------------------------------------------------
+# ceralive.service watchdog margin. The CeraUI .deb ships WatchdogSec=30s with
+# WatchdogSignal=SIGKILL and KillMode=mixed, and the backend pulses every
+# WATCHDOG_USEC/2 from its main loop. A kill takes srtla_send with the cgroup,
+# so a 15-30 s main-loop stall ends a live stream until an operator Stop. This
+# drop-in raises only WatchdogSec to 90 s (pulse every 45 s, tolerated stall
+# 45-90 s); signal, kill mode and restart policy stay as packaged. Installed from
+# the committed artifact under CERALIVE_RUNTIME_SRC, like setup_cerastream_ordering.
+# CERALIVE_WATCHDOG_DROPIN_DIR overrides the drop-in directory for the offline unit test.
+# ---------------------------------------------------------------------------
+setup_ceralive_watchdog_margin() {
+  log "widening the ceralive.service watchdog to 90 s (additive WatchdogSec drop-in)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-watchdog-margin.dropin.conf" ]] \
+    || die "watchdog-margin source not found: ${src}/ceralive-watchdog-margin.dropin.conf (is \$SRCDIR/runtime mounted?)"
+  local dropin_dir="${CERALIVE_WATCHDOG_DROPIN_DIR:-/etc/systemd/system/ceralive.service.d}"
+  mkdir -p "${dropin_dir}"
+  install -m 0644 "${src}/ceralive-watchdog-margin.dropin.conf" "${dropin_dir}/60-watchdog-margin.conf"
 }
 
 # ---------------------------------------------------------------------------
