@@ -7,6 +7,9 @@ After=boot-complete.target
 Type=oneshot
 # Keep boot-scoped markers and kernel confirmation together with RAUC success.
 ExecStart=/usr/local/bin/ceralive-healthcheck.sh --mark-good
+# Count even when the update agent never starts a mirror during this boot.
+# If preflight is busy, a later mirror/stage attempt can record this boot.
+ExecStartPost=-/usr/libexec/ceralive/ceralive-slot-sync observe
 RemainAfterExit=yes
 
 [Install]

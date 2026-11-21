@@ -195,6 +195,7 @@ stage_fixture_reset
 jq -c 'del(.slots[0]["rootfs.0"].slot_status)' "${FIXTURE}/rauc.json" >"${WORK}/json"
 cp "${WORK}/json" "${FIXTURE}/rauc.json"
 booted_overlay confirmed
+stage_fixture_confirm || exit 1
 stage_run >"${WORK}/out" 2>&1
 assert_eq "booted slot without a RAUC record stages from its confirmed overlay" 0 "$?"
 assert_eq "overlay base identity is carried to the target" "$(expected_base)" "$(jq -c .base_bundle_identity "${OVERLAY}")"

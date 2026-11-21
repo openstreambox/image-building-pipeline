@@ -1,13 +1,8 @@
 [Unit]
 Description=CeraLive verified local mirror of the healthy running slot into the other slot
 Documentation=file:///usr/share/doc/ceralive/partition-contract.md
-# Task 26 (Metis G3/G4/G14). NEVER enabled/started at boot — this unit carries
-# NO [Install] section on purpose. It is started on demand, exclusively by the
-# future lagged-mirror orchestrator (todo 27's healthcheck / the CeraUI update
-# agent) via `systemctl start --no-block ceralive-slot-sync.service`, after the
-# booted slot's OWN healthy-state.json has already survived a reboot and a
-# streaming healthcheck. There is nothing here for `preset-all` to resurrect.
-# The script requires a current boot/build/dpkg health receipt before copying.
+# Started on demand by the update agent. Requires a health receipt matching
+# the current boot, build and package state, then checks the fallback hold.
 # A later health-unit restart must not interrupt a verified mirror in progress.
 Wants=ceralive-mark-good.service
 After=ceralive-mark-good.service

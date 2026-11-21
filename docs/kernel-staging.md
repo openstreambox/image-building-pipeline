@@ -14,9 +14,15 @@ not an APT downloader or an activation service. CeraUI launches it as:
 The inherited descriptor must resolve to the update lock, with a matching
 granted FLOCK WRITE row owned by the parent in `/proc/locks`. The stager never
 acquires this lock. It acquires the booted dpkg frontend flock itself and reuses
-slot-sync's six read-only gates. Booted and primary must agree; target resolution
+slot-sync's preflight gates, including the fallback hold. Booted and primary must agree; target resolution
 uses the other RAUC rootfs slot's PARTLABEL. An armed activation, pending OS
 install or nonterminal kernel transaction refuses staging.
+
+Staging itself overwrites the other slot, so it waits for the same three
+healthy boots or explicit confirmation as the standalone mirror. During the
+hold the helper exits 75 before creating a staging transaction or marking the
+target bad. CeraUI may surface this as a staging failure. Retry after the hold
+clears.
 
 Before any mirror write, the durable state is `staging`, OTHER is marked bad,
 its mirror receipt and adaptive index are retired, and its overlay becomes

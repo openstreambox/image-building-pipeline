@@ -243,7 +243,7 @@ EOF
 rauc_json_fixture() {
   local other_extra="${1:-}"
   cat >"${RAUC_JSON_FIXTURE}" <<EOF
-{"compatible":"ceralive-test","variant":"","booted":"A","boot_primary":"rootfs.0","slots":[{"rootfs.0":{"class":"rootfs","device":"${WORK}/mnt/source","type":"ext4","bootname":"A","state":"booted","parent":null,"mountpoint":"/","boot_status":"good","bundle":{"compatible":"ceralive-test","version":"${BUILD_ID}"},"installed":{"timestamp":"2026-09-20T00:00:00Z","count":3},"activated":{"timestamp":"2026-09-20T00:00:05Z","count":3},"status":"ok"}},{"rootfs.1":{"class":"rootfs","device":"${WORK}/dev/rootfs_b","type":"ext4","bootname":"B","state":"inactive","parent":null,"mountpoint":null,"boot_status":"good"${other_extra},"status":"ok"}}]}
+{"compatible":"ceralive-test","variant":"","booted":"A","boot_primary":"rootfs.0","slots":[{"rootfs.0":{"class":"rootfs","device":"${WORK}/mnt/source","type":"ext4","bootname":"A","state":"booted","parent":null,"mountpoint":"/","boot_status":"good","bundle":{"compatible":"ceralive-test","version":"${BUILD_ID}"},"status":"ok"}},{"rootfs.1":{"class":"rootfs","device":"${WORK}/dev/rootfs_b","type":"ext4","bootname":"B","state":"inactive","parent":null,"mountpoint":null,"boot_status":"good"${other_extra},"status":"ok"}}]}
 EOF
 }
 
@@ -260,7 +260,7 @@ reset_happy_fixtures() {
   : >"${FINDMNT_CALLS}"
   unset SYNC_RECEIPT_FAIL
   printf '2026.10.68\n' >"${CERALIVE_OS_RELEASE_VERSION_FILE}"
-  rauc_json_fixture ""   # other slot NEVER installed -> not pending
+  rauc_json_fixture ""   # preinstalled pair, neither slot written by RAUC
   healthy_state_write "${BOOT_ID}" "${DPKG_SHA}" "${BUILD_ID}"
   rm -f "${CERALIVE_SYNC_RECEIPT_FILE}"
   : >"${RAUC_CALLS}"; : >"${RSYNC_CALLS}"; : >"${MOUNT_CALLS}"; : >"${UMOUNT_CALLS}"

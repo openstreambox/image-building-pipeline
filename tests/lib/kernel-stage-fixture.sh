@@ -98,6 +98,7 @@ EOF
 EOF
   : >"${FIXTURE}/mounts"
   printf good >"${FIXTURE}/eligibility"
+  stage_fixture_confirm
 }
 
 stage_args() {
@@ -116,6 +117,15 @@ stage_fixture_boot_b() {
   printf '%s\n' "${updated}" >"${CERALIVE_HEALTHY_STATE_FILE}"
   mv "${FIXTURE}/state/slot-overlay-B.json" "${FIXTURE}/state/slot-overlay-A.json"
   mv "${FIXTURE}/rauc-data/slot.rootfs.1" "${FIXTURE}/rauc-data/slot.rootfs.0"
+  stage_fixture_confirm
+}
+
+# Staging fixtures start after support has released the fallback. Hold tests
+# opt out to exercise the gates with a newly installed pair.
+stage_fixture_confirm() {
+  [[ "${STAGE_FIXTURE_UNCONFIRMED:-0}" != 1 ]] || return 0
+  "${CERALIVE_SLOT_SYNC_LIB}" confirm >/dev/null || return 1
+  rm -f "${FIXTURE}/events"
 }
 
 # Native userspace stays host-architecture; APT sees the fixture's arm64 target.
