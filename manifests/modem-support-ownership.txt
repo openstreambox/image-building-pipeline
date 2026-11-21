@@ -73,3 +73,8 @@ image	/etc/udev/rules.d/79-ceralive-slot-dell-fastboot-release.rules
 # it belongs in ceralive-modem-support once the companion ships it.
 image	/etc/udev/rules.d/99-ceralive-modem-usbspeed.rules
 image	/etc/systemd/system/ceralive-modem-usbspeed@.service
+# 78-ceralive-modem-port-hints.rules sets ID_MM_PORT_IGNORE on the RM520N's
+# secondary AT port, from
+# mkosi/customize/postinst.d/networking.sh::setup_modem_port_hints. Image-owned
+# because the image carries the pinned companion as is.
+image	/etc/udev/rules.d/78-ceralive-modem-port-hints.rules
