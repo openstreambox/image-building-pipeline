@@ -271,6 +271,70 @@ os_release_version_writer() {
 }
 
 # ===========================================================================
+# 18d. NetworkManager shared-mode helper probes — NM 1.52 runs
+#      `modprobe --use-blacklist` for six NAT helpers on every ipv4.method=shared
+#      activation. The kernel builds none of them, so each hotspot or shared-LAN
+#      start logged six <error> lines. The committed modprobe.d fragment turns
+#      those lookups into no-ops (CERALIVE_MODPROBE_DIR points it at a temp dir).
+# ===========================================================================
+
+NM_SHARE_HELPERS="nf_nat_ftp nf_nat_irc nf_nat_sip nf_nat_tftp nf_nat_pptp nf_nat_h323"
+
+@test "nm share helpers: the fragment no-ops exactly the six helpers NM probes, nothing else" {
+  local conf="$PIPELINE_DIR/mkosi/runtime/ceralive-nm-share-helpers.modprobe.conf" m
+  for m in $NM_SHARE_HELPERS; do
+    grep -Fxq "install $m /bin/true" "$conf"
+  done
+  [ "$(grep -cvE '^(#|$)' "$conf")" -eq 6 ]
+  run grep -Eq '^(blacklist|alias|options|remove|softdep)[[:space:]]' "$conf"
+  [ "$status" -ne 0 ]
+}
+
+@test "nm share helpers: none of the shimmed helpers is built by the kernel fragment" {
+  # A helper that gets built must lose its shim line, or it can never load.
+  local frag="$PIPELINE_DIR/manifests/kernel/rk3588-edge.fragment" sym
+  for sym in FTP IRC SIP TFTP PPTP H323; do
+    run grep -Eq "^CONFIG_NF_(CONNTRACK|NAT)_${sym}=[ym]" "$frag"
+    [ "$status" -ne 0 ]
+  done
+}
+
+@test "nm share helpers: setup installs the fragment world-readable into modprobe.d" {
+  local dir="$BATS_TEST_TMPDIR/modprobe.d"
+  run env CERALIVE_RUNTIME_SRC="$PIPELINE_DIR/mkosi/runtime" CERALIVE_MODPROBE_DIR="$dir" \
+    bash -c "source '$POSTINST_ENTRY'; setup_nm_share_helper_shims"
+  [ "$status" -eq 0 ]
+  cmp "$PIPELINE_DIR/mkosi/runtime/ceralive-nm-share-helpers.modprobe.conf" "$dir/ceralive-nm-share-helpers.conf"
+  [ "$(stat -c %a "$dir/ceralive-nm-share-helpers.conf")" = "644" ]
+}
+
+@test "nm share helpers: missing runtime source fails the build without writing anything" {
+  local dir="$BATS_TEST_TMPDIR/modprobe-fail.d"
+  run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" CERALIVE_MODPROBE_DIR="$dir" \
+    bash -c "source '$POSTINST_ENTRY'; setup_nm_share_helper_shims"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"nm share helper shim not found"* ]]
+  [ ! -e "$dir" ]
+}
+
+@test "nm share helpers: kmod resolves every shimmed helper as a successful no-op" {
+  command -v modprobe >/dev/null || skip "kmod not installed"
+  local dir="$BATS_TEST_TMPDIR/kmod-conf" m
+  mkdir -p "$dir"
+  cp "$PIPELINE_DIR/mkosi/runtime/ceralive-nm-share-helpers.modprobe.conf" "$dir/ceralive.conf"
+  for m in $NM_SHARE_HELPERS; do
+    run modprobe --use-blacklist --dry-run --verbose --config "$dir/ceralive.conf" \
+      --dirname "$BATS_TEST_TMPDIR/no-modules" --set-version 0.0.0-none "$m"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"install /bin/true"* ]]
+  done
+}
+
+@test "nm share helpers: image contract wires the setup into the runtime executor" {
+  grep -Eq '^[[:space:]]+setup_nm_share_helper_shims([[:space:]]|$)' "$REPO_ROOT/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+}
+
+# ===========================================================================
 # 18c. ceralive.service -> cerastream.service boot ordering — ceralive.service's
 #      initPipelines() connects to cerastream's control socket exactly once, so a
 #      cerastream that starts LATE (confirmed live: ~2 min after ceralive.service)
