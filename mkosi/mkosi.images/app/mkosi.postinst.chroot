@@ -413,24 +413,37 @@ keep_ceraui_build_stamps() {
 # ---------------------------------------------------------------------------
 # gate_ceralive_watchdog_margin [root] — keep the runtime layer's
 # ceralive.service.d/60-watchdog-margin.conf (WatchdogSec=90s) only when the
-# installed ceralive-device unit arms a service watchdog of its own.
+# installed ceralive-device unit arms a shorter service watchdog of its own.
 #
 # The drop-in widens an existing watchdog: the backend that ships a WatchdogSec
 # unit pulses every WATCHDOG_USEC/2. A ceralive-device build whose unit has no
 # WatchdogSec (2026.11.2 and older) has no pulse either, and the drop-in alone
 # would turn a watchdog on that nothing feeds: systemd would abort and restart a
-# healthy backend about every 90 s. Such a build, or a build with no CeraUI
-# staged at all, gets no drop-in. Only the packaged unit is read; no image
-# drop-in other than this one sets WatchdogSec (tests/ceralive-watchdog-margin.bats).
+# healthy backend about every 90 s. A unit that already sets 90 s or more must
+# not be shortened either.
+#
+# FAIL CLOSED: the drop-in stays only for the plain form CeraUI ships, exactly
+# one `WatchdogSec=<N>`, `<N>s`, `<N>sec` or `<N>min` line in [Service], N > 0,
+# under 90 s, in a unit with no continuation lines. Anything else (another
+# duration syntax, a second assignment, a backslash continuation anywhere, no
+# unit at all) removes the drop-in, which only gives up the wider margin. Only
+# the packaged unit is read; no image drop-in other than this one sets
+# WatchdogSec (tests/ceralive-watchdog-margin.bats).
 # ---------------------------------------------------------------------------
 CERALIVE_WATCHDOG_MARGIN_DROPIN="etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf"
-packaged_unit_arms_watchdog() { # <unit file>
-  awk '
-    /^[[:space:]]*\[/ { in_service = ($0 ~ /^[[:space:]]*\[Service\][[:space:]]*$/); next }
-    in_service && /^[[:space:]]*WatchdogSec[[:space:]]*=/ {
-      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v); last = v
+CERALIVE_WATCHDOG_MARGIN_SEC=90
+packaged_watchdog_needs_margin() { # <unit file>
+  awk -v margin="${CERALIVE_WATCHDOG_MARGIN_SEC}" '
+    /\\[[:space:]]*$/ { ambiguous = 1 }
+    /^[[:space:]]*\[/ { in_service = ($0 ~ /^\[Service\][[:space:]]*$/); next }
+    in_service && /^[[:space:]]*WatchdogSec([[:space:]]|=|$)/ { n++; line = $0 }
+    END {
+      if (ambiguous || n != 1 || line !~ /^WatchdogSec=[1-9][0-9]*(s|sec|min)?$/) exit 1
+      v = line; sub(/^WatchdogSec=/, "", v)
+      secs = v + 0
+      if (v ~ /min$/) secs *= 60
+      exit (secs < margin) ? 0 : 1
     }
-    END { exit (last == "" || last ~ /^(0+|0+(us|ms|s|min|h)|infinity)$/) ? 1 : 0 }
   ' "$1"
 }
 gate_ceralive_watchdog_margin() {
@@ -438,12 +451,12 @@ gate_ceralive_watchdog_margin() {
   local unit="${root}/etc/systemd/system/ceralive.service"
   local dropin="${root}/${CERALIVE_WATCHDOG_MARGIN_DROPIN}"
   [[ -e "${dropin}" ]] || return 0
-  if [[ -f "${unit}" ]] && packaged_unit_arms_watchdog "${unit}"; then
-    log "kept ${CERALIVE_WATCHDOG_MARGIN_DROPIN}: the packaged ceralive.service arms its own watchdog"
+  if [[ -f "${unit}" ]] && packaged_watchdog_needs_margin "${unit}"; then
+    log "kept ${CERALIVE_WATCHDOG_MARGIN_DROPIN}: the packaged ceralive.service arms a watchdog under ${CERALIVE_WATCHDOG_MARGIN_SEC} s"
     return 0
   fi
   rm -f "${dropin}"
-  log "removed ${CERALIVE_WATCHDOG_MARGIN_DROPIN}: the installed ceralive.service has no watchdog of its own to widen"
+  log "removed ${CERALIVE_WATCHDOG_MARGIN_DROPIN}: the installed ceralive.service has no plain watchdog under ${CERALIVE_WATCHDOG_MARGIN_SEC} s to widen"
 }
 
 main() {

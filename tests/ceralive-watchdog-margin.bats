@@ -162,28 +162,53 @@ WantedBy=multi-user.target'
   [ ! -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ]
 }
 
-@test "watchdog gate: a disabled, reset or misplaced WatchdogSec does not count" {
-  local v root
-  # awk -v turns the \n in the last case into a second line: set, then reset.
-  for v in 'WatchdogSec=0' 'WatchdogSec=0s' 'WatchdogSec=infinity' 'WatchdogSec=30s\nWatchdogSec=' 'WatchdogSec = 0'; do
-    root="$BATS_TEST_TMPDIR/off-$RANDOM"
-    printf '%s\n' "$PACKAGED_WITHOUT_WATCHDOG" \
-      | awk -v v="$v" '{ print } $0 == "Restart=always" { print v }' | gate_tree "$root"
-    grep -q '^WatchdogSec' "$root/etc/systemd/system/ceralive.service"
+# packaged_with <lines> — the 2026.11.2 unit with <lines> added to [Service]
+# after Restart=always. awk -v turns \n into a line break and \\ into one
+# backslash, so a case can hold several lines or a continuation.
+packaged_with() {
+  printf '%s\n' "$PACKAGED_WITHOUT_WATCHDOG" | awk -v v="$1" '{ print } $0 == "Restart=always" { print v }'
+}
+
+# The plain forms CeraUI ships, below 90 s: the drop-in stays.
+GATE_KEEPS=('WatchdogSec=30s' 'WatchdogSec=30' 'WatchdogSec=1min' 'WatchdogSec=89sec')
+# Everything else removes it (fail closed: the wider margin is given up, never
+# a watchdog armed that nothing feeds or a longer one shortened).
+GATE_REMOVES=(
+  'WatchdogSec=0' 'WatchdogSec=0s' 'WatchdogSec=0 sec' 'WatchdogSec=0.0s' 'WatchdogSec=0d'
+  'WatchdogSec=infinity' 'WatchdogSec=' 'WatchdogSec=90s' 'WatchdogSec=2min' 'WatchdogSec=1min 30s'
+  'WatchdogSec = 30s' 'WatchdogSec=30s ' 'WatchdogSec=30s\nWatchdogSec=' 'WatchdogSec=30s\nWatchdogSec=60s'
+  'WatchdogSec=\\\n0' 'WatchdogSec\\\n=30s' 'Environment=A=1 \\\nWatchdogSec=30s'
+)
+
+@test "watchdog gate: only one plain WatchdogSec under 90 s keeps the drop-in" {
+  local v root i=0
+  for v in "${GATE_KEEPS[@]}"; do
+    root="$BATS_TEST_TMPDIR/keep-$((i++))"
+    packaged_with "$v" | gate_tree "$root"
     run_gate "$root"
-    [ "$status" -eq 0 ]
-    [ ! -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ]
+    [ "$status" -eq 0 ] || { echo "gate failed for: $v"; return 1; }
+    [ -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ] \
+      || { echo "removed for: $v"; return 1; }
+  done
+  for v in "${GATE_REMOVES[@]}"; do
+    root="$BATS_TEST_TMPDIR/remove-$((i++))"
+    packaged_with "$v" | gate_tree "$root"
+    grep -q 'WatchdogSec' "$root/etc/systemd/system/ceralive.service"
+    run_gate "$root"
+    [ "$status" -eq 0 ] || { echo "gate failed for: $v"; return 1; }
+    [ ! -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ] \
+      || { echo "kept for: $v"; return 1; }
   done
   # Outside [Service] it is not a service setting.
   root="$BATS_TEST_TMPDIR/misplaced"
   printf '%s\n' "$PACKAGED_WITHOUT_WATCHDOG" | sed 's|^After=network.target$|After=network.target\nWatchdogSec=30s|' | gate_tree "$root"
   run_gate "$root"
   [ ! -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ]
-  # Spacing around "=" is accepted, as systemd does.
-  root="$BATS_TEST_TMPDIR/spaced"
-  printf '%s\n' "$PACKAGED_WITH_WATCHDOG" | sed 's|^WatchdogSec=30s$|WatchdogSec = 30s|' | gate_tree "$root"
+  # A continuation anywhere in the unit makes it ambiguous.
+  root="$BATS_TEST_TMPDIR/continued"
+  printf '%s\n' "$PACKAGED_WITH_WATCHDOG" | sed 's|^ExecStart=/usr/local/bin/ceralive$|ExecStart=/usr/local/bin/ceralive \\\n  --flag|' | gate_tree "$root"
   run_gate "$root"
-  [ -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ]
+  [ ! -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ]
 }
 
 @test "watchdog gate: the app layer runs the gate after the first-party install, on every build" {
@@ -258,4 +283,17 @@ UNIT
   [ "$(systemctl --user show -p KillMode --value "$name.service")" = mixed ]
   [ "$(systemctl --user show -p Restart --value "$name.service")" = always ]
   [ "$(systemctl --user show -p RestartUSec --value "$name.service")" = 2s ]
+
+  # Every form the gate keeps really arms a watchdog under 90 s in systemd.
+  rm -rf "$udir/$name.service.d"
+  local v want
+  local -A expect=([WatchdogSec=30s]=30s [WatchdogSec=30]=30s [WatchdogSec=1min]=1min [WatchdogSec=89sec]="1min 29s")
+  [ "${#expect[@]}" -eq "${#GATE_KEEPS[@]}" ]
+  for v in "${GATE_KEEPS[@]}"; do
+    want="${expect[$v]}"
+    [ -n "$want" ]
+    sed -i "s|^WatchdogSec.*|$v|" "$udir/$name.service"
+    run_and_read
+    [ "$WD_PROP" = "$want" ] || { echo "$v: manager reports $WD_PROP"; return 1; }
+  done
 }
