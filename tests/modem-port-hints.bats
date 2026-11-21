@@ -21,6 +21,8 @@ RULES_NAME=78-ceralive-modem-port-hints.rules
     'ACTION!="add|change|move|bind", GOTO="ceralive_mm_port_hints_end"'
     'SUBSYSTEM!="tty", GOTO="ceralive_mm_port_hints_end"'
     'SUBSYSTEMS=="usb", ATTRS{bInterfaceNumber}=="?*", ENV{.CERALIVE_MM_USBIFNUM}="$attr{bInterfaceNumber}"'
+    'ATTRS{idVendor}=="413c", ATTRS{idProduct}=="81d7", ENV{.CERALIVE_MM_USBIFNUM}=="02", ENV{ID_MM_PORT_IGNORE}="1"'
+    'ATTRS{idVendor}=="413c", ATTRS{idProduct}=="81d7", ENV{.CERALIVE_MM_USBIFNUM}=="03", ENV{ID_MM_PORT_IGNORE}="1"'
     'ATTRS{idVendor}=="2c7c", ATTRS{idProduct}=="0801", ENV{.CERALIVE_MM_USBIFNUM}=="03", ENV{ID_MM_PORT_IGNORE}="1"'
     'LABEL="ceralive_mm_port_hints_end"'
   )

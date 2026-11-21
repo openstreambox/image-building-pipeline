@@ -16,6 +16,19 @@ ACTION!="add|change|move|bind", GOTO="ceralive_mm_port_hints_end"
 SUBSYSTEM!="tty", GOTO="ceralive_mm_port_hints_end"
 SUBSYSTEMS=="usb", ATTRS{bInterfaceNumber}=="?*", ENV{.CERALIVE_MM_USBIFNUM}="$attr{bInterfaceNumber}"
 
+# Dell DW5821e (413c:81d7, recorded MBIM composition, configuration 2; other
+# compositions are outside that evidence): interfaces 2 and 3 are its AT
+# ports. Data, SIM, registration and carrier configuration all run over MBIM
+# (with QMI over MBIM), and ModemManager creates an MBIM modem without an AT
+# port. While these ports are probed, the Dell plugin's custom init sends AT+GMI
+# until the module answers (three tries, 3 s timeout each); that runs beside the
+# MBIM probe and decides when the modem appears whenever it finishes last.
+# Ignoring both ports takes AT probing off that path. What is lost: unmanaged GPS
+# (it needs a ModemManager AT port) and the "(at)" entry in ModemManager's port
+# list that CeraUI's USB-mode dialog looks for.
+ATTRS{idVendor}=="413c", ATTRS{idProduct}=="81d7", ENV{.CERALIVE_MM_USBIFNUM}=="02", ENV{ID_MM_PORT_IGNORE}="1"
+ATTRS{idVendor}=="413c", ATTRS{idProduct}=="81d7", ENV{.CERALIVE_MM_USBIFNUM}=="03", ENV{ID_MM_PORT_IGNORE}="1"
+
 # Quectel RM520N-GL / RM530N-GL (2c7c:0801, QMI configuration): interface 3 is
 # ModemManager's secondary AT port (0 QCDM, 1 GPS, 2 AT primary, 3 AT secondary).
 # ModemManager keeps the primary AT, QMI and data ports. CeraUI reads the module

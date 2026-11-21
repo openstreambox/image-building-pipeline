@@ -164,25 +164,29 @@ and Orange Pi 5 Plus has a USB 2 path.
 
 `mkosi/runtime/78-ceralive-modem-port-hints.rules`, installed into
 `/etc/udev/rules.d` by `networking.sh::setup_modem_port_hints`, sets
-`ID_MM_PORT_IGNORE=1` on one tty, matched by exact USB vendor/product and
+`ID_MM_PORT_IGNORE=1` on three ttys, each matched by exact USB vendor/product and
 interface number. ModemManager then lists the port as `(ignored)` and never opens
 or probes it. ModemManager's own port-type hints stay in place.
 
 | Device | Interface | Why |
 |---|---|---|
+| Dell DW5821e `413c:81d7` (MBIM) | 2, 3 (both AT ports) | The modem runs entirely over MBIM. While its AT ports are probed, the Dell plugin's custom init sends `AT+GMI` until the module answers, beside the MBIM probe; whichever finishes last decides when the modem appears. Without the AT ports only the MBIM probe counts. Lost: unmanaged GPS and the `(at)` entry in ModemManager's port list that CeraUI's USB-mode dialog looks for. |
 | Quectel RM520N-GL / RM530N-GL `2c7c:0801` (QMI) | 3 (secondary AT) | CeraUI reads `AT+QTEMP` and `AT+QENG="servingcell"` read-only on this port, and only when the udev database shows this release. ModemManager keeps the primary AT, QMI and data ports, and the USB 2 quirk above still talks to the `(at)` port while it holds the modem. |
 
 Without the release CeraUI refuses both reads, as `owned-by-modemmanager` while
 ModemManager lists the tty as an AT port, otherwise as `not-released`.
 
-The match uses the USB ID and interface number only, not the USB configuration or
-the retail model. `2c7c:0801` is shared by the RM520N-GL and the RM530N-GL, and
-the interface layout above is the recorded QMI composition (configuration 1);
-other compositions of this ID, such as MBIM, are outside that evidence.
+The matches use the USB ID and interface number only, not the USB configuration
+or the retail model. `2c7c:0801` is shared by the RM520N-GL and the RM530N-GL, and
+the interface layout above is the recorded QMI composition (configuration 1); the
+DW5821e layout is its recorded MBIM composition (configuration 2). Other
+compositions of these IDs are outside that evidence. The DW5821e eSIM product
+(`413c:81e0`) has the same layout in ModemManager's rules but has not been
+measured here, so it is not matched.
 
 The hints take effect for a modem probed after installation (boot, replug, or a
-re-probe of that modem). `tests/modem-port-hints.bats` checks the file and proves the
-matches with `udevadm test` against a generated sysfs.
+re-probe of that modem). `tests/modem-port-hints.bats` checks the file and proves
+the matches with `udevadm test` against a generated sysfs.
 
 ---
 
