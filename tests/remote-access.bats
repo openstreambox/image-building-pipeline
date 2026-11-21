@@ -200,6 +200,10 @@ case "\$*" in
     : >"$T/state/tailscaled.state"; [ -n "\$TS_SLEEP" ] && sleep "\$TS_SLEEP"
     [ -n "\$TS_OUT" ] && echo "\$TS_OUT" >&2; exit "\${TS_RC:-0}";;
   *"status --json"*) echo "{\"BackendState\": \"\${TS_BACKEND:-NeedsLogin}\"}";;
+  # \$TS_SET_OUT/\$TS_SET_RC model tailscaled refusing a pref change while
+  # Tailscale SSH stays on; turning SSH off in the same change is accepted.
+  *" set "*) case "\$*" in *"--ssh=false"*) exit "\${TS_SSHOFF_RC:-0}";; esac
+    [ -n "\$TS_SET_OUT" ] && echo "\$TS_SET_OUT" >&2; exit "\${TS_SET_RC:-0}";;
 esac
 exit 0
 STUB
@@ -237,6 +241,51 @@ fresh() { # wipe the per-scenario state inside this test's own tmpdir
   [ "$(cut -d' ' -f1 "$T/enroll/enroll-status")" = joined ]
   [ -e "$T/enroll/joined-once" ] && [ ! -e "$T/enroll/state-ours" ]
   no_leftovers
+  no_key_anywhere
+}
+
+NO_TAILNET_SSH="Unable to enable local Tailscale SSH server; not enabled on Tailnet."
+
+@test "on a tailnet without Tailscale SSH, enrollment turns SSH off so the auto-update pin still applies" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_SET_RC=1 TS_SET_OUT="$NO_TAILNET_SSH"
+  [ "$status" -eq 0 ]
+  # the plain pin was refused, then SSH off and both pins went in one change
+  [ "$(grep -c ' set ' "$T/calls")" -eq 2 ]
+  [ "$(tail -n1 "$T/calls")" = "tailscale --socket=$T/none.sock set --ssh=false --accept-risk=lose-ssh --auto-update=false --update-check=false" ]
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 1 0 ok-without-tailnet-ssh" ]
+  [[ "$output" == *"does not allow Tailscale SSH"* ]]
+  [ ! -e "$T/enroll/pending-authkey" ] && [ -e "$T/enroll/joined-once" ]
+  no_leftovers
+  no_key_anywhere
+}
+
+@test "a pin that still fails is reported in the status, not as a plain ok" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_SET_RC=1 TS_SET_OUT="$NO_TAILNET_SSH" TS_SSHOFF_RC=1
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 1 0 ok-auto-update-not-pinned" ]
+  fresh; enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_SET_RC=1 TS_SET_OUT="some other error"
+  [ "$status" -eq 0 ]
+  # an unrelated refusal never turns SSH off
+  ! grep -q -- '--ssh=false' "$T/calls"
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 1 0 ok-auto-update-not-pinned" ]
+  [[ "$output" == *"could not pin auto-update off"* ]]
+  no_key_anywhere
+}
+
+@test "a new key for a box already on a tailnet without Tailscale SSH ends at once, keeping its state" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="$NO_TAILNET_SSH" TS_BACKEND=Running
+  [ "$status" -ne 0 ]
+  [ "$(cut -d' ' -f1,4- "$T/enroll/enroll-status")" = "gave-up this tailnet does not allow Tailscale SSH; forget the box there first" ]
+  [ -e "$T/state/tailscaled.state" ] && [ ! -e "$T/enroll/pending-authkey" ]
   no_key_anywhere
 }
 

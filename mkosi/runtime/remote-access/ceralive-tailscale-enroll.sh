@@ -28,6 +28,9 @@
 # 2. While a pending key exists, tailscaled is started and `tailscale up` runs
 #    with Tailscale SSH on and no DNS/route changes, then auto-update is pinned
 #    off. On success the pending key is overwritten and removed.
+#    If the tailnet does not grant Tailscale SSH, tailscaled refuses every later
+#    pref change (this pin, `down`, `logout`) while SSH is on, so SSH is turned
+#    off in the same change as the pin; the status reason says so.
 # 3. Failures are bounded. A final control-plane answer (invalid, expired,
 #    revoked or already used key) ends enrollment at once. Other failures (no
 #    network yet) back off from 2 to 30 minutes and give up after MAX_ATTEMPTS.
@@ -69,6 +72,9 @@ NAME_RE='^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$'
 REFUSED_RE='^(backend error: )?(invalid key|key (has )?(been )?(expired|revoked|already (been )?used))\b
 \binvalid (pre[- ]?)?auth[- ]?key\b
 \b(pre[- ]?)?auth[- ]?key (has )?(been )?(not found|not valid|invalid|expired|revoked|(already (been )?)?used)\b'
+# tailscaled's answer to any pref change while Tailscale SSH is on and the
+# tailnet's policy does not grant this node the SSH capability.
+NO_TAILNET_SSH_RE='not enabled on tailnet'
 
 log() { logger -t ceralive-tailscale-enroll -- "$*" 2>/dev/null || true; echo "ceralive-tailscale-enroll: $*"; }
 
@@ -245,6 +251,25 @@ give_up() { # reason
   log "gave up Tailscale enrollment: $1; the key was removed. Put a new key file on BOOT to retry."
 }
 
+# `up` resets the auto-update preference to "unset" (then the tailnet default
+# applies), so pin it off after every successful up. Prints the status reason.
+pin_auto_update_off() {
+  local out
+  if out="$("${CLI}" --socket="${SOCKET}" set --auto-update=false --update-check=false 2>&1)"; then
+    echo ok
+    return 0
+  fi
+  if printf '%s' "$out" | grep -qiE "$NO_TAILNET_SSH_RE" \
+     && "${CLI}" --socket="${SOCKET}" set --ssh=false --accept-risk=lose-ssh \
+          --auto-update=false --update-check=false >/dev/null 2>&1; then
+    log "this tailnet does not allow Tailscale SSH: turned SSH off on this box so its settings can change; auto-update pinned off" >&2
+    echo ok-without-tailnet-ssh
+    return 0
+  fi
+  log "could not pin auto-update off ($(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)); tailscaled re-applies it at start" >&2
+  echo ok-auto-update-not-pinned
+}
+
 enroll_pending() {
   present "${PENDING}" || return 0
   parse_keyfile "${PENDING}"
@@ -289,12 +314,10 @@ enroll_pending() {
   if (( rc == 0 )); then
     : >"${ENROLL}/joined-once"
     rm -f -- "${OURS}"
-    # `up` resets the auto-update preference to "unset" (then the tailnet
-    # default applies), so pin it off after every successful up.
-    "${CLI}" --socket="${SOCKET}" set --auto-update=false --update-check=false \
-      || log "could not pin auto-update off; tailscaled re-applies it at start"
+    local reason
+    reason="$(pin_auto_update_off)"
     wipe "${PENDING}"
-    write_status joined "$attempts" 0 ok
+    write_status joined "$attempts" 0 "$reason"
     sync "${ENROLL}"
     log "joined Tailscale${name:+ as ${name}}"
     return 0
@@ -307,6 +330,12 @@ enroll_pending() {
   # "certificate has expired" (a wrong clock on first boot) is transient.
   if printf '%s' "$out" | grep -qiE "$REFUSED_RE"; then
     give_up "the control server refused the key"
+    return 1
+  fi
+  # Only a box that already holds a netmap from such a tailnet answers this way
+  # (a fresh login has no netmap yet); retrying cannot change it.
+  if printf '%s' "$out" | grep -qiE "$NO_TAILNET_SSH_RE"; then
+    give_up "this tailnet does not allow Tailscale SSH; forget the box there first"
     return 1
   fi
   if (( attempts >= MAX_ATTEMPTS )); then

@@ -6381,8 +6381,13 @@ with the card.
   `joined`, `gave-up`. The reason is free text and may contain spaces, so parse the
   first field. `pending-authkey` exists while a key waits (presence only; don't read
   it), and `joined-once` exists after the first successful join.
+  After a join the reason is `ok`, `ok-without-tailnet-ssh` (see below) or
+  `ok-auto-update-not-pinned` (the pin failed for another reason; tailscaled
+  re-applies it at its next start).
 - **Giving up:** a refused key, or 100 failed attempts (back-off 2 to 30 minutes),
-  ends in `gave-up` and removes the key. `/var/lib/tailscale/tailscaled.state` is
+  ends in `gave-up` and removes the key. So does a new key for a box that is still
+  logged in to a tailnet without Tailscale SSH: tailscaled refuses that `up` until
+  the box is forgotten there. `/var/lib/tailscale/tailscaled.state` is
   removed only when all three hold:
   - this enrollment created it (`state-ours`, written before tailscaled first ran
     without state);
@@ -6396,6 +6401,14 @@ with the card.
   on 1.104.7). After any `up` the card runs
   `tailscale set --auto-update=false --update-check=false`. tailscaled also re-applies
   it at every start (`ExecStartPost`).
+- **Tailnets without Tailscale SSH:** the enrollment joins with `--ssh`. If the
+  tailnet's policy does not grant the node the SSH capability, tailscaled accepts
+  that first `up` (it has no netmap yet) but then refuses every pref change while
+  SSH is on, including this pin, `tailscale down` and `tailscale logout` ("Unable to
+  enable local Tailscale SSH server; not enabled on Tailnet", measured on 1.104.7).
+  The enrollment then turns SSH off in the same `set` as the pin and reports
+  `ok-without-tailnet-ssh`. To get Tailscale SSH later, allow it in the tailnet
+  policy and enroll the box again with a new key.
 - **Loopback fence:** tailnet peers reach only TCP 18080 (CeraUI backend) on the box
   (`tailscaled-loopback.nft`, matched by tailscaled's account). Tailscale SSH sessions
   run as `ceralive-tailscale` and become root with `sudo`.
