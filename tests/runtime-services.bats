@@ -1334,7 +1334,7 @@ EOF
   [ -d "$root/typec/port0" ]
   [ ! -e "$root/iio/writes" ]
   [ "$(cut -d' ' -f1 "$root/run/reprobe")" = recovered ]
-  [[ "$output" == *"<6>ceralive-typec-policy: INFO: fusb302-reprobe: port0 is source with no partner 3"?"s after the last cycle: rebinding 4-0022 from typec_fusb302"* ]]
+  [[ "$output" == *"<5>ceralive-typec-policy: INFO: fusb302-reprobe: port0 is source with no partner 3"?"s after the last cycle: rebinding 4-0022 from typec_fusb302"* ]]
   [[ "$output" == *"INFO: fusb302-reprobe: partner found after rebinding 4-0022: power_role=source data_role=host"* ]]
 }
 
@@ -1356,7 +1356,7 @@ EOF
   run run_typec_rock
   [ "$status" -eq 0 ]
   [ "$(cut -d' ' -f1 "$root/run/reprobe")" = no-partner ]
-  [[ "$output" == *"<6>ceralive-typec-policy: INFO: fusb302-reprobe: no partner 0s after rebinding 4-0022: J11 is empty or the chip is still stuck — only a partner that appears again re-arms another rebind"* ]]
+  [[ "$output" == *"<5>ceralive-typec-policy: INFO: fusb302-reprobe: no partner 0s after rebinding 4-0022: J11 is empty or the chip is still stuck — only a partner that appears again re-arms another rebind"* ]]
   [[ "$output" != *"WARNING"* && "$output" != *"<4>"* && "$output" != *"<3>"* ]]
   # Without a partner ever appearing, nothing re-arms: no further rebind, no log.
   export CERALIVE_TYPEC_REARM_SETTLE=0
@@ -1389,7 +1389,7 @@ EOF
   export CERALIVE_TYPEC_REARM_SETTLE=0
   run run_typec_rock
   [ "$status" -eq 0 ]
-  [[ "$output" == *"<6>ceralive-typec-policy: INFO: fusb302-reprobe: re-arm 1/3: port0 lost its partner and has had none for 0s or more: rebinding 4-0022 from typec_fusb302"* ]]
+  [[ "$output" == *"<5>ceralive-typec-policy: INFO: fusb302-reprobe: re-arm 1/3: port0 lost its partner and has had none for 0s or more: rebinding 4-0022 from typec_fusb302"* ]]
   [[ "$output" == *"INFO: fusb302-reprobe: re-arm 1/3: partner found after rebinding 4-0022"* ]]
   [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 2 ]
   [ "$(cat "$root/run/rearm")" = 1 ]
@@ -1810,7 +1810,7 @@ rearm_due_state() {
 
   run run_typec_rock
   [ "$status" -eq 0 ]
-  [ "$output" = "ceralive-typec-policy: INFO: port0 is absent — no connector writes until it returns" ]
+  [ "$output" = "<5>ceralive-typec-policy: INFO: port0 is absent — no connector writes until it returns" ]
   for n in 1 2 3; do
     run run_typec_rock
     [ "$status" -eq 0 ]
@@ -3836,4 +3836,54 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
     run env MARK_GOOD_STATUS="$state" bash -c '"$1" $2' bash "$root/systemctl" "$payload"
     [ "$status" -eq "$state" ]
   done
+}
+
+# ===========================================================================
+# Quiet polling units — a timer tick that changes nothing journals nothing.
+# The recheck (10 s) and hostname reconcile (30 s) units cap their journal at
+# notice; their scripts print decisions and failures at notice or above.
+# ===========================================================================
+
+@test "typec recheck: the unit caps its journal at notice" {
+  grep -Fxq 'LogLevelMax=notice' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-recheck.service"
+  # The boot/udev policy unit keeps its default level.
+  ! grep -Fq 'LogLevelMax' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.service"
+}
+
+@test "typec policy: every line it prints carries notice or a higher priority" {
+  local root="$BATS_TEST_TMPDIR/rock" line
+  typec_rock_fixture "$root"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  while IFS= read -r line; do
+    [[ "$line" =~ ^\<[345]\>ceralive-typec-policy:\  ]]
+  done <<<"$output"
+  # The tag decides the priority.
+  run bash -c "source <(sed -n '/^log() {/,/^}/p' '$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh'); log 'ERROR: x'; log 'WARNING: y'; log 'INFO: z'; log 'plain'"
+  [ "$output" = $'<3>ceralive-typec-policy: ERROR: x\n<4>ceralive-typec-policy: WARNING: y\n<5>ceralive-typec-policy: INFO: z\n<5>ceralive-typec-policy: plain' ]
+}
+
+@test "hostname reconcile: the 30 s unit caps its journal at notice; actions stay above it" {
+  local src="$PIPELINE_DIR/mkosi/customize/postinst.d/hostname.sh" unit
+  unit="$(awk '/cat >\/etc\/systemd\/system\/ceralive-hostname-reconcile\.service <</ { f=1; next } f && /^EOF$/ { exit } f { print }' "$src")"
+  [ -n "$unit" ]
+  grep -Fxq 'LogLevelMax=notice' <<<"$unit"
+  # The boot-time hostname unit keeps its default level.
+  local boot
+  boot="$(awk '/cat >\/etc\/systemd\/system\/ceralive-hostname\.service <</ { f=1; next } f && /^EOF$/ { exit } f { print }' "$src")"
+  [ -n "$boot" ]
+  ! grep -Fq 'LogLevelMax' <<<"$boot"
+  # The two routine reconcile lines stay at info, so a no-change tick is silent.
+  grep -Fq "printf 'ceralive-set-hostname: identity already aligned at" "$src"
+  grep -Fq "printf 'ceralive-set-hostname: publication is still registering;" "$src"
+  # Changes and failures are notice or above.
+  local msg
+  for msg in 'completed pending consumer restart' 'persisted provisional identity' \
+    'publication diverged' 'reconciled and established' 'conflicted; trying next' \
+    'has no stable owner'; do
+    grep -Eq "printf '<[345]>ceralive-set-hostname: [^']*${msg}" "$src"
+  done
+  grep -Fq "printf '<3>ceralive-set-hostname: %s\\n' \"\$*\" >&2" "$src"
 }
