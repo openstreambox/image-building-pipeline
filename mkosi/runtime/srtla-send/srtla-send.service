@@ -1,0 +1,23 @@
+[Unit]
+Description=SRTLA bonding sender for the live stream
+# CeraUI writes the sender's arguments to /run/ceralive/srtla-send.argv and
+# starts this unit for a stream, restarts it to reconfigure and stops it when
+# the stream ends. The sender then lives in its own cgroup, so a CeraUI restart
+# (ceralive.service, KillMode=mixed) no longer kills it. cerastream.service
+# already orders itself after this unit. Contract: docs/srtla-send-unit.md.
+After=network.target
+# A sender that keeps failing stops here and waits for CeraUI to start it again.
+StartLimitIntervalSec=60
+StartLimitBurst=10
+# No [Install]: nothing starts the sender at boot.
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/ceralive/srtla-send-launch
+# systemd is the only restart authority for the sender (CeraUI never respawns it).
+Restart=on-failure
+RestartSec=1s
+# Exit 2 is the launcher refusing its argument file; retrying cannot fix that.
+RestartPreventExitStatus=2
+TimeoutStopSec=5s
+SyslogIdentifier=srtla_send
