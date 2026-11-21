@@ -48,6 +48,10 @@ ACTIVE_FLAG="${CERALIVE_PROVISION_ACTIVE_FLAG:-${STATE_DIR}/portal-active}"
 SCAN_CACHE="${CERALIVE_PROVISION_SCAN_CACHE:-${STATE_DIR}/scan.txt}"
 ERROR_MARKER="${CERALIVE_PROVISION_ERROR_MARKER:-${STATE_DIR}/last-error}"
 PENDING_JOIN="${CERALIVE_PROVISION_PENDING_JOIN:-${STATE_DIR}/pending-join}"
+JOIN_LOCK="${CERALIVE_PROVISION_JOIN_LOCK:-${STATE_DIR}/pending-join.lock}"   # shared with ceralive-provision
+JOIN_LOCK_WAIT="${CERALIVE_JOIN_LOCK_WAIT:-10}"
+JOIN_UUID_SOURCE="${CERALIVE_JOIN_UUID_SOURCE:-/proc/sys/kernel/random/uuid}"  # fresh UUID for each saved profile
+UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 HOSTNAME_FILE="${CERALIVE_HOSTNAME_FILE:-/etc/hostname}"
 HOST_INDEX_FILE="${CERALIVE_HOSTNAME_INDEX_FILE:-/etc/ceralive/host_index}"
 HOSTNAME_BIN="${CERALIVE_HOSTNAME_BIN:-hostname}"
@@ -297,37 +301,104 @@ HTML
 }
 
 # --- credential handoff -------------------------------------------------------
-# Persist the user's network as a NM profile (credentials land ONLY in NM storage).
-# Fixed con-name → retries overwrite cleanly; counted by the provision trigger so the
-# portal stays down on the next boot once the join has verified it (EC4).
+# Every attempt gets its own profile UUID, recorded in pending-join BEFORE the profile
+# is saved. The provision trigger does not count a profile pending-join names, and
+# whoever settles the attempt (this handler on a failed save, the connect worker, the
+# next boot) retires the record only while it still names that attempt. The portal
+# accepts parallel connections, so the whole save runs under the join lock.
+
+# Take the join lock (shared with ceralive-provision). Non-zero when it is not held.
+join_lock() {
+  mkdir -p "${STATE_DIR}" 2>/dev/null
+  exec {JOIN_LOCK_FD}>>"${JOIN_LOCK}" || return 1
+  flock -w "${JOIN_LOCK_WAIT}" "${JOIN_LOCK_FD}" && return 0
+  join_unlock
+  return 1
+}
+join_unlock() {
+  [ -n "${JOIN_LOCK_FD:-}" ] && exec {JOIN_LOCK_FD}>&-
+  JOIN_LOCK_FD=""
+}
+
+# Remove pending-join only if it still names the attempt with UUID $1, under the join
+# lock (taken here unless the caller holds it). Non-zero when it names $1 and stays.
+retire_pending_join() {
+  local uuid="$1" took=0 rc=0
+  if [ -z "${JOIN_LOCK_FD:-}" ]; then
+    join_lock || { log "could not take ${JOIN_LOCK}; ${PENDING_JOIN} kept"; return 1; }
+    took=1
+  fi
+  if grep -qx "uuid=${uuid}" "${PENDING_JOIN}" 2>/dev/null; then
+    rm -f "${PENDING_JOIN}" 2>/dev/null && [ ! -e "${PENDING_JOIN}" ] || rc=1
+  fi
+  [ "${took}" = 1 ] && join_unlock
+  return "${rc}"
+}
+
+# NM's profile listing (NAME:UUID:TYPE); non-zero when NM cannot be read.
+nm_profiles() { "${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null; }
+
+# Persist the user's network as a NM profile with UUID $3 (credentials land ONLY in NM
+# storage). The fixed con-name is what the provision trigger and worker look for.
 # stdout is the client socket here, so nmcli's "successfully added" line would go out
 # ahead of the HTTP status line. Discard stdout and keep stderr for the journal.
 write_user_profile() {
-  local ssid="$1" psk="$2" err rc
-  local -a add=(connection add type wifi con-name "${USER_CON_NAME}" ifname "${AP_IFACE}"
-                ssid "${ssid}" autoconnect yes)
+  local ssid="$1" psk="$2" uuid="$3" err rc
+  local -a add=(connection add type wifi con-name "${USER_CON_NAME}" connection.uuid "${uuid}"
+                ifname "${AP_IFACE}" ssid "${ssid}" autoconnect yes)
   [ -n "${psk}" ] && add+=(wifi-sec.key-mgmt wpa-psk wifi-sec.psk "${psk}")
-  "${NMCLI}" connection delete "${USER_CON_NAME}" >/dev/null 2>&1 || true
   err="$("${NMCLI}" "${add[@]}" 2>&1 >/dev/null)"; rc=$?
   [ "${rc}" -eq 0 ] || log "nmcli connection add failed (rc=${rc}): ${err}"
   return "${rc}"
 }
 
-# Record that the profile about to be saved is not verified yet: the provision trigger
-# does not count it while this file exists, and the connect worker removes it once the
-# join is verified or the profile deleted. Temp file + rename, flushed before the
-# profile is written, so a power loss cannot leave the profile without it. No SSID
-# newlines: the file is read line by line. Non-zero when the file is not in place.
+# Write pending-join for SSID $1 and UUID $2: temp file, flushed, renamed, directory
+# flushed, so a power loss cannot leave the profile saved without it. Any failure
+# (including a flush) removes what was written and returns non-zero: no record, no
+# profile. No SSID newlines: the file is read line by line.
 mark_join_pending() {
   local tmp="${PENDING_JOIN}.tmp.$$"
   mkdir -p "${STATE_DIR}" 2>/dev/null
-  if printf 'ssid=%s\ncon=%s\n' "${1//$'\n'/ }" "${USER_CON_NAME}" >"${tmp}" 2>/dev/null \
+  if printf 'ssid=%s\ncon=%s\nuuid=%s\n' "${1//$'\n'/ }" "${USER_CON_NAME}" "$2" >"${tmp}" 2>/dev/null \
+      && sync -- "${tmp}" 2>/dev/null \
       && mv -fT "${tmp}" "${PENDING_JOIN}" 2>/dev/null; then
-    sync -- "${PENDING_JOIN}" "${STATE_DIR}" 2>/dev/null || log "could not flush ${PENDING_JOIN}"
-    return 0
+    sync -- "${STATE_DIR}" 2>/dev/null && return 0
+    log "could not flush ${STATE_DIR}; dropping ${PENDING_JOIN}"
+    rm -f "${PENDING_JOIN}" 2>/dev/null
+    return 1
   fi
+  log "could not write and flush ${PENDING_JOIN}"
   rm -f "${tmp}" 2>/dev/null
   return 1
+}
+
+# The save itself; the caller holds the join lock. Earlier ${USER_CON_NAME} profiles are
+# deleted (by UUID) first, and a delete that fails stops the save before pending-join
+# is touched, so a profile that stays saved keeps whatever record named it. Then the
+# record, then the profile with exactly that UUID. A failed add retires the record
+# only once NM shows no profile with that UUID. Sets JOIN_UUID; non-zero = not saved.
+save_join() {
+  local ssid="$1" psk="$2" uuid list old u
+  uuid="$(tr -d '[:space:]' <"${JOIN_UUID_SOURCE}" 2>/dev/null)"
+  [[ "${uuid}" =~ ${UUID_RE} ]] || { log "could not choose a UUID for '${USER_CON_NAME}'"; return 1; }
+  list="$(nm_profiles)" || { log "could not read NetworkManager profiles; '${USER_CON_NAME}' not saved"; return 1; }
+  old="$(awk -F: -v n="${USER_CON_NAME}" 'NF == 3 && $1 == n && $3 == "802-11-wireless" { print $2 }' <<<"${list}")"
+  for u in ${old}; do
+    if ! "${NMCLI}" connection delete uuid "${u}" >/dev/null 2>&1; then
+      log "could not delete the earlier '${USER_CON_NAME}' (${u}); new profile not saved"
+      return 1
+    fi
+  done
+  mark_join_pending "${ssid}" "${uuid}" || return 1
+  if ! write_user_profile "${ssid}" "${psk}" "${uuid}"; then
+    if list="$(nm_profiles)" && ! awk -F: -v u="${uuid}" '$2 == u { f = 1 } END { exit !f }' <<<"${list}"; then
+      retire_pending_join "${uuid}" || log "could not remove ${PENDING_JOIN}"
+    else
+      log "profile ${uuid} may be saved after a failed add; ${PENDING_JOIN} kept"
+    fi
+    return 1
+  fi
+  JOIN_UUID="${uuid}"
 }
 
 # Fire the detached handoff worker in its own transient unit so it survives this
@@ -337,7 +408,7 @@ trigger_connect() {
   "${SYSTEMD_RUN}" --no-block --collect \
     --unit=ceralive-provision-connect \
     --property=RuntimeMaxSec="${CONNECT_RUNTIME_MAX}" \
-    "${PROVISION_BIN}" connect "${USER_CON_NAME}" >/dev/null 2>&1
+    "${PROVISION_BIN}" connect "${USER_CON_NAME}" "$1" >/dev/null 2>&1
 }
 
 handle_post() {
@@ -354,14 +425,16 @@ handle_post() {
     return 0
   fi
 
-  if ! mark_join_pending "${ssid}"; then
-    log "could not write ${PENDING_JOIN}; NM profile for SSID '${ssid}' not saved"
-    send_response "200 OK" "$(render_invalid "Could not save the network profile. Please try again.")"
-    return 0
+  local saved=1
+  if join_lock; then
+    save_join "${ssid}" "${psk}" || saved=0
+    join_unlock
+  else
+    log "could not take ${JOIN_LOCK}"
+    saved=0
   fi
-  if ! write_user_profile "${ssid}" "${psk}"; then
-    log "failed to write NM profile for SSID '${ssid}'"
-    rm -f "${PENDING_JOIN}"
+  if [ "${saved}" = 0 ]; then
+    log "failed to save NM profile for SSID '${ssid}'"
     send_response "200 OK" "$(render_invalid "Could not save the network profile. Please try again.")"
     return 0
   fi
@@ -370,7 +443,7 @@ handle_post() {
   send_response "200 OK" "$(render_connecting "${ssid}")"
   # Answer first, hand off second — the worker drops the AP that is carrying this socket.
   # A worker that cannot start leaves the join pending; the next boot decides on it.
-  trigger_connect || log "could not start the handoff worker; '${USER_CON_NAME}' stays unverified"
+  trigger_connect "${JOIN_UUID}" || log "could not start the handoff worker; '${USER_CON_NAME}' stays unverified"
 }
 
 # --- request loop (single request per connection) -----------------------------
