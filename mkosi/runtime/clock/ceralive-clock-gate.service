@@ -1,5 +1,5 @@
 [Unit]
-Description=CeraLive: start persistent calendar timers once chrony has set the clock
+Description=CeraLive: start persistent calendar timers once their stamps can be trusted
 Documentation=man:systemd.timer(5) man:chronyc(1)
 # WHY THIS EXISTS (Rock 5B+ booted from an SD card, cold boots):
 #
@@ -21,22 +21,25 @@ Documentation=man:systemd.timer(5) man:chronyc(1)
 # `systemctl is-system-running` would read "starting" for that time, and for
 # up to the waiter's timeout on a box without an uplink.
 #
-# Instead the timers carry ConditionPathExists=/run/ceralive/clock-synchronized
+# Instead the timers carry ConditionPathExists=/run/ceralive/clock-gate-open
 # (50-ceralive-clock-gate.conf), so they are skipped at boot, and this unit
-# waits in the background for chrony to report a synchronised clock, writes
-# that flag and starts every enabled timer that carries the drop-in. Each then
-# reads its stamp against the real time and keeps its intended cadence. Until
-# the clock syncs, these jobs do not run; with no real time there is no way to
-# tell whether a week has passed.
+# starts each enabled one as soon as its stamp is behind the clock (valid RTC,
+# warm boot, clock set by hand, or after chrony's step; no NTP needed) or
+# chrony reports a synchronised clock. The boot clock can lag real time but
+# never leads it, so a stamp behind the clock is read correctly. On a box that
+# never gets a usable clock, dpkg-db-backup still runs once after an hour of
+# uptime; the trim, apt and certificate expiry jobs wait, since without a real
+# date there is no telling whether they are due. The script and its tests say
+# exactly how each case is handled.
 After=chrony.service chronyd-restricted.service
 
 [Service]
-# exec, not oneshot: the unit is active as soon as the waiter runs, so nothing
-# at boot waits for the clock.
+# exec, not oneshot: the unit is active as soon as the gate runs, so nothing at
+# boot waits for the clock.
 Type=exec
 ExecStart=/usr/libexec/ceralive/ceralive-clock-gate
-# chronyc or the flag failing (exit 1) is retried; a timer that will not start
-# (exit 2) is not.
+# A failed flag write (exit 1) is retried; giving up on a timer that kept
+# failing to start for 10 minutes (exit 2) is not.
 Restart=on-failure
 RestartSec=30s
 RestartPreventExitStatus=2
