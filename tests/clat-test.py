@@ -148,6 +148,41 @@ class Recovery(Isolated):
         self.assertEqual(clat.eligible(addresses), ['2001:db8::1', '2001:db8::2'])
         self.assertEqual(clat.eligible(addresses[::-1]), clat.eligible(addresses))
 
+    def test_discovery_failure_survives_cleanup_and_warns_on_transitions(self):
+        from contextlib import redirect_stderr
+        from io import StringIO
+        from unittest.mock import patch
+
+        host = FakeHost()
+        controller = clat.Controller()
+        wanted = {'wan1': ('2001:db8::1', '2001:db8::2', ('2001:db8::53',))}
+        log = StringIO()
+        snapshot = clat.RUN / '3.json'
+        with host.patched(), redirect_stderr(log), patch.object(clat, 'discover') as discover:
+            for reason in ('dns64-unreachable', 'dns64-unreachable', 'no-nat64-prefix'):
+                discover.side_effect = clat.DiscoveryError(reason)
+                controller.sync(wanted, sharing=False)
+                status = json.loads(snapshot.read_text())
+                self.assertEqual((status['state'], status['last_error']), ('down', reason))
+                self.assertEqual(status['expires_at'], status['observed_at'])
+                self.assertFalse(controller.links)
+                self.assertFalse(host.processes)
+                self.assertFalse(host.tables)
+                self.assertFalse((clat.RUN / '3.cleanup').exists())
+            self.assertEqual(log.getvalue().splitlines(), [
+                '<4>CLAT wan1 DNS64 discovery failed: dns64-unreachable',
+                '<4>CLAT wan1 DNS64 discovery failed: no-nat64-prefix',
+            ])
+            controller.sync({}, sharing=False)
+            self.assertIsNone(json.loads(snapshot.read_text())['last_error'])
+            controller.sync(wanted, sharing=False)
+            self.assertEqual(log.getvalue().count('no-nat64-prefix'), 2)
+            discover.side_effect = None
+            discover.return_value = '64:ff9b::/96'
+            controller.sync(wanted, sharing=False)
+            status = json.loads(snapshot.read_text())
+            self.assertEqual((status['state'], status['last_error']), ('up', None))
+
     def test_revalidation_hysteresis_and_recovery(self):
         from unittest.mock import Mock, patch
         link = Mock(process=None, index=3, stopping=False, refreshed=0, failures=0, prefix='64:ff9b::/96')
@@ -166,6 +201,34 @@ class Recovery(Isolated):
             for _ in range(3): controller.sync({'wan1': signature})
         link.stop.assert_called_once_with('error', 'timeout')
         self.assertFalse(controller.links)
+
+    def test_revalidation_diagnostic_survives_heartbeats_and_withdrawal(self):
+        from contextlib import redirect_stderr
+        from io import StringIO
+        from unittest.mock import patch
+
+        host = FakeHost()
+        controller = clat.Controller()
+        wanted = {'wan1': ('2001:db8::1', '2001:db8::2', ('2001:db8::53',))}
+        log = StringIO()
+        snapshot = clat.RUN / '3.json'
+        with host.patched(), redirect_stderr(log), patch.object(clat.time, 'monotonic') as clock:
+            clock.return_value = 0
+            controller.sync(wanted, sharing=False)
+            error = clat.DiscoveryError('dns64-unreachable')
+            with patch.object(clat, 'discover', side_effect=error):
+                for tick in (61, 71, 122):
+                    clock.return_value = tick
+                    controller.sync(wanted, sharing=False)
+                    status = json.loads(snapshot.read_text())
+                    self.assertEqual((status['state'], status['last_error']), ('up', str(error)))
+                clock.return_value = 183
+                controller.sync(wanted, sharing=False)
+                self.assertFalse(controller.links)
+                controller.sync(wanted, sharing=False)
+                status = json.loads(snapshot.read_text())
+                self.assertEqual((status['state'], status['last_error']), ('down', str(error)))
+            self.assertEqual(log.getvalue().count('DNS64 discovery failed:'), 1)
 
     def test_validated_prefix_change_withdraws(self):
         from unittest.mock import Mock, patch
