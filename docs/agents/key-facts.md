@@ -6439,7 +6439,61 @@ with the card.
   it), and `joined-once` exists after the first successful join.
   After a join the reason is `ok`, `ok-without-tailnet-ssh` (see below) or
   `ok-auto-update-not-pinned` (the pin failed for another reason; tailscaled
-  re-applies it at its next start).
+  re-applies it at its next start). `already-joined` means a new key arrived
+  while the box already held a login, and the key was not used (see below).
+- **Whether tailscaled runs is the owner's:** the card's On/Off (`enable --now`,
+  `down` then `disable --now`) is the only thing that switches it. Checking a
+  new key never starts or stops it. The unit asks
+  `systemctl is-active tailscaled.service` first:
+  - `active`: tailscaled is asked (`status --json`), as below.
+  - `inactive`/`failed`: `/var/lib/tailscale/tailscaled.state` is read, as
+    root and read-only. It is opened without following a link or blocking on a
+    FIFO, must be a regular file of at most 1 MiB, and nothing from it is logged
+    or copied (it holds private keys). Layout measured on 1.104.7 (scrubbed
+    copies in `tests/fixtures/tailscaled-state/`): a JSON object of base64
+    values; `_current-profile` names the profile entry holding the prefs;
+    `prefs.Config.PrivateNodeKey` is the node key (all zero when there is none);
+    a logout deletes the profile; a fresh daemon writes `{}`. A node key that
+    is not `LoggedOut` counts as a login. No file, `{}`, a deleted profile, no
+    node key or `LoggedOut` count as no login. Anything else (a link, a FIFO,
+    an oversized or unparsable file, the pre-profile `_daemon` layout, unknown
+    top-level keys, another profile, an odd key format, no python3) means
+    "can't tell".
+  - `activating`/`deactivating`, or any other answer: asked again later.
+
+  "Can't tell" is never read as "no login": the key stays pending, the reason
+  is logged and the attempt backs off like any other (and gives up at the
+  cap without touching the state).
+- **A new key on a box that is already in a tailnet:** the box cannot tell
+  which tailnet a key belongs to without sending it, and an `up` without
+  `--force-reauth` keeps the current login anyway (it would only re-send the
+  key and reset prefs). So before the keyed `up` first runs for a pending key:
+  - tailscaled runs and reports a node key with `Running`, or `Stopped`
+    (`down` only): the key is not used.
+  - tailscaled is not running and its state holds a login: the key is not used,
+    and tailscaled stays off. Without control the box cannot tell an expired
+    login from a working one, so the note says to switch remote access on and,
+    if the card then asks for a key, to add it again.
+  - tailscaled runs and reports a node key with `NoState` or `Starting` (still
+    connecting; the login may have expired meanwhile): asked again at the next
+    attempt, without the keyed `up`.
+  - tailscaled runs and reports `NeedsLogin` (expired or logged out) or
+    `NeedsMachineAuth`: the key is used as before.
+  - tailscaled is not running and its state holds no login: the key asks to
+    join, so the unit starts tailscaled for the keyed `up`, and it stays running
+    (as for any join). If tailscaled then reports a login after all, the key is
+    not used and tailscaled is left running, with a warning in the log.
+
+  An unused key ends with `TAILSCALE-KEY-NOT-USED.txt` on BOOT (synced) with the
+  box's MagicDNS name when tailscaled answered (`Self.DNSName`, else the
+  tailnet's MagicDNS suffix; never the account name) and how to move it, then
+  `joined <attempts> 0 already-joined` (synced), then the key is removed. If
+  the note or the result cannot be stored, the key stays for the next run. Moving
+  a box to another tailnet is an explicit step: remove it from the current
+  tailnet (its admin console, or the card's Forget), then add the key again. The
+  next adopted BOOT key removes the note. A join that began while tailscaled
+  ran (a `prior-login` record exists) and then finds it switched off waits,
+  key pending, until the owner switches it on.
 - **Giving up:** a refused key, or 100 failed attempts (back-off 2 to 30 minutes),
   ends in `gave-up` and removes the key. So does a new key for a box that is still
   logged in to a tailnet without Tailscale SSH: tailscaled refuses that `up` until
@@ -6464,7 +6518,8 @@ with the card.
   enable local Tailscale SSH server; not enabled on Tailnet", measured on 1.104.7).
   The enrollment then turns SSH off in the same `set` as the pin and reports
   `ok-without-tailnet-ssh`. To get Tailscale SSH later, allow it in the tailnet
-  policy and enroll the box again with a new key.
+  policy, forget the box (card) or remove it in the admin console, and enroll it
+  again with a new key (a new key on a box that is still joined is not used).
   A keyed `up` that times out (for example while waiting for device approval) may
   still have registered the box; the retry's `up --ssh` is then refused the same
   way. Before the keyed `up` first runs for a pending key, the unit writes
