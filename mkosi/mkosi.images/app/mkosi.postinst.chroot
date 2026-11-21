@@ -441,6 +441,7 @@ packaged_watchdog_needs_margin() { # <unit file>
   LC_ALL=C awk -v margin="${CERALIVE_WATCHDOG_MARGIN_SEC}" '
     /\\[[:space:]]*$/ { ambiguous = 1 }
     /^[[:space:]]+[^[:space:]]/ { ambiguous = 1 }
+    /^\[/ && !/\]$/ { ambiguous = 1 }
     /^\[/ { in_service = ($0 == "[Service]"); next }
     /^WatchdogSec([[:space:]]|=|$)/ { n++; line = $0; if (!in_service) ambiguous = 1 }
     END {

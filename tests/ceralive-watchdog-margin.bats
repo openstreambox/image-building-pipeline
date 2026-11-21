@@ -74,9 +74,11 @@ directives() { grep -Ev '^[[:space:]]*(#|$)' "$1"; }
   [ "$output" = "$SRC" ]
 }
 
-@test "watchdog margin: 60-watchdog-margin.conf sorts after every other ceralive.service.d drop-in" {
-  # systemd applies drop-ins in file-name order, so a later one would win.
-  # Literal paths, plus the two installers that take the directory as a variable.
+@test "watchdog margin: the source tree names no numbered ceralive.service.d drop-in after 60-watchdog-margin.conf" {
+  # systemd applies drop-ins in file-name order, so a later one would win. This
+  # scans source text: literal paths, plus the two installers that take the
+  # directory as a variable. Unnumbered ones such as data-ready.conf (rock-5b-plus)
+  # sort later but set no watchdog directive, which the test above checks.
   local names
   names="$( { grep -rhoE 'ceralive\.service\.d/[0-9A-Za-z._-]+\.conf' "$ROOT/mkosi" | sed 's#.*/##'
               printf '%s\n' 20-paseto-public-key.conf 40-nftables-ordering.conf; } | sort -u)"
@@ -238,6 +240,8 @@ GATE_REMOVES=(
   printf '%s\n' "$PACKAGED_WITH_WATCHDOG" | sed 's/$/\r/' | gate_removes
   printf '%s\n' "$PACKAGED_WITH_WATCHDOG" | sed 's/^WatchdogSec=30s$/  WatchdogSec=30s/' | gate_removes
   printf '%s\n' "$PACKAGED_WITH_WATCHDOG" | sed 's/^\[Service\]$/[Service] /' | gate_removes
+  # A malformed header (systemd rejects the whole fragment).
+  printf '%s\n[Broken\n' "$PACKAGED_WITH_WATCHDOG" | gate_removes
   # The plain unit itself still keeps it (the shapes above differ only as stated).
   root="$BATS_TEST_TMPDIR/shape-plain"
   printf '%s\n' "$PACKAGED_WITH_WATCHDOG" | gate_tree "$root"
