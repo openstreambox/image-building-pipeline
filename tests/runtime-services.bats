@@ -3249,3 +3249,62 @@ CONF
   run grep -cE '^setup_pipewire_system_mode\(\) \{' "$POSTINST_LIB"
   [ "$output" -eq 1 ]
 }
+
+# ===========================================================================
+# Quiet polling units — a timer tick that changes nothing journals nothing.
+# The recheck (10 s) and hostname reconcile (30 s) units cap their journal at
+# notice; their scripts print decisions and failures at notice or above.
+# ===========================================================================
+
+@test "typec recheck: the unit caps its journal at notice" {
+  grep -Fxq 'LogLevelMax=notice' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-recheck.service"
+  # Untagged stderr (a shell or kernel error) defaults to notice under the cap.
+  grep -Fxq 'SyslogLevel=notice' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-recheck.service"
+  # The boot/udev policy unit keeps its default level.
+  ! grep -Fq 'LogLevelMax' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.service"
+}
+
+@test "typec policy: every line it prints carries notice or a higher priority" {
+  local root="$BATS_TEST_TMPDIR/rock" line
+  typec_rock_fixture "$root"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  while IFS= read -r line; do
+    [[ "$line" =~ ^\<[345]\>ceralive-typec-policy:\  ]]
+  done <<<"$output"
+  # The tag decides the priority.
+  run bash -c "source <(sed -n '/^log() {/,/^}/p' '$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh'); log 'ERROR: x'; log 'WARNING: y'; log 'INFO: z'; log 'plain'"
+  [ "$output" = $'<3>ceralive-typec-policy: ERROR: x\n<4>ceralive-typec-policy: WARNING: y\n<5>ceralive-typec-policy: INFO: z\n<5>ceralive-typec-policy: plain' ]
+}
+
+@test "hostname reconcile: the 30 s unit caps its journal at notice; actions stay above it" {
+  local src="$PIPELINE_DIR/mkosi/customize/postinst.d/hostname.sh" unit
+  unit="$(awk '/cat >\/etc\/systemd\/system\/ceralive-hostname-reconcile\.service <</ { f=1; next } f && /^EOF$/ { exit } f { print }' "$src")"
+  [ -n "$unit" ]
+  grep -Fxq 'LogLevelMax=notice' <<<"$unit"
+  # The boot-time hostname unit keeps its default level.
+  local boot
+  boot="$(awk '/cat >\/etc\/systemd\/system\/ceralive-hostname\.service <</ { f=1; next } f && /^EOF$/ { exit } f { print }' "$src")"
+  [ -n "$boot" ]
+  ! grep -Fq 'LogLevelMax' <<<"$boot"
+  # Routine reconcile lines are tagged info, so a no-change tick is silent. That
+  # includes an offline box re-confirming its provisional identity every 30 s.
+  grep -Fq "printf '<6>ceralive-set-hostname: identity already aligned at" "$src"
+  grep -Fq "printf '<6>ceralive-set-hostname: publication is still registering;" "$src"
+  grep -Fq "printf '<6>ceralive-set-hostname: persisted provisional identity" "$src"
+  # Anything untagged (a set -e exit from mkdir, chmod or the lock redirection,
+  # a tool's own stderr) defaults to notice, so the cap never hides a failure.
+  grep -Fxq 'SyslogLevel=notice' <<<"$unit"
+  # ... which means every line the helper itself prints must carry a tag.
+  ! grep -Eq "printf '(ceralive-set-hostname): " "$src"
+  # Changes and failures are notice or above.
+  local msg
+  for msg in 'completed pending consumer restart' \
+    'publication diverged' 'reconciled and established' 'conflicted; trying next' \
+    'has no stable owner'; do
+    grep -Eq "printf '<[345]>ceralive-set-hostname: [^']*${msg}" "$src"
+  done
+  grep -Fq "printf '<3>ceralive-set-hostname: %s\\n' \"\$*\" >&2" "$src"
+}

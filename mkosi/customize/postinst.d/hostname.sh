@@ -77,7 +77,7 @@ CONSUMER_UNITS=(
 )
 
 die() {
-    printf 'ceralive-set-hostname: %s\n' "$*" >&2
+    printf '<3>ceralive-set-hostname: %s\n' "$*" >&2
     exit 1
 }
 
@@ -261,7 +261,7 @@ claim_candidate() {
                     if candidate_has_stable_owner "$candidate"; then
                         return "$CLAIM_CONFLICT"
                     fi
-                    printf 'ceralive-set-hostname: %s.local has no stable owner; retrying the same deterministic candidate\n' \
+                    printf '<5>ceralive-set-hostname: %s.local has no stable owner; retrying the same deterministic candidate\n' \
                         "$candidate" >&2
                     retry=1
                     break
@@ -420,9 +420,9 @@ if ! publishable_address_present; then
     if [[ "$MODE" = reconcile && -e "$RESTART_PENDING_FILE" ]]; then
         restart_identity_consumers || die "failed to requeue identity consumers"
         clear_restart_pending || die "failed to clear identity-consumer restart marker"
-        printf 'ceralive-set-hostname: completed pending consumer restart for %s.local\n' "$candidate"
+        printf '<5>ceralive-set-hostname: completed pending consumer restart for %s.local\n' "$candidate"
     fi
-    printf 'ceralive-set-hostname: persisted provisional identity %s.local; no publishable LAN address, deferring publication claim\n' "$candidate"
+    printf '<6>ceralive-set-hostname: persisted provisional identity %s.local; no publishable LAN address, deferring publication claim\n' "$candidate"
     exit 0
 fi
 
@@ -436,13 +436,13 @@ if [[ "$MODE" = reconcile ]]; then
             if [ -e "$RESTART_PENDING_FILE" ]; then
                 restart_identity_consumers || die "failed to requeue identity consumers"
                 clear_restart_pending || die "failed to clear identity-consumer restart marker"
-                printf 'ceralive-set-hostname: completed pending consumer restart for %s.local\n' "$candidate"
+                printf '<5>ceralive-set-hostname: completed pending consumer restart for %s.local\n' "$candidate"
             fi
-            printf 'ceralive-set-hostname: identity already aligned at %s.local\n' "$candidate"
+            printf '<6>ceralive-set-hostname: identity already aligned at %s.local\n' "$candidate"
             exit 0
         fi
         if [[ "$state" = 1 ]]; then
-            printf 'ceralive-set-hostname: publication is still registering; deferring reconciliation\n'
+            printf '<6>ceralive-set-hostname: publication is still registering; deferring reconciliation\n'
             exit 0
         fi
     fi
@@ -450,7 +450,7 @@ if [[ "$MODE" = reconcile ]]; then
         || die "Avahi is not able to establish hostname ownership (state $state)"
     [[ "$state" != 1 ]] \
         || die "local identity diverged while Avahi is still registering"
-    printf 'ceralive-set-hostname: publication diverged (expected=%s state=%s published=%s); reclaiming deterministically\n' \
+    printf '<5>ceralive-set-hostname: publication diverged (expected=%s state=%s published=%s); reclaiming deterministically\n' \
         "$candidate" "$state" "$published" >&2
 fi
 
@@ -467,16 +467,16 @@ while (( index <= MAX_INDEX )); do
         if [[ "$MODE" = reconcile ]]; then
             restart_identity_consumers || die "failed to requeue identity consumers"
             clear_restart_pending || die "failed to clear identity-consumer restart marker"
-            printf 'ceralive-set-hostname: reconciled and established %s.local\n' "$candidate"
+            printf '<5>ceralive-set-hostname: reconciled and established %s.local\n' "$candidate"
         else
-            printf 'ceralive-set-hostname: established %s.local\n' "$candidate"
+            printf '<5>ceralive-set-hostname: established %s.local\n' "$candidate"
         fi
         exit 0
     else
         rc=$?
     fi
     if [[ "$rc" = "$CLAIM_CONFLICT" ]]; then
-        printf 'ceralive-set-hostname: %s.local conflicted; trying next deterministic candidate\n' "$candidate" >&2
+        printf '<5>ceralive-set-hostname: %s.local conflicted; trying next deterministic candidate\n' "$candidate" >&2
         index=$((index + 1))
         continue
     fi
@@ -526,6 +526,14 @@ After=ceralive-hostname.service NetworkManager.service avahi-daemon.service
 Type=oneshot
 ExecStart=/usr/local/sbin/ceralive-set-hostname reconcile
 TimeoutStartSec=150
+# Every 30 s tick otherwise journals four info lines (start, "identity already
+# aligned", deactivated, finished) whether or not anything changed. Actions and
+# failures are logged at notice or above, so they still reach the journal.
+# Untagged output (a set -e exit from mkdir, chmod or the lock redirection, or a
+# tool's own stderr) defaults to notice, so the cap never hides a failure; the
+# helper tags its routine lines <6> itself.
+LogLevelMax=notice
+SyslogLevel=notice
 EOF
 
   cat >/etc/systemd/system/ceralive-hostname-reconcile.timer <<'EOF'
