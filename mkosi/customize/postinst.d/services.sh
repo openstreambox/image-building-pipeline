@@ -197,14 +197,16 @@ setup_srtla_send_unit() {
   local src="${CERALIVE_RUNTIME_SRC:-}/srtla-send"
   local helper_dir="${CERALIVE_SRTLA_SEND_HELPER_DIR:-/usr/libexec/ceralive}"
   local unit_dir="${CERALIVE_SRTLA_SEND_UNIT_DIR:-/etc/systemd/system}"
+  local tmpfiles_dir="${CERALIVE_SRTLA_SEND_TMPFILES_DIR:-/usr/lib/tmpfiles.d}"
   local artifact
-  for artifact in srtla-send-launch.sh srtla-send.service; do
+  for artifact in srtla-send-launch.py srtla-send.service srtla-send.tmpfiles.conf; do
     [[ -n "${CERALIVE_RUNTIME_SRC:-}" && -f "${src}/${artifact}" ]] \
       || die "srtla-send unit source not found: ${src}/${artifact} (is \$SRCDIR/runtime mounted?)"
   done
   log "installing srtla-send.service (started by CeraUI, not at boot)"
-  install -D -m 0755 "${src}/srtla-send-launch.sh" "${helper_dir}/srtla-send-launch"
+  install -D -m 0755 "${src}/srtla-send-launch.py" "${helper_dir}/srtla-send-launch"
   install -D -m 0644 "${src}/srtla-send.service" "${unit_dir}/srtla-send.service"
+  install -D -m 0644 "${src}/srtla-send.tmpfiles.conf" "${tmpfiles_dir}/srtla-send.conf"
 }
 
 # Unlike the on-demand slot mirror, recovery must run before the app at boot.
