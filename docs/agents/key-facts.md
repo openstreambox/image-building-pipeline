@@ -6448,11 +6448,13 @@ with the card.
   it does not use the key: the box cannot tell which tailnet a key belongs to
   without sending it, and an `up` without `--force-reauth` keeps the current
   login anyway (it would only re-send the key and reset prefs). The unit writes
-  `joined <attempts> 0 already-joined` (synced), then removes the key, and leaves
-  `TAILSCALE-KEY-NOT-USED.txt` on BOOT with the box's MagicDNS name
+  `TAILSCALE-KEY-NOT-USED.txt` on BOOT (synced) with the box's MagicDNS name
   (`Self.DNSName`, else the tailnet's MagicDNS suffix; never the account name)
-  and how to move it. A daemon this run started only to ask, and found
-  `Stopped`, is stopped again. A node key with `NoState` or `Starting` (still
+  and how to move it, then `joined <attempts> 0 already-joined` (synced), then
+  removes the key. If the note cannot be written the key stays for the next
+  run. Every exit before the keyed `up` leaves tailscaled as the attempt found
+  it: a daemon that was not running (or activating) is stopped again and
+  checked; if it does not stop, the key stays for the next run. A node key with `NoState` or `Starting` (still
   connecting; the login may have expired meanwhile) is asked again at the next
   attempt without the keyed `up`. `NeedsLogin` (expired or logged out) and
   `NeedsMachineAuth` use the key as before. Moving a box to another tailnet is
