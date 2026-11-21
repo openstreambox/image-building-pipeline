@@ -2,16 +2,16 @@
 bats_require_minimum_version 1.5.0
 #
 # clock-gated-timers.bats — persistent calendar timers are started only once
-# systemd can read their stamps correctly.
+# the wall clock is usable.
 #
 # The Rock 5B+ RTC has no battery, so a cold boot starts at /usr/lib/clock-epoch
 # (the build date). A persistent timer started then finds its stamp "in the
 # future", drops it and runs its job on every boot; on a board this made
 # fstrim discard ~51 GiB within 100 minutes of each boot. The timers carry a
 # ConditionPathExists drop-in and ceralive-clock-gate.service starts each one
-# when the clock is past its stamp or chrony reports sync, with a once-per-boot
-# dpkg-db-backup fallback for a box that never gets a usable clock
-# (runtime/clock/).
+# once the clock is usable (chrony synchronised, or the boot time is past the
+# build-date floor), with a daily dpkg-db-backup fallback for a box that never
+# gets a usable clock (runtime/clock/).
 #
 # Run:  run-tests   or   bats tests/clock-gated-timers.bats
 
@@ -51,7 +51,7 @@ refute() { ! "$@"; }
 #   sleep     advances the fake uptime instead of sleeping
 make_gate_fixture() {
   local root="$1"
-  mkdir -p "$root/bin" "$root/units" "$root/stamps" "$root/states" "$root/startfail"
+  mkdir -p "$root/bin" "$root/units" "$root/states" "$root/startfail"
   : >"$root/calls"
   printf '100.00 400.00\n' >"$root/uptime"
   local timer
@@ -105,9 +105,15 @@ SH
   chmod +x "$root/bin/chronyc" "$root/bin/systemctl" "$root/bin/sleep"
 }
 
-# stamp <root> <timer> <offset-seconds-from-now>
-stamp() {
-  touch -d "@$(( $(date +%s) + $3 ))" "$1/stamps/stamp-$2"
+# epoch <root> cold|usable: the build-date floor (/usr/lib/clock-epoch).
+#   cold   the clock was set to the floor at boot (no RTC): floor = now - uptime
+#   usable the floor is a year old, so the boot time came from an RTC or a person
+epoch() {
+  local up; up="$(cut -d. -f1 "$1/uptime")"
+  case "$2" in
+    cold)   touch -d "@$(( $(date +%s) - up ))" "$1/clock-epoch" ;;
+    usable) touch -d "@$(( $(date +%s) - 365 * 86400 ))" "$1/clock-epoch" ;;
+  esac
 }
 
 run_gate() {
@@ -120,119 +126,125 @@ run_gate() {
     CERALIVE_SYSTEMCTL="$root/bin/systemctl" \
     CERALIVE_CLOCK_FLAG="$root/run/ceralive/clock-gate-open" \
     CERALIVE_CLOCK_GATE_UNIT_DIR="$root/units" \
-    CERALIVE_CLOCK_GATE_STAMP_DIR="$root/stamps" \
+    CERALIVE_CLOCK_GATE_EPOCH_FILE="$root/clock-epoch" \
     CERALIVE_CLOCK_GATE_UPTIME_FILE="$root/uptime" \
     "$GATE_SH" "$GATE"
   printf '%s\n' "$output"
   cat "$root/calls"
 }
 
-@test "clock gate: a usable clock without NTP releases every timer at once (stamps behind the clock)" {
-  # Valid RTC, warm boot or a clock set by hand on a network that blocks NTP:
-  # the stamps are behind the clock, so systemd reads them correctly.
+@test "clock gate: a clock past the build floor (RTC, set by hand) releases all timers without NTP" {
   local root="$BATS_TEST_TMPDIR/usable"
   make_gate_fixture "$root"
-  stamp "$root" fstrim.timer -3600
-  stamp "$root" e2scrub_all.timer -86400
-  # dpkg-db-backup has no stamp yet (fresh slot): also safe.
+  epoch "$root" usable
   run_gate "$root"
   [ "$status" -eq 0 ]
   local timer
   for timer in fstrim.timer e2scrub_all.timer dpkg-db-backup.timer; do
     grep -Fxq "systemctl start $timer flag=present up=100" "$root/calls"
   done
-  # chrony is not needed and not asked.
-  refute grep -q '^chronyc' "$root/calls"
   refute grep -q '^sleep' "$root/calls"
   refute grep -Fq 'ceralive-typec-recheck' "$root/calls"
-  [[ "$output" == *"fstrim.timer(stamp)"* ]]
+  [[ "$output" == *"clock usable (clock)"* ]]
 }
 
-@test "clock gate: cold boot holds timers whose stamps are ahead until chrony syncs" {
+@test "clock gate: cold boot at the build floor waits for chrony, even with no stamps at all" {
+  # A fresh slot has no stamps; stamps do not decide anything.
   local root="$BATS_TEST_TMPDIR/coldboot"
   make_gate_fixture "$root"
-  # Clock at the build date: the last real runs are "in the future".
-  stamp "$root" fstrim.timer 86400
-  stamp "$root" e2scrub_all.timer 86400
-  stamp "$root" dpkg-db-backup.timer -60
+  epoch "$root" cold
   run_gate "$root" GATE_SYNC_AT=130 CERALIVE_CLOCK_GATE_INTERVAL=10
   [ "$status" -eq 0 ]
-  # dpkg-db-backup's stamp is behind the clock: released in the first round.
-  grep -Fxq 'systemctl start dpkg-db-backup.timer flag=present up=100' "$root/calls"
-  # The other two wait for the sync at 130 s, polled every 10 s, one try each.
-  refute grep -Eq '^systemctl start (fstrim|e2scrub_all)\.timer .* up=1[0-2][0-9]$' "$root/calls"
+  awk '/^systemctl start /{split($NF, a, "="); if (a[2] + 0 < 130) bad = 1} END {exit bad}' "$root/calls"
   grep -Fxq 'systemctl start fstrim.timer flag=present up=130' "$root/calls"
-  grep -Fxq 'systemctl start e2scrub_all.timer flag=present up=130' "$root/calls"
+  grep -Fxq 'systemctl start dpkg-db-backup.timer flag=present up=130' "$root/calls"
   [ "$(grep -c '^sleep 10$' "$root/calls")" -eq 3 ]
   grep -Fxq 'chronyc -n waitsync 1 1 up=100' "$root/calls"
   refute grep -Eq '^chronyc -n waitsync 0' "$root/calls"
-  # chronyc's per-try output stays out of the journal.
   [[ "$output" != *"try: 1"* ]]
-  [[ "$output" == *"fstrim.timer(synced)"* ]]
+  [[ "$output" == *"clock usable (synced)"* ]]
 }
 
-@test "clock gate: with no usable clock, dpkg-db-backup still runs once after an hour; trims wait" {
+@test "clock gate: a missing build floor means only chrony can release" {
+  local root="$BATS_TEST_TMPDIR/noepoch"
+  make_gate_fixture "$root"
+  run_gate "$root" GATE_SYNC_AT=120 CERALIVE_CLOCK_GATE_INTERVAL=10
+  [ "$status" -eq 0 ]
+  grep -Fxq 'systemctl start fstrim.timer flag=present up=120' "$root/calls"
+  refute grep -Eq '^systemctl start .* up=1[01][0-9]$' "$root/calls"
+}
+
+@test "clock gate: with no usable clock, an enabled dpkg-db-backup runs after an hour and then daily; trims wait" {
   local root="$BATS_TEST_TMPDIR/offline"
   make_gate_fixture "$root"
-  stamp "$root" fstrim.timer 86400
-  stamp "$root" e2scrub_all.timer 86400
-  stamp "$root" dpkg-db-backup.timer 86400
-  # NTP arrives only after two hours, to end the run (seen on the next
-  # once-a-minute poll, at 7320 s).
-  run_gate "$root" GATE_SYNC_AT=7300 CERALIVE_CLOCK_GATE_INTERVAL=10 CERALIVE_CLOCK_GATE_SLOW_INTERVAL=60
+  epoch "$root" cold
+  # NTP only after a day and a half, to end the run.
+  run_gate "$root" GATE_SYNC_AT=130000 GATE_MAX_UPTIME=200000 CERALIVE_CLOCK_GATE_INTERVAL=10 CERALIVE_CLOCK_GATE_SLOW_INTERVAL=600
   [ "$status" -eq 0 ]
-  [ "$(grep -c '^systemctl start --no-block dpkg-db-backup.service' "$root/calls")" -eq 1 ]
-  grep -Eq '^systemctl start --no-block dpkg-db-backup\.service flag=absent up=3(6|7)[0-9][0-9]$' "$root/calls"
-  # No other job gets a fallback, and no timer starts before the sync.
-  refute grep -Eq '^systemctl start --no-block (fstrim|e2scrub)' "$root/calls"
-  awk '/^systemctl start [a-z_-]+\.timer /{split($NF, a, "="); if (a[2] + 0 < 7300) bad = 1} END {exit bad}' "$root/calls"
-  grep -Fxq 'systemctl start fstrim.timer flag=present up=7320' "$root/calls"
-  grep -Fxq 'systemctl start dpkg-db-backup.timer flag=present up=7320' "$root/calls"
-  # After the first hour it polls once a minute.
-  grep -Fxq 'sleep 60' "$root/calls"
-  [[ "$output" == *"ran dpkg-db-backup.service once without its timer"* ]]
+  [ "$(grep -c '^systemctl start dpkg-db-backup.service' "$root/calls")" -eq 2 ]
+  grep -Fxq 'systemctl start dpkg-db-backup.service flag=absent up=3600' "$root/calls"
+  grep -Eq '^systemctl start dpkg-db-backup\.service flag=absent up=(89|9[0-9])[0-9]{3}$' "$root/calls"
+  refute grep -Eq '^systemctl start (fstrim|e2scrub_all)\.service' "$root/calls"
+  awk '/^systemctl start [a-z_-]+\.timer /{split($NF, a, "="); if (a[2] + 0 < 130000) bad = 1} END {exit bad}' "$root/calls"
+  grep -Eq '^systemctl start fstrim\.timer flag=present up=13[0-9]{4}$' "$root/calls"
+  [[ "$output" == *"ran dpkg-db-backup.service without its timer"* ]]
 }
 
-@test "clock gate: an unreachable manager is retried, not taken as disabled; disabled and masked stay off" {
+@test "clock gate: the fallback leaves a disabled or masked backup timer alone" {
+  local root="$BATS_TEST_TMPDIR/offline-disabled"
+  make_gate_fixture "$root"
+  epoch "$root" cold
+  echo masked >"$root/states/dpkg-db-backup.timer.final"; : >"$root/states/dpkg-db-backup.timer"
+  run_gate "$root" GATE_SYNC_AT=7300 CERALIVE_CLOCK_GATE_INTERVAL=10 CERALIVE_CLOCK_GATE_SLOW_INTERVAL=60
+  [ "$status" -eq 0 ]
+  refute grep -Fq 'start dpkg-db-backup' "$root/calls"
+  grep -Eq '^systemctl start fstrim\.timer flag=present up=73[0-9]{2}$' "$root/calls"
+}
+
+@test "clock gate: a failed fallback run is retried on the next poll, not lost" {
+  local root="$BATS_TEST_TMPDIR/offline-retry"
+  make_gate_fixture "$root"
+  epoch "$root" cold
+  printf 'x\n' >"$root/startfail/dpkg-db-backup.service"
+  run_gate "$root" GATE_SYNC_AT=4000 CERALIVE_CLOCK_GATE_INTERVAL=10 CERALIVE_CLOCK_GATE_SLOW_INTERVAL=60
+  [ "$status" -eq 0 ]
+  grep -Fxq 'systemctl start dpkg-db-backup.service flag=absent up=3600' "$root/calls"
+  grep -Fxq 'systemctl start dpkg-db-backup.service flag=absent up=3660' "$root/calls"
+  [ "$(grep -c '^systemctl start dpkg-db-backup.service' "$root/calls")" -eq 2 ]
+  [[ "$output" == *"dpkg-db-backup.service failed, retrying"* ]]
+}
+
+@test "clock gate: an unreachable manager is retried, not taken as disabled; disabled, masked and static stay off" {
   local root="$BATS_TEST_TMPDIR/query"
   make_gate_fixture "$root"
+  epoch "$root" usable
   printf 'ERR\nERR\n' >"$root/states/fstrim.timer"
   echo disabled >"$root/states/e2scrub_all.timer.final"; : >"$root/states/e2scrub_all.timer"
-  echo masked >"$root/states/dpkg-db-backup.timer.final"; : >"$root/states/dpkg-db-backup.timer"
+  echo static >"$root/states/dpkg-db-backup.timer.final"; : >"$root/states/dpkg-db-backup.timer"
   run_gate "$root" CERALIVE_CLOCK_GATE_INTERVAL=10
   [ "$status" -eq 0 ]
   [ "$(grep -c '^systemctl is-enabled fstrim.timer' "$root/calls")" -eq 3 ]
   grep -Fxq 'systemctl start fstrim.timer flag=present up=120' "$root/calls"
   refute grep -Fq 'start e2scrub_all.timer' "$root/calls"
   refute grep -Fq 'start dpkg-db-backup.timer' "$root/calls"
-  [[ "$output" == *"e2scrub_all.timer(disabled)"* ]]
-  [[ "$output" == *"dpkg-db-backup.timer(masked)"* ]]
-}
-
-@test "clock gate: a static timer (no install hooks) is not something boot would start" {
-  local root="$BATS_TEST_TMPDIR/static"
-  make_gate_fixture "$root"
-  echo static >"$root/states/e2scrub_all.timer.final"; : >"$root/states/e2scrub_all.timer"
-  run_gate "$root"
-  [ "$status" -eq 0 ]
-  refute grep -Fq 'start e2scrub_all.timer' "$root/calls"
-  [[ "$output" == *"e2scrub_all.timer(static)"* ]]
+  [[ "$output" == *"not enabled: dpkg-db-backup.timer e2scrub_all.timer"* ]]
 }
 
 @test "clock gate: a start that fails for a while is retried until it succeeds" {
   local root="$BATS_TEST_TMPDIR/transient"
   make_gate_fixture "$root"
+  epoch "$root" usable
   printf 'x\nx\n' >"$root/startfail/fstrim.timer"
   run_gate "$root" CERALIVE_CLOCK_GATE_INTERVAL=10
   [ "$status" -eq 0 ]
   [ "$(grep -c '^systemctl start fstrim.timer' "$root/calls")" -eq 3 ]
   grep -Fxq 'systemctl start fstrim.timer flag=present up=120' "$root/calls"
-  [[ "$output" == *"fstrim.timer(stamp)"* ]]
 }
 
 @test "clock gate: a timer that keeps failing is given up after the budget (exit 2), the rest still start" {
   local root="$BATS_TEST_TMPDIR/budget"
   make_gate_fixture "$root"
+  epoch "$root" usable
   yes x | head -n 100 >"$root/startfail/e2scrub_all.timer"
   run_gate "$root" CERALIVE_CLOCK_GATE_INTERVAL=10 CERALIVE_CLOCK_GATE_START_BUDGET=60
   [ "$status" -eq 2 ]
@@ -243,17 +255,6 @@ run_gate() {
   grep -Fxq 'RestartPreventExitStatus=2' "$UNIT"
 }
 
-@test "clock gate: the start budget counts per timer, not while others wait for the clock" {
-  local root="$BATS_TEST_TMPDIR/budget-per-timer"
-  make_gate_fixture "$root"
-  stamp "$root" fstrim.timer 86400
-  # dpkg-db-backup fails once at 100 s, then starts; fstrim waits 200 s for sync.
-  printf 'x\n' >"$root/startfail/dpkg-db-backup.timer"
-  run_gate "$root" GATE_SYNC_AT=300 CERALIVE_CLOCK_GATE_INTERVAL=10 CERALIVE_CLOCK_GATE_START_BUDGET=60
-  [ "$status" -eq 0 ]
-  grep -Fxq 'systemctl start fstrim.timer flag=present up=300' "$root/calls"
-}
-
 @test "clock gate: a flag that cannot be written exits 1 (retried), before any timer starts" {
   local root="$BATS_TEST_TMPDIR/flagfail"
   make_gate_fixture "$root"
@@ -261,7 +262,6 @@ run_gate() {
   # A dangling symlink whose target directory is missing: in dash a
   # redirection onto it would exit 2, the code reserved for start errors.
   ln -s "$root/missing-dir/flag" "$root/run/ceralive/clock-gate-open"
-  stamp "$root" fstrim.timer 86400
   run_gate "$root" GATE_SYNC_AT=0
   [ "$status" -eq 1 ]
   refute grep -q '^systemctl start' "$root/calls"
@@ -277,7 +277,6 @@ run_gate() {
   [ "$status" -eq 0 ]
   [ ! -e "$root/run/ceralive/clock-gate-open" ]
   refute grep -q '^systemctl' "$root/calls"
-  [[ "$output" == *"started: none"* ]]
 }
 
 @test "clock gate: drop-in, script and unit agree on the flag and the drop-in name" {
@@ -341,13 +340,15 @@ user_manager_ok() {
   printf '#!/bin/sh\nexec systemctl --user "$@"\n' >"$work/bin/systemctl"
   printf '#!/bin/sh\nexit 1\n' >"$work/bin/chronyc"
   chmod +x "$work/bin/systemctl" "$work/bin/chronyc"
+  # The host clock is real: a build floor a year back.
+  touch -d '-365 days' "$work/clock-epoch"
   systemctl --user daemon-reload
   systemctl --user enable --runtime "$name.timer" >/dev/null 2>&1
 
   gate() {
     env CERALIVE_CHRONYC="$work/bin/chronyc" CERALIVE_SYSTEMCTL="$work/bin/systemctl" \
       CERALIVE_CLOCK_FLAG="$work/flag" CERALIVE_CLOCK_GATE_UNIT_DIR="$work/units" \
-      CERALIVE_CLOCK_GATE_STAMP_DIR="$sdir" "$GATE_SH" "$GATE"
+      CERALIVE_CLOCK_GATE_EPOCH_FILE="$work/clock-epoch" "$GATE_SH" "$GATE"
   }
 
   # 1. Recent stamp: skipped at start, then released with its weekly schedule.
@@ -357,7 +358,7 @@ user_manager_ok() {
   run gate
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"$name.timer(stamp)"* ]]
+  [[ "$output" == *"started: $name.timer"* ]]
   [ "$(systemctl --user show -p ActiveState --value "$name.timer")" = active ]
   local next now
   next="$(systemctl --user show -p NextElapseUSecRealtime --value "$name.timer")"

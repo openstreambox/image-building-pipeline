@@ -184,16 +184,17 @@ setup_dpkg_recovery() {
   enable_service ceralive-dpkg-recover.service
 }
 
-# Persistent calendar timers start only once their stamps can be read
-# correctly. The board's RTC has no battery, so every cold boot starts at
-# /usr/lib/clock-epoch; a timer started then drops its stamp as "in the future"
-# and runs its job on every boot (fstrim: ~51 GiB of discard each boot instead
-# of weekly). The measurements, the release rules (stamp behind the clock, or
-# chrony synchronised, plus a once-per-boot dpkg-db-backup fallback) and the
-# reason this is not a time-sync.target waiter are in runtime/clock/. Each listed timer gets the
-# condition drop-in; the gate starts whichever enabled timers carry it, so this
-# list is the only place to add one. cert-rotation-expiry.timer is installed
-# later by setup_cert_rotation; its drop-in does not need the unit yet.
+# Persistent calendar timers start only once the wall clock is usable. The
+# board's RTC has no battery, so every cold boot starts at /usr/lib/clock-epoch;
+# a timer started then drops its stamp as "in the future" and runs its job on
+# every boot (fstrim: ~51 GiB of discard each boot instead of weekly). The
+# measurements, the release rule (chrony synchronised, or the boot time past
+# the build-date floor, plus a daily dpkg-db-backup fallback while neither
+# holds) and the reason this is not a time-sync.target waiter are in
+# runtime/clock/. Each listed timer gets the condition drop-in; the gate starts
+# whichever enabled timers carry it, so this list is the only place to add one.
+# cert-rotation-expiry.timer is installed later by setup_cert_rotation; its
+# drop-in does not need the unit yet.
 CLOCK_GATED_TIMERS=(
   fstrim.timer
   e2scrub_all.timer
