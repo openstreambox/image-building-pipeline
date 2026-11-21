@@ -160,6 +160,22 @@ running and is left for the next boot. A carrier with no USB 2 wiring would
 lose the module at `"20"`; every measured SuperSpeed socket on the Rock 5B+
 and Orange Pi 5 Plus has a USB 2 path.
 
+### 3b. ModemManager port hints (`78-ceralive-modem-port-hints.rules`)
+
+`mkosi/runtime/78-ceralive-modem-port-hints.rules`, installed into
+`/etc/udev/rules.d` by `networking.sh::setup_modem_port_hints`, sets
+`ID_MM_PORT_IGNORE=1` on one tty, matched by exact USB vendor/product and
+interface number. ModemManager then lists the port as `(ignored)` and never opens
+or probes it. ModemManager's own port-type hints stay in place.
+
+| Device | Interface | Why |
+|---|---|---|
+| Quectel RM520N-GL / RM530N-GL `2c7c:0801` (QMI) | 3 (secondary AT) | CeraUI reads `AT+QTEMP` and `AT+QENG="servingcell"` read-only on this port, and only when the udev database shows this release. ModemManager keeps the primary AT, QMI and data ports, and the USB 2 quirk above still talks to the `(at)` port while it holds the modem. |
+
+The hints take effect for a modem probed after installation (boot, replug, or a
+re-probe of that modem). `tests/modem-port-hints.bats` checks the file and proves the
+matches with `udevadm test` against a generated sysfs.
+
 ---
 
 ## 4. SRTLA modem source-routing — RETIRED

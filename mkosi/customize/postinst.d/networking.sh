@@ -421,3 +421,13 @@ setup_modem_usbspeed() {
   install -D -m 0644 "${src}/ceralive-modem-usbspeed@.service" "${unit_dir}/ceralive-modem-usbspeed@.service"
   install -D -m 0644 "${src}/99-ceralive-modem-usbspeed.rules" "${rules_dir}/99-ceralive-modem-usbspeed.rules"
 }
+
+# ModemManager port hints: ID_MM_PORT_IGNORE on the RM520N's secondary AT port
+# (see the rules file for why). Admin tier,
+# basename never shipped by the modem-support companion
+# (manifests/modem-support-ownership.txt).
+setup_modem_port_hints() {
+  local src="${CERALIVE_RUNTIME_SRC:?}"
+  local rules_dir="${MODEM_PORT_HINTS_RULES_DIR:-/etc/udev/rules.d}"
+  install -D -m 0644 "${src}/78-ceralive-modem-port-hints.rules" "${rules_dir}/78-ceralive-modem-port-hints.rules"
+}

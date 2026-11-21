@@ -197,6 +197,7 @@ tests/real-rauc-cleanup-contract.test.sh	shell	privileged	opt-in	same RAUC servi
 tests/manifest-helpers.bash	helper	support	invoked-by-suite	shared bats setup and fixture helpers; must never define an @test or the split counts stop summing
 tests/lib/assertions.sh	helper	support	invoked-by-suite	the one ok/bad/assert_eq/assert_contains library for the collecting shell harnesses
 tests/lib/kernel-stage-fixture.sh	helper	support	invoked-by-suite	directory-backed slots and real kernel archive for kernel staging
+tests/lib/modem-port-hints-udev.sh	helper	support	invoked-by-suite	fake-sysfs udevadm match proof for modem-port-hints.bats (runs inside a user + mount namespace)
 tests/kernel-stage-contract-fixtures.sh	tool	support	invoked-by-suite	real producer serialization for self-contained consumer fixture copies
 tests/fixtures/kernel-stage-contract/staged-state.json	fixture	support	not-executed	byte-identical real producer staged record for the adopted consumer contract
 tests/fixtures/kernel-stage-contract/pending-overlay.json	fixture	support	not-executed	byte-identical real producer pending overlay with observed RAUC byte identity
@@ -289,4 +290,5 @@ tests/clat-test.py	helper	unit	invoked-by-suite	CLAT discovery and state regress
 tests/clat-netns.py	helper	privileged	opt-in	two synthetic cellular links, hotspot and real SRTLA through tayga
 tests/clat-nm-fixture.py	helper	privileged	invoked-by-suite	private NetworkManager D-Bus fixture for the CLAT network test
 tests/modem-usbspeed.bats	bats	unit	default-bats	RM520N USB 2 quirk: udev rule, oneshot template, install wiring
+tests/modem-port-hints.bats	bats	unit	default-bats	ModemManager port hints: rule content, install wiring, udevadm match against recorded modem compositions
 tests/modem-usbspeed-test.py	helper	unit	invoked-by-suite	RM520N USB 2 quirk decisions against fake sysfs, mmcli and a pty modem
