@@ -172,6 +172,14 @@ or probes it. ModemManager's own port-type hints stay in place.
 |---|---|---|
 | Quectel RM520N-GL / RM530N-GL `2c7c:0801` (QMI) | 3 (secondary AT) | CeraUI reads `AT+QTEMP` and `AT+QENG="servingcell"` read-only on this port, and only when the udev database shows this release. ModemManager keeps the primary AT, QMI and data ports, and the USB 2 quirk above still talks to the `(at)` port while it holds the modem. |
 
+Without the release CeraUI refuses both reads, as `owned-by-modemmanager` while
+ModemManager lists the tty as an AT port, otherwise as `not-released`.
+
+The match uses the USB ID and interface number only, not the USB configuration or
+the retail model. `2c7c:0801` is shared by the RM520N-GL and the RM530N-GL, and
+the interface layout above is the recorded QMI composition (configuration 1);
+other compositions of this ID, such as MBIM, are outside that evidence.
+
 The hints take effect for a modem probed after installation (boot, replug, or a
 re-probe of that modem). `tests/modem-port-hints.bats` checks the file and proves the
 matches with `udevadm test` against a generated sysfs.
