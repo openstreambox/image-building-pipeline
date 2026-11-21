@@ -410,6 +410,42 @@ keep_ceraui_build_stamps() {
   log "kept CeraUI build stamps for ceralive-device ${package_version} at ${CERAUI_BUILD_STAMPS_DIR}"
 }
 
+# ---------------------------------------------------------------------------
+# gate_ceralive_watchdog_margin [root] — keep the runtime layer's
+# ceralive.service.d/60-watchdog-margin.conf (WatchdogSec=90s) only when the
+# installed ceralive-device unit arms a service watchdog of its own.
+#
+# The drop-in widens an existing watchdog: the backend that ships a WatchdogSec
+# unit pulses every WATCHDOG_USEC/2. A ceralive-device build whose unit has no
+# WatchdogSec (2026.11.2 and older) has no pulse either, and the drop-in alone
+# would turn a watchdog on that nothing feeds: systemd would abort and restart a
+# healthy backend about every 90 s. Such a build, or a build with no CeraUI
+# staged at all, gets no drop-in. Only the packaged unit is read; no image
+# drop-in other than this one sets WatchdogSec (tests/ceralive-watchdog-margin.bats).
+# ---------------------------------------------------------------------------
+CERALIVE_WATCHDOG_MARGIN_DROPIN="etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf"
+packaged_unit_arms_watchdog() { # <unit file>
+  awk '
+    /^[[:space:]]*\[/ { in_service = ($0 ~ /^[[:space:]]*\[Service\][[:space:]]*$/); next }
+    in_service && /^[[:space:]]*WatchdogSec[[:space:]]*=/ {
+      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v); last = v
+    }
+    END { exit (last == "" || last ~ /^(0+|0+(us|ms|s|min|h)|infinity)$/) ? 1 : 0 }
+  ' "$1"
+}
+gate_ceralive_watchdog_margin() {
+  local root="${1:-}"
+  local unit="${root}/etc/systemd/system/ceralive.service"
+  local dropin="${root}/${CERALIVE_WATCHDOG_MARGIN_DROPIN}"
+  [[ -e "${dropin}" ]] || return 0
+  if [[ -f "${unit}" ]] && packaged_unit_arms_watchdog "${unit}"; then
+    log "kept ${CERALIVE_WATCHDOG_MARGIN_DROPIN}: the packaged ceralive.service arms its own watchdog"
+    return 0
+  fi
+  rm -f "${dropin}"
+  log "removed ${CERALIVE_WATCHDOG_MARGIN_DROPIN}: the installed ceralive.service has no watchdog of its own to widen"
+}
+
 main() {
   log "APPLICATION layer (Stage 3) — installing first-party CeraLive apps"
   install_chroot_service_policy
@@ -421,6 +457,7 @@ main() {
   else
     log "no first-party .debs staged at ${FIRST_PARTY_DIR} (offline/dev build) — installing nothing"
   fi
+  gate_ceralive_watchdog_margin
 
   # Staging hygiene: the staging tree must NEVER ship in the final image. Stage 3
   # consumes it (local .deb install above) BEFORE removing it.

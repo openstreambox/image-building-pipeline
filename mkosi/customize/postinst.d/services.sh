@@ -587,8 +587,10 @@ setup_cerastream_ordering() {
 # WATCHDOG_USEC/2 from its main loop. A kill takes srtla_send with the cgroup,
 # so a 15-30 s main-loop stall ends a live stream until an operator Stop. This
 # drop-in raises only WatchdogSec to 90 s (pulse every 45 s, tolerated stall
-# 45-90 s); signal, kill mode and restart policy stay as packaged. Installed from
-# the committed artifact under CERALIVE_RUNTIME_SRC, like setup_cerastream_ordering.
+# about 45-90 s); signal, kill mode and restart policy stay as packaged. The app
+# layer removes it again if the installed CeraUI unit has no watchdog of its own
+# (app/mkosi.postinst.chroot::gate_ceralive_watchdog_margin). Installed from the
+# committed artifact under CERALIVE_RUNTIME_SRC, like setup_cerastream_ordering.
 # CERALIVE_WATCHDOG_DROPIN_DIR overrides the drop-in directory for the offline unit test.
 # ---------------------------------------------------------------------------
 setup_ceralive_watchdog_margin() {

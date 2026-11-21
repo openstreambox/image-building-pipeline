@@ -993,7 +993,7 @@ main() {
   setup_paseto_public_key      # ADR-0006 D2: bake device-token PUBLIC key into CeraUI runtime env
   setup_avahi_restart          # mDNS reliability: additive Restart=on-failure drop-in so avahi-daemon self-heals after any signal/crash
   setup_cerastream_ordering    # boot race: additive After=cerastream.service drop-in (ordering only, no Requires=) so ceralive.service starts after the engine
-  setup_ceralive_watchdog_margin # live streams: WatchdogSec=90s drop-in so a main-loop stall under 45 s cannot kill the backend and srtla_send with it
+  setup_ceralive_watchdog_margin # live streams: WatchdogSec=90s drop-in (pulse every 45 s instead of 15 s); the app layer drops it if CeraUI has no watchdog
   setup_boot_healthcheck       # task 29: gate mark-good on real streaming health
   setup_hawkbit_updater        # task 41: hawkBit DDI OTA + secure first-boot enrollment
   setup_cert_rotation          # task 42: baked-in intermediate/leaf rotation (root immutable)

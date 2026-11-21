@@ -2,12 +2,15 @@
 bats_require_minimum_version 1.5.0
 #
 # ceralive-watchdog-margin.bats — the image widens ceralive.service's watchdog
-# to 90 s with a drop-in, and changes nothing else about the unit.
+# to 90 s with a drop-in, changes nothing else about the unit, and keeps the
+# drop-in only when the installed CeraUI unit arms a watchdog of its own.
 #
 # The CeraUI .deb ships WatchdogSec=30s, WatchdogSignal=SIGKILL and
 # KillMode=mixed. The backend pulses every WATCHDOG_USEC/2 from its main loop,
 # so the tolerated main-loop stall follows WatchdogSec: 15-30 s at 30 s, 45-90 s
-# at 90 s. A kill also takes srtla_send, so it ends a live stream.
+# at 90 s. A kill also takes srtla_send, so it ends a live stream. Older
+# ceralive-device builds (2026.11.2) ship no WatchdogSec and no pulse; the drop-in
+# alone would turn on a watchdog nothing feeds, so the app layer removes it there.
 #
 # Run:  run-tests   or   bats tests/ceralive-watchdog-margin.bats
 
@@ -17,6 +20,7 @@ setup() {
   RUNTIME="$ROOT/mkosi/runtime"
   SRC="$RUNTIME/ceralive-watchdog-margin.dropin.conf"
   CHROOT="$ROOT/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  APP_POSTINST="$ROOT/mkosi/mkosi.images/app/mkosi.postinst.chroot"
 }
 
 teardown() {
@@ -80,6 +84,120 @@ directives() { grep -Ev '^[[:space:]]*(#|$)' "$1"; }
   grep -q 'dropin_dir}/40-nftables-ordering.conf' "$ROOT/mkosi/customize/postinst.d/networking.sh"
   [ "$(printf '%s\n' "$names" | tail -n1)" = 60-watchdog-margin.conf ]
   [ "$(printf '%s\n' "$names" | wc -l)" -ge 6 ]
+}
+
+# A synthetic finished tree: the runtime layer's drop-in plus a packaged unit
+# body given on stdin (none when "-" is passed as the only argument).
+gate_tree() { # <root> [-]
+  local root="$1"
+  install -D -m 0644 "$SRC" "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf"
+  if [ "${2:-}" != - ]; then
+    cat >"$root/etc/systemd/system/ceralive.service"
+  fi
+}
+
+run_gate() { # <root>
+  run bash -c 'set -euo pipefail; source "$1"; gate_ceralive_watchdog_margin "$2"' _ "$APP_POSTINST" "$1"
+}
+
+# The watchdog lines of CeraUI's current deployment/ceralive.service.
+PACKAGED_WITH_WATCHDOG='[Unit]
+Description=CeraLive service
+After=network.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+Environment=NODE_ENV=production
+ExecStart=/usr/local/bin/ceralive
+KillMode=mixed
+Restart=always
+RestartSec=2s
+WatchdogSec=30s
+WatchdogSignal=SIGKILL
+
+[Install]
+WantedBy=multi-user.target'
+
+# ceralive-device 2026.11.2 (CeraUI 31b06d54): notify unit, no watchdog.
+PACKAGED_WITHOUT_WATCHDOG='[Unit]
+Description=CeraLive service
+After=network.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+Environment=NODE_ENV=production
+ExecStart=/usr/local/bin/ceralive
+KillMode=mixed
+Restart=always
+
+[Install]
+WantedBy=multi-user.target'
+
+@test "watchdog gate: kept when the packaged unit arms its own watchdog" {
+  local root="$BATS_TEST_TMPDIR/with"
+  printf '%s\n' "$PACKAGED_WITH_WATCHDOG" | gate_tree "$root"
+  run_gate "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"kept etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf"* ]]
+  cmp "$SRC" "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf"
+}
+
+@test "watchdog gate: removed for a ceralive-device without a watchdog (2026.11.2)" {
+  local root="$BATS_TEST_TMPDIR/without"
+  printf '%s\n' "$PACKAGED_WITHOUT_WATCHDOG" | gate_tree "$root"
+  run_gate "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"removed etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf"* ]]
+  [ ! -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ]
+  [ -f "$root/etc/systemd/system/ceralive.service" ]
+}
+
+@test "watchdog gate: removed when no CeraUI is installed" {
+  local root="$BATS_TEST_TMPDIR/none"
+  gate_tree "$root" -
+  run_gate "$root"
+  [ "$status" -eq 0 ]
+  [ ! -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ]
+}
+
+@test "watchdog gate: a disabled, reset or misplaced WatchdogSec does not count" {
+  local v root
+  # awk -v turns the \n in the last case into a second line: set, then reset.
+  for v in 'WatchdogSec=0' 'WatchdogSec=0s' 'WatchdogSec=infinity' 'WatchdogSec=30s\nWatchdogSec=' 'WatchdogSec = 0'; do
+    root="$BATS_TEST_TMPDIR/off-$RANDOM"
+    printf '%s\n' "$PACKAGED_WITHOUT_WATCHDOG" \
+      | awk -v v="$v" '{ print } $0 == "Restart=always" { print v }' | gate_tree "$root"
+    grep -q '^WatchdogSec' "$root/etc/systemd/system/ceralive.service"
+    run_gate "$root"
+    [ "$status" -eq 0 ]
+    [ ! -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ]
+  done
+  # Outside [Service] it is not a service setting.
+  root="$BATS_TEST_TMPDIR/misplaced"
+  printf '%s\n' "$PACKAGED_WITHOUT_WATCHDOG" | sed 's|^After=network.target$|After=network.target\nWatchdogSec=30s|' | gate_tree "$root"
+  run_gate "$root"
+  [ ! -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ]
+  # Spacing around "=" is accepted, as systemd does.
+  root="$BATS_TEST_TMPDIR/spaced"
+  printf '%s\n' "$PACKAGED_WITH_WATCHDOG" | sed 's|^WatchdogSec=30s$|WatchdogSec = 30s|' | gate_tree "$root"
+  run_gate "$root"
+  [ -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ]
+}
+
+@test "watchdog gate: the app layer runs the gate after the first-party install, on every build" {
+  local body
+  body="$(sed -n '/^main() {/,/^}/p' "$APP_POSTINST")"
+  printf '%s\n' "$body" | grep -Eq '^  gate_ceralive_watchdog_margin$'
+  # After the install branch closes (so dev builds without CeraUI are covered too)
+  # and before the staging tree goes.
+  local fi_line gate_line rm_line
+  fi_line="$(printf '%s\n' "$body" | grep -n '^  fi$' | head -n1 | cut -d: -f1)"
+  gate_line="$(printf '%s\n' "$body" | grep -n '^  gate_ceralive_watchdog_margin$' | cut -d: -f1)"
+  rm_line="$(printf '%s\n' "$body" | grep -n 'rm -rf "${FIRST_PARTY_DIR}"' | cut -d: -f1)"
+  [ "$fi_line" -lt "$gate_line" ]
+  [ "$gate_line" -lt "$rm_line" ]
 }
 
 user_manager_ok() {
