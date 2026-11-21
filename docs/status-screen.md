@@ -1,10 +1,9 @@
-# Status screen (renderer only)
+# Status screen
 
 A plain page for a monitor plugged into the box, written to be photographed
-and sent to support when the box has no network. This change ships the
-renderer, `/usr/libexec/ceralive/ceralive-status-screen`, and the `qrencode`
-package it uses; nothing starts it yet. The console wiring below is the
-proposed next step.
+and sent to support when the box has no network. The renderer is
+`/usr/libexec/ceralive/ceralive-status-screen` and uses the `qrencode`
+package; the attention owner paints it on VT8 (see "Console wiring").
 
 ## What the page shows
 
@@ -17,8 +16,8 @@ proposed next step.
 | Up for | `/proc/uptime` |
 | Uplinks | Snapshot: role labels (`Cellular 1`, `Ethernet 1`, `Wi-Fi 1`) and `up`/`degraded`/`down` |
 | SIMs | Snapshot: `Modem N` and `present`/`absent`/`locked`/`unknown` |
-| Last err | Snapshot: a code, shown as fixed wording, unknown codes generically |
-| Attention | The highest shared attention condition's `line`, cleaned like all text |
+| Last err | Snapshot: the failure class of the last failed start (CeraUI clears it when a start succeeds), shown as fixed wording, unknown codes generically |
+| Attention | The highest shared attention condition as fixed wording by id (`data-readiness`, `temperature-high`, `clock-unset`) or severity; a producer's own text never reaches the page |
 | Address, Open, QR | Global IPv4 addresses from `ip -j -4 addr`, client-facing interfaces (`ap`, `wlan`, `br`, `eth`) before uplinks; the QR always encodes the image's TLS front, `https://<address>/`: the snapshot `url` may only choose which of these addresses, its scheme, port and path are ignored |
 
 Without a snapshot the page says that the application has not reported and
@@ -77,21 +76,47 @@ beside a text block of at most 60 columns when the console has its width plus
 32 columns and its height plus one row (a local address needs 66x33 cells),
 else below the text when it fits, else it is left out. The `Open` and
 `Address` lines come right after the header, so on a crowded page the
-uplink, SIM and attention detail is cut first. On a 1024x600 panel the 8x16 font gives 128x37 and shows the code; the
-attention owner's 16x32 font gives 64x18 and does not. When printing to a
+uplink, SIM and attention detail is cut first. On a 1024x600 panel the 8x16 font
+the page uses gives 128x37 and shows the code; the condition
+16x32 font would give 64x18 and does not. When printing to a
 terminal the renderer emits no trailing newline, so the first row does not
 scroll away.
 
-## Proposed console wiring (not in this change)
+## Console wiring
 
-- The attention owner (`ceralive-attention watch`) already owns VT8 and
-  repaints it every two seconds. When no critical or fatal condition holds VT8,
-  it would paint this page there instead of clearing it, with the 8x16 font and
-  the default palette (light foreground on black).
-- It would switch to VT8 once at boot and when an HDMI connector changes from
-  disconnected to connected (`/sys/class/drm/card*-HDMI-A-*/status`), never
-  while an operator is on another VT, as it does today.
-- Critical and fatal conditions keep precedence and keep their current text.
+`ceralive-attention watch` already owns VT8 and repaints it every two seconds.
+When the renderer is installed it loads it in its own process and VT8 always
+shows something:
+
+- A critical or fatal condition: the condition text in the 16x32 font, as
+  before. It switches to VT8 once per condition, never away from a VT someone
+  is logged in on (Alt+F8 shows it there), and hands an operator it took from
+  a login prompt back to that VT when the condition clears. A monitor plugged
+  in meanwhile does not switch again, including one first seen on the tick
+  that clears the condition or while its hand-back is still being retried.
+  The hand-back target is the prompt of the pull that actually happened.
+- Otherwise: this page in the 8x16 font (`Lat15-TerminusBold16`), with the
+  default palette (light foreground on black). It is overwritten in place
+  rather than cleared, so a camera does not catch a blank frame. `qrencode`
+  runs only when the address changes.
+
+The owner switches to VT8 once per boot and whenever an HDMI connector goes
+from disconnected to connected (`/sys/class/drm/card*-HDMI-A-*/status`, read
+every tick; the kernel updates it in the same hotplug path that sends the drm
+change uevent). It skips both when someone is logged in on the foreground VT,
+meaning any process outside the owner's own session other than `agetty` or
+`login` has that terminal, and waits for the next tick while `fgconsole` gives
+no answer. A
+display stack started on its own VT (for example a kiosk with `TTYPath=`)
+counts the same way and is left alone. A restarted owner repeats none of these switches: markers in
+`/run/ceralive/attention-console/` survive a service stop, and the one for a
+condition goes when a tick sees no condition. When the service stops it returns to the
+VT it found at start (fallback tty1), unless someone is logged in on VT8, and
+restores VT8's saved font.
+
+A renderer that fails to load leaves VT8 to critical and fatal conditions
+only, as before; a renderer error while painting shows a short fallback with
+the login line.
 
 HDMI output, the real palette and a phone reading the code off a monitor at an
-angle still need a board and a monitor before this is enabled.
+angle still need a board and a monitor.

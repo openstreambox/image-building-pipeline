@@ -501,7 +501,7 @@ systemd-repart           # grow the existing data partition before /data mounts
 kbd                     # Startup failure console font loader
 console-setup-linux     # Lat15-TerminusBold32x16 bitmap console font
 python3                 # Shared attention producer and consumer
-qrencode                # Status screen QR code to the local UI (LGPL-2.1+; trixie arm64 qrencode + libqrencode4 under 200 KiB installed)
+qrencode                # Status screen QR code to the local UI (LGPL-2.1+; trixie arm64 qrencode + libqrencode4 208 KiB installed)
 # Image-owned per-link CLAT (stock Debian translator, no custom build).
 tayga
 python3-dbus

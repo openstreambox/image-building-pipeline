@@ -2,6 +2,8 @@
 """Volatile, public-only conditions shared by device packages."""
 import argparse
 import html
+import importlib.machinery
+import importlib.util
 import json
 import math
 import os
@@ -9,6 +11,7 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+import sys
 import time
 import textwrap
 
@@ -17,6 +20,11 @@ OUTPUT = Path('/run/ceralive/attention-status')
 SEVERITY = {'info': 0, 'warn': 1, 'critical': 2, 'fatal': 3}
 IDENTIFIER = re.compile(r'[a-z][a-z0-9-]{0,63}\Z')
 LED = '/usr/local/sbin/ceralive-led-status'
+STATUS_SCREEN = Path('/usr/libexec/ceralive/ceralive-status-screen')
+ATTENTION_FONT = '/usr/share/consolefonts/Lat15-TerminusBold32x16.psf.gz'
+# 8x16 gives 128x37 cells on a 1024x600 panel: room for the text and the QR code.
+STATUS_FONT = '/usr/share/consolefonts/Lat15-TerminusBold16.psf.gz'
+DRM = Path('/sys/class/drm')
 
 
 def atomic(path, value):
@@ -144,84 +152,338 @@ def console_command(*args):
         return False
 
 
+def hdmi_connected(drm=DRM):
+    """Names of the HDMI connectors that report a monitor.
+
+    The kernel updates this attribute in the same hotplug path that sends the
+    drm change uevent, so reading it every watch tick sees the same events.
+    """
+    found = set()
+    for path in drm.glob('card*-HDMI-A-*/status'):
+        try:
+            if path.read_text().strip() == 'connected':
+                found.add(path.parent.name)
+        except OSError:
+            return None  # no answer this tick; a failed read must not look like a plug
+    return found
+
+
+def operator_on(vt, proc=Path('/proc')):
+    """True when anything but a login prompt runs on tty<vt>: someone is logged in.
+
+    The owner's own session never counts, so checking VT8 never finds the
+    owner itself or its setfont and chvt helpers.
+    """
+    if not vt.isdecimal():
+        return False
+    device = (4 << 8) | int(vt)  # tty_nr of /dev/tty<vt> (major 4) in /proc/<pid>/stat
+    own = os.getsid(0)
+    for path in proc.glob('[0-9]*/stat'):
+        try:
+            text = path.read_text()
+            name = text[text.index('(') + 1:text.rindex(')')]
+            fields = text[text.rindex(')') + 2:].split()
+            session, terminal = int(fields[3]), int(fields[4])
+        except (OSError, ValueError, IndexError):
+            continue
+        if terminal == device and session != own and name not in ('agetty', 'login'):
+            return True
+    return False
+
+
+def open_terminal(path):
+    """Open a VT for writing, never as this process's controlling terminal.
+
+    A service is a session leader. Linux already refuses a controlling
+    terminal on a write-only open; O_NOCTTY says so explicitly.
+    """
+    return os.fdopen(os.open(path, os.O_WRONLY | os.O_TRUNC | os.O_NOCTTY), 'w')
+
+
+class StatusPage:
+    """The status screen renderer, run in this process; None when not installed."""
+
+    def __init__(self, module):
+        self.module = module
+        # Last URL, its QR matrix and when it was encoded: qrencode runs when the
+        # address changes, and a failed encode is retried at most every 30 s.
+        self.code = (None, None, 0.0)
+
+    @classmethod
+    def load(cls, path=None):
+        path = STATUS_SCREEN if path is None else path
+        if not path.exists():
+            return None
+        sys.dont_write_bytecode = True  # never write a cache next to the image's tools
+        loader = importlib.machinery.SourceFileLoader('ceralive_status_screen', str(path))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        return cls(module)
+
+    def qr(self, url):
+        last, matrix, at = self.code
+        if last != url or (matrix is None and time.monotonic() - at >= 30):
+            self.code = (url, self.module.qr_matrix(url), time.monotonic())
+        return self.code[1]
+
+    def __call__(self, columns, rows):
+        m = self.module
+        return m.page_lines(m.facts(), m.load_snapshot(), columns, rows, qr=self.qr)
+
+    def console(self, line):
+        return self.module.to_console([line])
+
+
 class Console:
-    """Own only VT8; leave the login terminals and their fonts untouched."""
+    """Own only VT8; leave the login terminals and their fonts untouched.
+
+    With the status screen installed VT8 always shows something: the highest
+    critical or fatal condition in the large font, else the status page in the
+    8x16 font. Without it VT8 is only taken for critical and fatal conditions.
+    The owner never switches away from a VT someone is logged in on, VT8
+    included, and switches only from a foreground VT it has just read: when
+    fgconsole gives no answer it waits for the next tick. A restarted owner
+    never repeats a switch it already made this boot.
+    """
 
     def __init__(self, directory=Path('/run/ceralive/attention-console'), terminal='/dev/tty8',
-                 run=console_command, foreground=None):
+                 run=console_command, foreground=None, status=None, connectors=hdmi_connected,
+                 operator=operator_on):
         self.directory = directory
         self.terminal = terminal
         self.run = run
         self.foreground = foreground or (lambda: command('fgconsole'))
+        self.status = status
+        self.connectors = connectors
+        self.operator = operator
         self.state = directory / 'state.json'
         self.font = directory / 'font.psf'
-        # A restarted owner must not pull an operator away from their login.
-        self.entered = self.state.exists()
+        # Both survive a service stop (release), so a restarted owner does not
+        # switch again: the boot switch, and the switch for the condition that
+        # is still showing. The second goes once a tick sees no condition.
+        self.booted = directory / 'boot-switch-done'
+        self.handled = directory / 'condition-switch-done'
+        self.loaded_font = None
+        self.seen = None  # HDMI connectors at the previous tick; None until the first look
+        self.plug = False  # a plug whose switch waits for a known foreground VT
+        self.entered = self.handled.exists() or (
+            self.state.exists() and self.saved().get('alarm', True))
+
+    def saved(self):
+        try:
+            value = json.loads(self.state.read_text())
+            return value if isinstance(value, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def save(self, **changes):
+        atomic(self.state, json.dumps(self.saved() | changes))
+
+    def current(self):
+        """The foreground VT, or None when fgconsole gives no usable answer."""
+        vt = self.foreground()
+        return vt if vt == '8' or valid_vt(vt) else None
+
+    def switch(self, source, target):
+        """chvt to target, only if source is still in front and nobody is logged in on it.
+
+        Read again right before the switch: an operator may have changed VT
+        since the owner last looked, for example while it wrote its state.
+        """
+        if self.current() != source or self.operator(source):
+            return False
+        return self.run('chvt', target)
 
     def acquire(self):
         if self.state.exists():
             return
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         previous = self.foreground()
-        if not previous.isdecimal() or not 1 <= int(previous) <= 63 or previous == '8':
+        if not valid_vt(previous):
             previous = '1'
         # Persist the return VT before changing either font or foreground VT.
-        atomic(self.state, json.dumps({'return_vt': previous}))
+        atomic(self.state, json.dumps({'return_vt': previous, 'alarm': False}))
         # Never change the font unless its original bytes were saved successfully.
         temporary_font = self.directory / 'font.tmp'
         temporary_font.unlink(missing_ok=True)
         if self.run('setfont', '-C', self.terminal, '-O', str(temporary_font)) and temporary_font.exists():
             temporary_font.replace(self.font)
-            self.run('setfont', '-C', self.terminal,
-                     '/usr/share/consolefonts/Lat15-TerminusBold32x16.psf.gz')
+            if self.status is None:  # Without the page the large font is loaded once, here.
+                self.run('setfont', '-C', self.terminal, ATTENTION_FONT)
         else:
             temporary_font.unlink(missing_ok=True)
 
+    def use_font(self, path):
+        if self.loaded_font != path and self.font.exists() and self.run('setfont', '-C', self.terminal, path):
+            self.loaded_font = path
+
     def update(self, top):
-        if not top or top['severity'] not in ('critical', 'fatal'):
-            self.release()
-            return
+        alarm = bool(top) and top['severity'] in ('critical', 'fatal')
+        # A tick that ends a condition, or still owes its hand-back, belongs to
+        # the condition: a monitor plugged in now must not undo the hand-back.
+        settling = not alarm and (self.entered or bool(self.saved().get('pulled')))
+        if not alarm:
+            self.end_alarm()
+            if self.status is None:
+                self.release()
+                return
         self.acquire()
+        if not alarm:
+            self.hand_back()
+        if self.status is not None:
+            self.use_font(ATTENTION_FONT if alarm else STATUS_FONT)
         try:
-            with open(self.terminal, 'w') as terminal:
+            with open_terminal(self.terminal) as terminal:
                 try:
                     columns, rows = os.get_terminal_size(terminal.fileno())
                 except OSError:
                     columns, rows = 80, 25
                 columns, rows = max(20, columns), max(5, rows)
-                lines = []
-                heading = "The box can't start safely. " if top['id'] == 'data-readiness' else ''
-                for value in (heading + top['line'], '', top['fix'], '', 'Details: ' + top['detail']):
-                    lines.extend(textwrap.wrap(value, width=columns) or [''])
-                # Keep the recovery shortcut visible even for very long details.
-                lines = lines[:rows - 4]
-                lines += ['', 'Alt+F1 to log in. Alt+F8 returns here.']
-                terminal.write('\033[2J\033[H\033[?25l' + '\n'.join(lines) + '\n')
-            if not self.entered:
-                self.entered = self.run('chvt', '8')
+                terminal.write(self.alarm_text(top, columns, rows) if alarm else self.status_text(columns, rows))
+            if alarm and not self.entered:
+                self.start_alarm()
         except OSError:
-            pass
+            return
+        if self.status is not None:
+            self.follow_monitor(alarm or settling)
+
+    def start_alarm(self):
+        """Show a new condition once: switch to VT8 unless someone is logged in."""
+        previous = self.current()
+        if previous is None:
+            return  # No answer from fgconsole: switch nothing, look again next tick.
+        if previous == '8' or self.operator(previous):
+            # Already showing, or someone is logged in: never switch away from a
+            # login; Alt+F8 shows the condition.
+            self.save(alarm=True)
+            atomic(self.handled, '')
+            self.entered = True
+            return
+        if self.status is not None:
+            # The prompt this attempt takes the operator from, refreshed on every
+            # retry; it becomes the hand-back target only once the switch happens.
+            self.save(alarm_return=previous)
+        self.save(alarm=True)
+        if self.switch(previous, '8'):
+            if self.status is not None:
+                self.save(pulled=True)
+            atomic(self.handled, '')
+            self.entered = True
+
+    def alarm_text(self, top, columns, rows):
+        lines = []
+        heading = "The box can't start safely. " if top['id'] == 'data-readiness' else ''
+        for value in (heading + top['line'], '', top['fix'], '', 'Details: ' + top['detail']):
+            lines.extend(textwrap.wrap(value, width=columns) or [''])
+        # Keep the recovery shortcut visible even for very long details.
+        lines = lines[:rows - 4]
+        lines += ['', 'Alt+F1 to log in. Alt+F8 returns here.']
+        return '\033[2J\033[H\033[?25l' + '\n'.join(lines) + '\n'
+
+    def status_text(self, columns, rows):
+        try:
+            lines = self.status(columns, rows)
+            painted = [self.status.console(line) for line in lines]
+        except Exception:  # A renderer fault must never stop the attention owner.
+            lines = painted = ['Box status is not available.', 'Alt+F1 to log in.']
+        # Overwrite in place, without clearing first, so a phone camera sees no flicker.
+        # The page ends without a newline so the first row never scrolls away.
+        text = '\033[H\033[?25l' + '\n'.join('\033[2K' + line for line in painted)
+        # Erase what is left below. A footer filling the last column would lose
+        # its last cell to an erase there, so step to the next row first; on the
+        # bottom row there is nothing below to erase.
+        if len(lines[-1]) < columns:
+            return text + '\033[J'
+        return text + ('\n\033[J' if len(lines) < rows else '')
+
+    def end_alarm(self):
+        """No condition holds: forget it, so the next one switches again.
+
+        A hand-back or font restore still owed is retried on its own and never
+        keeps the next condition from showing.
+        """
+        self.handled.unlink(missing_ok=True)
+        if self.state.exists() and self.saved().get('alarm', True):
+            self.save(alarm=False)
+        self.entered = False
+
+    def hand_back(self):
+        """Return an operator a condition pulled from a prompt, then show the page.
+
+        Retried each tick until it happens, or until it no longer applies: the
+        operator left VT8 on their own or is logged in on it.
+        """
+        state = self.saved()
+        if not state.get('pulled'):
+            return
+        current = self.current()
+        if current is None:
+            return  # Unknown foreground: try again next tick.
+        if current == '8' and not self.operator('8'):
+            previous = state.get('alarm_return')
+            if not self.switch('8', previous if valid_vt(previous) else '1'):
+                return  # Retry next tick; VT8 still shows something useful.
+        state = self.saved()
+        state.pop('alarm_return', None)
+        atomic(self.state, json.dumps(state | {'pulled': False}))
+
+    def follow_monitor(self, hold):
+        """Show VT8 once per boot and when a monitor is plugged in, unless someone is logged in.
+
+        While a condition holds VT8, or its hand-back is under way, its own
+        switch rule applies: plugs only move the baseline, and the boot switch
+        counts as done.
+        """
+        connected = self.connectors()
+        if connected is not None:  # unreadable this tick: keep the previous baseline
+            self.plug |= self.seen is not None and bool(connected - self.seen)
+            self.seen = connected
+        boot = not self.booted.exists()
+        if hold:
+            self.plug = False
+            if boot:
+                atomic(self.booted, '')
+            return
+        if not (boot or self.plug):
+            return
+        current = self.current()
+        if current is None:
+            return  # Unknown foreground: the boot or plug switch waits for an answer.
+        self.plug = False
+        if current == '8' or self.operator(current) or self.switch(current, '8'):
+            if boot:
+                atomic(self.booted, '')
 
     def release(self):
         if not self.state.exists():
             return
         try:
             previous = json.loads(self.state.read_text())['return_vt']
-            if not isinstance(previous, str) or not previous.isdecimal() or not 1 <= int(previous) <= 63 or previous == '8':
+            if not valid_vt(previous):
                 previous = '1'
             # Return to the untouched login before clearing our screen. A font
             # failure must not strand the operator on an empty diagnostic VT.
-            if self.foreground() == '8' and not self.run('chvt', previous):
+            # Someone logged in on VT8 stays there; an unknown foreground keeps
+            # everything for the next attempt or the next owner.
+            current = self.current()
+            if current is None:
                 return
-            with open(self.terminal, 'w') as terminal:
+            if current == '8' and not self.operator('8') and not self.switch('8', previous):
+                return
+            with open_terminal(self.terminal) as terminal:
                 terminal.write('\033[2J\033[H\033[?25h')
             if self.font.exists() and not self.run('setfont', '-C', self.terminal, str(self.font)):
                 return  # The private backup survives even a manual service stop.
             self.font.unlink(missing_ok=True)
             self.state.unlink()
-            self.entered = False
+            self.entered = self.handled.exists()
+            self.loaded_font = None
         except (OSError, ValueError, KeyError, TypeError):
             pass
+
+
+def valid_vt(value):
+    return isinstance(value, str) and value.isdecimal() and 1 <= int(value) <= 63 and value != '8'
 
 
 def apply(top):
@@ -241,7 +503,11 @@ def listener(items):
 
 def watch():
     previous = None
-    console = Console()
+    try:
+        status = StatusPage.load()
+    except Exception:  # A broken renderer leaves VT8 to critical and fatal conditions only.
+        status = None
+    console = Console(status=status)
     running = True
     def stop(*_):
         nonlocal running

@@ -8,6 +8,7 @@ import re
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 
 SPEC = importlib.util.spec_from_file_location(
     'status_screen', Path(__file__).resolve().parents[1] / 'mkosi/runtime/ceralive-status-screen.py')
@@ -106,6 +107,15 @@ class QrTests(unittest.TestCase):
 
 
 class SnapshotTests(Temp):
+    def test_last_start_failure_classes_get_fixed_wording(self):
+        result = self.load(snapshot(last_error={'code': 'start_timeout', 'at': NOW - 5}))
+        self.assertEqual(result['last_error'], 'the stream did not start in time')
+        result = self.load(snapshot(last_error={'code': 'recovery_pending', 'at': NOW - 5}))
+        self.assertEqual(result['last_error'], 'the box is restoring its last session')
+        # Start failure wording is for the last error only; the ready line keeps its own table.
+        result = self.load(snapshot(ready={'ready': False, 'code': 'start_timeout'}))
+        self.assertEqual(result['ready']['line'], s.OTHER_REASON)
+
     def test_current_snapshot_becomes_role_labels_and_fixed_text(self):
         result = self.load(snapshot(stream_key='live_secret', imei='35000000000000',
                                     uplinks=[{'kind': 'wifi', 'state': 'up', 'name': 'HomeSSID'},
@@ -238,7 +248,9 @@ class PageTests(Temp):
     def test_versions_must_look_like_releases(self):
         for good in ('2026.11.21', '1.2.3', '2026.11.21-osb', '1.2.3+git.abc'):
             self.assertEqual(self.snap(ceraui=good)['ceraui'], good, good)
-        for bad in ('350000000000000', 'live_secret', 'HomeSSID', '2026', '1.2.3-' + 'x' * 20):
+        # Other scripts' digits (Arabic-Indic, fullwidth) are not ASCII and never reach the page.
+        for bad in ('350000000000000', 'live_secret', 'HomeSSID', '2026', '1.2.3-' + 'x' * 20,
+                    '\u0662\u0660\u0662\u0666.\u0661\u0661', '\uff12\uff10\uff12\uff16.1.2', '2026.\u0661\u0661.21'):
             self.assertIsNone(self.snap(ceraui=bad)['ceraui'], bad)
 
     def test_small_panel_drops_the_code_but_keeps_the_address(self):
@@ -273,6 +285,31 @@ class PageTests(Temp):
         page = '\n'.join(s.page_lines(dict(FACTS, addresses=[]), None, columns=128, rows=37, qr=fake_qr()))
         self.assertIn('no local address', page)
         self.assertNotIn(s.LIGHT, page)
+
+
+class AttentionTextTests(unittest.TestCase):
+    def test_attention_shows_fixed_wording_never_the_producer_text(self):
+        leaky = {'id': 'modem-sim', 'severity': 'warn', 'line': 'Joined HomeSSID with hunter2', 'fix': 'x', 'detail': 'y'}
+        self.assertEqual(s.attention_text(leaky), 'a warning is reported (see the device page)')
+        self.assertEqual(s.attention_text(dict(leaky, id='clock-unset')), 'the clock is not set')
+        self.assertEqual(s.attention_text(dict(leaky, id='temperature-high', severity='critical')),
+                         'the device is hot')
+        self.assertEqual(s.attention_text(dict(leaky, severity='info')), 'a notice is reported (see the device page)')
+        for bad in (None, 'text', {'id': 'Bad Id', 'severity': 'warn'}, {'id': 'x', 'severity': 'loud'}):
+            self.assertIsNone(s.attention_text(bad))
+
+    def test_the_page_never_prints_attention_prose(self):
+        with tempfile.TemporaryDirectory() as temp:
+            status = Path(temp) / 'status.json'
+            status.write_text(json.dumps({'highest': {'id': 'modem-sim', 'severity': 'warn',
+                                                      'line': 'Joined HomeSSID'}}))
+            with unittest.mock.patch.object(s, 'ATTENTION', status):
+                facts = s.facts()
+        self.assertNotIn('HomeSSID', json.dumps(facts))
+        self.assertEqual(facts['attention'], 'a warning is reported (see the device page)')
+
+    def test_local_destination_settings_are_not_called_unavailable(self):
+        self.assertEqual(s.READY_TEXT['receiver_invalid'], 'the destination settings are incomplete')
 
 
 class FactTests(unittest.TestCase):

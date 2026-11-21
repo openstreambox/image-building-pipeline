@@ -11,7 +11,7 @@ Two sources, so the page still says something when the application is down:
 
 - The image's own facts: release, uptime, support code (the same four hex
   digits the setup hotspot and hostname carry), local IPv4 addresses and the
-  highest shared attention condition.
+  highest shared attention condition (fixed wording by id or severity).
 - A snapshot CeraUI writes to /run/ceralive/status-screen/snapshot.json. It
   carries codes, role labels and states only, never free text; the page maps
   codes to fixed wording. A snapshot that is missing, oversized, not a regular
@@ -47,8 +47,8 @@ LIGHT = '\x01'  # internal marker for a light QR cell; never survives clean()
 FOOTER = 'Photograph this screen for support. Alt+F1 to log in.'
 FOOTER_SHORT = 'Alt+F1 to log in.'
 CODE = re.compile(r'[A-Za-z0-9_]{1,48}\Z')
-# A release version: dotted numbers, at most two short suffixes (no bare digit runs).
-VERSION = re.compile(r'\d{1,4}(\.\d{1,4}){1,3}([.+~-][0-9A-Za-z]{1,12}){0,2}\Z')
+# A release version: dotted ASCII numbers, at most two short suffixes (no bare digit runs).
+VERSION = re.compile(r'[0-9]{1,4}(\.[0-9]{1,4}){1,3}([.+~-][0-9A-Za-z]{1,12}){0,2}\Z')
 
 # Fixed wording for the codes CeraUI's stream-ready flag reports; any other
 # code gets fixed generic wording, never its own text.
@@ -63,11 +63,39 @@ READY_TEXT = {
     'source_lost': 'the video source is not connected',
     'source_unavailable': 'the video source is not sending',
     'receiver_not_set': 'no destination is set',
-    'receiver_invalid': 'the destination is not available',
+    'receiver_invalid': 'the destination settings are incomplete',
     'receiver_refused': 'the destination refused the last test',
     'no_uplink': 'no uplink is connected',
     'no_uplink_passes': 'no uplink reaches the internet',
     'no_link_carrying': 'no link carries the stream',
+}
+# The last failed start reports its failure class (CeraUI's start taxonomy).
+START_TEXT = {
+    'engine_unavailable': 'the streaming engine was not running',
+    'engine_restarting': 'the streaming engine was restarting',
+    'protocol_incompatible': 'the streaming engine version did not match',
+    'start_invalid': 'the stream settings were refused',
+    'engine_internal': 'the streaming engine failed',
+    'start_timeout': 'the stream did not start in time',
+    'audio_source_unavailable': 'the audio source was not available',
+    'capture_source_unavailable': 'the video source could not be opened',
+    'modem_transition_active': 'a modem was restarting',
+    'mutation_blocked': 'a modem change could not be undone',
+}
+ERROR_TEXT = {**READY_TEXT, **START_TEXT}
+# Shared attention conditions are shown by id and severity only; a producer's
+# own text never reaches this page (the critical/fatal console keeps it).
+ATTENTION_ID = re.compile(r'[a-z][a-z0-9-]{0,63}\Z')
+ATTENTION_TEXT = {
+    'data-readiness': 'the card is not ready',
+    'temperature-high': 'the device is hot',
+    'clock-unset': 'the clock is not set',
+}
+SEVERITY_TEXT = {
+    'info': 'a notice is reported (see the device page)',
+    'warn': 'a warning is reported (see the device page)',
+    'critical': 'a critical condition is reported (see the device page)',
+    'fatal': 'a fatal condition is reported (see the device page)',
 }
 KIND_LABEL = {'cellular': 'Cellular', 'ethernet': 'Ethernet', 'wifi': 'Wi-Fi', 'other': 'Link'}
 
@@ -207,9 +235,20 @@ def load_snapshot(path=SNAPSHOT, now=None):
     if isinstance(ready, dict) and isinstance(ready.get('ready'), bool):
         result['ready'] = {'ready': ready['ready'], 'line': code_text(ready.get('code'), READY_TEXT)}
     error = item.get('last_error')
-    if isinstance(error, dict) and code_text(error.get('code'), READY_TEXT):
-        result['last_error'] = code_text(error['code'], READY_TEXT)
+    if isinstance(error, dict) and code_text(error.get('code'), ERROR_TEXT):
+        result['last_error'] = code_text(error['code'], ERROR_TEXT)
     return result
+
+
+def attention_text(highest):
+    """Fixed wording for the highest shared condition, or None."""
+    if not isinstance(highest, dict):
+        return None
+    ident, severity = highest.get('id'), highest.get('severity')
+    if not (isinstance(ident, str) and ATTENTION_ID.fullmatch(ident)) or \
+            not (isinstance(severity, str) and severity in SEVERITY_TEXT):
+        return None
+    return ATTENTION_TEXT.get(ident, SEVERITY_TEXT[severity])
 
 
 def support_code(machine_id=Path('/etc/machine-id')):
@@ -294,7 +333,7 @@ def facts(now=None):
         'uptime': uptime,
         'code': support_code(),
         'addresses': ipv4_addresses(),
-        'attention': clean(attention.get('line'), 120) if isinstance(attention, dict) else None,
+        'attention': attention_text(attention),
         'now': now,
     }
 

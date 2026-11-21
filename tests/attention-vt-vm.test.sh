@@ -45,7 +45,9 @@ for index, source in enumerate(shlex.split(os.environ.get('CERALIVE_ATTENTION_VM
     loads.append('/bin/busybox insmod /modules/'+destination.name)
 (root/'load-modules.sh').write_text('\n'.join(loads)+'\n')
 copy(Path('/usr/share/consolefonts/Lat15-TerminusBold32x16.psf.gz'))
+copy(Path('/usr/share/consolefonts/Lat15-TerminusBold16.psf.gz'))
 shutil.copy2('mkosi/runtime/ceralive-attention.py',root/'attention.py')
+shutil.copy2('mkosi/runtime/ceralive-status-screen.py',root/'status-screen.py')
 for folder in ['dev','proc','sys','run','tmp','etc','bin']:
     (root/folder).mkdir(exist_ok=True)
 for name in ['sh','mount','poweroff','login']:
@@ -76,7 +78,8 @@ spec=importlib.util.spec_from_file_location('attention','/attention.py')
 a=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(a)
 owner=a.Console()
-top=dict(severity='fatal',line='The card is not ready.',fix='Check the card.',detail='Synthetic storage refusal.')
+owners=[owner]
+top=dict(id='example',severity='fatal',line='The card is not ready.',fix='Check the card.',detail='Synthetic storage refusal.')
 gettys=[]
 def cmd(*args):
     return subprocess.run(args,capture_output=True,text=True,check=True).stdout.strip()
@@ -124,12 +127,117 @@ try:
     owner.release()
     capture('stop-handback')
     assert cmd('fgconsole')=='1'
+    # Status page: the owner with the renderer installed. The guest has no
+    # network or qrencode, so the address and the module matrix are stand-ins.
+    status=a.StatusPage.load(Path('/status-screen.py'))
+    status.module.ipv4_addresses=lambda *args,**kwargs:[('wlan0','192.168.42.1')]
+    status.module.qr_matrix=lambda url,**kwargs:[[(x*y)%3==0 for x in range(25)] for y in range(25)]
+    monitors=set()
+    viewer=a.Console(Path('/run/status-console'),status=status,connectors=lambda:set(monitors))
+    owners.append(viewer)
+    viewer.update(None)
+    capture('status-boot')
+    assert cmd('fgconsole')=='8', 'boot switch with only login prompts on tty1'
+    screen=Path('/dev/vcsa8').read_bytes()
+    rows,columns=screen[0],screen[1]
+    assert (rows,columns)==tuple(geometry), 'the 8x16 font keeps the panel geometry'
+    text=Path('/dev/vcs8').read_bytes()
+    assert b'support code' in text and b'https://192.168.42.1/' in text and b'Alt+F1 to log in.' in text
+    attributes=screen[4+1::2]
+    assert attributes.count(attributes[0]^0x77)>=25*25, 'QR modules drawn in reverse video'
+    viewer.update(top)
+    capture('status-fatal')
+    assert b'The card is not ready.' in Path('/dev/vcs8').read_bytes()
+    assert Path('/dev/vcsa8').read_bytes()[:2]!=bytes(geometry)
+    viewer.update(None)
+    capture('status-after-fatal')
+    assert b'The card is not ready.' not in Path('/dev/vcs8').read_bytes()
+    assert b'support code' in Path('/dev/vcs8').read_bytes()
+    assert cmd('fgconsole')=='8'
+    cmd('chvt','1')
+    viewer.update(None)
+    assert cmd('fgconsole')=='1', 'repaints never pull the operator back'
+    monitors.add('card0-HDMI-A-1')
+    viewer.update(None)
+    capture('status-hotplug')
+    assert cmd('fgconsole')=='8', 'a new monitor shows VT8'
+    shell=subprocess.Popen(['/bin/busybox','setsid','-c','/bin/sh','-c','sleep 60'],stdin=open('/dev/tty2'),stdout=open('/dev/tty2','w'),stderr=subprocess.STDOUT)
+    gettys.append(shell)
+    time.sleep(1)
+    cmd('chvt','2')
+    monitors.add('card0-HDMI-A-2')
+    viewer.update(None)
+    assert cmd('fgconsole')=='2', 'a logged-in operator is never pulled away by a plug'
+    viewer.update(top)
+    capture('status-fatal-over-login')
+    assert cmd('fgconsole')=='2', 'a condition never pulls a logged-in operator away'
+    assert b'The card is not ready.' in Path('/dev/vcs8').read_bytes()
+    viewer.update(None)
+    viewer.release()
+    cmd('setfont','-C','/dev/tty8','-O','/run/after-status.psf')
+    assert Path('/run/after-status.psf').read_bytes()==baseline
+    # The owner as a service runs it: a session leader. tty8 does not become its
+    # controlling terminal and the login check on VT8 does not count the owner,
+    # so the hand-back still happens.
+    cmd('chvt','1')
+    leader=subprocess.run(['/bin/busybox','setsid','/usr/bin/python3','/leader.py'],capture_output=True,text=True,timeout=60)
+    print(leader.stdout+leader.stderr,flush=True)
+    assert leader.returncode==0 and 'LEADER PASS' in leader.stdout
+    assert cmd('fgconsole')=='1'
+    # Someone logged in on tty8 itself: neither a hand-back nor a stop switches them away.
+    session=subprocess.Popen(['/bin/busybox','setsid','-c','/bin/sh','-c','sleep 60'],stdin=open('/dev/tty8'),stdout=open('/dev/tty8','w'),stderr=subprocess.STDOUT)
+    gettys.append(session)
+    time.sleep(1)
+    keeper=a.Console(Path('/run/keeper-console'),status=status,connectors=set)
+    owners.append(keeper)
+    keeper.update(top)
+    capture('tty8-login-fatal')
+    assert cmd('fgconsole')=='8', 'pulled from the tty1 prompt'
+    keeper.update(None)
+    capture('tty8-login-clear')
+    assert cmd('fgconsole')=='8', 'the hand-back never leaves a login on tty8'
+    keeper.update(top)
+    keeper.release()
+    assert cmd('fgconsole')=='8', 'a stop never leaves a login on tty8'
     print('ATTENTION-VM PASS',flush=True)
 finally:
-    owner.release()
+    for console in owners:
+        console.release()
     for process in gettys:
         process.terminate()
 PY
+cat >"$root/leader.py" <<'LEADER'
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+spec=importlib.util.spec_from_file_location('attention','/attention.py')
+a=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(a)
+def fg():
+    return subprocess.run(['fgconsole'],capture_output=True,text=True,check=True).stdout.strip()
+def controlling():
+    text=Path('/proc/self/stat').read_text()
+    return int(text[text.rindex(')')+2:].split()[4])
+assert os.getsid(0)==os.getpid(), 'a session leader, like a service'
+status=a.StatusPage.load(Path('/status-screen.py'))
+status.module.ipv4_addresses=lambda *args,**kwargs:[('wlan0','192.168.42.1')]
+status.module.qr_matrix=lambda url,**kwargs:[[(x*y)%3==0 for x in range(25)] for y in range(25)]
+owner=a.Console(Path('/run/leader-console'),status=status,connectors=set)
+owner.booted.parent.mkdir(parents=True,exist_ok=True)
+owner.booted.write_text('')  # the boot switch is covered above
+try:
+    top=dict(id='example',severity='fatal',line='The card is not ready.',fix='Check the card.',detail='Synthetic storage refusal.')
+    owner.update(top)
+    assert fg()=='8', 'pulled from the tty1 prompt'
+    assert controlling()==0, 'tty8 did not become the controlling terminal'
+    assert not a.operator_on('8'), 'the owner is not a login on VT8'
+    owner.update(None)
+    assert fg()=='1', 'handed back to the tty1 prompt'
+    print('LEADER PASS',flush=True)
+finally:
+    owner.release()
+LEADER
 (cd "$root"; find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -1) >"$work/initrd.gz"
 args=()
 if [[ -n ${CERALIVE_ATTENTION_QEMU_DATA:-} ]]; then args+=(-L "$CERALIVE_ATTENTION_QEMU_DATA"); fi
@@ -151,5 +259,5 @@ for line in log.splitlines():
         for key in ('vcs1','vcs8'):
             (root/(item['stage']+'-'+key+'.txt')).write_bytes(base64.b64decode(item[key]))
         (root/(item['stage']+'.json')).write_text(json.dumps(item))
-print('real VT/getty startup race, reachable login, text/font hand-back: PASS')
+print('real VT/getty startup race, reachable login, text/font hand-back, status page, hotplug, service session and tty8 login: PASS')
 PY
