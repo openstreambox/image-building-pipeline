@@ -637,6 +637,8 @@ probe_orders_after NetworkManager.service ModemManager.service \
   || fail 'NetworkManager.service is NOT ordered after ModemManager.service (ModemManager stops first at power-off)'
 probe_orders_after ceralive.service ModemManager.service \
   || fail 'ceralive.service is NOT ordered after ModemManager.service (CeraUI loses ModemManager while it stops)'
+probe_orders_after ceralive-write-drain.service NetworkManager.service \
+  || fail 'the write drain is NOT ordered after NetworkManager.service (a streamed RAUC write can lose the network)'
 probe_orders_after ceralive-write-drain.service ModemManager.service \
   || fail 'the write drain is NOT ordered after ModemManager.service'
 probe_orders_after ModemManager.service polkit.service \
