@@ -20,8 +20,20 @@ describe a recycled PID. The unit is the caller's cgroup directly under
 `/system.slice`; user units, nested scopes and similarly named units don't match.
 
 **Operator confirmation.** The broker finds the caller's controlling terminal in
-`/proc/<pid>/stat`. It must be in the system's mount namespace, and the caller must
-be in that terminal's foreground process group. The broker opens the device itself
+`/proc/<pid>/stat`. It must be a system terminal, and the caller must be in that
+terminal's foreground process group. A caller in the system's mount namespace
+shares its `/dev/pts`. A caller in another mount namespace must hold that terminal
+open on stdin, stdout or stderr, and the open file must be the same device and
+inode as the system's `/dev/pts` entry. That is the case for a Tailscale SSH
+session: `tailscaled.service` gets its own mount namespace from `ReadOnlyPaths=`,
+its sessions inherit it, and their terminals are on the system's devpts. A pty of
+a private devpts instance can carry the number of a different system terminal and
+is refused. The terminal is also bound to the caller's session: the broker refuses
+when another session, with a controlling terminal of that number, holds the system
+terminal itself open (same devpts instance and inode). That rules out prompting on
+a terminal another session of the same account controls, in any namespace, while a
+session on another devpts instance (a container) that happens to use the same
+number doesn't block anyone. The broker opens the device itself
 (no symlinks, verified with `fstat`: character device, same device number, owned
 by the caller). It discards anything typed earlier, prints what will happen and
 reads one line within 60 s. Only the exact word (`poweroff` or `reboot`) admits the

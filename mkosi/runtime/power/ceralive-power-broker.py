@@ -524,6 +524,31 @@ def same_mount_namespace(pid):
     return os.readlink(f'/proc/{pid}/ns/mnt') == os.readlink(SYSTEM_MOUNT_NS)
 
 
+def holds_system_terminal(pid, rdev):
+    """For a caller in another mount namespace (a Tailscale SSH session runs in
+    tailscaled.service's): whether one of its standard streams is the system
+    terminal with this device number. The file the caller has open is compared
+    by device and inode with the system's /dev/pts entry, so a pty of a private
+    devpts instance, whose number can match a different system terminal, is not
+    taken for it. Path and namespace of the caller are not used."""
+    path = tty_path(rdev)
+    if path is None:
+        return False
+    try:
+        system = os.stat(path)
+    except OSError:
+        return False
+    for n in (0, 1, 2):
+        try:
+            held = os.stat(f'/proc/{pid}/fd/{n}')
+        except OSError:
+            continue
+        if stat.S_ISCHR(held.st_mode) and held.st_rdev == rdev and \
+                (held.st_dev, held.st_ino) == (system.st_dev, system.st_ino):
+            return True
+    return False
+
+
 def tty_path(rdev):
     major, minor = os.major(rdev), os.minor(rdev)
     if 136 <= major <= 143:
@@ -535,9 +560,48 @@ def tty_path(rdev):
     return None
 
 
+def sessions_holding_system_terminal(rdev):
+    """Sessions with a process whose controlling terminal has this device
+    number and which holds the system terminal itself (same devpts instance and
+    inode as /dev/pts/N here) open. A terminal is the controlling terminal of at
+    most one session, and device numbers of different devpts instances can be
+    equal, so the number alone says nothing: a session on another devpts
+    instance (a container, a private namespace) never holds the system node and
+    is not counted. An unreadable process is skipped: it has exited."""
+    path = tty_path(rdev)
+    try:
+        system = os.stat(path) if path else None
+    except OSError:
+        system = None
+    if system is None:
+        return set()
+    target = (system.st_dev, system.st_ino)
+    sessions = set()
+    for name in os.listdir('/proc'):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f'/proc/{name}/stat', 'rb') as source:
+                proc = parse_stat(source.read())
+            if proc['tty_nr'] != rdev or proc['session'] in sessions:
+                continue
+            for fd in os.listdir(f'/proc/{name}/fd'):
+                try:
+                    held = os.stat(f'/proc/{name}/fd/{fd}')
+                except OSError:
+                    continue
+                if (held.st_dev, held.st_ino) == target:
+                    sessions.add(proc['session'])
+                    break
+        except (OSError, ValueError, IndexError):
+            continue
+    return sessions
+
+
 def check_terminal(uid, pidfd, fd=None, expected_rdev=None):
-    """The caller's own foreground controlling terminal, in the system's mount
-    namespace; with an opened fd, also that fd's device and owner."""
+    """The caller's own foreground controlling terminal, a system terminal
+    (in the system's mount namespace, or held open on a standard stream) that no
+    other session holds; with an opened fd, also that fd's device and owner."""
     pid, data = read_bracketed(pidfd, 'stat')
     proc = parse_stat(data)
     if proc['tty_nr'] == 0:
@@ -546,8 +610,14 @@ def check_terminal(uid, pidfd, fd=None, expected_rdev=None):
         raise PeerError('terminal changed')
     if proc['tpgid'] != proc['pgrp']:
         raise PeerError('not in the foreground of its terminal')
-    if not same_mount_namespace(pid):
+    if not same_mount_namespace(pid) and not holds_system_terminal(pid, proc['tty_nr']):
         raise PeerError('terminal in another mount namespace')
+    # Bind the terminal to the caller's own session: no other session with this
+    # controlling terminal number may hold the system terminal (a private devpts
+    # pty can reuse the number of a system terminal that another session of the
+    # same account controls; a session on another devpts instance doesn't count).
+    if sessions_holding_system_terminal(proc['tty_nr']) - {proc['session']}:
+        raise PeerError('terminal held by another session')
     if fd is not None:
         info = os.fstat(fd)
         if not stat.S_ISCHR(info.st_mode) or info.st_rdev != proc['tty_nr']:
