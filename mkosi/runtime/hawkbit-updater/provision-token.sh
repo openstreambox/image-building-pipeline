@@ -62,8 +62,8 @@ else
   APT_CLIENT_KEY="${CERALIVE_APT_CLIENT_KEY:-${legacy_certs_dir}/client.key}"
 fi
 
-log()  { printf '%s: %s\n' "${PROG}" "$*"; }
-die()  { printf '%s: ERROR: %s\n' "${PROG}" "$*" >&2; exit 1; }
+log()  { local priority="$1"; shift; printf '<%s>%s: %s\n' "$priority" "${PROG}" "$*"; }
+die()  { printf '<3>%s: ERROR: %s\n' "${PROG}" "$*" >&2; exit 1; }
 
 mark_retry_pending() {
   install -d -m 0700 "$(dirname "${PENDING_FILE}")"
@@ -85,7 +85,10 @@ fetch_token_from_url() {
   local url="$1"
   command -v curl >/dev/null 2>&1 || return 69
   if [ -e "${credentials_dir}/client.crt" ] || [ -e "${credentials_dir}/client.key" ]; then
-    [ -s "${APT_CLIENT_CRT}" ] && [ -s "${APT_CLIENT_KEY}" ] || return 75
+    if [ ! -s "${APT_CLIENT_CRT}" ] || [ ! -s "${APT_CLIENT_KEY}" ]; then
+      log 4 "WARN: provisioning client certificate or key is missing or empty" >&2
+      return 75
+    fi
   fi
   local -a auth=()
   if [ -s "${APT_CLIENT_CRT}" ] && [ -s "${APT_CLIENT_KEY}" ]; then
@@ -100,8 +103,8 @@ fetch_token_from_url() {
 
 main() {
   [ -r "${ENROLL_CONF}" ] || {
-    log "no enrollment file at ${ENROLL_CONF} — device not yet enrolled; nothing to do"
-    log "drop ${ENROLL_CONF} (HAWKBIT_SERVER + a token) on /data to enroll, then re-run"
+    log 6 "no enrollment file at ${ENROLL_CONF} — device not yet enrolled; nothing to do"
+    log 6 "drop ${ENROLL_CONF} (HAWKBIT_SERVER + a token) on /data to enroll, then re-run"
     exit 0
   }
 
@@ -121,7 +124,7 @@ main() {
   elif [ -n "${HAWKBIT_GATEWAY_TOKEN}" ]; then
     auth_kind="gateway_token"; token="${HAWKBIT_GATEWAY_TOKEN}"
   elif [ -n "${HAWKBIT_PROVISION_URL}" ]; then
-    log "fetching per-device token from provisioning endpoint"
+    log 6 "fetching per-device token from provisioning endpoint"
     auth_kind="auth_token"
     if token="$(fetch_token_from_url "${HAWKBIT_PROVISION_URL}")"; then
       :
@@ -129,8 +132,10 @@ main() {
       fetch_rc=$?
       case "${fetch_rc}" in
         75)
+          local priority=5
+          [ ! -f "${PENDING_FILE}" ] || priority=6
           mark_retry_pending
-          log "provisioning endpoint unavailable; retry pending at ${PENDING_FILE}"
+          log "$priority" "provisioning endpoint unavailable; retry pending at ${PENDING_FILE}"
           return 0
           ;;
         69) die "curl missing — cannot fetch token from ${HAWKBIT_PROVISION_URL}" ;;
@@ -139,7 +144,7 @@ main() {
       esac
     fi
   elif [ -s "${TOKEN_FILE}" ]; then
-    log "reusing previously provisioned token at ${TOKEN_FILE}"
+    log 5 "reusing previously provisioned token at ${TOKEN_FILE}"
     auth_kind="auth_token"; token="$(tr -d '\r\n[:space:]' <"${TOKEN_FILE}")"
   else
     die "${ENROLL_CONF}: provide HAWKBIT_TARGET_TOKEN, HAWKBIT_GATEWAY_TOKEN or HAWKBIT_PROVISION_URL"
@@ -149,14 +154,14 @@ main() {
   install -d -m 0700 "$(dirname "${TOKEN_FILE}")"
   ( umask 077; printf '%s\n' "${token}" >"${TOKEN_FILE}" )
   chmod 0600 "${TOKEN_FILE}"
-  log "token persisted to ${TOKEN_FILE} (mode 0600, on /data)"
+  log 5 "token persisted to ${TOKEN_FILE} (mode 0600, on /data)"
 
   # 2. Render the effective config from the baked-in template.
   [ -r "${TEMPLATE}" ] || die "template missing: ${TEMPLATE}"
   local target_name="${HAWKBIT_TARGET_NAME}"
   [ -n "${target_name}" ] || target_name="$(hostname)"
   local compatible; compatible="$(read_compatible)"
-  [ -n "${compatible}" ] || log "WARN: no compatible in ${RAUC_SYSTEM_CONF} — rendering empty (rollout target filter won't match until RAUC is provisioned)"
+  [ -n "${compatible}" ] || log 4 "WARN: no compatible in ${RAUC_SYSTEM_CONF} — rendering empty (rollout target filter won't match until RAUC is provisioned)"
 
   local content auth_line
   content="$(cat "${TEMPLATE}")"
@@ -173,8 +178,8 @@ main() {
   ( umask 077; printf '%s\n' "${content}" >"${EFFECTIVE}" )
   chmod 0600 "${EFFECTIVE}"
   rm -f -- "${PENDING_FILE}"
-  log "rendered effective config → ${EFFECTIVE} (mode 0600; auth=${auth_kind}, target=${target_name}, compatible=${compatible:-<none>})"
-  log "rauc-hawkbit-updater.service may now start (its ConditionPathExists is satisfied)"
+  log 5 "rendered effective config → ${EFFECTIVE} (mode 0600; auth=${auth_kind}, target=${target_name}, compatible=${compatible:-<none>})"
+  log 5 "rauc-hawkbit-updater.service may now start (its ConditionPathExists is satisfied)"
 }
 
 main "$@"

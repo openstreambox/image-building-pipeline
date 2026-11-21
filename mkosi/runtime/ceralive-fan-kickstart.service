@@ -29,6 +29,8 @@ After=systemd-udev-trigger.service
 After=ceralive-fan-curve.service
 
 [Service]
+LogLevelMax=notice
+SyslogLevel=notice
 # Type=exec, not the oneshot used by ceralive-fan-curve/-led-status/-typec-source:
 # this is the first genuinely RESIDENT unit in that family. It has to be, because
 # the fan drops back to state 0 whenever the board cools below the trip and

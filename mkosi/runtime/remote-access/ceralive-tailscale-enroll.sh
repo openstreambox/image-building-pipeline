@@ -70,7 +70,8 @@ REFUSED_RE='^(backend error: )?(invalid key|key (has )?(been )?(expired|revoked|
 \binvalid (pre[- ]?)?auth[- ]?key\b
 \b(pre[- ]?)?auth[- ]?key (has )?(been )?(not found|not valid|invalid|expired|revoked|(already (been )?)?used)\b'
 
-log() { logger -t ceralive-tailscale-enroll -- "$*" 2>/dev/null || true; echo "ceralive-tailscale-enroll: $*"; }
+# Use the unit's journal stream once per message.
+log() { local priority="$1"; shift; printf '<%s>ceralive-tailscale-enroll: %s\n' "$priority" "$*"; }
 
 regular() { [[ -f "$1" && ! -L "$1" ]]; }
 present() { [[ -e "$1" || -L "$1" ]]; }
@@ -91,7 +92,7 @@ discard_claim() {
     local rejected
     rejected="$(mktemp -d "${ENROLL}/.rejected.XXXXXX")"
     mv -T -- "${CLAIMED}" "${rejected}/incoming-authkey"
-    log "quarantined a populated incoming-authkey directory"
+    log 4 "quarantined a populated incoming-authkey directory"
   fi
 }
 
@@ -163,7 +164,7 @@ adopt() { # source
   write_status pending 0 0 new-key
   mv -f -- "$tmp" "${PENDING}"
   sync "${ENROLL}"
-  log "new key from $1${NAME:+ for machine name ${NAME}}"
+  log 5 "new key from $1${NAME:+ for machine name ${NAME}}"
 }
 
 reject_all() { # reason files...
@@ -173,7 +174,7 @@ reject_all() { # reason files...
   printf 'These files were removed from this card and not used: %s\nReason: %s\nAsk for a new key file.\n' \
     "${names[*]}" "$reason" >"${REJECTED_NOTE}" 2>/dev/null || true
   sync -f "${BOOT}" 2>/dev/null || true
-  log "removed unusable key file(s) ${names[*]}: ${reason}"
+  log 4 "removed unusable key file(s) ${names[*]}: ${reason}"
 }
 
 take_boot_key() {
@@ -213,7 +214,7 @@ take_incoming_keys() {
     mv -fT -- "${INCOMING}" "${CLAIMED}"
     parse_keyfile "${CLAIMED}"
     if [[ -z "${KEY}" ]]; then
-      log "removed incoming-authkey: not a regular file holding one tskey-auth- key (and an optional name)"
+      log 4 "removed incoming-authkey: not a regular file holding one tskey-auth- key (and an optional name)"
     else
       adopt "a local writer"
       KEY=""
@@ -237,12 +238,12 @@ give_up() { # reason
       rm -f -- "${TS_STATE}/tailscaled.state"   # rm never follows a link
       rm -f -- "${OURS}"
     else
-      log "kept tailscaled.state (tailscaled state '${backend:-unknown}')"
+      log 5 "kept tailscaled.state (tailscaled state '${backend:-unknown}')"
     fi
   fi
   write_status gave-up "$attempts" 0 "$1"
   sync "${ENROLL}" 2>/dev/null || true
-  log "gave up Tailscale enrollment: $1; the key was removed. Put a new key file on BOOT to retry."
+  log 4 "gave up Tailscale enrollment: $1; the key was removed. Put a new key file on BOOT to retry."
 }
 
 enroll_pending() {
@@ -250,7 +251,7 @@ enroll_pending() {
   parse_keyfile "${PENDING}"
   if [[ -z "${KEY}" ]]; then
     wipe "${PENDING}"
-    log "removed pending-authkey: not a regular file holding one tskey-auth- key"
+    log 4 "removed pending-authkey: not a regular file holding one tskey-auth- key"
     return 0
   fi
   local name="${NAME}"
@@ -271,7 +272,7 @@ enroll_pending() {
     : >"${OURS}"
   fi
   if ! "${SYSTEMCTL}" start tailscaled.service; then
-    log "tailscaled did not start (attempt ${attempts}/${MAX_ATTEMPTS})"
+    log 4 "tailscaled did not start (attempt ${attempts}/${MAX_ATTEMPTS})"
     if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not start after ${attempts} attempts"; fi
     return 1
   fi
@@ -292,15 +293,15 @@ enroll_pending() {
     # `up` resets the auto-update preference to "unset" (then the tailnet
     # default applies), so pin it off after every successful up.
     "${CLI}" --socket="${SOCKET}" set --auto-update=false --update-check=false \
-      || log "could not pin auto-update off; tailscaled re-applies it at start"
+      || log 4 "could not pin auto-update off; tailscaled re-applies it at start"
     wipe "${PENDING}"
     write_status joined "$attempts" 0 ok
     sync "${ENROLL}"
-    log "joined Tailscale${name:+ as ${name}}"
+    log 5 "joined Tailscale${name:+ as ${name}}"
     return 0
   fi
   message="$(printf '%s' "$out" | sed -E 's/tskey-[A-Za-z0-9_-]+/<key>/g' | tr '\n' ' ' | cut -c1-200)"
-  log "tailscale up failed (attempt ${attempts}/${MAX_ATTEMPTS}): ${message}"
+  log 4 "tailscale up failed (attempt ${attempts}/${MAX_ATTEMPTS}): ${message}"
   # Final refusals: Tailscale's control plane ("invalid key: …", expired, revoked,
   # already used) and headscale ("invalid pre auth key", "… has expired", "… has
   # already been used"). Every phrase must be about the key: a TLS error such as
@@ -318,13 +319,13 @@ enroll_pending() {
 }
 
 if present "${ENROLL}" && { [[ -L "${ENROLL}" ]] || [[ ! -d "${ENROLL}" ]]; }; then
-  log "refusing: ${ENROLL} is not a plain directory"
+  log 3 "refusing: ${ENROLL} is not a plain directory"
   exit 1
 fi
 install -d -m 0700 "${ENROLL}"
 chmod 0700 "${ENROLL}"
 exec 9>"${ENROLL}/.lock"
-flock -w "${LOCK_WAIT}" 9 || { log "another enrollment run holds the lock; the timer retries"; exit 0; }
+flock -w "${LOCK_WAIT}" 9 || { log 6 "another enrollment run holds the lock; the timer retries"; exit 0; }
 
 recover
 take_boot_key

@@ -662,6 +662,13 @@ SH
   printf '%s\n' "$output"
 }
 
+@test "hawkbit retry drops routine journal records and keeps untagged stderr" {
+  local retry_unit
+  retry_unit="$(sed -n "/<<'HBRETRYSVC'/,/^HBRETRYSVC$/p" "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot")"
+  grep -Fxq 'LogLevelMax=notice' <<<"$retry_unit"
+  grep -Fxq 'SyslogLevel=notice' <<<"$retry_unit"
+}
+
 @test "hawkbit enrollment: an offline token endpoint exits successfully and leaves a retry pending" {
   local canonical="$PIPELINE_DIR/mkosi/runtime/hawkbit-updater/provision-token.sh"
   local inline="$BATS_TEST_TMPDIR/ceralive-hawkbit-provision-inline"
@@ -720,11 +727,25 @@ EOF
       CERALIVE_RAUC_SYSTEM_CONF="$root/system.conf" \
       bash "$script"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"retry pending"* ]]
+    [[ "$output" == *"<6>ceralive-hawkbit-provision: fetching"* ]]
+    [[ "$output" == *"<5>ceralive-hawkbit-provision: provisioning endpoint unavailable; retry pending"* ]]
     [ -f "$root/data/provision.pending" ]
     [ "$(stat -c '%a' "$root/data/provision.pending")" = 600 ]
     [ ! -e "$root/data/token" ]
     [ ! -e "$root/data/effective.conf" ]
+
+    run env PATH="$root/bin:$PATH" HAWKBIT_CURL_MODE=offline HAWKBIT_CURL_ARGS_LOG="$cert_args" \
+      CERALIVE_APT_CREDENTIALS_DIR="$root/apt-credentials" CERALIVE_APT_LEGACY_CERTS_DIR="$root/legacy-certs" \
+      CERALIVE_HAWKBIT_ENROLL_CONF="$root/enroll.conf" \
+      CERALIVE_HAWKBIT_TOKEN_FILE="$root/data/token" \
+      CERALIVE_HAWKBIT_TEMPLATE="$root/template.conf" \
+      CERALIVE_HAWKBIT_EFFECTIVE="$root/data/effective.conf" \
+      CERALIVE_HAWKBIT_PENDING="$root/data/provision.pending" \
+      CERALIVE_RAUC_SYSTEM_CONF="$root/system.conf" \
+      bash "$script"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"<6>ceralive-hawkbit-provision: provisioning endpoint unavailable; retry pending"* ]]
+    [[ "$output" != *"<5>"* ]]
 
     run env PATH="$root/bin:$PATH" HAWKBIT_CURL_MODE=online HAWKBIT_CURL_ARGS_LOG="$cert_args" \
       CERALIVE_APT_CREDENTIALS_DIR="$root/apt-credentials" CERALIVE_APT_LEGACY_CERTS_DIR="$root/legacy-certs" \
@@ -737,6 +758,7 @@ EOF
       bash "$script"
     [ "$status" -eq 0 ]
     [ ! -e "$root/data/provision.pending" ]
+    [[ "$output" == *"<5>ceralive-hawkbit-provision: rendered effective config"* ]]
     [ "$(cat "$root/data/token")" = device-token ]
     grep -Fq 'auth_token                = device-token' "$root/data/effective.conf"
     grep -Fq 'compatible=ceralive-test' "$root/data/effective.conf"
@@ -774,6 +796,7 @@ EOF
     [ "$status" -eq 0 ]
     [ -f "$root/data/provision.pending" ]
     [ ! -s "$cert_args" ]
+    [[ "$output" == *"<4>ceralive-hawkbit-provision: WARN: provisioning client certificate or key is missing or empty"* ]]
     [ ! -e "$root/data/token" ]
     rm -f "$root/apt-credentials/client.crt" "$root/data/provision.pending"
 
@@ -2945,6 +2968,20 @@ SH
 #     no hardware, UNIT scope.
 # ===========================================================================
 
+@test "fan kickstart: journal cap keeps untagged diagnostics and failed sysfs opens" {
+  local err_target="$BATS_TEST_TMPDIR/missing/cur_state"
+  local script
+  script="$(FANKICK_SCRIPT)"
+  grep -Fxq 'LogLevelMax=notice' "${script%.sh}.service"
+  grep -Fxq 'SyslogLevel=notice' "${script%.sh}.service"
+  run env LC_ALL=C bash -c '
+    eval "$(sed -n "/^warn()/p; /^write_attr() {/,/^}/p" "$1")"
+    write_attr "$2" 1
+  ' _ "$script" "$err_target"
+  [ "$status" -ne 0 ]
+  [[ "$output" == '<4>ceralive-fan-kickstart: WARNING:'*"cur_state"*'No such file or directory' ]]
+}
+
 @test "fan kickstart: the monitor script + unit are installed and enabled" {
   local unit_dir="$BATS_TEST_TMPDIR/fk-units"
   local sbin_dir="$BATS_TEST_TMPDIR/fk-sbin"
@@ -2993,12 +3030,12 @@ SH
   [ "$status" -eq 0 ]
   wait "$sampler"
 
-  [[ "$output" == *"nudging to state 6"* ]]
+  [[ "$output" == *"<6>ceralive-fan-kickstart: cooling_device6: governor moved it 0 -> 1"*"nudging to state 6"* ]]
   [[ "$output" == *"max_state"* ]]
   # It kicked: max_state was actually observed on the device mid-run.
   grep -qx '6' "$timeline"
   # It restored: the governor's own commanded state is what is left behind.
-  [[ "$output" == *"state 1 handed back"* ]]
+  [[ "$output" == *"<6>ceralive-fan-kickstart: cooling_device6: nudge over, governor's own state 1 handed back"* ]]
   [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "1" ]
   # The decoy CPUFreq cooling device was never touched.
   [ "$(fankick_attr "$sysfs/cooling_device2/cur_state")" = "0" ]
@@ -3109,7 +3146,7 @@ SH
   out="$(<"$log")"
   [ "$rc" -eq 0 ]
   [[ "$out" == *"nudging to state 6"* ]]
-  [[ "$out" == *"re-asserted state 4"* ]]
+  [[ "$out" == *"<5>ceralive-fan-kickstart: cooling_device6: governor re-asserted state 4"* ]]
   [[ "$out" != *"state 1 handed back"* ]]
   [ "$(fankick_attr "$attr")" = "4" ]
 }
