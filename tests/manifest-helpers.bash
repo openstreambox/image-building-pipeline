@@ -1154,7 +1154,11 @@ run_typec_rock() {
         "${TYPEC_FAKE_I2C:-/nonexistent}"/drivers/*/unbind)
           # Fake kernel: unbinding removes the driver link and the Type-C port.
           builtin printf "unbind %s\n" "$2" >>"$CERALIVE_TYPEC_IIO_DIR/i2c-writes"
-          [[ ! -e "$CERALIVE_TYPEC_IIO_DIR/reject-unbind" ]] || return 1
+          if [[ -e "$CERALIVE_TYPEC_IIO_DIR/reject-unbind" ]]; then
+            [[ ! -e "$CERALIVE_TYPEC_IIO_DIR/write-error-text" ]] ||
+              builtin printf "printf: write error: Permission denied\n" >&2
+            return 1
+          fi
           rm -f "$TYPEC_FAKE_I2C/devices/$2/driver"
           rm -rf "$CERALIVE_TYPEC_IIO_DIR/port0.unbound"
           mv "$CERALIVE_TYPEC_CLASS_DIR/port0" "$CERALIVE_TYPEC_IIO_DIR/port0.unbound"
