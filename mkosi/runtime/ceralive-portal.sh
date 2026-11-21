@@ -408,12 +408,15 @@ save_join() {
   JOIN_UUID="${uuid}"
 }
 
-# Fire the detached handoff worker in its own transient unit so it survives this
+# Fire the detached handoff worker for attempt $1 (its profile UUID) in its own
+# transient unit, named per attempt so a newer save never collides with an older
+# worker that is still waiting (the older one then sees it was superseded and exits).
+# The unit survives this
 # per-connection service (and the AP) being torn down. RuntimeMaxSec is the hard
 # timeout that guarantees a return to AP mode rather than a headless-dead device.
 trigger_connect() {
   "${SYSTEMD_RUN}" --no-block --collect \
-    --unit=ceralive-provision-connect \
+    --unit="ceralive-provision-connect-$1" \
     --property=RuntimeMaxSec="${CONNECT_RUNTIME_MAX}" \
     "${PROVISION_BIN}" connect "${USER_CON_NAME}" "$1" >/dev/null 2>&1
 }
