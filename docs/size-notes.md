@@ -70,8 +70,10 @@ change needed in Task 19 — verified present.
 
 `mkosi/mkosi.images/{base,platform,runtime,app}/mkosi.conf`:
 
-- `Locale=C.UTF-8` + `LocaleMessages=C.UTF-8` on `base` — pins `/etc/locale.conf`
-  to `LANG=C.UTF-8`. glibc 2.41 (trixie) ships **C.UTF-8 built into libc**, so
+- `Locale=C.UTF-8` + `LocaleMessages=C.UTF-8` on `base` — meant to pin
+  `/etc/locale.conf` to `LANG=C.UTF-8`, but the shipped image 2026.11.11201 had
+  no such file, so the runtime layer also writes it (`pin_system_locale`).
+  Debian links `/etc/default/locale` to it at every boot. glibc 2.41 (trixie) ships **C.UTF-8 built into libc**, so
   no `locale-gen` run and no `/usr/lib/locale/locale-archive` are required for it
   to work. Re-verified on a real trixie arm64 container (todo 10): `locale -a`
   lists `C.utf8` with no `/usr/lib/locale` archive present, so the strip below is

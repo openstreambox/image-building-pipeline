@@ -971,6 +971,7 @@ main() {
   apply_streaming_optimizations
   configure_networking
   configure_services
+  pin_system_locale            # /etc/locale.conf = C.UTF-8; Debian links /etc/default/locale to it at boot
   setup_hostname_service
   create_ceralive_structure
   setup_update_preset          # release builds: factory update-channel preset in /opt/ceralive (validated on the host)
