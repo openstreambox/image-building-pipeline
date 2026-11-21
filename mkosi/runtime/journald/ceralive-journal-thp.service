@@ -34,3 +34,7 @@ ConditionPathExists=/sys/kernel/mm/transparent_hugepage/enabled
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/sh -c 'echo madvise > /sys/kernel/mm/transparent_hugepage/enabled'
+# Trust the kernel's readback, not the write: if the knob refused the value the
+# unit fails (systemctl --failed, journal) while the soft dependency still lets
+# the flush run.
+ExecStartPost=/bin/grep -Fq [madvise] /sys/kernel/mm/transparent_hugepage/enabled

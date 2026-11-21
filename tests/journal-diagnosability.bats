@@ -130,6 +130,10 @@ id_of() { tr -d '\n' <"$1"; }
   # Measured: with THP=always the mmapped system.journal sat in 2 MiB folios and
   # writeback rewrote 4 MiB of card every ~30 s for a few entries.
   grep -Fxq "ExecStart=/bin/sh -c 'echo madvise > /sys/kernel/mm/transparent_hugepage/enabled'" "$unit"
+  # The kernel's own readback decides success: a knob that refused the write
+  # fails the unit (visible in systemctl --failed and the journal) instead of
+  # leaving journald on huge pages silently.
+  grep -Fxq 'ExecStartPost=/bin/grep -Fq [madvise] /sys/kernel/mm/transparent_hugepage/enabled' "$unit"
   grep -Eq '^Type=oneshot$' "$unit"
   grep -Eq '^RemainAfterExit=yes$' "$unit"
   # Before sysinit.target, so no default dependencies; skipped on a kernel
