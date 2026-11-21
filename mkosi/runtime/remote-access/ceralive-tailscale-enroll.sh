@@ -31,11 +31,15 @@
 #    If the tailnet does not grant Tailscale SSH, tailscaled refuses every later
 #    pref change (this pin, `down`, `logout`) while SSH is on, so SSH is turned
 #    off in the same change as the pin; the status reason says so.
-#    Before a key's first attempt that reaches tailscaled, prior-login records
-#    whether the box already held a login (yes/no). A retry refused that way with no prior login means an earlier
-#    attempt of this key registered the box (e.g. it waited for approval past
-#    the timeout): that is finished as a join. Only a login that predates the
-#    key makes the enrollment give up.
+#    Before the keyed `up` first runs for a pending key, prior-login records
+#    whether the box already held a login ("yes|no <pending inode>"), synced
+#    to disk first and kept until the attempt's result is recorded. A retry
+#    refused that way with "no" means an earlier attempt of this key registered
+#    the box (e.g. it waited for approval past the timeout, or the box lost
+#    power): that is finished as a join. A login that predates the key makes
+#    the enrollment give up. Without an answer from tailscaled the keyed `up`
+#    does not run. ssh-off-node holds the node key of the login whose SSH this
+#    enrollment turned off; a join that keeps SSH on removes it.
 # 3. Failures are bounded. A final control-plane answer (invalid, expired,
 #    revoked or already used key) ends enrollment at once. Other failures (no
 #    network yet) back off from 2 to 30 minutes and give up after MAX_ATTEMPTS.
@@ -73,6 +77,7 @@ CLAIMED="${ENROLL}/.claimed"
 STATUS="${ENROLL}/enroll-status"
 OURS="${ENROLL}/state-ours"
 PRIOR="${ENROLL}/prior-login"
+SSH_OFF="${ENROLL}/ssh-off-node"
 REJECTED_NOTE="${BOOT}/TAILSCALE-KEY-REJECTED.txt"
 KEY_RE='^tskey-auth-[A-Za-z0-9_-]{8,200}$'
 NAME_RE='^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$'
@@ -89,8 +94,30 @@ regular() { [[ -f "$1" && ! -L "$1" ]]; }
 clean() { printf '%s' "$1" | sed -E 's/tskey-[A-Za-z0-9_-]+/<key>/g' | tr '\n' ' ' | cut -c1-160; }
 
 backend_state() { # prints tailscaled's BackendState (empty if it does not answer) and sets STATUS_JSON
-  STATUS_JSON="$("${CLI}" --socket="${SOCKET}" status --json 2>/dev/null)" || { STATUS_JSON=""; return 0; }
+  # `status` exits non-zero in some states but still prints its JSON.
+  STATUS_JSON="$("${CLI}" --socket="${SOCKET}" status --json --peers=false 2>/dev/null)" || true
+  [[ "$STATUS_JSON" == \{* ]] || { STATUS_JSON=""; return 0; }
   grep -o '"BackendState": *"[A-Za-z]*"' <<<"$STATUS_JSON" | head -n1 | grep -o '"[A-Za-z]*"$' | tr -d '"' || true
+}
+
+put_synced() { # path content tmp-prefix: tmp file in ENROLL, fsync, rename, fsync the directory
+  local tmp
+  tmp="$(mktemp "${ENROLL}/$3.XXXXXX")"
+  printf '%s\n' "$2" >"$tmp"
+  chmod 0644 "$tmp"
+  sync "$tmp"
+  mv -f -- "$tmp" "$1"
+  sync "${ENROLL}"
+}
+
+# The login record of the current pending key: "yes" or "no", empty when there
+# is none for this key (another key's record does not count).
+read_prior() {
+  regular "${PRIOR}" && regular "${PENDING}" || return 0
+  local value inode
+  read -r value inode <"${PRIOR}" || true
+  [[ "$inode" == "$(stat -c %i -- "${PENDING}")" && "$value" =~ ^(yes|no)$ ]] && echo "$value"
+  return 0
 }
 present() { [[ -e "$1" || -L "$1" ]]; }
 
@@ -169,7 +196,7 @@ recover() {
     fi
   fi
   shopt -s nullglob dotglob
-  for f in "${ENROLL}"/.pending.* "${ENROLL}"/.status.* "${ENROLL}"/.up-key.*; do wipe "$f"; done
+  for f in "${ENROLL}"/.pending.* "${ENROLL}"/.status.* "${ENROLL}"/.up-key.* "${ENROLL}"/.prior.* "${ENROLL}"/.sshoff.*; do wipe "$f"; done
   shopt -u nullglob dotglob
 }
 
@@ -180,7 +207,6 @@ adopt() { # source
   printf '%s\n%s\n' "${KEY}" "${NAME}" >"$tmp"
   sync "$tmp"
   write_status pending 0 0 new-key
-  rm -f -- "${PRIOR}"   # asked again before this key's first attempt
   mv -f -- "$tmp" "${PENDING}"
   sync "${ENROLL}"
   log "new key from $1${NAME:+ for machine name ${NAME}}"
@@ -244,7 +270,6 @@ take_incoming_keys() {
 
 give_up() { # reason
   wipe "${PENDING}"
-  rm -f -- "${PRIOR}"
   if (( joined == 0 )) && [[ -e "${OURS}" ]]; then
     # NoState is also possible for a registered node waiting for control.
     # Keep its state if the status is ambiguous or already has a node key.
@@ -263,6 +288,7 @@ give_up() { # reason
   fi
   write_status gave-up "$attempts" 0 "$1"
   sync "${ENROLL}" 2>/dev/null || true
+  rm -f -- "${PRIOR}"
   log "gave up Tailscale enrollment: $1; the key was removed. Put a new key file on BOOT to retry."
 }
 
@@ -278,6 +304,7 @@ pin_auto_update_off() {
     if out="$("${CLI}" --socket="${SOCKET}" set --ssh=false --accept-risk=lose-ssh \
           --auto-update=false --update-check=false 2>&1)"; then
       log "this tailnet does not allow Tailscale SSH: turned SSH off on this box so its settings can change; auto-update pinned off" >&2
+      record_ssh_off
       echo ok-without-tailnet-ssh
       return 0
     fi
@@ -287,14 +314,30 @@ pin_auto_update_off() {
   echo ok-auto-update-not-pinned
 }
 
-finish_join() { # name
+record_ssh_off() { # remember which login had its SSH turned off (for CeraUI's card)
+  backend_state >/dev/null
+  local node
+  node="$(grep -o '"PublicKey": *"nodekey:[0-9a-f]*"' <<<"$STATUS_JSON" | head -n1 | grep -o 'nodekey:[0-9a-f]*')" || true
+  [[ -n "$node" ]] && put_synced "${SSH_OFF}" "$node" .sshoff
+  return 0
+}
+
+finish_join() { # name [refused-ssh]: the second argument says tailscaled refused --ssh here
   : >"${ENROLL}/joined-once"
-  rm -f -- "${OURS}" "${PRIOR}"
+  rm -f -- "${OURS}"
   local reason
   reason="$(pin_auto_update_off)"
+  if [[ -n "${2:-}" && "$reason" == ok ]]; then
+    # The plain pin went through, so SSH was already off (an earlier run of
+    # this join turned it off before it could record the result).
+    record_ssh_off
+    reason=ok-without-tailnet-ssh
+  fi
+  [[ "$reason" == ok ]] && rm -f -- "${SSH_OFF}"
   wipe "${PENDING}"
   write_status joined "$attempts" 0 "$reason"
   sync "${ENROLL}"
+  rm -f -- "${PRIOR}"   # only once the result is on disk
   log "joined Tailscale${1:+ as $1}"
 }
 
@@ -329,15 +372,19 @@ enroll_pending() {
     return 1
   fi
   for ((i = 0; i < WAIT; i++)); do [[ -S "${SOCKET}" ]] && break; sleep 1; done
-  if [[ ! -e "${PRIOR}" ]]; then
-    # Once per key, before its first attempt that reaches tailscaled: did the
-    # box already hold a login? Unanswered stays undetermined (asked again).
+  if [[ -z "$(read_prior)" ]]; then
+    # Before the keyed up first runs for this key: did the box already hold a
+    # login? On disk before the up, so a power cut cannot lose it afterwards.
     backend_state >/dev/null
-    if [[ "$STATUS_JSON" =~ \"HaveNodeKey\"[[:space:]]*:[[:space:]]*true ]]; then
-      echo yes >"${PRIOR}"
-    elif [[ -n "$STATUS_JSON" ]]; then
-      echo no >"${PRIOR}"
+    if [[ -z "$STATUS_JSON" ]]; then
+      log "tailscaled did not answer before the attempt (${attempts}/${MAX_ATTEMPTS}); trying again later"
+      if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not answer after ${attempts} attempts"; return 1; fi
+      write_status pending "$attempts" "$((NOW + delay))" retry
+      return 1
     fi
+    local prior=no
+    [[ "$STATUS_JSON" =~ \"HaveNodeKey\"[[:space:]]*:[[:space:]]*true ]] && prior=yes
+    put_synced "${PRIOR}" "$prior $(stat -c %i -- "${PENDING}")" .prior
   fi
   # The CLI reads a key-only copy (the pending file also carries the name).
   keyfile="$(mktemp "${ENROLL}/.up-key.XXXXXX")"
@@ -368,14 +415,15 @@ enroll_pending() {
   # cannot change it. Otherwise an earlier attempt of this key registered the box
   # and only timed out: finish that join.
   if printf '%s' "$out" | grep -qiE "$NO_TAILNET_SSH_RE"; then
-    # Undetermined counts as a login that predates the key.
-    if [[ "$(cat -- "${PRIOR}" 2>/dev/null)" != no ]]; then
+    # Only a record that this key found no login counts; anything else means
+    # the login predates the key.
+    if [[ "$(read_prior)" != no ]]; then
       give_up "this tailnet does not allow Tailscale SSH; forget the box there first"
       return 1
     fi
     if [[ "$(backend_state)" == Running ]]; then
       log "an earlier attempt with this key registered the box"
-      finish_join "$name"
+      finish_join "$name" refused-ssh
       return 0
     fi
   fi

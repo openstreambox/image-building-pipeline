@@ -6360,7 +6360,8 @@ with the card.
   `incoming-authkey`. `systemctl enable tailscaled` is not needed: the image ships it
   enabled and conditioned on state or a pending key.
 - **What the unit does:** it is the only writer of `pending-authkey` (same two-line
-  format), `enroll-status`, `joined-once`, `state-ours` and `prior-login`, and holds
+  format), `enroll-status`, `joined-once`, `state-ours`, `prior-login` and
+  `ssh-off-node`, and holds
   `.lock` (flock) for each whole run.
   - It claims `incoming-authkey` by renaming it to `.claimed`, so a drop that
     arrives meanwhile stays separate.
@@ -6411,11 +6412,21 @@ with the card.
   policy and enroll the box again with a new key.
   A keyed `up` that times out (for example while waiting for device approval) may
   still have registered the box; the retry's `up --ssh` is then refused the same
-  way. Before a key's first attempt that reaches tailscaled, the unit writes
-  `prior-login` (`yes` when tailscaled already holds a node key, else `no`). On
-  that refusal, `no` means this key registered the box: the join is finished with
-  the same pin step. `yes`, or no answer, means the login predates the key, and the
-  enrollment gives up as described under "Giving up".
+  way. Before the keyed `up` first runs for a pending key, the unit writes
+  `prior-login` = `<yes|no> <inode of pending-authkey>` (`yes` when tailscaled
+  already holds a node key), through a synced temporary file and a synced
+  rename, so a power cut cannot lose it once `up` may have registered the box. It
+  stays until the attempt's result is on disk. If tailscaled does not answer
+  that check, the keyed `up` does not run (the attempt counts and backs off). On
+  that refusal, `no` for the current pending key means this key registered the
+  box: the join is finished with the same pin step and reports
+  `ok-without-tailnet-ssh`. Anything else means the login predates the key, and
+  the enrollment gives up as described under "Giving up".
+- **What CeraUI may also read:** `ssh-off-node` (0644, one line `nodekey:<hex>`)
+  names the login whose Tailscale SSH the enrollment turned off. It is written
+  when SSH is turned off and removed only by a later join that keeps SSH on, so a
+  failed later key does not erase it. The card shows its note while that node
+  key is the daemon's current one and `RunSSH` is still false.
 - **Loopback fence:** tailnet peers reach only TCP 18080 (CeraUI backend) on the box
   (`tailscaled-loopback.nft`, matched by tailscaled's account). Tailscale SSH sessions
   run as `ceralive-tailscale` and become root with `sudo`.
