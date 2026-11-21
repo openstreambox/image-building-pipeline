@@ -69,6 +69,20 @@ READY_TEXT = {
     'no_uplink_passes': 'no uplink reaches the internet',
     'no_link_carrying': 'no link carries the stream',
 }
+# The last failed start reports its failure class (CeraUI's start taxonomy).
+START_TEXT = {
+    'engine_unavailable': 'the streaming engine was not running',
+    'engine_restarting': 'the streaming engine was restarting',
+    'protocol_incompatible': 'the streaming engine version did not match',
+    'start_invalid': 'the stream settings were refused',
+    'engine_internal': 'the streaming engine failed',
+    'start_timeout': 'the stream did not start in time',
+    'audio_source_unavailable': 'the audio source was not available',
+    'capture_source_unavailable': 'the video source could not be opened',
+    'modem_transition_active': 'a modem was restarting',
+    'mutation_blocked': 'a modem change could not be undone',
+}
+ERROR_TEXT = {**READY_TEXT, **START_TEXT}
 KIND_LABEL = {'cellular': 'Cellular', 'ethernet': 'Ethernet', 'wifi': 'Wi-Fi', 'other': 'Link'}
 
 
@@ -207,8 +221,8 @@ def load_snapshot(path=SNAPSHOT, now=None):
     if isinstance(ready, dict) and isinstance(ready.get('ready'), bool):
         result['ready'] = {'ready': ready['ready'], 'line': code_text(ready.get('code'), READY_TEXT)}
     error = item.get('last_error')
-    if isinstance(error, dict) and code_text(error.get('code'), READY_TEXT):
-        result['last_error'] = code_text(error['code'], READY_TEXT)
+    if isinstance(error, dict) and code_text(error.get('code'), ERROR_TEXT):
+        result['last_error'] = code_text(error['code'], ERROR_TEXT)
     return result
 
 

@@ -106,6 +106,15 @@ class QrTests(unittest.TestCase):
 
 
 class SnapshotTests(Temp):
+    def test_last_start_failure_classes_get_fixed_wording(self):
+        result = self.load(snapshot(last_error={'code': 'start_timeout', 'at': NOW - 5}))
+        self.assertEqual(result['last_error'], 'the stream did not start in time')
+        result = self.load(snapshot(last_error={'code': 'recovery_pending', 'at': NOW - 5}))
+        self.assertEqual(result['last_error'], 'the box is restoring its last session')
+        # Start failure wording is for the last error only; the ready line keeps its own table.
+        result = self.load(snapshot(ready={'ready': False, 'code': 'start_timeout'}))
+        self.assertEqual(result['ready']['line'], s.OTHER_REASON)
+
     def test_current_snapshot_becomes_role_labels_and_fixed_text(self):
         result = self.load(snapshot(stream_key='live_secret', imei='35000000000000',
                                     uplinks=[{'kind': 'wifi', 'state': 'up', 'name': 'HomeSSID'},

@@ -16,7 +16,7 @@ package; the attention owner paints it on VT8 (see "Console wiring").
 | Up for | `/proc/uptime` |
 | Uplinks | Snapshot: role labels (`Cellular 1`, `Ethernet 1`, `Wi-Fi 1`) and `up`/`degraded`/`down` |
 | SIMs | Snapshot: `Modem N` and `present`/`absent`/`locked`/`unknown` |
-| Last err | Snapshot: a code, shown as fixed wording, unknown codes generically |
+| Last err | Snapshot: the failure class of the last failed start (CeraUI clears it when a start succeeds), shown as fixed wording, unknown codes generically |
 | Attention | The highest shared attention condition's `line`, cleaned like all text |
 | Address, Open, QR | Global IPv4 addresses from `ip -j -4 addr`, client-facing interfaces (`ap`, `wlan`, `br`, `eth`) before uplinks; the QR always encodes the image's TLS front, `https://<address>/`: the snapshot `url` may only choose which of these addresses, its scheme, port and path are ignored |
 
