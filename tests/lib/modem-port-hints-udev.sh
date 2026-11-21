@@ -85,11 +85,13 @@ else
   echo "  FAIL: udevadm test reports no properties for the fake sysfs"; fail=1
 fi
 
-expect_lacks "DW5821e interface 2 (AT primary) stays with ModemManager" add "${dell_if2}" "ID_MM_PORT_IGNORE"
-expect_lacks "DW5821e interface 3 (AT secondary) stays with ModemManager" add "${dell_if3}" "ID_MM_PORT_IGNORE"
+expect_has   "DW5821e interface 2 (AT primary) is left to other tools" add "${dell_if2}" "ID_MM_PORT_IGNORE=1"
+expect_has   "DW5821e interface 3 (AT secondary) is left to other tools" add "${dell_if3}" "ID_MM_PORT_IGNORE=1"
+expect_has   "the DW5821e release holds on a change event" change "${dell_if3}" "ID_MM_PORT_IGNORE=1"
+expect_has   "the DW5821e release holds on a bind event" bind "${dell_if2}" "ID_MM_PORT_IGNORE=1"
 expect_lacks "DW5821e interface 4 (GPS) stays with ModemManager" add "${dell_if4}" "ID_MM_PORT_IGNORE"
 expect_lacks "DW5821e interface 5 (QCDM) stays with ModemManager" add "${dell_if5}" "ID_MM_PORT_IGNORE"
-expect_lacks "the DW5821e eSIM product is untouched" add "${esim_if2}" "ID_MM_PORT_IGNORE"
+expect_lacks "the unmeasured DW5821e eSIM product is untouched" add "${esim_if2}" "ID_MM_PORT_IGNORE"
 expect_has   "the RM520N release holds on a change event" change "${rm520_if3}" "ID_MM_PORT_IGNORE=1"
 expect_has   "the RM520N release holds on a bind event" bind "${rm520_if3}" "ID_MM_PORT_IGNORE=1"
 expect_has   "RM520N interface 3 (AT secondary) is left to other tools" add "${rm520_if3}" "ID_MM_PORT_IGNORE=1"

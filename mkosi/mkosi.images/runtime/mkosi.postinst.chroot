@@ -1003,7 +1003,7 @@ main() {
   setup_ingest_firewall        # todo 14: LAN-ingest ingress firewall (drop :1935/:4001 on WAN/modem uplinks; LAN/hotspot only)
   setup_cellular_clat
   setup_modem_usbspeed         # RM520N: keep the module on USB 2 (udev-started, once per boot)
-  setup_modem_port_hints       # ModemManager leaves the RM520N secondary AT port alone
+  setup_modem_port_hints       # ModemManager leaves the DW5821e AT ports and the RM520N secondary AT port alone
   setup_uplink_sharing_carrier # REQ-USB-020..026: ceralive-share.service carrier + teardown script + CeraUI After=nftables drop-in (NOT enabled; CeraUI drives it)
   setup_power_button
   setup_button_ingress

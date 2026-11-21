@@ -422,8 +422,8 @@ setup_modem_usbspeed() {
   install -D -m 0644 "${src}/99-ceralive-modem-usbspeed.rules" "${rules_dir}/99-ceralive-modem-usbspeed.rules"
 }
 
-# ModemManager port hints: ID_MM_PORT_IGNORE on the RM520N's secondary AT port
-# (see the rules file for why). Admin tier,
+# ModemManager port hints: ID_MM_PORT_IGNORE on the DW5821e's AT ports and on the
+# RM520N's secondary AT port (see the rules file for why each one). Admin tier,
 # basename never shipped by the modem-support companion
 # (manifests/modem-support-ownership.txt).
 setup_modem_port_hints() {
