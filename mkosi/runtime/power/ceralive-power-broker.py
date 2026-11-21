@@ -560,10 +560,32 @@ def tty_path(rdev):
     return None
 
 
+def sessions_on_terminal(rdev):
+    """Sessions with a process whose controlling terminal has this device
+    number. A terminal is the controlling terminal of at most one session, and
+    that session's leader keeps it while the session holds it; device numbers
+    of different devpts instances can be equal. So when another session shows
+    the same number, the terminal the broker would open may be that session's.
+    An unreadable process is skipped: it has exited or is being reaped."""
+    sessions = set()
+    for name in os.listdir('/proc'):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f'/proc/{name}/stat', 'rb') as source:
+                proc = parse_stat(source.read())
+        except (OSError, ValueError, IndexError):
+            continue
+        if proc['tty_nr'] == rdev:
+            sessions.add(proc['session'])
+    return sessions
+
+
 def check_terminal(uid, pidfd, fd=None, expected_rdev=None):
     """The caller's own foreground controlling terminal, a system terminal
-    (in the system's mount namespace, or held open on a standard stream); with
-    an opened fd, also that fd's device and owner."""
+    (in the system's mount namespace, or held open on a standard stream) whose
+    number no other session shows; with an opened fd, also that fd's device and
+    owner."""
     pid, data = read_bracketed(pidfd, 'stat')
     proc = parse_stat(data)
     if proc['tty_nr'] == 0:
@@ -574,6 +596,11 @@ def check_terminal(uid, pidfd, fd=None, expected_rdev=None):
         raise PeerError('not in the foreground of its terminal')
     if not same_mount_namespace(pid) and not holds_system_terminal(pid, proc['tty_nr']):
         raise PeerError('terminal in another mount namespace')
+    # Bind the number to the caller's own session: no other session may show a
+    # controlling terminal with it (a private devpts pty can reuse the number of
+    # a system terminal that another session of the same account controls).
+    if sessions_on_terminal(proc['tty_nr']) != {proc['session']}:
+        raise PeerError('terminal number shared with another session')
     if fd is not None:
         info = os.fstat(fd)
         if not stat.S_ISCHR(info.st_mode) or info.st_rdev != proc['tty_nr']:
