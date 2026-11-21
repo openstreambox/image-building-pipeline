@@ -169,6 +169,7 @@ configure_services() {
   setup_slot_sync
   setup_boot_script_sync
   setup_dpkg_recovery
+  setup_clock_gated_timers
 }
 
 # Unlike the on-demand slot mirror, recovery must run before the app at boot.
@@ -181,6 +182,42 @@ setup_dpkg_recovery() {
   install -D -m 0755 "${src}/ceralive-dpkg-recover.sh" "${helper_dir}/ceralive-dpkg-recover"
   install -D -m 0644 "${src}/ceralive-dpkg-recover.service" "${unit_dir}/ceralive-dpkg-recover.service"
   enable_service ceralive-dpkg-recover.service
+}
+
+# Persistent calendar timers start only once chrony has set the clock. The
+# board's RTC has no battery, so every cold boot starts at /usr/lib/clock-epoch;
+# a timer started then drops its stamp as "in the future" and runs its job on
+# every boot (fstrim: ~51 GiB of discard each boot instead of weekly). The
+# measurements and the reason this is not a time-sync.target waiter are in
+# runtime/clock/ceralive-clock-gate.service. Each listed timer gets the
+# condition drop-in; the gate starts whichever enabled timers carry it, so this
+# list is the only place to add one. cert-rotation-expiry.timer is installed
+# later by setup_cert_rotation; its drop-in does not need the unit yet.
+CLOCK_GATED_TIMERS=(
+  fstrim.timer
+  e2scrub_all.timer
+  dpkg-db-backup.timer
+  apt-daily.timer
+  apt-daily-upgrade.timer
+  cert-rotation-expiry.timer
+)
+
+setup_clock_gated_timers() {
+  local src="${CERALIVE_RUNTIME_SRC:-}/clock"
+  local helper_dir="${CERALIVE_CLOCK_GATE_HELPER_DIR:-/usr/libexec/ceralive}"
+  local unit_dir="${CERALIVE_CLOCK_GATE_UNIT_DIR:-/etc/systemd/system}"
+  local artifact timer
+  for artifact in ceralive-clock-gate.sh ceralive-clock-gate.service 50-ceralive-clock-gate.conf; do
+    [[ -n "${CERALIVE_RUNTIME_SRC:-}" && -f "${src}/${artifact}" ]] \
+      || die "clock gate source not found: ${src}/${artifact} (is \$SRCDIR/runtime mounted?)"
+  done
+  log "holding persistent calendar timers until chrony sets the clock (${CLOCK_GATED_TIMERS[*]})"
+  install -D -m 0755 "${src}/ceralive-clock-gate.sh" "${helper_dir}/ceralive-clock-gate"
+  install -D -m 0644 "${src}/ceralive-clock-gate.service" "${unit_dir}/ceralive-clock-gate.service"
+  for timer in "${CLOCK_GATED_TIMERS[@]}"; do
+    install -D -m 0644 "${src}/50-ceralive-clock-gate.conf" "${unit_dir}/${timer}.d/50-ceralive-clock-gate.conf"
+  done
+  enable_service ceralive-clock-gate.service
 }
 
 # Power-key safety and the optional maintenance entrypoint apply without RAUC.
@@ -427,6 +464,10 @@ setup_pipewire_system_mode() {
 # ordering edge between the two units, so masking removes no guarantee that ever
 # existed. chronyd itself is untouched and still steps the clock (`makestep 1 3`);
 # only the boot-readiness GATE goes away. Never mask chrony.service.
+# One edge did exist: systemd orders every OnCalendar= timer after
+# time-sync.target. Without the waiter that target is reached with the clock
+# still at the build date, so persistent timers ran on every boot;
+# setup_clock_gated_timers holds them back without a boot gate.
 suppress_unusable_boot_units() {
   log "masking structural wait-online gates and stock units this image cannot use (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait)"
   local svc
