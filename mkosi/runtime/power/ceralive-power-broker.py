@@ -560,13 +560,22 @@ def tty_path(rdev):
     return None
 
 
-def sessions_on_terminal(rdev):
+def sessions_holding_system_terminal(rdev):
     """Sessions with a process whose controlling terminal has this device
-    number. A terminal is the controlling terminal of at most one session, and
-    that session's leader keeps it while the session holds it; device numbers
-    of different devpts instances can be equal. So when another session shows
-    the same number, the terminal the broker would open may be that session's.
-    An unreadable process is skipped: it has exited or is being reaped."""
+    number and which holds the system terminal itself (same devpts instance and
+    inode as /dev/pts/N here) open. A terminal is the controlling terminal of at
+    most one session, and device numbers of different devpts instances can be
+    equal, so the number alone says nothing: a session on another devpts
+    instance (a container, a private namespace) never holds the system node and
+    is not counted. An unreadable process is skipped: it has exited."""
+    path = tty_path(rdev)
+    try:
+        system = os.stat(path) if path else None
+    except OSError:
+        system = None
+    if system is None:
+        return set()
+    target = (system.st_dev, system.st_ino)
     sessions = set()
     for name in os.listdir('/proc'):
         if not name.isdigit():
@@ -574,18 +583,25 @@ def sessions_on_terminal(rdev):
         try:
             with open(f'/proc/{name}/stat', 'rb') as source:
                 proc = parse_stat(source.read())
+            if proc['tty_nr'] != rdev or proc['session'] in sessions:
+                continue
+            for fd in os.listdir(f'/proc/{name}/fd'):
+                try:
+                    held = os.stat(f'/proc/{name}/fd/{fd}')
+                except OSError:
+                    continue
+                if (held.st_dev, held.st_ino) == target:
+                    sessions.add(proc['session'])
+                    break
         except (OSError, ValueError, IndexError):
             continue
-        if proc['tty_nr'] == rdev:
-            sessions.add(proc['session'])
     return sessions
 
 
 def check_terminal(uid, pidfd, fd=None, expected_rdev=None):
     """The caller's own foreground controlling terminal, a system terminal
-    (in the system's mount namespace, or held open on a standard stream) whose
-    number no other session shows; with an opened fd, also that fd's device and
-    owner."""
+    (in the system's mount namespace, or held open on a standard stream) that no
+    other session holds; with an opened fd, also that fd's device and owner."""
     pid, data = read_bracketed(pidfd, 'stat')
     proc = parse_stat(data)
     if proc['tty_nr'] == 0:
@@ -596,11 +612,12 @@ def check_terminal(uid, pidfd, fd=None, expected_rdev=None):
         raise PeerError('not in the foreground of its terminal')
     if not same_mount_namespace(pid) and not holds_system_terminal(pid, proc['tty_nr']):
         raise PeerError('terminal in another mount namespace')
-    # Bind the number to the caller's own session: no other session may show a
-    # controlling terminal with it (a private devpts pty can reuse the number of
-    # a system terminal that another session of the same account controls).
-    if sessions_on_terminal(proc['tty_nr']) != {proc['session']}:
-        raise PeerError('terminal number shared with another session')
+    # Bind the terminal to the caller's own session: no other session with this
+    # controlling terminal number may hold the system terminal (a private devpts
+    # pty can reuse the number of a system terminal that another session of the
+    # same account controls; a session on another devpts instance doesn't count).
+    if sessions_holding_system_terminal(proc['tty_nr']) - {proc['session']}:
+        raise PeerError('terminal held by another session')
     if fd is not None:
         info = os.fstat(fd)
         if not stat.S_ISCHR(info.st_mode) or info.st_rdev != proc['tty_nr']:
