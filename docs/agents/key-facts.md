@@ -6415,8 +6415,8 @@ with the card.
   `incoming-authkey`. `systemctl enable tailscaled` is not needed: the image ships it
   enabled and conditioned on state or a pending key.
 - **What the unit does:** it is the only writer of `pending-authkey` (same two-line
-  format), `enroll-status`, `joined-once`, `state-ours`, `prior-login` and
-  `ssh-off-node`, and holds
+  format), `enroll-status`, `joined-once`, `state-ours`, `prior-login`,
+  `ssh-off-node` and `started-tailscaled`, and holds
   `.lock` (flock) for each whole run.
   - It claims `incoming-authkey` by renaming it to `.claimed`, so a drop that
     arrives meanwhile stays separate.
@@ -6454,7 +6454,11 @@ with the card.
   removes the key. If the note cannot be written the key stays for the next
   run. Every exit before the keyed `up` leaves tailscaled as the attempt found
   it: a daemon that was not running (or activating) is stopped again and
-  checked; if it does not stop, the key stays for the next run. A node key with `NoState` or `Starting` (still
+  checked; if it does not stop, the key stays for the next run. Before
+  starting a daemon that was not running, the unit writes `started-tailscaled`
+  (synced); it is removed once a stop is confirmed or when the keyed `up` runs,
+  so a later attempt still stops a daemon an earlier one could not. A failed
+  start is stopped again too. A node key with `NoState` or `Starting` (still
   connecting; the login may have expired meanwhile) is asked again at the next
   attempt without the keyed `up`. `NeedsLogin` (expired or logged out) and
   `NeedsMachineAuth` use the key as before. Moving a box to another tailnet is

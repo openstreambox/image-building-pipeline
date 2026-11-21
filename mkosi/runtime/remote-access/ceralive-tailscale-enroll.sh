@@ -49,7 +49,8 @@
 #    BOOT gets TAILSCALE-KEY-NOT-USED.txt naming the network the box is in, and
 #    the status reads "joined … already-joined"; the note is on BOOT before
 #    the key goes. Every exit before the keyed up leaves tailscaled as it was
-#    found (one that was not running is stopped again). Moving the box is an explicit
+#    found (one that was not running is stopped again); started-tailscaled
+#    keeps that duty across attempts until a stop is confirmed or a keyed up runs. Moving the box is an explicit
 #    step: remove it from its tailnet (admin console, or Forget on the card),
 #    then add the key again. A login that is still connecting (NoState or
 #    Starting) is asked again at the next attempt. An expired, logged-out or
@@ -92,6 +93,7 @@ STATUS="${ENROLL}/enroll-status"
 OURS="${ENROLL}/state-ours"
 PRIOR="${ENROLL}/prior-login"
 SSH_OFF="${ENROLL}/ssh-off-node"
+STARTED="${ENROLL}/started-tailscaled"
 REJECTED_NOTE="${BOOT}/TAILSCALE-KEY-REJECTED.txt"
 NOT_USED_NOTE="${BOOT}/TAILSCALE-KEY-NOT-USED.txt"
 KEY_RE='^tskey-auth-[A-Za-z0-9_-]{8,200}$'
@@ -399,9 +401,12 @@ settle_back() {
   (( was_active == 1 )) && return 0
   "${SYSTEMCTL}" stop tailscaled.service 2>/dev/null || true
   if daemon_up; then
+    # started-tailscaled stays, so the next attempt knows it is ours to stop.
     log 4 "could not stop tailscaled again after asking it; the next run tries again"
     return 1
   fi
+  rm -f -- "${STARTED}"
+  sync "${ENROLL}" 2>/dev/null || true
 }
 
 # The box already holds a working login: leave it as it is and say so on BOOT
@@ -464,14 +469,25 @@ enroll_pending() {
   delay=$(( 120 << (attempts > 4 ? 4 : attempts - 1) ))
   (( delay > 1800 )) && delay=1800
   write_status pending "$attempts" "$((NOW + delay))" trying
+  # started-tailscaled: an earlier attempt started a daemon that was not
+  # running and could not stop it again, so it still counts as not running.
   local was_active=0
-  daemon_up && was_active=1
+  if daemon_up && ! present "${STARTED}"; then
+    was_active=1
+  elif ! present "${STARTED}"; then
+    if ! { : >"${STARTED}" && sync "${ENROLL}"; }; then
+      log 4 "could not record that this attempt starts tailscaled; trying again later"
+      write_status pending "$attempts" "$((NOW + delay))" retry || true
+      return 1
+    fi
+  fi
   # Any state that appears from now on, where none existed, is ours to clean up.
   if [[ ! -e "${TS_STATE}/tailscaled.state" && ! -L "${TS_STATE}/tailscaled.state" ]]; then
     : >"${OURS}"
   fi
   if ! "${SYSTEMCTL}" start tailscaled.service; then
     log 4 "tailscaled did not start (attempt ${attempts}/${MAX_ATTEMPTS})"
+    settle_back || true   # a failed start can leave it activating
     if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not start after ${attempts} attempts"; fi
     return 1
   fi
@@ -522,6 +538,8 @@ enroll_pending() {
       return 1
     fi
   fi
+  # The keyed up joins, so tailscaled stays running from here on.
+  rm -f -- "${STARTED}"
   # The CLI reads a key-only copy (the pending file also carries the name).
   keyfile="$(mktemp "${ENROLL}/.up-key.XXXXXX")"
   parse_keyfile "${PENDING}"

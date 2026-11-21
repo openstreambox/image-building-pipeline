@@ -202,7 +202,7 @@ enroll_env() {
 echo "systemctl \$*" >>"$T/calls"
 case "\$*" in
   *is-active*) if [ -z "\$TS_INACTIVE" ] || [ -e "$T/up" ]; then echo active; exit 0; fi; echo inactive; exit 3;;
-  "start tailscaled.service") : >"$T/up";;
+  "start tailscaled.service") : >"$T/up"; [ -z "\$TS_START_FAIL" ] || exit 1;;
   "stop tailscaled.service") [ -n "\$TS_STOP_FAIL" ] || rm -f "$T/up";;
 esac
 exit 0
@@ -444,6 +444,46 @@ systemctl_stopped() { grep -qx 'systemctl stop tailscaled.service' "$T/calls"; }
   [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 retry" ]
   [[ "$output" == *"could not stop tailscaled again"* ]]
   lacks ' up ' "$T/calls"
+}
+
+@test "a daemon that could not be stopped is stopped by the next attempt, not mistaken for running before" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1 TS_STOP_FAIL=1
+  [ "$status" -ne 0 ]
+  [ -e "$T/up" ]
+  [ -e "$T/enroll/started-tailscaled" ]
+  # the stop works now; the daemon this enrollment started is still running
+  enroll CERALIVE_TS_NOW=1200 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'systemctl stop tailscaled.service' "$T/calls")" -eq 2 ]
+  [ ! -e "$T/up" ]
+  [ ! -e "$T/enroll/started-tailscaled" ]
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 2 0 already-joined" ]
+  lacks ' up ' "$T/calls"
+}
+
+@test "a failed start that leaves tailscaled activating is stopped again" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_INACTIVE=1 TS_START_FAIL=1
+  [ "$status" -ne 0 ]
+  systemctl_stopped
+  [ ! -e "$T/up" ]
+  [ ! -e "$T/enroll/started-tailscaled" ]
+  [ -e "$T/enroll/pending-authkey" ]
+}
+
+@test "a keyed up keeps the daemon it started and clears the duty to stop it" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_INACTIVE=1
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1,4 "$T/enroll/enroll-status")" = "joined ok" ]
+  [ -e "$T/up" ]
+  [ ! -e "$T/enroll/started-tailscaled" ]
+  lacks 'systemctl stop tailscaled.service' "$T/calls"
 }
 
 @test "the note is on BOOT before an unused key goes" {
