@@ -16,7 +16,10 @@
 #                      from the pre-AP scan cache (single radio can't scan in AP mode)
 #                      and free-text entry is always allowed. A prior failed attempt is
 #                      shown as an error banner (read from the last-error marker).
-#   POST /           → validate ssid/passphrase, write the NM profile via nmcli
+#   POST /           → validate ssid/passphrase, mark the join pending (pending-join,
+#                      so a box that loses power before the join is verified does not
+#                      count the profile as a working network on the next boot), write
+#                      the NM profile via nmcli
 #                      (credentials go ONLY into NM's /data-backed store — never a file),
 #                      answer with a "connecting…" page, then trigger the DETACHED
 #                      handoff worker `ceralive-provision connect <con>` via systemd-run
@@ -44,6 +47,7 @@ STATE_DIR="${CERALIVE_PROVISION_STATE_DIR:-/data/ceralive/provision}"
 ACTIVE_FLAG="${CERALIVE_PROVISION_ACTIVE_FLAG:-${STATE_DIR}/portal-active}"
 SCAN_CACHE="${CERALIVE_PROVISION_SCAN_CACHE:-${STATE_DIR}/scan.txt}"
 ERROR_MARKER="${CERALIVE_PROVISION_ERROR_MARKER:-${STATE_DIR}/last-error}"
+PENDING_JOIN="${CERALIVE_PROVISION_PENDING_JOIN:-${STATE_DIR}/pending-join}"
 HOSTNAME_FILE="${CERALIVE_HOSTNAME_FILE:-/etc/hostname}"
 HOST_INDEX_FILE="${CERALIVE_HOSTNAME_INDEX_FILE:-/etc/ceralive/host_index}"
 HOSTNAME_BIN="${CERALIVE_HOSTNAME_BIN:-hostname}"
@@ -295,7 +299,7 @@ HTML
 # --- credential handoff -------------------------------------------------------
 # Persist the user's network as a NM profile (credentials land ONLY in NM storage).
 # Fixed con-name → retries overwrite cleanly; counted by the provision trigger so the
-# portal stays down on the next boot once a profile exists (EC4).
+# portal stays down on the next boot once the join has verified it (EC4).
 # stdout is the client socket here, so nmcli's "successfully added" line would go out
 # ahead of the HTTP status line. Discard stdout and keep stderr for the journal.
 write_user_profile() {
@@ -307,6 +311,23 @@ write_user_profile() {
   err="$("${NMCLI}" "${add[@]}" 2>&1 >/dev/null)"; rc=$?
   [ "${rc}" -eq 0 ] || log "nmcli connection add failed (rc=${rc}): ${err}"
   return "${rc}"
+}
+
+# Record that the profile about to be saved is not verified yet: the provision trigger
+# does not count it while this file exists, and the connect worker removes it once the
+# join is verified or the profile deleted. Temp file + rename, flushed before the
+# profile is written, so a power loss cannot leave the profile without it. No SSID
+# newlines: the file is read line by line. Non-zero when the file is not in place.
+mark_join_pending() {
+  local tmp="${PENDING_JOIN}.tmp.$$"
+  mkdir -p "${STATE_DIR}" 2>/dev/null
+  if printf 'ssid=%s\ncon=%s\n' "${1//$'\n'/ }" "${USER_CON_NAME}" >"${tmp}" 2>/dev/null \
+      && mv -fT "${tmp}" "${PENDING_JOIN}" 2>/dev/null; then
+    sync -- "${PENDING_JOIN}" "${STATE_DIR}" 2>/dev/null || log "could not flush ${PENDING_JOIN}"
+    return 0
+  fi
+  rm -f "${tmp}" 2>/dev/null
+  return 1
 }
 
 # Fire the detached handoff worker in its own transient unit so it survives this
@@ -333,8 +354,14 @@ handle_post() {
     return 0
   fi
 
+  if ! mark_join_pending "${ssid}"; then
+    log "could not write ${PENDING_JOIN}; NM profile for SSID '${ssid}' not saved"
+    send_response "200 OK" "$(render_invalid "Could not save the network profile. Please try again.")"
+    return 0
+  fi
   if ! write_user_profile "${ssid}" "${psk}"; then
     log "failed to write NM profile for SSID '${ssid}'"
+    rm -f "${PENDING_JOIN}"
     send_response "200 OK" "$(render_invalid "Could not save the network profile. Please try again.")"
     return 0
   fi
@@ -342,7 +369,8 @@ handle_post() {
   log "stored NM profile '${USER_CON_NAME}' for SSID '${ssid}'; triggering handoff"
   send_response "200 OK" "$(render_connecting "${ssid}")"
   # Answer first, hand off second — the worker drops the AP that is carrying this socket.
-  trigger_connect
+  # A worker that cannot start leaves the join pending; the next boot decides on it.
+  trigger_connect || log "could not start the handoff worker; '${USER_CON_NAME}' stays unverified"
 }
 
 # --- request loop (single request per connection) -----------------------------

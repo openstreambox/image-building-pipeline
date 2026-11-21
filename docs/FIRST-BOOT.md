@@ -184,8 +184,11 @@ WiFi credentials are stored in NetworkManager's `/data`-backed profile store.
 A RAUC A/B update preserves `/data`, so the portal does not start after an
 update — the device rejoins your network automatically.
 
-Source: `ceralive-provision.sh` lines 196-200 (`stored_wifi_profile_count`,
-EC4 comment).
+Source: `ceralive-provision.sh` `stored_wifi_profile_count` (EC4 comment).
+A network the portal saved but never managed to join does not count: if the
+device lost power before the join was verified and the network does not come
+up within the grace window on the next boot, the profile is deleted and the
+setup hotspot comes back with an error banner.
 
 ---
 
@@ -421,7 +424,9 @@ connectivity appears within 75 seconds. Check:
 - Is a wired cable plugged in? The device may have found connectivity via
   Ethernet and skipped the portal.
 - Did a previous provisioning attempt leave a stored profile? Check on the
-  device console: `nmcli connection show`.
+  device console: `nmcli connection show`. A profile saved through the portal
+  whose join was never verified (`/data/ceralive/provision/pending-join`
+  exists) does not count; the hotspot returns once the grace window expires.
 - To force the portal regardless: create the file
   `/data/ceralive/provision/force-portal` and reboot.
 
