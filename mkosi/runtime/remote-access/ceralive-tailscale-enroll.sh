@@ -42,6 +42,16 @@
 #    stable node ID of the login whose SSH this enrollment turned off; a join
 #    that keeps SSH on removes it. A join's result is synced before its key is
 #    consumed.
+#    A box that already holds a working login (tailscaled Running, or Stopped
+#    because the owner switched remote access off) does not use a new key: the
+#    box cannot tell which tailnet a key belongs to without sending it, and an
+#    `up` without --force-reauth keeps the old login anyway. The key is removed,
+#    BOOT gets TAILSCALE-KEY-NOT-USED.txt naming the network the box is in, and
+#    the status reads "joined … already-joined". Moving the box is an explicit
+#    step: remove it from its tailnet (admin console, or Forget on the card),
+#    then add the key again. A login that is still connecting (NoState or
+#    Starting) is asked again at the next attempt. An expired, logged-out or
+#    unapproved login uses the key as before.
 # 3. Failures are bounded. A final control-plane answer (invalid, expired,
 #    revoked or already used key) ends enrollment at once. Other failures (no
 #    network yet) back off from 2 to 30 minutes and give up after MAX_ATTEMPTS.
@@ -81,6 +91,7 @@ OURS="${ENROLL}/state-ours"
 PRIOR="${ENROLL}/prior-login"
 SSH_OFF="${ENROLL}/ssh-off-node"
 REJECTED_NOTE="${BOOT}/TAILSCALE-KEY-REJECTED.txt"
+NOT_USED_NOTE="${BOOT}/TAILSCALE-KEY-NOT-USED.txt"
 KEY_RE='^tskey-auth-[A-Za-z0-9_-]{8,200}$'
 NAME_RE='^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$'
 REFUSED_RE='^(backend error: )?(invalid key|key (has )?(been )?(expired|revoked|already (been )?used))\b
@@ -252,7 +263,7 @@ take_boot_key() {
   adopt "the BOOT partition"
   KEY=""
   wipe "$f"
-  rm -f -- "${REJECTED_NOTE}"
+  rm -f -- "${REJECTED_NOTE}" "${NOT_USED_NOTE}"
   sync -f "${BOOT}" 2>/dev/null || true
 }
 
@@ -360,6 +371,51 @@ finish_join() { # name [refused-ssh]: the second argument says tailscaled refuse
   log 5 "joined Tailscale${1:+ as $1}"
 }
 
+# The box's own name in its tailnet ("box.tail1234.ts.net"), from STATUS_JSON:
+# Self.DNSName, else the tailnet's MagicDNS suffix. Empty when tailscaled has no
+# netmap (switched off since boot). Not the tailnet's account name.
+tailnet_name() {
+  local name
+  name="$(grep -o '"DNSName": *"[^"]*"' <<<"$STATUS_JSON" | head -n1 | sed -E 's/.*"([^"]*)"$/\1/')" || true
+  [[ -n "$name" ]] || name="$(grep -o '"MagicDNSSuffix": *"[^"]*"' <<<"$STATUS_JSON" | head -n1 | sed -E 's/.*"([^"]*)"$/\1/')" || true
+  name="${name%.}"
+  [[ "$name" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,250})$ ]] && echo "$name"
+  return 0
+}
+
+# The box already holds a working login: leave it as it is, remove the key and
+# say so on BOOT. backend is Running or Stopped; was_active says whether
+# tailscaled ran before this attempt started it.
+key_not_used() { # backend was_active
+  local where off=""
+  where="$(tailnet_name)"
+  [[ "$1" == Stopped ]] && off=1
+  if [[ -n "$off" && "$2" != 1 ]]; then
+    # Started only to ask; the owner had it off.
+    "${SYSTEMCTL}" stop tailscaled.service 2>/dev/null || true
+  fi
+  # The result goes to disk before the key is removed, as in finish_join.
+  if ! { write_status joined "$attempts" 0 already-joined && sync "${ENROLL}"; }; then
+    log 4 "could not store the enrollment result; the next run tries again"
+    return 1
+  fi
+  wipe "${PENDING}"
+  sync "${ENROLL}" 2>/dev/null || true
+  rm -f -- "${PRIOR}"
+  {
+    printf 'This box is already in a Tailscale network%s, so the new key was not used.\n' "${where:+ (${where})}"
+    printf 'The key file was removed from this card. An unused key stays valid until it expires.\n'
+    [[ -n "$off" ]] && printf 'Remote access is switched off on this box; it keeps its login.\n'
+    printf 'If that is the network you meant, there is nothing to do.\n'
+    printf 'To move the box to another network, first remove it from the one it is in: delete it in that\n'
+    printf "network's admin console, or press Forget this device under Settings, Developer, Remote access\n"
+    printf 'in CeraUI. Then put a key file for the new network on this card again.\n'
+  } >"${NOT_USED_NOTE}" 2>/dev/null || true
+  rm -f -- "${REJECTED_NOTE}"
+  sync -f "${BOOT}" 2>/dev/null || true
+  log 5 "this box is already in a Tailscale network${where:+ as ${where}}${off:+ (switched off)}; the new key was not used and was removed. To move it, remove it from that network first, then add the key again."
+}
+
 enroll_pending() {
   present "${PENDING}" || return 0
   parse_keyfile "${PENDING}"
@@ -381,6 +437,8 @@ enroll_pending() {
   delay=$(( 120 << (attempts > 4 ? 4 : attempts - 1) ))
   (( delay > 1800 )) && delay=1800
   write_status pending "$attempts" "$((NOW + delay))" trying
+  local was_active=0
+  "${SYSTEMCTL}" is-active --quiet tailscaled.service 2>/dev/null && was_active=1
   # Any state that appears from now on, where none existed, is ours to clean up.
   if [[ ! -e "${TS_STATE}/tailscaled.state" && ! -L "${TS_STATE}/tailscaled.state" ]]; then
     : >"${OURS}"
@@ -408,8 +466,24 @@ enroll_pending() {
       write_status pending "$attempts" "$((NOW + delay))" retry
       return 1
     fi
-    local prior=no
-    [[ "$STATUS_JSON" =~ \"HaveNodeKey\"[[:space:]]*:[[:space:]]*true ]] && prior=yes
+    local prior=no backend
+    backend="$(grep -o '"BackendState": *"[A-Za-z]*"' <<<"$STATUS_JSON" | head -n1 | grep -o '"[A-Za-z]*"$' | tr -d '"')" || true
+    if [[ "$STATUS_JSON" =~ \"HaveNodeKey\"[[:space:]]*:[[:space:]]*true ]]; then
+      prior=yes
+      case "$backend" in
+        Running|Stopped)
+          key_not_used "$backend" "$was_active" || return 1
+          return 0
+          ;;
+        NoState|Starting|"")
+          # A login that is still connecting may be working or expired; ask again.
+          log 5 "tailscaled is still connecting with its current login (${attempts}/${MAX_ATTEMPTS}); asking again later"
+          if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not settle after ${attempts} attempts"; return 1; fi
+          write_status pending "$attempts" "$((NOW + delay))" retry
+          return 1
+          ;;
+      esac
+    fi
     if ! put_synced "${PRIOR}" "$prior $(stat -c %i -- "${PENDING}")" .prior; then
       log 4 "could not store the login check durably (${attempts}/${MAX_ATTEMPTS}); trying again later"
       if (( attempts >= MAX_ATTEMPTS )); then give_up "could not store enrollment state after ${attempts} attempts"; return 1; fi

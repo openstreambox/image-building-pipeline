@@ -6439,7 +6439,26 @@ with the card.
   it), and `joined-once` exists after the first successful join.
   After a join the reason is `ok`, `ok-without-tailnet-ssh` (see below) or
   `ok-auto-update-not-pinned` (the pin failed for another reason; tailscaled
-  re-applies it at its next start).
+  re-applies it at its next start). `already-joined` means a new key arrived
+  while the box already held a working login, and the key was not used (see
+  below).
+- **A new key on a box that is already in a tailnet:** before the keyed `up`
+  first runs for a pending key, the unit asks tailscaled for its state. With a
+  node key and `Running`, or `Stopped` (the owner switched remote access off),
+  it does not use the key: the box cannot tell which tailnet a key belongs to
+  without sending it, and an `up` without `--force-reauth` keeps the current
+  login anyway (it would only re-send the key and reset prefs). The unit writes
+  `joined <attempts> 0 already-joined` (synced), then removes the key, and leaves
+  `TAILSCALE-KEY-NOT-USED.txt` on BOOT with the box's MagicDNS name
+  (`Self.DNSName`, else the tailnet's MagicDNS suffix; never the account name)
+  and how to move it. A daemon this run started only to ask, and found
+  `Stopped`, is stopped again. A node key with `NoState` or `Starting` (still
+  connecting; the login may have expired meanwhile) is asked again at the next
+  attempt without the keyed `up`. `NeedsLogin` (expired or logged out) and
+  `NeedsMachineAuth` use the key as before. Moving a box to another tailnet is
+  an explicit step: remove it from the current tailnet (its admin console, or
+  the card's Forget), then add the key again. The next adopted BOOT key removes
+  the note.
 - **Giving up:** a refused key, or 100 failed attempts (back-off 2 to 30 minutes),
   ends in `gave-up` and removes the key. So does a new key for a box that is still
   logged in to a tailnet without Tailscale SSH: tailscaled refuses that `up` until
@@ -6464,7 +6483,8 @@ with the card.
   enable local Tailscale SSH server; not enabled on Tailnet", measured on 1.104.7).
   The enrollment then turns SSH off in the same `set` as the pin and reports
   `ok-without-tailnet-ssh`. To get Tailscale SSH later, allow it in the tailnet
-  policy and enroll the box again with a new key.
+  policy, forget the box (card) or remove it in the admin console, and enroll it
+  again with a new key (a new key on a box that is still joined is not used).
   A keyed `up` that times out (for example while waiting for device approval) may
   still have registered the box; the retry's `up --ssh` is then refused the same
   way. Before the keyed `up` first runs for a pending key, the unit writes
