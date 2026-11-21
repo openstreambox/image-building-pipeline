@@ -906,8 +906,24 @@ bounded_connect() { # connection id args: <name> or uuid <uuid>
   fi
 }
 
+# For a worker started with its attempt's UUID: take the join lock and return holding
+# it while ${PENDING_JOIN} still names $1. Otherwise a newer save has replaced this
+# attempt (or the lock cannot be taken): exit quietly, touching nothing - the newer
+# attempt's own worker owns the AP, the portal and its profile.
+hold_if_current() {
+  if ! join_lock; then
+    log "ERROR: could not take ${JOIN_LOCK}; attempt $1 leaves the AP and portal alone"
+    exit 1
+  fi
+  grep -qx "uuid=$1" "${PENDING_JOIN}" 2>/dev/null && return 0
+  join_unlock
+  log "attempt $1 was superseded by a newer save; exiting without touching the AP, portal or profiles"
+  exit 0
+}
+
 connect_target() {
   local con="${1:?connect requires a connection name}" uuid="${2:-}" found
+  local own=0; [ -n "${uuid}" ] && own=1   # started by the portal for this attempt
   # The portal passes the attempt's profile UUID. Without one, a single saved profile
   # of that name stands in for it; otherwise nothing is retired by UUID.
   if [ -z "${uuid}" ] && found="$(user_con_uuids "${con}")" && [ "$(grep -c . <<<"${found}")" = 1 ]; then
@@ -917,6 +933,7 @@ connect_target() {
   [ -n "${uuid}" ] && target=(uuid "${uuid}")
   local attempt_ssid; attempt_ssid="$(con_ssid "${target[@]}")"
   log "credential handoff: attempting to join '${attempt_ssid:-${con}}' (profile ${con})"
+  if [ "${own}" = 1 ]; then hold_if_current "${uuid}"; join_unlock; fi
 
   # Let the browser receive the "connecting…" page before we drop the AP that is
   # carrying its connection.
@@ -927,14 +944,19 @@ connect_target() {
   # wlan0, and an explicit device-disconnect would block the very client activation
   # below (and, on success, would tear down the link we just brought up). The full
   # radio release for the FAILURE path is handled by re-arming, and for out-of-band
-  # exits by teardown_ap with keep_link=0.
+  # exits by teardown_ap with keep_link=0. Checked and done under the join lock: once
+  # the portal is stopped no newer save can arrive.
+  [ "${own}" = 1 ] && hold_if_current "${uuid}"
   stop_portal_socket
   down_setup_aps
+  join_unlock
 
   if bounded_connect "${target[@]}" && verify_joined; then
+    [ "${own}" = 1 ] && hold_if_current "${uuid}"
     log "joined target network (${con}) — finalising provisioning teardown"
     rm -f "${ERROR_MARKER}"
     [ -n "${uuid}" ] && retire_pending_join "${uuid}"
+    join_unlock
     teardown_ap 1     # KEEP_LINK: wlan0 is carrying the new client connection
     exit $?
   fi
@@ -942,6 +964,7 @@ connect_target() {
   # FAILURE / TIMEOUT — wrong passphrase, no DHCP, or a wedged join. Delete the bad
   # profile (so it neither lingers nor suppresses a re-trigger), record the reason,
   # and re-arm the AP for a retry. Never leave the device headless-dead.
+  [ "${own}" = 1 ] && hold_if_current "${uuid}"
   log "join FAILED for '${attempt_ssid:-${con}}' — returning to AP mode for retry"
   if [ -z "${uuid}" ]; then
     "${NMCLI}" connection delete "${con}" >/dev/null 2>&1 || true
@@ -950,6 +973,7 @@ connect_target() {
   else
     log "ERROR: could not delete profile ${uuid}; it stays unverified (${PENDING_JOIN} kept)"
   fi
+  join_unlock
   mkdir -p "${STATE_DIR}"
   printf 'ssid=%s\nreason=auth_or_timeout\n' "${attempt_ssid}" >"${ERROR_MARKER}"
   bring_up_ap

@@ -123,10 +123,15 @@ request:
    ceralive-wifi … wifi-sec.psk <psk>` (credentials → NM storage only). The PSK is passed
    as quoted argv, never via a shell string or a file.
 2. It answers the browser, then fires a detached worker in its own transient unit:
-   `systemd-run --no-block --collect --unit=ceralive-provision-connect
-   --property=RuntimeMaxSec=120 ceralive-provision connect ceralive-wifi`. The transient
-   unit outlives the per-connection portal service (which dies when the AP is torn down).
+   `systemd-run --no-block --collect --unit=ceralive-provision-connect-<profile UUID>
+   --property=RuntimeMaxSec=120 ceralive-provision connect ceralive-wifi <profile UUID>`.
+   The transient unit outlives the per-connection portal service (which dies when the AP
+   is torn down); its per-attempt name means a newer save never collides with an older
+   worker that is still waiting.
 3. The worker (`ceralive-provision connect <con>`):
+   - exits quietly, touching nothing, whenever `pending-join` no longer names its UUID
+     (a newer save replaced the attempt): checked under the join lock at start, around
+     the AP drop and before the teardown or the failure handling,
    - sleeps briefly so the HTTP response flushes,
    - stops the portal socket and brings the AP connection down (freeing the radio — it
      does **not** `device disconnect`, which would block the client activation),

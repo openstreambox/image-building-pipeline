@@ -1354,6 +1354,27 @@ for up_rc in 0 4; do
   names "${OTHER_UUID}"                          && pass "worker (up rc=${up_rc}) leaves another attempt's record" || fail "worker (up rc=${up_rc}) leaves another attempt's record"
 done
 
+# Two saves in a row (A, then B) both succeed; A's worker wakes after B replaced it. It
+# must leave the portal, the AP, B's profile and record and last-error alone, and the
+# two dispatches must not share a unit name.
+reset_state; boot_units; seed_setup_ap
+echo "${AP_UUID}" >>"${NMSTATE}/active"; : >"${UNITS}/ceralive-portal.socket"
+printf 'ssid=CeraLive-Setup-f00d\npending_join=1\n' >"$(state_file portal-active)"
+printf '%s\n' "${A_UUID}" >"${SANDBOX}/join-uuid-a"
+CERALIVE_JOIN_UUID_SOURCE="${SANDBOX}/join-uuid-a" post_join >/dev/null
+post_join >/dev/null
+UNITS_USED="$(grep -o -- '--unit=[^ ]*' "${CALL_LOG}" | sort -u | wc -l)"
+[ "${UNITS_USED}" = 2 ] && called "--unit=ceralive-provision-connect-${A_UUID}" && called "--unit=ceralive-provision-connect-${USER_UUID}" \
+                                                 && pass "each save dispatches its worker under its own unit name" || fail "each save dispatches its worker under its own unit name"
+: >"${CALL_LOG}"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC=0 STUB_CONNECTIVITY=full \
+    bash "${PROVISION}" connect ceralive-wifi "${A_UUID}" >/dev/null 2>&1
+! called "systemctl stop ceralive-portal.socket" && ! called "connection down" && ! called "connection up" \
+  && [ -e "${UNITS}/ceralive-portal.socket" ] && grep -qx "${AP_UUID}" "${NMSTATE}/active" \
+                                                 && pass "superseded worker leaves the portal and the AP alone" || fail "superseded worker leaves the portal and the AP alone"
+! called "connection delete" && [ ! -e "$(state_file last-error)" ] && names "${USER_UUID}" && saved "${USER_UUID}" \
+                                                 && pass "superseded worker deletes nothing, writes no error, B intact" || fail "superseded worker deletes nothing, writes no error, B intact"
+
 echo
 if [ "${FAILED}" -eq 0 ]; then
   echo "RESULT: ALL PASS — captive portal + handoff + 4-condition teardown verified offline"
