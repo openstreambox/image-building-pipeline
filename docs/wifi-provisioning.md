@@ -33,7 +33,7 @@ All under `/data/ceralive/provision/`:
 |------|---------|
 | `force-portal` | Factory-reset re-trigger flag — start the portal even when profiles exist |
 | `portal-active` | Setup marker: the setup owns `wlan0`; `key=value` (`ssid`, `gateway`, `iface`, `con`, `user_con`, `pending_join=1`). See *Setup marker* below |
-| `pending-join` | The portal saved `ceralive-wifi` but no join has verified it yet: `ssid=<name>` + `con=ceralive-wifi`. Written (temp file + rename, flushed) before the profile is saved; removed by the connect worker after a verified join or after it deletes a failed profile. See *Unverified join* below |
+| `pending-join` | The portal saved `ceralive-wifi` but no join has verified it yet: `ssid=<name>`, `con=ceralive-wifi` and `uuid=<profile UUID>` (one per covered profile). Each attempt picks a fresh UUID, writes this file (temp file, flushed, rename, directory flushed; any failure means no profile is saved), then creates the profile with exactly that `connection.uuid`. Removed by the connect worker after a verified join or after it deletes a failed profile. Every change happens under `pending-join.lock`, and a removal only while the file still names the remover's UUID. See *Unverified join* below |
 | `teardown-requested` | Out-of-band teardown request honored at next service start |
 | `scan.txt` | Cached visible SSIDs (one per line), scanned **before** the AP came up |
 | `last-error` | After a failed join: `ssid=<name>` + `reason=auth_or_timeout` (the worker's join failed) or `reason=not_verified` (a boot found the join still pending and the network never came up) — shown by the portal |
@@ -144,20 +144,22 @@ the worker verified the join (or `systemd-run` could not start the worker),
 `ceralive-wifi` as a stored profile, so with no other profile it goes through the
 grace window:
 
-- connectivity appears and `ceralive-wifi` is activated → the join counts as verified,
+- connectivity appears and a profile `pending-join` names is activated → the join counts as verified,
   `pending-join` is removed, and the boot carries on as for a configured box (a stale
   `portal-active` goes through the usual stale-marker teardown);
 - connectivity appears but not through `ceralive-wifi` → no portal, and the join stays
   pending;
-- the window expires → `ceralive-wifi` is deleted (by UUID), `last-error` gets
+- the window expires → the profiles `pending-join` names are deleted (by UUID; another
+  `ceralive-wifi` is a saved network of its own and is never touched), `last-error` gets
   `reason=not_verified`, `pending-join` is removed and the setup AP comes up as on a
   fresh card. A profile that cannot be deleted keeps `pending-join`.
 
 Images before `pending-join` existed wrote a `portal-active` without the
 `pending_join=1` line. Their failure path deleted the profile before every re-arm, so
 such a marker next to a saved `ceralive-wifi` means their handoff was cut short: it is
-treated as pending, and `pending-join` is written so the decision survives the
-stale-marker teardown. With this image's marker, a missing `pending-join` means the
+treated as pending, and `pending-join` is written with the UUIDs of the
+`ceralive-wifi` profiles found then, so the decision survives the stale-marker
+teardown and covers only those profiles. With this image's marker, a missing `pending-join` means the
 join was verified.
 
 ## Teardown — MAC6 end-state (all four)
