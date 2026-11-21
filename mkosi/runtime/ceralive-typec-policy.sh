@@ -110,6 +110,27 @@ reprobe_log() {
   printf '<%s>ceralive-typec-policy: %s: fusb302-reprobe: %s\n' "${prio}" "$1" "$2"
 }
 
+# reprobe_write <what> <path> <value> — one sysfs write; a failure is journaled
+# at warning with the kernel's error text. Whether the write took effect is
+# still judged by the driver link afterwards, never by this exit status.
+reprobe_write() {
+  local what="$1" path="$2" value="$3" errf="${RUN_DIR}/reprobe-write.err" rc=0 err=""
+  # Never let the error capture stop the write itself.
+  : >"${errf}" 2>/dev/null || errf=/dev/null
+  # stderr first, so a failed open of ${path} is captured as well.
+  printf '%s\n' "${value}" 2>"${errf}" >"${path}" || rc=$?
+  if (( rc != 0 )); then
+    [[ ! -r "${errf}" ]] || err="$(tr '\n' ' ' <"${errf}")"
+    err="${err%" "}"
+    if [[ -n "${err}" ]]; then
+      reprobe_log WARNING "${what} write for ${value} failed: ${err}"
+    else
+      reprobe_log WARNING "${what} write for ${value} failed (exit status ${rc}, no error text)"
+    fi
+  fi
+  [[ "${errf}" == /dev/null ]] || rm -f "${errf}"
+}
+
 # reprobe_record <state> — the once-per-boot marker; false when it cannot be kept.
 reprobe_record() {
   printf '%s %s\n' "$1" "$(date +%s)" >"${RUN_DIR}/reprobe"
@@ -246,21 +267,21 @@ rock_fusb302_reprobe() {
   else
     reprobe_log INFO "${PORT} is source with no partner $((now - last))s after the last cycle: rebinding ${name} from ${driver##*/}"
   fi
-  printf '%s\n' "${name}" >"${driver}/unbind" || true
+  reprobe_write unbind "${driver}/unbind" "${name}"
   if ! wait_bound "${dev}" unbound; then
     reprobe_log ERROR "unbind of ${name} did not take — ${name} left bound, not retrying this boot"
     reprobe_record failed-unbind || reprobe_log ERROR "cannot record the failure"
     return 0
   fi
   sleep "${REBIND_GAP}"
-  printf '%s\n' "${name}" >"${driver}/bind" || true
+  reprobe_write bind "${driver}/bind" "${name}"
   if ! wait_bound "${dev}" bound; then
     reprobe_log WARNING "${name} not bound after bind — asking the bus to probe it"
-    printf '%s\n' "${name}" >"${bus}/drivers_probe" || true
+    reprobe_write drivers_probe "${bus}/drivers_probe" "${name}"
   fi
   if ! wait_bound "${dev}" bound; then
     sleep 2
-    printf '%s\n' "${name}" >"${driver}/bind" || true
+    reprobe_write bind "${driver}/bind" "${name}"
   fi
   if ! wait_bound "${dev}" bound; then
     reprobe_log ERROR "${name} is still unbound after bind, bus probe and a second bind — ${PORT} has no controller until reboot"

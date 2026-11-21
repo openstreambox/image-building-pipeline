@@ -3846,6 +3846,8 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
 
 @test "typec recheck: the unit caps its journal at notice" {
   grep -Fxq 'LogLevelMax=notice' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-recheck.service"
+  # Untagged stderr (a shell or kernel error) defaults to notice under the cap.
+  grep -Fxq 'SyslogLevel=notice' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-recheck.service"
   # The boot/udev policy unit keeps its default level.
   ! grep -Fq 'LogLevelMax' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.service"
 }
@@ -3875,15 +3877,46 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   boot="$(awk '/cat >\/etc\/systemd\/system\/ceralive-hostname\.service <</ { f=1; next } f && /^EOF$/ { exit } f { print }' "$src")"
   [ -n "$boot" ]
   ! grep -Fq 'LogLevelMax' <<<"$boot"
-  # The two routine reconcile lines stay at info, so a no-change tick is silent.
-  grep -Fq "printf 'ceralive-set-hostname: identity already aligned at" "$src"
-  grep -Fq "printf 'ceralive-set-hostname: publication is still registering;" "$src"
+  # Routine reconcile lines are tagged info, so a no-change tick is silent. That
+  # includes an offline box re-confirming its provisional identity every 30 s.
+  grep -Fq "printf '<6>ceralive-set-hostname: identity already aligned at" "$src"
+  grep -Fq "printf '<6>ceralive-set-hostname: publication is still registering;" "$src"
+  grep -Fq "printf '<6>ceralive-set-hostname: persisted provisional identity" "$src"
+  # Anything untagged (a set -e exit from mkdir, chmod or the lock redirection,
+  # a tool's own stderr) defaults to notice, so the cap never hides a failure.
+  grep -Fxq 'SyslogLevel=notice' <<<"$unit"
+  # ... which means every line the helper itself prints must carry a tag.
+  ! grep -Eq "printf '(ceralive-set-hostname): " "$src"
   # Changes and failures are notice or above.
   local msg
-  for msg in 'completed pending consumer restart' 'persisted provisional identity' \
+  for msg in 'completed pending consumer restart' \
     'publication diverged' 'reconciled and established' 'conflicted; trying next' \
     'has no stable owner'; do
     grep -Eq "printf '<[345]>ceralive-set-hostname: [^']*${msg}" "$src"
   done
   grep -Fq "printf '<3>ceralive-set-hostname: %s\\n' \"\$*\" >&2" "$src"
+}
+
+@test "typec policy: a failed fusb302 sysfs write is logged with its error at warning" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  touch "$root/iio/reject-unbind" "$root/iio/write-error-text"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<4>ceralive-typec-policy: WARNING: fusb302-reprobe: unbind write for 4-0022 failed: printf: write error: Permission denied"* ]]
+  # The link-based outcome check still decides what happened.
+  [[ "$output" == *"<3>ceralive-typec-policy: ERROR: fusb302-reprobe: unbind of 4-0022 did not take"* ]]
+  [ ! -e "$root/run/reprobe-write.err" ]
+}
+
+@test "typec policy: a bind write that errors but binds still logs the write failure" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_reprobe_fixture "$root"
+  touch "$root/iio/bind-errors-but-binds" "$root/iio/reprobe-attaches"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = recovered ]
+  [[ "$output" == *"<4>ceralive-typec-policy: WARNING: fusb302-reprobe: bind write for 4-0022 failed (exit status 1, no error text)"* ]]
 }

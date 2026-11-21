@@ -430,7 +430,7 @@ if ! publishable_address_present; then
         clear_restart_pending || die "failed to clear identity-consumer restart marker"
         printf '<5>ceralive-set-hostname: completed pending consumer restart for %s.local\n' "$candidate"
     fi
-    printf '<5>ceralive-set-hostname: persisted provisional identity %s.local; no publishable LAN address, deferring publication claim\n' "$candidate"
+    printf '<6>ceralive-set-hostname: persisted provisional identity %s.local; no publishable LAN address, deferring publication claim\n' "$candidate"
     exit 0
 fi
 
@@ -446,11 +446,11 @@ if [[ "$MODE" = reconcile ]]; then
                 clear_restart_pending || die "failed to clear identity-consumer restart marker"
                 printf '<5>ceralive-set-hostname: completed pending consumer restart for %s.local\n' "$candidate"
             fi
-            printf 'ceralive-set-hostname: identity already aligned at %s.local\n' "$candidate"
+            printf '<6>ceralive-set-hostname: identity already aligned at %s.local\n' "$candidate"
             exit 0
         fi
         if [[ "$state" = 1 ]]; then
-            printf 'ceralive-set-hostname: publication is still registering; deferring reconciliation\n'
+            printf '<6>ceralive-set-hostname: publication is still registering; deferring reconciliation\n'
             exit 0
         fi
     fi
@@ -553,7 +553,11 @@ TimeoutStartSec=150
 # Every 30 s tick otherwise journals four info lines (start, "identity already
 # aligned", deactivated, finished) whether or not anything changed. Actions and
 # failures are logged at notice or above, so they still reach the journal.
+# Untagged output (a set -e exit from mkdir, chmod or the lock redirection, or a
+# tool's own stderr) defaults to notice, so the cap never hides a failure; the
+# helper tags its routine lines <6> itself.
 LogLevelMax=notice
+SyslogLevel=notice
 EOF
 
   cat >/etc/systemd/system/ceralive-hostname-reconcile.timer <<'EOF'
