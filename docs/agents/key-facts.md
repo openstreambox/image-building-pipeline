@@ -5922,6 +5922,40 @@ and never without confirmed back power. An empty J11 cannot be told from a stuck
 sysfs, so on a back-powered boot with nothing plugged in the rebind runs once and ends in an
 info line.
 
+**Early rebind, before the cycles.** On one Rock 5B+ with an RM520N-GL on J11 through a
+C-to-A adapter, the chip was stuck in 6 of 7 stock cold boots, and the late rebind found the
+partner every time. The first `port_type` cycle found it once; the second and third never
+did. Waiting for three cycles plus the settle put the modem's bearer at about 136-139 s
+after power-on. So the first recheck (8 s after boot) that finds the port source with no
+partner now rebinds right away, with every guard above (back power, source preference,
+`power_role` source, nothing enumerated, the driver link, the lock, recheck mode only).
+Five cold boots with this: the rebind ran at about 8.4 s of uptime, the partner came 7.4 s
+later every time, and the bearer was up at a median 65.7 s after power-on (about 72 s
+sooner). It runs once per boot (`reprobe-early` next to `reprobe`, which records the outcome
+as before). A deferral (for example `power_role` still sink) or a skip that touched nothing
+(no I2C device, another driver) lets the same tick's cycle run as before, and the early
+rebind then follows that cycle by `CERALIVE_TYPEC_EARLY_SETTLE` (5 s; the cycle's own run
+already waits `CERALIVE_TYPEC_WAIT` for its partner).
+
+Cost: the rebind re-registers `port0`, udev starts `ceralive-typec-policy.service` again,
+that run waits for the policy lock while the rebind waits for its partner, and the unit is
+ordered `Before=` the media services. CeraUI started 2.2 s later on each of those five
+boots. With an empty J11 the rebind waits the full `CERALIVE_TYPEC_WAIT`, so expect up to
+about 6 s there (not measured).
+
+The rebind's own waits (`wait_bound` and the partner wait) count `/proc/uptime`, not bash
+`SECONDS`: at about 23 s of uptime NTP steps the clock of a board without an RTC, and a
+wall-clock deadline taken before the step expires at once. A rebind at about 19 s found
+its partner 7.4 s later, but its wait had already given up and recorded `no-partner`.
+
+An early outcome of `no-partner` leaves the late rebind available: after the cycles are
+used up and `CERALIVE_TYPEC_REPROBE_SETTLE`, once (`reprobe-late`), and only while no
+partner has been seen since. That keeps a device plugged in during the first minute or so
+covered as before. A partner seen after the early rebind hands over to the re-arm below
+instead. An empty J11 now costs two info-logged rebinds per boot (early and late). Every
+other outcome (`recovered`, `skipped`, `failed-*`, a crash that leaves `attempted`)
+keeps the once-per-boot rule.
+
 **Re-arm after a detach.** A hot unplug and replug of the same modem sticks the chip just
 like a cold boot (no partner, `vbus5v0_typec` off), and a second unbind/bind recovered it on
 the bench within 14 s. So once a partner has been seen after this boot's rebind (outcome
