@@ -42,6 +42,21 @@
 #    stable node ID of the login whose SSH this enrollment turned off; a join
 #    that keeps SSH on removes it. A join's result is synced before its key is
 #    consumed.
+#    A box that already holds a working login (tailscaled Running, or Stopped
+#    because the owner switched remote access off) does not use a new key: the
+#    box cannot tell which tailnet a key belongs to without sending it, and an
+#    `up` without --force-reauth keeps the old login anyway. The key is removed,
+#    BOOT gets TAILSCALE-KEY-NOT-USED.txt naming the network the box is in, and
+#    the status reads "joined … already-joined"; the note is on BOOT before
+#    the key goes. Every exit before the keyed up leaves tailscaled as it was
+#    found (one that was not running is stopped again); started-tailscaled
+#    keeps that duty across attempts until a stop is confirmed or a keyed up
+#    runs, and only for the systemd invocation it names: a daemon started again
+#    since (by the owner) is left running. Moving the box is an explicit
+#    step: remove it from its tailnet (admin console, or Forget on the card),
+#    then add the key again. A login that is still connecting (NoState or
+#    Starting) is asked again at the next attempt. An expired, logged-out or
+#    unapproved login uses the key as before.
 # 3. Failures are bounded. A final control-plane answer (invalid, expired,
 #    revoked or already used key) ends enrollment at once. Other failures (no
 #    network yet) back off from 2 to 30 minutes and give up after MAX_ATTEMPTS.
@@ -80,7 +95,9 @@ STATUS="${ENROLL}/enroll-status"
 OURS="${ENROLL}/state-ours"
 PRIOR="${ENROLL}/prior-login"
 SSH_OFF="${ENROLL}/ssh-off-node"
+STARTED="${ENROLL}/started-tailscaled"
 REJECTED_NOTE="${BOOT}/TAILSCALE-KEY-REJECTED.txt"
+NOT_USED_NOTE="${BOOT}/TAILSCALE-KEY-NOT-USED.txt"
 KEY_RE='^tskey-auth-[A-Za-z0-9_-]{8,200}$'
 NAME_RE='^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$'
 REFUSED_RE='^(backend error: )?(invalid key|key (has )?(been )?(expired|revoked|already (been )?used))\b
@@ -252,7 +269,7 @@ take_boot_key() {
   adopt "the BOOT partition"
   KEY=""
   wipe "$f"
-  rm -f -- "${REJECTED_NOTE}"
+  rm -f -- "${REJECTED_NOTE}" "${NOT_USED_NOTE}" 2>/dev/null || true   # an old note is not worth stopping for
   sync -f "${BOOT}" 2>/dev/null || true
 }
 
@@ -360,6 +377,96 @@ finish_join() { # name [refused-ssh]: the second argument says tailscaled refuse
   log 5 "joined Tailscale${1:+ as $1}"
 }
 
+# The box's own name in its tailnet ("box.tail1234.ts.net"), from STATUS_JSON:
+# Self.DNSName, else the tailnet's MagicDNS suffix. Empty when tailscaled has no
+# netmap (switched off since boot). Not the tailnet's account name.
+tailnet_name() {
+  local name
+  name="$(grep -o '"DNSName": *"[^"]*"' <<<"$STATUS_JSON" | head -n1 | sed -E 's/.*"([^"]*)"$/\1/')" || true
+  [[ -n "$name" ]] || name="$(grep -o '"MagicDNSSuffix": *"[^"]*"' <<<"$STATUS_JSON" | head -n1 | sed -E 's/.*"([^"]*)"$/\1/')" || true
+  name="${name%.}"
+  [[ "$name" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,250})$ ]] && echo "$name"
+  return 0
+}
+
+# Is tailscaled running or on its way up (a restart pending counts too)?
+daemon_up() {
+  local state rc=0
+  state="$("${SYSTEMCTL}" is-active tailscaled.service 2>/dev/null)" || rc=$?
+  (( rc == 0 )) || [[ "$state" == activating || "$state" == reloading ]]
+}
+
+# The systemd invocation of the running tailscaled (InvocationID), empty when
+# none can be read. A new one is assigned every time the unit starts from
+# inactive, so a daemon started by someone else never matches an older record.
+invocation() {
+  "${SYSTEMCTL}" show -p InvocationID --value tailscaled.service 2>/dev/null | head -n1 | tr -cd '[:alnum:]' || true
+}
+
+# started-tailscaled holds the invocation an attempt started and could not stop
+# again; only a daemon still in that invocation is this enrollment's to stop.
+read_started() {
+  regular "${STARTED}" || return 0
+  local id=""
+  read -r id <"${STARTED}" || true
+  [[ "$id" =~ ^[A-Za-z0-9]{1,64}$ ]] && echo "$id"
+  return 0
+}
+
+# Every exit before the keyed up leaves tailscaled as this attempt found it: a
+# daemon that was not running (the owner switched remote access off) is
+# stopped again, and that is checked.
+settle_back() {
+  (( was_active == 1 )) && return 0
+  "${SYSTEMCTL}" stop tailscaled.service 2>/dev/null || true
+  if daemon_up; then
+    # started-tailscaled stays, so the next attempt knows it is ours to stop.
+    log 4 "could not stop tailscaled again after asking it; the next run tries again"
+    return 1
+  fi
+  rm -f -- "${STARTED}"
+  sync "${ENROLL}" 2>/dev/null || true
+}
+
+# The box already holds a working login: leave it as it is and say so on BOOT
+# before the key goes. backend is Running or Stopped.
+key_not_used() { # backend
+  local where off=""
+  where="$(tailnet_name)"
+  [[ "$1" == Stopped || "$was_active" != 1 ]] && off=1
+  if ! settle_back; then
+    write_status pending "$attempts" "$((NOW + delay))" retry || true
+    return 1
+  fi
+  # The note is what the owner sees, so it is on the card before the key goes.
+  if ! {
+    {
+      printf 'This box is already in a Tailscale network%s, so the new key was not used.\n' "${where:+ (${where})}"
+      printf 'The key file was removed from this card. An unused key stays valid until it expires.\n'
+      [[ -z "$off" ]] || printf 'Remote access is switched off on this box; it keeps its login.\n'
+      printf 'If that is the network you meant, there is nothing to do.\n'
+      printf 'To move the box to another network, first remove it from the one it is in: delete it in that\n'
+      printf "network's admin console, or press Forget this device under Settings, Developer, Remote access\n"
+      printf 'in CeraUI. Then put a key file for the new network on this card again.\n'
+    } >"${NOT_USED_NOTE}" && sync -f "${BOOT}"
+  } 2>/dev/null; then
+    log 4 "could not write ${NOT_USED_NOTE##*/} on BOOT; the key stays and the next run tries again"
+    write_status pending "$attempts" "$((NOW + delay))" retry || true
+    return 1
+  fi
+  # The result goes to disk before the key is removed, as in finish_join.
+  if ! { write_status joined "$attempts" 0 already-joined && sync "${ENROLL}"; }; then
+    log 4 "could not store the enrollment result; the next run tries again"
+    return 1
+  fi
+  wipe "${PENDING}"
+  sync "${ENROLL}" 2>/dev/null || true
+  rm -f -- "${PRIOR}"
+  rm -f -- "${REJECTED_NOTE}"
+  sync -f "${BOOT}" 2>/dev/null || true
+  log 5 "this box is already in a Tailscale network${where:+ as ${where}}${off:+ (switched off)}; the new key was not used and was removed. To move it, remove it from that network first, then add the key again."
+}
+
 enroll_pending() {
   present "${PENDING}" || return 0
   parse_keyfile "${PENDING}"
@@ -381,12 +488,49 @@ enroll_pending() {
   delay=$(( 120 << (attempts > 4 ? 4 : attempts - 1) ))
   (( delay > 1800 )) && delay=1800
   write_status pending "$attempts" "$((NOW + delay))" trying
+  # started-tailscaled: an earlier attempt started a daemon that was not
+  # running and could not stop it again. While that same invocation runs, it
+  # still counts as not running. Any other running daemon (it exited and the
+  # owner started it again) is the owner's: the record goes and the daemon is
+  # left alone.
+  local was_active=0 started=""
+  started="$(read_started)"
+  if daemon_up; then
+    if [[ -z "$started" || "$(invocation)" != "$started" ]]; then
+      was_active=1
+      started=""
+      if present "${STARTED}"; then
+        log 5 "tailscaled was started again since an earlier attempt started it; leaving it running"
+      fi
+    fi
+  else
+    started=""   # that daemon is gone; this attempt records the one it starts
+  fi
+  if [[ -z "$started" ]] && present "${STARTED}"; then
+    rm -f -- "${STARTED}"
+    sync "${ENROLL}" 2>/dev/null || true
+  fi
   # Any state that appears from now on, where none existed, is ours to clean up.
   if [[ ! -e "${TS_STATE}/tailscaled.state" && ! -L "${TS_STATE}/tailscaled.state" ]]; then
     : >"${OURS}"
   fi
-  if ! "${SYSTEMCTL}" start tailscaled.service; then
+  local start_rc=0
+  "${SYSTEMCTL}" start tailscaled.service || start_rc=$?
+  # A daemon this attempt started (a failed start can leave it activating) is
+  # recorded by its invocation before anything else can fail, so a later
+  # attempt can still stop it if this one cannot.
+  if (( was_active == 0 )) && daemon_up && [[ -z "$started" ]]; then
+    started="$(invocation)"
+    if [[ -z "$started" ]] || ! put_synced "${STARTED}" "$started" .started; then
+      log 4 "could not record which tailscaled this attempt started; stopping it and trying again later"
+      settle_back || true
+      write_status pending "$attempts" "$((NOW + delay))" retry || true
+      return 1
+    fi
+  fi
+  if (( start_rc != 0 )); then
     log 4 "tailscaled did not start (attempt ${attempts}/${MAX_ATTEMPTS})"
+    settle_back || true   # a failed start can leave it activating
     if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not start after ${attempts} attempts"; fi
     return 1
   fi
@@ -394,6 +538,7 @@ enroll_pending() {
   if [[ -n "$(read_prior)" ]] && ! { sync -- "${PRIOR}" && sync "${ENROLL}"; }; then
     # A record left by an earlier run is trusted only once it is durable.
     log 4 "could not make the login check durable (${attempts}/${MAX_ATTEMPTS}); trying again later"
+    settle_back || true
     if (( attempts >= MAX_ATTEMPTS )); then give_up "could not store enrollment state after ${attempts} attempts"; return 1; fi
     write_status pending "$attempts" "$((NOW + delay))" retry || true
     return 1
@@ -404,19 +549,40 @@ enroll_pending() {
     backend_state >/dev/null
     if [[ -z "$STATUS_JSON" ]]; then
       log 4 "tailscaled did not answer before the attempt (${attempts}/${MAX_ATTEMPTS}); trying again later"
+      settle_back || true
       if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not answer after ${attempts} attempts"; return 1; fi
       write_status pending "$attempts" "$((NOW + delay))" retry
       return 1
     fi
-    local prior=no
-    [[ "$STATUS_JSON" =~ \"HaveNodeKey\"[[:space:]]*:[[:space:]]*true ]] && prior=yes
+    local prior=no backend
+    backend="$(grep -o '"BackendState": *"[A-Za-z]*"' <<<"$STATUS_JSON" | head -n1 | grep -o '"[A-Za-z]*"$' | tr -d '"')" || true
+    if [[ "$STATUS_JSON" =~ \"HaveNodeKey\"[[:space:]]*:[[:space:]]*true ]]; then
+      prior=yes
+      case "$backend" in
+        Running|Stopped)
+          key_not_used "$backend" || return 1
+          return 0
+          ;;
+        NoState|Starting|"")
+          # A login that is still connecting may be working or expired; ask again.
+          log 5 "tailscaled is still connecting with its current login (${attempts}/${MAX_ATTEMPTS}); asking again later"
+          settle_back || true
+          if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not settle after ${attempts} attempts"; return 1; fi
+          write_status pending "$attempts" "$((NOW + delay))" retry
+          return 1
+          ;;
+      esac
+    fi
     if ! put_synced "${PRIOR}" "$prior $(stat -c %i -- "${PENDING}")" .prior; then
       log 4 "could not store the login check durably (${attempts}/${MAX_ATTEMPTS}); trying again later"
+      settle_back || true
       if (( attempts >= MAX_ATTEMPTS )); then give_up "could not store enrollment state after ${attempts} attempts"; return 1; fi
       write_status pending "$attempts" "$((NOW + delay))" retry
       return 1
     fi
   fi
+  # The keyed up joins, so tailscaled stays running from here on.
+  rm -f -- "${STARTED}"
   # The CLI reads a key-only copy (the pending file also carries the name).
   keyfile="$(mktemp "${ENROLL}/.up-key.XXXXXX")"
   parse_keyfile "${PENDING}"

@@ -6415,8 +6415,8 @@ with the card.
   `incoming-authkey`. `systemctl enable tailscaled` is not needed: the image ships it
   enabled and conditioned on state or a pending key.
 - **What the unit does:** it is the only writer of `pending-authkey` (same two-line
-  format), `enroll-status`, `joined-once`, `state-ours`, `prior-login` and
-  `ssh-off-node`, and holds
+  format), `enroll-status`, `joined-once`, `state-ours`, `prior-login`,
+  `ssh-off-node` and `started-tailscaled`, and holds
   `.lock` (flock) for each whole run.
   - It claims `incoming-authkey` by renaming it to `.claimed`, so a drop that
     arrives meanwhile stays separate.
@@ -6439,7 +6439,37 @@ with the card.
   it), and `joined-once` exists after the first successful join.
   After a join the reason is `ok`, `ok-without-tailnet-ssh` (see below) or
   `ok-auto-update-not-pinned` (the pin failed for another reason; tailscaled
-  re-applies it at its next start).
+  re-applies it at its next start). `already-joined` means a new key arrived
+  while the box already held a working login, and the key was not used (see
+  below).
+- **A new key on a box that is already in a tailnet:** before the keyed `up`
+  first runs for a pending key, the unit asks tailscaled for its state. With a
+  node key and `Running`, or `Stopped` (the owner switched remote access off),
+  it does not use the key: the box cannot tell which tailnet a key belongs to
+  without sending it, and an `up` without `--force-reauth` keeps the current
+  login anyway (it would only re-send the key and reset prefs). The unit writes
+  `TAILSCALE-KEY-NOT-USED.txt` on BOOT (synced) with the box's MagicDNS name
+  (`Self.DNSName`, else the tailnet's MagicDNS suffix; never the account name)
+  and how to move it, then `joined <attempts> 0 already-joined` (synced), then
+  removes the key. If the note cannot be written the key stays for the next
+  run. Every exit before the keyed `up` leaves tailscaled as the attempt found
+  it: a daemon that was not running (or activating) is stopped again and
+  checked; if it does not stop, the key stays for the next run. Right after
+  starting a daemon that was not running (a failed start included), the unit
+  writes the unit's `InvocationID` to `started-tailscaled` (synced); it is
+  removed once a stop is confirmed or when the keyed `up` runs, so a later
+  attempt still stops a daemon an earlier one could not. A later attempt treats
+  a running daemon as its own only while its `InvocationID` still matches; a
+  daemon that exited and was started again (the owner turned remote access on)
+  gets a new one, so the record is dropped and that daemon is left running. If
+  the ID cannot be read or stored, the attempt stops the daemon and keeps the
+  key. A failed start is stopped again too. A node key with `NoState` or `Starting` (still
+  connecting; the login may have expired meanwhile) is asked again at the next
+  attempt without the keyed `up`. `NeedsLogin` (expired or logged out) and
+  `NeedsMachineAuth` use the key as before. Moving a box to another tailnet is
+  an explicit step: remove it from the current tailnet (its admin console, or
+  the card's Forget), then add the key again. The next adopted BOOT key removes
+  the note.
 - **Giving up:** a refused key, or 100 failed attempts (back-off 2 to 30 minutes),
   ends in `gave-up` and removes the key. So does a new key for a box that is still
   logged in to a tailnet without Tailscale SSH: tailscaled refuses that `up` until
@@ -6464,7 +6494,8 @@ with the card.
   enable local Tailscale SSH server; not enabled on Tailnet", measured on 1.104.7).
   The enrollment then turns SSH off in the same `set` as the pin and reports
   `ok-without-tailnet-ssh`. To get Tailscale SSH later, allow it in the tailnet
-  policy and enroll the box again with a new key.
+  policy, forget the box (card) or remove it in the admin console, and enroll it
+  again with a new key (a new key on a box that is still joined is not used).
   A keyed `up` that times out (for example while waiting for device approval) may
   still have registered the box; the retry's `up --ssh` is then refused the same
   way. Before the keyed `up` first runs for a pending key, the unit writes

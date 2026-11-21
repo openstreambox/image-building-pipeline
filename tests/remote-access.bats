@@ -194,7 +194,25 @@ PY' _ "$T/lo.nft"
 KEY=tskey-auth-kAbC123-XyZ987654321
 enroll_env() {
   mkdir -p "$T/boot" "$T/bin" "$T/state"
-  printf '#!/bin/sh\necho "systemctl $*" >>"%s/calls"\n' "$T" >"$T/bin/systemctl"
+  # $TS_INACTIVE: tailscaled was not running before this run (switched off on the
+  # card); `start` and `stop` then change what `is-active` says ($T/up), and
+  # $TS_STOP_FAIL makes `stop` leave it running. $T/up holds the running
+  # invocation: a start from inactive gets a new one, as with systemd's
+  # InvocationID; an already running daemon keeps its own.
+  cat >"$T/bin/systemctl" <<STUB
+#!/bin/sh
+echo "systemctl \$*" >>"$T/calls"
+case "\$*" in
+  *is-active*) if [ -z "\$TS_INACTIVE" ] || [ -e "$T/up" ]; then echo active; exit 0; fi; echo inactive; exit 3;;
+  "show -p InvocationID --value tailscaled.service")
+    if [ -e "$T/up" ]; then cat "$T/up"; elif [ -z "\$TS_INACTIVE" ]; then echo 0wner0; else echo; fi;;
+  "start tailscaled.service")
+    if [ ! -e "$T/up" ]; then n=\$(( \$(cat "$T/invocations" 2>/dev/null || echo 0) + 1 )); echo "\$n" >"$T/invocations"; echo "inv\$n" >"$T/up"; fi
+    [ -z "\$TS_START_FAIL" ] || exit 1;;
+  "stop tailscaled.service") [ -n "\$TS_STOP_FAIL" ] || rm -f "$T/up";;
+esac
+exit 0
+STUB
   # stub CLI: logs arguments and the key it was given; `up` creates a state like
   # tailscaled would, prints $TS_OUT, exits $TS_RC; `status --json` reports $TS_BACKEND.
   cat >"$T/bin/tailscale" <<STUB
@@ -220,6 +238,7 @@ case "\$*" in
     [ -n "\$TS_OUT" ] && echo "\$TS_OUT" >&2; exit "\${TS_RC:-0}";;
   *"status --json"*) [ -n "\$TS_STATUS_RC" ] && exit "\$TS_STATUS_RC"; [ -n "\$TS_NODEKEY" ] && nk=', "HaveNodeKey": true' || nk=''
     if [ -n "\$TS_NO_SELF" ]; then echo "{\"BackendState\": \"\${TS_BACKEND:-NeedsLogin}\"\$nk}"
+    elif [ -n "\$TS_DNSNAME" ]; then sfx="\${TS_DNSNAME#*.}"; sfx="\${sfx%.}"; echo "{\"BackendState\": \"\${TS_BACKEND:-NeedsLogin}\"\$nk, \"Self\": {\"ID\": \"\${TS_NODE:-nStable1}\", \"PublicKey\": \"nodekey:aa11\", \"DNSName\": \"\$TS_DNSNAME\"}, \"CurrentTailnet\": {\"Name\": \"owner@example.invalid\", \"MagicDNSSuffix\": \"\$sfx\"}}"
     else echo "{\"BackendState\": \"\${TS_BACKEND:-NeedsLogin}\"\$nk, \"Self\": {\"ID\": \"\${TS_NODE:-nStable1}\", \"PublicKey\": \"nodekey:aa11\"}}"; fi;;
   # \$TS_SET_OUT/\$TS_SET_RC model tailscaled refusing a pref change while
   # Tailscale SSH stays on; turning SSH off in the same change is accepted.
@@ -247,7 +266,7 @@ no_key_anywhere() { # the key text appears in no file on BOOT, in no output, no 
 }
 no_leftovers() { [ -z "$(cd "$T/enroll" && ls -A | grep -E '^\.(claimed|pending\.|status\.|up-key\.)')" ]; }
 fresh() { # wipe the per-scenario state inside this test's own tmpdir
-  rm -rf "${T:?}/enroll" "${T:?}/state" "${T:?}/calls" "${T:?}/used" "${T:?}/syncs" "${T:?}/bin"
+  rm -rf "${T:?}/enroll" "${T:?}/state" "${T:?}/calls" "${T:?}/used" "${T:?}/syncs" "${T:?}/bin" "${T:?}/up" "${T:?}/invocations"
 }
 
 @test "enrollment takes the key off BOOT, joins with Tailscale SSH and the file's name, then pins auto-update off" {
@@ -300,11 +319,12 @@ NO_TAILNET_SSH="Unable to enable local Tailscale SSH server; not enabled on Tail
   no_key_anywhere
 }
 
-@test "a new key for a box already on a tailnet without Tailscale SSH ends at once, keeping its state" {
+@test "a new key for a box whose expired login is on a tailnet without Tailscale SSH ends at once, keeping its state" {
   enroll_env
   printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
   : >"$T/state/tailscaled.state"
-  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="$NO_TAILNET_SSH" TS_BACKEND=Running TS_NODEKEY=1
+  # expired: tailscaled asks for a login but still holds the old node key and netmap
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="$NO_TAILNET_SSH" TS_BACKEND=NeedsLogin TS_NODEKEY=1
   [ "$status" -ne 0 ]
   [ "$(cut -d' ' -f1,4- "$T/enroll/enroll-status")" = "gave-up this tailnet does not allow Tailscale SSH; forget the box there first" ]
   [ -e "$T/state/tailscaled.state" ] && [ ! -e "$T/enroll/pending-authkey" ]
@@ -328,10 +348,339 @@ NO_TAILNET_SSH="Unable to enable local Tailscale SSH server; not enabled on Tail
   no_key_anywhere
 }
 
+# `! cmd` never fails a bats test (errexit ignores it); a function returning non-zero does.
+lacks() { # [grep options] pattern file: the file does not contain the pattern
+  ! grep -qF "$@"
+}
+
+@test "a new key on a box that is already in a tailnet is not used: it is removed with a note naming the network" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale-us-white.key"
+  : >"$T/state/tailscaled.state"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1 TS_DNSNAME=us-white.tail1234.ts.net.
+  [ "$status" -eq 0 ]
+  # the key never reached tailscaled, and no pref changed
+  lacks ' up ' "$T/calls"
+  lacks ' set ' "$T/calls"
+  [ ! -e "$T/used" ]
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 1 0 already-joined" ]
+  [ ! -e "$T/enroll/pending-authkey" ]
+  [ ! -e "$T/enroll/prior-login" ]
+  [ -e "$T/state/tailscaled.state" ]
+  # only the note is left on BOOT: where the box is, and how to move it
+  [ "$(ls -A "$T/boot")" = TAILSCALE-KEY-NOT-USED.txt ]
+  grep -qF 'us-white.tail1234.ts.net' "$T/boot/TAILSCALE-KEY-NOT-USED.txt"
+  grep -qi 'forget this device' "$T/boot/TAILSCALE-KEY-NOT-USED.txt"
+  lacks 'owner@example.invalid' "$T/boot/TAILSCALE-KEY-NOT-USED.txt"
+  [[ "$output" == *"already in a Tailscale network"* ]]
+  lacks 'systemctl stop tailscaled.service' "$T/calls"
+  no_leftovers
+  no_key_anywhere
+  # the next key file that is used clears the note
+  rm -f "$T/calls"
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=2000
+  [ "$(cut -d' ' -f1,4 "$T/enroll/enroll-status")" = "joined ok" ]
+  [ -z "$(ls -A "$T/boot")" ]
+}
+
+systemctl_stopped() { grep -qx 'systemctl stop tailscaled.service' "$T/calls"; }
+
+@test "a box switched off on the card keeps its login and stays off when a new key arrives" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Stopped TS_NODEKEY=1 TS_INACTIVE=1
+  [ "$status" -eq 0 ]
+  lacks ' up ' "$T/calls"
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 1 0 already-joined" ]
+  # started only to ask, then stopped again; it was off before
+  systemctl_stopped
+  [ "$(grep -n 'systemctl start tailscaled.service' "$T/calls" | cut -d: -f1)" -lt "$(grep -n 'systemctl stop tailscaled.service' "$T/calls" | cut -d: -f1)" ]
+  grep -qi 'switched off' "$T/boot/TAILSCALE-KEY-NOT-USED.txt"
+  no_key_anywhere
+  [ ! -e "$T/up" ]
+  # off on the card while `down` was refused: the stored prefs still say running,
+  # so the daemon this run started comes up connected. It is stopped again.
+  fresh; enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 1 0 already-joined" ]
+  systemctl_stopped
+  [ ! -e "$T/up" ]
+  grep -qi 'switched off' "$T/boot/TAILSCALE-KEY-NOT-USED.txt"
+  # a running daemon is left running
+  fresh; enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1
+  lacks 'systemctl stop tailscaled.service' "$T/calls"
+  lacks -i 'switched off' "$T/boot/TAILSCALE-KEY-NOT-USED.txt"
+}
+
+@test "asking tailscaled never leaves it more up than it was, on any exit before the keyed up" {
+  local args
+  for args in "TS_BACKEND=Starting TS_NODEKEY=1" "TS_BACKEND=NoState TS_NODEKEY=1" "TS_STATUS_RC=1"; do
+    fresh; enroll_env
+    printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+    : >"$T/state/tailscaled.state"
+    # shellcheck disable=SC2086
+    enroll CERALIVE_TS_NOW=1000 TS_INACTIVE=1 $args
+    [ "$status" -ne 0 ]
+    lacks ' up ' "$T/calls"
+    systemctl_stopped
+    [ ! -e "$T/up" ]
+    [ -e "$T/enroll/pending-authkey" ]
+    # the next attempt still finds it off, so it is still treated as off
+    # shellcheck disable=SC2086
+    enroll CERALIVE_TS_NOW=1200 TS_INACTIVE=1 $args
+    [ "$(grep -c 'systemctl stop tailscaled.service' "$T/calls")" -eq 2 ]
+    [ ! -e "$T/up" ]
+  done
+}
+
+@test "a daemon that cannot be stopped again keeps the key for the next run" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Stopped TS_NODEKEY=1 TS_INACTIVE=1 TS_STOP_FAIL=1
+  [ "$status" -ne 0 ]
+  [ -e "$T/enroll/pending-authkey" ]
+  [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 retry" ]
+  [[ "$output" == *"could not stop tailscaled again"* ]]
+  lacks ' up ' "$T/calls"
+}
+
+@test "a daemon that could not be stopped is stopped by the next attempt, not mistaken for running before" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1 TS_STOP_FAIL=1
+  [ "$status" -ne 0 ]
+  [ -e "$T/up" ]
+  [ "$(cat "$T/enroll/started-tailscaled")" = "$(cat "$T/up")" ]
+  # the stop works now; the daemon this enrollment started is still running
+  enroll CERALIVE_TS_NOW=1200 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'systemctl stop tailscaled.service' "$T/calls")" -eq 2 ]
+  [ ! -e "$T/up" ]
+  [ ! -e "$T/enroll/started-tailscaled" ]
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 2 0 already-joined" ]
+  lacks ' up ' "$T/calls"
+}
+
+@test "a failed start that leaves tailscaled activating is stopped again" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_INACTIVE=1 TS_START_FAIL=1
+  [ "$status" -ne 0 ]
+  systemctl_stopped
+  [ ! -e "$T/up" ]
+  [ ! -e "$T/enroll/started-tailscaled" ]
+  [ -e "$T/enroll/pending-authkey" ]
+}
+
+@test "the record names the invocation it started, and an independent restart by the owner is left running" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1 TS_STOP_FAIL=1
+  [ "$status" -ne 0 ]
+  [ "$(cat "$T/enroll/started-tailscaled")" = inv1 ]
+  # the daemon this enrollment started exits on its own, then the owner turns
+  # remote access on: a new invocation
+  rm -f "$T/up"
+  TS_INACTIVE=1 "$T/bin/systemctl" start tailscaled.service
+  [ "$(cat "$T/up")" = inv2 ]
+  enroll CERALIVE_TS_NOW=1200 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1
+  [ "$status" -eq 0 ]
+  # the owner's daemon keeps running; the old record is gone
+  [ "$(grep -c 'systemctl stop tailscaled.service' "$T/calls")" -eq 1 ]
+  [ "$(cat "$T/up")" = inv2 ]
+  [ ! -e "$T/enroll/started-tailscaled" ]
+  [[ "$output" == *"leaving it running"* ]]
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 2 0 already-joined" ]
+  lacks -i 'switched off' "$T/boot/TAILSCALE-KEY-NOT-USED.txt"
+  lacks ' up ' "$T/calls"
+}
+
+@test "a record without an invocation, or from before a restart, never stops a running daemon" {
+  local content
+  for content in "" "inv7" "not a valid id!"; do
+    fresh; enroll_env
+    printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+    : >"$T/state/tailscaled.state"
+    mkdir -p "$T/enroll"; chmod 700 "$T/enroll"
+    printf '%s\n' "$content" >"$T/enroll/started-tailscaled"
+    echo inv3 >"$T/up"
+    enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1
+    [ "$status" -eq 0 ]
+    lacks 'systemctl stop tailscaled.service' "$T/calls"
+    [ "$(cat "$T/up")" = inv3 ]
+    [ ! -e "$T/enroll/started-tailscaled" ]
+  done
+}
+
+@test "a record left while the daemon is down is replaced by the invocation this attempt starts" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  mkdir -p "$T/enroll"; chmod 700 "$T/enroll"
+  echo inv0 >"$T/enroll/started-tailscaled"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1 TS_STOP_FAIL=1
+  [ "$status" -ne 0 ]
+  [ "$(cat "$T/enroll/started-tailscaled")" = inv1 ]
+  enroll CERALIVE_TS_NOW=1200 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1
+  [ "$status" -eq 0 ]
+  [ ! -e "$T/up" ]
+  [ ! -e "$T/enroll/started-tailscaled" ]
+}
+
+@test "a failed start that cannot be stopped is recorded by invocation and stopped by the next attempt" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_INACTIVE=1 TS_START_FAIL=1 TS_STOP_FAIL=1
+  [ "$status" -ne 0 ]
+  [ -e "$T/up" ]
+  [ "$(cat "$T/enroll/started-tailscaled")" = inv1 ]
+  [ -e "$T/enroll/pending-authkey" ]
+  # still the same invocation: stopped this time, even though the start fails again
+  enroll CERALIVE_TS_NOW=1200 TS_INACTIVE=1 TS_START_FAIL=1
+  [ "$status" -ne 0 ]
+  [ "$(grep -c 'systemctl stop tailscaled.service' "$T/calls")" -eq 2 ]
+  [ ! -e "$T/up" ]
+  [ ! -e "$T/enroll/started-tailscaled" ]
+  [ -e "$T/enroll/pending-authkey" ]
+}
+
+@test "a started daemon whose invocation cannot be recorded is stopped and the key kept" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  # systemctl answers no InvocationID
+  sed -i 's|then cat "'"$T"'/up"; elif|then echo; elif|' "$T/bin/systemctl"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1 TS_INACTIVE=1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not record which tailscaled"* ]]
+  systemctl_stopped
+  [ ! -e "$T/up" ]
+  [ ! -e "$T/enroll/started-tailscaled" ]
+  [ -e "$T/enroll/pending-authkey" ]
+  [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 retry" ]
+  lacks ' up ' "$T/calls"
+}
+
+@test "a keyed up keeps the daemon it started and clears the duty to stop it" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_INACTIVE=1
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1,4 "$T/enroll/enroll-status")" = "joined ok" ]
+  [ -e "$T/up" ]
+  [ ! -e "$T/enroll/started-tailscaled" ]
+  lacks 'systemctl stop tailscaled.service' "$T/calls"
+}
+
+@test "the note is on BOOT before an unused key goes" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  # the note cannot be written (a directory in its place)
+  mkdir "$T/boot/TAILSCALE-KEY-NOT-USED.txt"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1
+  [ "$status" -ne 0 ]
+  [ -e "$T/enroll/pending-authkey" ]
+  [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 retry" ]
+  [[ "$output" == *"could not write TAILSCALE-KEY-NOT-USED.txt"* ]]
+  # BOOT is writable again: the next run writes the note, then removes the key
+  rmdir "$T/boot/TAILSCALE-KEY-NOT-USED.txt"
+  printf '#!/bin/sh\necho "sync $*" >>"%s/calls"\nexit 0\n' "$T" >"$T/bin/sync"; chmod +x "$T/bin/sync"
+  enroll CERALIVE_TS_NOW=1200 TS_BACKEND=Running TS_NODEKEY=1
+  [ "$status" -eq 0 ]
+  [ -f "$T/boot/TAILSCALE-KEY-NOT-USED.txt" ]
+  [ ! -e "$T/enroll/pending-authkey" ]
+  local note_sync status_sync
+  note_sync=$(grep -n "^sync -f $T/boot\$" "$T/calls" | head -1 | cut -d: -f1)
+  status_sync=$(grep -n "^sync $T/enroll\$" "$T/calls" | tail -2 | head -1 | cut -d: -f1)
+  [ -n "$note_sync" ]
+  [ -n "$status_sync" ]
+  [ "$note_sync" -lt "$status_sync" ]
+}
+
+@test "an unused key stays until its result is on disk" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  # the directory sync fails once the result line is written
+  printf '#!/bin/sh\n[ "$*" = "%s/enroll" ] && grep -q "^joined" "%s/enroll/enroll-status" 2>/dev/null && exit 1\nexit 0\n' "$T" "$T" >"$T/bin/sync"; chmod +x "$T/bin/sync"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1
+  [ "$status" -ne 0 ]
+  [ -e "$T/enroll/pending-authkey" ]
+  [[ "$output" == *"could not store the enrollment result"* ]]
+  rm "$T/bin/sync"
+  enroll CERALIVE_TS_NOW=1200 TS_BACKEND=Running TS_NODEKEY=1
+  [ "$status" -eq 0 ]
+  [ ! -e "$T/enroll/pending-authkey" ]
+  lacks ' up ' "$T/calls"
+}
+
+@test "a logged-in box that is still connecting is asked again later, without the key" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Starting TS_NODEKEY=1
+  [ "$status" -ne 0 ]
+  lacks ' up ' "$T/calls"
+  [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 retry" ]
+  [ -e "$T/enroll/pending-authkey" ]
+  [ ! -e "$T/enroll/prior-login" ]
+  enroll CERALIVE_TS_NOW=1130 TS_BACKEND=NoState TS_NODEKEY=1
+  lacks ' up ' "$T/calls"
+  [ -e "$T/enroll/pending-authkey" ]
+  # connected now: the box is in a tailnet, so the key is not used
+  enroll CERALIVE_TS_NOW=1400 TS_BACKEND=Running TS_NODEKEY=1
+  [ "$status" -eq 0 ]
+  lacks ' up ' "$T/calls"
+  [ "$(cut -d' ' -f1,4 "$T/enroll/enroll-status")" = "joined already-joined" ]
+  no_key_anywhere
+}
+
+@test "an expired, logged-out or unapproved login still uses the new key" {
+  local backend
+  for backend in NeedsLogin NeedsMachineAuth; do
+    fresh; enroll_env
+    printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+    : >"$T/state/tailscaled.state"
+    enroll CERALIVE_TS_NOW=1000 TS_BACKEND="$backend" TS_NODEKEY=1
+    [ "$status" -eq 0 ]
+    grep -q ' up --auth-key' "$T/calls"
+    [ "$(cut -d' ' -f1,4 "$T/enroll/enroll-status")" = "joined ok" ]
+    [ ! -e "$T/boot/TAILSCALE-KEY-NOT-USED.txt" ]
+  done
+  # forgotten on the card: no node key at all
+  fresh; enroll_env
+  card_drop "$KEY"
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=NeedsLogin
+  grep -q ' up --auth-key' "$T/calls"
+  [ "$(cut -d' ' -f1,4 "$T/enroll/enroll-status")" = "joined ok" ]
+}
+
+@test "a key from the card that meets a joined box reports joined, so the card does not show a failure" {
+  enroll_env
+  card_drop "$KEY" us-white
+  enroll CERALIVE_TS_NOW=1000 TS_BACKEND=Running TS_NODEKEY=1
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1 "$T/enroll/enroll-status")" = joined ]
+  lacks ' up ' "$T/calls"
+  [ ! -e "$T/enroll/incoming-authkey" ]
+  [ ! -e "$T/enroll/pending-authkey" ]
+}
+
 @test "the login check is made once per key" {
   enroll_env
   printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
-  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="no network" TS_BACKEND=Running TS_NODEKEY=1
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="no network" TS_BACKEND=NeedsLogin TS_NODEKEY=1
   [ "$(cut -d' ' -f1 "$T/enroll/prior-login")" = yes ]
   # a later attempt sees no login but keeps the first answer
   enroll CERALIVE_TS_NOW=1130 TS_RC=1 TS_OUT="no network"
@@ -414,9 +763,9 @@ NO_TAILNET_SSH="Unable to enable local Tailscale SSH server; not enabled on Tail
   printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
   enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="no network"
   [ "$(cut -d' ' -f1 "$T/enroll/prior-login")" = no ]
-  # a new key arrives while the box is logged in: it is asked again
+  # a new key arrives while the box holds an (expired) login: it is asked again
   card_drop "$KEY"
-  enroll CERALIVE_TS_NOW=1140 TS_RC=1 TS_OUT="no network" TS_BACKEND=Running TS_NODEKEY=1
+  enroll CERALIVE_TS_NOW=1140 TS_RC=1 TS_OUT="no network" TS_BACKEND=NeedsLogin TS_NODEKEY=1
   [ "$(cut -d' ' -f1 "$T/enroll/prior-login")" = yes ]
 }
 
@@ -653,7 +1002,9 @@ STUB
 #!/bin/sh
 case "\$*" in
   *" up "*) printf '%s' test-node-state >"$T/state/tailscaled.state"; exit 1;;
-  *"status --json"*) printf '%s\n' '$response'; exit $status_rc;;
+  # a fresh box before the keyed up; the response under test once it ran
+  *"status --json"*) [ -e "$T/state/tailscaled.state" ] || { echo '{"BackendState": "NeedsLogin"}'; exit 0; }
+    printf '%s\n' '$response'; exit $status_rc;;
 esac
 STUB
     card_drop "$KEY"
