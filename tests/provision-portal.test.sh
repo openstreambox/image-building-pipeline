@@ -75,6 +75,12 @@ echo "$m nmcli $*" >>"$MARKER_LOG"
 args="$*"
 P="$NMSTATE/profiles" D="$NMSTATE/details" A="$NMSTATE/active"
 drop_uuid() { for f in "$P" "$D" "$A"; do grep -v -- "$1" "$f" >"$f.tmp"; mv "$f.tmp" "$f"; done; }
+# Profile rows as nmcli -t prints them: the model keeps raw names (UUID and TYPE are its
+# last two fields); output escapes '\' and ':' in the name like NM does.
+rows() { while IFS= read -r line; do [ -n "$line" ] || continue
+           t="${line##*:}"; r="${line%:*}"; u="${r##*:}"; n="${r%:*}"; n="${n//\\/\\\\}"; n="${n//:/\\:}"
+           case "$1" in nut) echo "$n:$u:$t" ;; utn) echo "$u:$t:$n" ;; nt) echo "$n:$t" ;; esac
+         done <"$P"; }
 case "$args" in
   *"dev wifi list"*) [ -n "${STUB_SCAN_FILE:-}" ] && cat "$STUB_SCAN_FILE"; exit 0 ;;
   *"-f CONNECTIVITY general status"*) printf "%s\n" "${STUB_CONNECTIVITY:-full}"; exit 0 ;;
@@ -90,14 +96,15 @@ case "$args" in
   *"-g GENERAL.STATE device show"*) [ -n "${STUB_DEV_READ_RC:-}" ] && exit "$STUB_DEV_READ_RC"
                                     if [ -n "${STUB_DEV_STATE:-}" ]; then echo "$STUB_DEV_STATE"
                                     elif [ -s "$A" ]; then echo "100 (connected)"; else echo "30 (disconnected)"; fi; exit 0 ;;
-  *"-f NAME,UUID,TYPE connection show"*) [ -n "${STUB_NM_READ_RC:-}" ] && exit "$STUB_NM_READ_RC"; cat "$P"; exit 0 ;;
+  *"-f NAME,UUID,TYPE connection show"*) [ -n "${STUB_NM_READ_RC:-}" ] && exit "$STUB_NM_READ_RC"; rows nut; exit 0 ;;
+  *"-f UUID,TYPE,NAME connection show"*) [ -n "${STUB_NM_READ_RC:-}" ] && exit "$STUB_NM_READ_RC"; rows utn; exit 0 ;;
   *"-g 802-11-wireless.mode connection show uuid "*) [ -n "${STUB_MODE_READ_RC:-}" ] && exit "$STUB_MODE_READ_RC"
                              set -- $args; field="$2"; uuid="${!#}"
                              awk -v u="$uuid" -v f="$field" '$1 == u && $2 == f { sub(/^[^ ]+ [^ ]+ /, ""); print }' "$D"; exit 0 ;;
   *"connection show uuid "*) set -- $args; field="$2"; uuid="${!#}"
                              awk -v u="$uuid" -v f="$field" '$1 == u && $2 == f { sub(/^[^ ]+ [^ ]+ /, ""); print }' "$D"; exit 0 ;;
   *"802-11-wireless.ssid connection show"*) printf "%s\n" "${STUB_CON_SSID:-HomeNet}"; exit 0 ;;
-  *"-f NAME,TYPE connection show"*) if [ -n "${STUB_PROFILES_FILE:-}" ]; then cat "$STUB_PROFILES_FILE"; else cut -d: -f1,3 "$P"; fi; exit 0 ;;
+  *"-f NAME,TYPE connection show"*) if [ -n "${STUB_PROFILES_FILE:-}" ]; then cat "$STUB_PROFILES_FILE"; else rows nt; fi; exit 0 ;;
   *"connection add"*ceralive-ap*)
     [ "${STUB_AP_ADD_RC:-0}" -ne 0 ] && exit "$STUB_AP_ADD_RC"
     u=""; prev=""; for a in "$@"; do [ "$prev" = connection.uuid ] && u="$a"; prev="$a"; done
@@ -109,6 +116,7 @@ case "$args" in
     exit 0 ;;
   *"connection up uuid "*) u="${!#}"; rc="${STUB_AP_UP_RC:-0}"
                            grep -q ":$u:" "$P" || exit 10
+                           grep -qx "$u 802-11-wireless.mode ap" "$D" || rc="${STUB_USER_UP_RC:-0}"
                            [ "$rc" -eq 0 ] && echo "$u" >>"$A"; exit "$rc" ;;
   *"connection up"*) exit "${STUB_USER_UP_RC:-0}" ;;
   *"connection down uuid "*) [ -n "${STUB_AP_DOWN_RC:-}" ] && exit "$STUB_AP_DOWN_RC"
@@ -117,13 +125,14 @@ case "$args" in
   *"connection delete uuid "*) [ -n "${STUB_DELETE_RC:-}" ] && exit "$STUB_DELETE_RC"
                                grep -q ":${!#}:" "$P" || exit 10
                                drop_uuid "${!#}"; exit 0 ;;
-  *"connection delete "*) u="$(awk -F: -v n="${!#}" '$1 == n { print $2; exit }' "$P")"
+  *"connection delete "*) [ -n "${STUB_DELETE_RC:-}" ] && exit "$STUB_DELETE_RC"
+                          u="$(awk -F: -v n="${!#}" '$1 == n { print $2; exit }' "$P")"
                           [ -n "$u" ] || exit 10
                           drop_uuid "$u"; exit 0 ;;
   *"device disconnect"*) : >"$A"; exit 0 ;;
   *"connection add"*) if [ "${STUB_ADD_RC:-0}" -ne 0 ]; then echo "Error: failed to modify 802-11-wireless.ssid: invalid" >&2; exit "$STUB_ADD_RC"; fi
                       u="${STUB_USER_UUID:-0000aaaa-0000-4000-8000-0000000000d4}"; name=""; ssid=""; prev=""
-                      for a in "$@"; do [ "$prev" = con-name ] && name="$a"; [ "$prev" = ssid ] && ssid="$a"; prev="$a"; done
+                      for a in "$@"; do [ "$prev" = con-name ] && name="$a"; [ "$prev" = ssid ] && ssid="$a"; [ "$prev" = connection.uuid ] && u="$a"; prev="$a"; done
                       drop_uuid "$u"; echo "$name:$u:802-11-wireless" >>"$P"; echo "$u 802-11-wireless.ssid $ssid" >>"$D"
                       echo "Connection '$name' ($u) successfully added."; exit 0 ;;
 esac
@@ -196,6 +205,9 @@ export CALL_LOG MARKER_LOG STUB_SCAN_FILE="${SCAN_SRC}"
 NMSTATE="${SANDBOX}/nm"; AP_UUID="5e7a1a5e-0000-4000-8000-0000000000a1"
 UUID_SRC="${SANDBOX}/uuid-source"; printf '%s\n' "${AP_UUID}" >"${UUID_SRC}"
 export NMSTATE AP_UUID CERALIVE_UUID_SOURCE="${UUID_SRC}"
+# The portal's per-attempt profile UUID (its own source: the AP's is fixed above).
+JOIN_UUID_SRC="${SANDBOX}/join-uuid-source"; printf '0000aaaa-0000-4000-8000-0000000000d4\n' >"${JOIN_UUID_SRC}"
+export CERALIVE_JOIN_UUID_SOURCE="${JOIN_UUID_SRC}" CERALIVE_JOIN_LOCK_WAIT=1
 AP_UP_CALL="nmcli connection up uuid ${AP_UUID}"
 AP_DEL_CALL="nmcli connection delete uuid ${AP_UUID}"
 # The setup AP as a previous bring-up of this script left it: profile + recorded UUID.
@@ -806,6 +818,39 @@ offline_boot
 grep -q "leaving out every profile called ceralive-ap" "${OUTF}" && grep -q "no stored WiFi profiles" "${OUTF}" \
                                                  && pass "unreadable setup AP identity: count falls back to the name" || fail "unreadable setup AP identity: count falls back to the name"
 
+# Names with ':' come escaped from nmcli -t (`\:`). The recorded setup AP renamed to
+# such a name is still the setup AP: not counted offline, and on a boot that needs no
+# portal it is deleted by UUID; its record never goes while the profile is saved.
+reset_state; boot_units
+echo "setup:old:${AP_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+printf '%s\n' "${AP_UUID}" >"$(state_file ap-uuid)"
+offline_boot; rc=$?
+[ "${rc}" -eq 0 ] && called "${AP_UP_CALL}"      && pass "recorded setup AP renamed with ':' is not counted" || fail "recorded setup AP renamed with ':' is not counted (rc=${rc})"
+reset_state; boot_units
+echo "setup:old:${AP_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+printf '%s\n' "${AP_UUID}" >"$(state_file ap-uuid)"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_CONNECTIVITY=full bash "${PROVISION}" start >"${OUTF}" 2>&1
+called "nmcli connection delete uuid ${AP_UUID}" && ! grep -q ":${AP_UUID}:" "${NMSTATE}/profiles" \
+  && { grep -q ":${AP_UUID}:" "${NMSTATE}/profiles" || [ ! -s "$(state_file ap-uuid)" ]; } \
+                                                 && pass "renamed setup AP with ':' deleted by UUID, record kept until it is gone" || fail "renamed setup AP with ':' deleted by UUID, record kept until it is gone"
+# A station called a:b is one saved network, also when the count falls back to names.
+reset_state; boot_units
+echo "a:b:${STATION_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+offline_boot
+grep -q "found 1 stored WiFi profile" "${OUTF}"  && pass "station named a:b counts once" || fail "station named a:b counts once"
+reset_state; boot_units
+echo "a:b:${STATION_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+printf 'not-a-uuid\n' >"$(state_file ap-uuid)"
+offline_boot
+grep -q "found 1 stored WiFi profile" "${OUTF}"  && pass "station named a:b counts once in the name fallback" || fail "station named a:b counts once in the name fallback"
+# The user profile is found by its unescaped name too (here a name with ':').
+reset_state; boot_units; seed_setup_ap
+printf 'ssid=CeraLive-Setup-f00d\ncon=ceralive-ap\n' >"$(state_file portal-active)"
+echo "cera:wifi:${STATION_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+offline_boot CERALIVE_USER_CON_NAME='cera:wifi'; rc=$?
+called "${AP_UP_CALL}" && ! grep -q ":${STATION_UUID}:" "${NMSTATE}/profiles" \
+                                                 && pass "user profile named with ':' is found (earlier image's handoff)" || fail "user profile named with ':' is found (earlier image's handoff) (rc=${rc})"
+
 # No setup AP at all: nothing deleted, exit 0.
 reset_state; boot_units
 env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_CONNECTIVITY=full STUB_PROFILES_FILE=/dev/null \
@@ -1259,7 +1304,7 @@ grace_boot STUB_CONNECTIVITY=none CERALIVE_PROVISION_GRACE=600; rc=$?
 for outcome in joined failed gone; do
   reset_state; boot_units; seed_setup_ap
   printf 'ssid=CeraLive-Setup-f00d\npending_join=1\n' >"$(state_file portal-active)"
-  printf 'ssid=HomeNet\ncon=ceralive-wifi\n' >"${PENDING}"
+  printf 'ssid=HomeNet\ncon=ceralive-wifi\nuuid=%s\n' "${USER_UUID}" >"${PENDING}"
   [ "${outcome}" = gone ] || echo "ceralive-wifi:${USER_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
   up_rc=4; [ "${outcome}" = joined ] && up_rc=0
   env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC="${up_rc}" STUB_CONNECTIVITY=full STUB_CON_SSID=HomeNet \
@@ -1285,6 +1330,99 @@ printf 'portal-active' >"$(state_file portal-active)"
 OUT="$(printf 'POST / HTTP/1.1\r\nContent-Length: 28\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nssid=HomeNet&psk=hunter2pass' | env STUB_ADD_RC=2 bash "${PORTAL}" serve 2>/dev/null)"
 grep -qF 'Could not save' <<<"${OUT}" && [ ! -e "${PENDING}" ] && ! ls "${STATE}"/pending-join.tmp.* >/dev/null 2>&1 \
                                                  && pass "failed profile write leaves no pending-join" || fail "failed profile write leaves no pending-join"
+
+# ===========================================================================
+echo "== Scenario W: each save is one attempt with its own UUID, settled only by that attempt =="
+OTHER_UUID="0000bbbb-0000-4000-8000-0000000000f6"
+A_UUID="0000cccc-0000-4000-8000-0000000000a7"
+names() { grep -qx "uuid=$1" "${PENDING}" 2>/dev/null; }
+saved() { grep -q ":$1:" "${NMSTATE}/profiles"; }
+seed_user() { echo "ceralive-wifi:$1:802-11-wireless" >>"${NMSTATE}/profiles"; echo "$1 802-11-wireless.ssid HomeNet" >>"${NMSTATE}/details"; }
+
+# The profile is created with exactly the UUID the record names, recorded first.
+reset_state
+printf 'portal-active' >"$(state_file portal-active)"
+post_join >/dev/null
+names "${USER_UUID}" && called "connection.uuid ${USER_UUID}" && saved "${USER_UUID}" \
+  && called "ceralive-provision.sh connect ceralive-wifi ${USER_UUID}" \
+                                                 && pass "profile saved with the UUID pending-join names; worker gets it" || fail "profile saved with the UUID pending-join names; worker gets it"
+
+# (a) A record that cannot be flushed means no profile and no success page.
+reset_state
+printf 'portal-active' >"$(state_file portal-active)"
+mkdir -p "${SANDBOX}/failsync"; printf '#!/usr/bin/env bash\nexit 1\n' >"${SANDBOX}/failsync/sync"; chmod +x "${SANDBOX}/failsync/sync"
+OUT="$(PATH="${SANDBOX}/failsync:${PATH}" post_join)"
+grep -qF 'Could not save' <<<"${OUT}" && ! grep -qiF 'Connecting' <<<"${OUT}" && ! called "connection add" \
+  && ! called "systemd-run" && [ ! -e "${PENDING}" ] && ! ls "${STATE}"/pending-join.tmp.* >/dev/null 2>&1 \
+                                                 && pass "flush failure: no record, no profile, no success page" || fail "flush failure: no record, no profile, no success page"
+
+# (c) Another save holds the join lock (attempt A between its record and its profile):
+# a second POST whose profile write fails neither saves nor touches A's record.
+reset_state
+printf 'portal-active' >"$(state_file portal-active)"
+printf 'ssid=HomeNet\ncon=ceralive-wifi\nuuid=%s\n' "${A_UUID}" >"${PENDING}"
+exec 9>>"$(state_file pending-join.lock)"; flock 9
+OUT="$(printf 'POST / HTTP/1.1\r\nContent-Length: 28\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nssid=HomeNet&psk=hunter2pass' | env STUB_ADD_RC=2 bash "${PORTAL}" serve 2>/dev/null)"
+exec 9>&-
+names "${A_UUID}" && grep -qF 'Could not save' <<<"${OUT}" \
+                                                 && pass "overlapping POST with a failing add leaves the other attempt's record" || fail "overlapping POST with a failing add leaves the other attempt's record"
+
+# (e) An earlier profile that cannot be deleted stops the save: it stays saved and the
+# record that named it stays.
+reset_state
+printf 'portal-active' >"$(state_file portal-active)"
+printf 'ssid=HomeNet\ncon=ceralive-wifi\nuuid=%s\n' "${A_UUID}" >"${PENDING}"
+seed_user "${A_UUID}"
+OUT="$(printf 'POST / HTTP/1.1\r\nContent-Length: 28\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nssid=HomeNet&psk=hunter2pass' | env STUB_DELETE_RC=1 bash "${PORTAL}" serve 2>/dev/null)"
+saved "${A_UUID}" && names "${A_UUID}" && ! saved "${USER_UUID}" && grep -qF 'Could not save' <<<"${OUT}" \
+                                                 && pass "failed delete of the earlier profile: it stays saved and named" || fail "failed delete of the earlier profile: it stays saved and named"
+# A replace that works deletes the earlier profile by UUID and names only the new one.
+reset_state
+printf 'portal-active' >"$(state_file portal-active)"
+printf 'ssid=HomeNet\ncon=ceralive-wifi\nuuid=%s\n' "${A_UUID}" >"${PENDING}"
+seed_user "${A_UUID}"
+post_join >/dev/null
+! saved "${A_UUID}" && saved "${USER_UUID}" && names "${USER_UUID}" && ! names "${A_UUID}" && called "connection delete uuid ${A_UUID}" \
+                                                 && pass "retry replaces the earlier profile by UUID and names the new one" || fail "retry replaces the earlier profile by UUID and names the new one"
+
+# (d) The boot acts only on the recorded UUID: another profile called ceralive-wifi is
+# a saved network of its own, so it keeps setup down and nothing is deleted.
+reset_state; boot_units
+printf 'ssid=HomeNet\ncon=ceralive-wifi\nuuid=%s\n' "${USER_UUID}" >"${PENDING}"
+seed_user "${USER_UUID}"; seed_user "${OTHER_UUID}"
+grace_boot STUB_CONNECTIVITY=none; rc=$?
+saved "${OTHER_UUID}" && ! called "${AP_UP_CALL}" \
+                                                 && pass "a ceralive-wifi the record does not name is kept and counts" || fail "a ceralive-wifi the record does not name is kept and counts (rc=${rc})"
+# Only the recorded one is deleted when the window expires; a stale UUID is ignored.
+reset_state; boot_units
+printf 'ssid=HomeNet\ncon=ceralive-wifi\nuuid=%s\n' "${USER_UUID}" >"${PENDING}"
+seed_user "${USER_UUID}"
+grace_boot STUB_CONNECTIVITY=none; rc=$?
+! saved "${USER_UUID}" && called "${AP_UP_CALL}" && [ ! -e "${PENDING}" ] \
+                                                 && pass "expired window deletes the recorded profile and retires its record" || fail "expired window deletes the recorded profile and retires its record (rc=${rc})"
+# Verification needs the recorded profile itself to be activated.
+reset_state; boot_units
+printf 'ssid=HomeNet\ncon=ceralive-wifi\nuuid=%s\n' "${USER_UUID}" >"${PENDING}"
+seed_user "${USER_UUID}"; echo "${OTHER_UUID}" >>"${NMSTATE}/active"
+grace_boot STUB_CONNECTIVITY=full
+names "${USER_UUID}"                             && pass "another active connection does not verify the recorded attempt" || fail "another active connection does not verify the recorded attempt"
+# An earlier image's handoff: the record names the UUIDs seen at detection.
+reset_state; boot_units; seed_setup_ap
+printf 'ssid=CeraLive-Setup-f00d\ncon=ceralive-ap\n' >"$(state_file portal-active)"
+seed_user "${USER_UUID}"
+grace_boot STUB_CONNECTIVITY=full
+names "${USER_UUID}"                             && pass "earlier image's handoff records the profile UUID it found" || fail "earlier image's handoff records the profile UUID it found"
+
+# (c) The worker settles only its own attempt: a record naming another attempt stays.
+for up_rc in 0 4; do
+  reset_state; boot_units; seed_setup_ap
+  printf 'ssid=CeraLive-Setup-f00d\npending_join=1\n' >"$(state_file portal-active)"
+  printf 'ssid=HomeNet\ncon=ceralive-wifi\nuuid=%s\n' "${OTHER_UUID}" >"${PENDING}"
+  seed_user "${USER_UUID}"
+  env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_USER_UP_RC="${up_rc}" STUB_CONNECTIVITY=full \
+      bash "${PROVISION}" connect ceralive-wifi "${USER_UUID}" >/dev/null 2>&1
+  names "${OTHER_UUID}"                          && pass "worker (up rc=${up_rc}) leaves another attempt's record" || fail "worker (up rc=${up_rc}) leaves another attempt's record"
+done
 
 echo
 if [ "${FAILED}" -eq 0 ]; then

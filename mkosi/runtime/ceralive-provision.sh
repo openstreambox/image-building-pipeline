@@ -72,9 +72,11 @@
 #   runs the full teardown; on a wrong passphrase or timeout it deletes the bad
 #   profile, writes an error marker the portal shows, and re-arms the AP for a retry —
 #   the device never ends up headless-dead.
-#   PENDING JOIN: the portal writes pending-join BEFORE it saves the profile, and the
-#   worker removes it once the join is verified, or once the failure path has deleted
-#   the profile. A power loss, reboot or a worker that never ran in between leaves
+#   PENDING JOIN: the portal gives every attempt its own profile UUID and writes it to
+#   pending-join (flushed) BEFORE it saves the profile with that UUID; the worker
+#   removes it once the join is verified, or once the failure path has deleted the
+#   profile. Every removal happens under the join lock and only while the record still
+#   names the remover's attempt, and the boot acts only on the UUIDs it names. A power loss, reboot or a worker that never ran in between leaves
 #   pending-join behind, and the next boot treats the saved profile as unverified
 #   (trigger 3) instead of as a configured network: with wrong credentials that box
 #   would otherwise stay off-line with no setup AP. Markers this image writes say so
@@ -161,6 +163,8 @@ FORCE_FLAG="${CERALIVE_PROVISION_FORCE_FLAG:-${STATE_DIR}/force-portal}"        
 ACTIVE_FLAG="${CERALIVE_PROVISION_ACTIVE_FLAG:-${STATE_DIR}/portal-active}"       # setup owns wlan0 (header §SETUP MARKER); read by the portal and CeraUI
 TEARDOWN_FLAG="${CERALIVE_PROVISION_TEARDOWN_FLAG:-${STATE_DIR}/teardown-requested}"
 PENDING_JOIN="${CERALIVE_PROVISION_PENDING_JOIN:-${STATE_DIR}/pending-join}"     # saved by the portal, join not verified yet (header §PENDING JOIN)
+JOIN_LOCK="${CERALIVE_PROVISION_JOIN_LOCK:-${STATE_DIR}/pending-join.lock}"       # serialises pending-join changes with the portal
+JOIN_LOCK_WAIT="${CERALIVE_JOIN_LOCK_WAIT:-10}"
 SCAN_CACHE="${CERALIVE_PROVISION_SCAN_CACHE:-${STATE_DIR}/scan.txt}"              # SSID list (single-radio: scanned BEFORE AP up)
 ERROR_MARKER="${CERALIVE_PROVISION_ERROR_MARKER:-${STATE_DIR}/last-error}"        # written on a failed join; shown by the portal
 AP_UUID_FILE="${CERALIVE_PROVISION_AP_UUID_FILE:-${STATE_DIR}/ap-uuid}"           # UUIDs of setup AP profiles this script created, one per line
@@ -202,32 +206,45 @@ ap_ssid() {
   printf 'CeraLive-Setup-%s' "${mid}"
 }
 
+# --- NetworkManager profile listings --------------------------------------------
+# Every profile listing is `nmcli -t -f UUID,TYPE,NAME connection show`: UUID and TYPE
+# never contain ':', so they are always fields 1 and 2, and the name is the rest of the
+# line with nmcli's escaping (`\:` for ':', `\\` for '\'). NM_AWK gives awk programs
+# nm_name(), the unescaped name of the current row. Non-zero when NM cannot be read.
+nm_profiles() { "${NMCLI}" -t -f UUID,TYPE,NAME connection show 2>/dev/null; }
+# shellcheck disable=SC2016
+NM_AWK='function nm_name(  s, o, i, c) { s = substr($0, length($1) + length($2) + 3); o = ""
+          for (i = 1; i <= length(s); i++) { c = substr(s, i, 1); if (c == "\\" && i < length(s)) c = substr(s, ++i, 1); o = o c }
+          return o }
+'
+# The same unescaping for one name in shell.
+# shellcheck disable=SC2001  # a backreference, which ${var//} cannot do
+nm_unescape() { sed 's/\\\(.\)/\1/g' <<<"$1"; }
+
 # --- stored WiFi profile count (EXCLUDING our own AP profile) ------------------
 # A real user WiFi profile means the device can rejoin an uplink, so the portal must
 # NOT start (EC4). Our own setup AP is excluded — it is created by THIS script and must
 # never suppress its own re-trigger. It is recognised the way cleanup recognises it
 # (setup_ap_uuids: recorded UUID or settings fingerprint), so a user's station profile
 # that happens to be called ${AP_CON_NAME} still counts. If that identity cannot be
-# read, every profile called ${AP_CON_NAME} is excluded, as before. Type and UUID are
-# the last two fields (they never contain ':'; a name may, escaped). With $1 = 1 the
-# portal's ${USER_CON_NAME} is left out as well: its join is still pending (header
-# §PENDING JOIN).
+# read, every profile called ${AP_CON_NAME} is excluded, as before. Profiles with the
+# UUIDs in $1 (newline-separated) are left out as well: their join is still pending
+# (header §PENDING JOIN).
 stored_wifi_profile_count() {
-  local skip="" list ap
-  [ "${1:-0}" = 1 ] && skip="${USER_CON_NAME}"
-  if list="$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" \
-      && ap="$(setup_ap_uuids 2>/dev/null)"; then
-    awk -F: -v skip="${skip}" '
+  local skip="${1:-}" list ap n
+  if list="$(nm_profiles)" && ap="$(setup_ap_uuids 2>/dev/null)"; then
+    awk -F: '
         NR == FNR { if (NF) s[$0] = 1; next }
-        NF >= 3 && $NF == "802-11-wireless" && !($(NF-1) in s) && !(skip != "" && NF == 3 && $1 == skip) { n++ }
-        END { print n + 0 }' <(printf '%s\n' "${ap}") - <<<"${list}"
+        $2 == "802-11-wireless" && !($1 in s) { n++ }
+        END { print n + 0 }' <(printf '%s\n%s\n' "${ap}" "${skip}") - <<<"${list}"
     return
   fi
   log "could not identify the setup AP profile; leaving out every profile called ${AP_CON_NAME}" >&2
-  "${NMCLI}" -t -f NAME,TYPE connection show 2>/dev/null \
-    | awk -F: -v ap="${AP_CON_NAME}" -v skip="${skip}" '
-        $2 == "802-11-wireless" && $1 != ap && !(skip != "" && $1 == skip) { n++ }
-        END { print n + 0 }'
+  "${NMCLI}" -t -f UUID,TYPE,NAME connection show 2>/dev/null \
+    | awk -F: -v ap="${AP_CON_NAME}" "${NM_AWK}"'
+        NR == FNR { if (NF) s[$0] = 1; next }
+        $2 == "802-11-wireless" && nm_name() != ap && !($1 in s) { n++ }
+        END { print n + 0 }' <(printf '%s\n' "${skip}") -
 }
 
 # --- the image's own setup AP profiles -----------------------------------------
@@ -327,11 +344,11 @@ settle_uncertain_record() {
   return 1
 }
 
-# Legacy setup APs in a NAME:UUID:TYPE listing ($1), by the settings fingerprint.
+# Legacy setup APs in an nm_profiles listing ($1), by the settings fingerprint.
 fingerprint_ap_uuids() {
   local name uuid type mode ssid addr
-  while IFS=: read -r name uuid type; do
-    [ "${name}" = "${AP_CON_NAME}" ] && [ "${type}" = 802-11-wireless ] && [ -n "${uuid}" ] || continue
+  while IFS=: read -r uuid type name; do
+    [ "$(nm_unescape "${name}")" = "${AP_CON_NAME}" ] && [ "${type}" = 802-11-wireless ] && [ -n "${uuid}" ] || continue
     mode="$("${NMCLI}" -g 802-11-wireless.mode connection show uuid "${uuid}" 2>/dev/null)" || return 1
     ssid="$("${NMCLI}" -g 802-11-wireless.ssid connection show uuid "${uuid}" 2>/dev/null)" || return 1
     addr="$("${NMCLI}" -g ipv4.addresses connection show uuid "${uuid}" 2>/dev/null)" || return 1
@@ -347,10 +364,10 @@ fingerprint_ap_uuids() {
 setup_ap_uuids() {
   local rec list legacy
   rec="$(recorded_ap_uuids)" || return 1
-  list="$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" || return 1
+  list="$(nm_profiles)" || return 1
   legacy="$(fingerprint_ap_uuids "${list}")" || return 1
   {
-    awk -F: 'NR == FNR { r[$0] = 1; next } ($2 in r) { print $2 }' <(printf '%s\n' "${rec}") - <<<"${list}"
+    awk -F: 'NR == FNR { r[$0] = 1; next } ($1 in r) { print $1 }' <(printf '%s\n' "${rec}") - <<<"${list}"
     printf '%s\n' "${legacy}"
   } | awk 'NF && !seen[$0]++'
 }
@@ -381,7 +398,7 @@ down_setup_aps() {
   rec="$(recorded_ap_uuids 2>/dev/null)" || rec=""
   # With an uncertain record, still bring down what the settings fingerprint finds.
   uuids="$(setup_ap_uuids 2>/dev/null)" \
-    || uuids="$(fingerprint_ap_uuids "$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" 2>/dev/null)" \
+    || uuids="$(fingerprint_ap_uuids "$(nm_profiles)" 2>/dev/null)" \
     || uuids=""
   for u in $(printf '%s\n%s\n' "${rec}" "${uuids}" | awk 'NF && !seen[$0]++'); do
     "${NMCLI}" "$@" connection down uuid "${u}" >/dev/null 2>&1 || true
@@ -416,10 +433,10 @@ prune_ap_record() {
   local rec list active keep
   rec="$(recorded_ap_uuids)" || return 1
   [ -n "${rec}" ] || return 0
-  list="$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" || return 1
+  list="$(nm_profiles)" || return 1
   active="$(active_uuids)" || return 1
   keep="$(awk -F: 'NR == FNR { if (NF) k[$NF] = 1; next } ($0 in k)' \
-            <(printf '%s\n%s\n' "$(cut -d: -f2 <<<"${list}")" "${active}") <(printf '%s\n' "${rec}"))"
+            <(printf '%s\n%s\n' "$(cut -d: -f1 <<<"${list}")" "${active}") <(printf '%s\n' "${rec}"))"
   if ! write_ap_record "${keep}"; then
     log "ERROR: could not rewrite the setup AP record ${AP_UUID_FILE}"
     return 1
@@ -466,78 +483,129 @@ have_connectivity() {
 }
 
 # --- unverified join (header §PENDING JOIN) -------------------------------------
-# UUIDs of saved Wi-Fi profiles called ${USER_CON_NAME}, one per line; non-zero when NM
-# cannot be read.
+# UUIDs of saved Wi-Fi profiles called $1 (default ${USER_CON_NAME}), one per line;
+# non-zero when NM cannot be read.
 user_con_uuids() {
   local list
-  list="$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" || return 1
-  awk -F: -v n="${USER_CON_NAME}" 'NF == 3 && $1 == n && $3 == "802-11-wireless" { print $2 }' <<<"${list}"
+  list="$(nm_profiles)" || return 1
+  awk -F: -v n="${1:-${USER_CON_NAME}}" "${NM_AWK}"'$2 == "802-11-wireless" && nm_name() == n { print $1 }' <<<"${list}"
 }
 
-# Write ${PENDING_JOIN} (temp file + rename) naming the SSID in $1.
-write_pending_join() {
-  local tmp="${PENDING_JOIN}.tmp.$$"
+# The join lock, shared with the portal. Non-zero when it is not held.
+join_lock() {
   mkdir -p "${STATE_DIR}" 2>/dev/null
-  if printf 'ssid=%s\ncon=%s\n' "${1//$'\n'/ }" "${USER_CON_NAME}" >"${tmp}" 2>/dev/null \
-      && mv -fT "${tmp}" "${PENDING_JOIN}" 2>/dev/null; then
-    return 0
-  fi
-  rm -f "${tmp}" 2>/dev/null
+  exec {JOIN_LOCK_FD}>>"${JOIN_LOCK}" || return 1
+  flock -w "${JOIN_LOCK_WAIT}" "${JOIN_LOCK_FD}" && return 0
+  join_unlock
   return 1
 }
+join_unlock() {
+  [ -n "${JOIN_LOCK_FD:-}" ] && exec {JOIN_LOCK_FD}>&-
+  JOIN_LOCK_FD=""
+}
 
-# 0 when ${USER_CON_NAME} is saved but no join has verified it: ${PENDING_JOIN} exists,
-# or a setup marker from an image without pending-join (no pending_join=1 line) sits
-# next to a saved ${USER_CON_NAME}. That image deleted the profile on every failed join
-# before re-arming, so the pair only exists when its handoff was cut short. The legacy
-# case is turned into a real ${PENDING_JOIN}, so it outlives the stale-marker teardown.
+# Remove ${PENDING_JOIN} only if it still names the attempt with UUID $1, under the
+# join lock (taken here unless the caller holds it). Non-zero when it names $1 and
+# stays (logged).
+retire_pending_join() {
+  local uuid="$1" took=0 rc=0
+  if [ -z "${JOIN_LOCK_FD:-}" ]; then
+    join_lock || { log "ERROR: could not take ${JOIN_LOCK}; ${PENDING_JOIN} kept"; return 1; }
+    took=1
+  fi
+  if grep -qx "uuid=${uuid}" "${PENDING_JOIN}" 2>/dev/null; then
+    if ! rm -f "${PENDING_JOIN}" 2>/dev/null || [ -e "${PENDING_JOIN}" ]; then
+      log "ERROR: could not remove ${PENDING_JOIN}"
+      rc=1
+    fi
+  fi
+  [ "${took}" = 1 ] && join_unlock
+  return "${rc}"
+}
+
+# Write ${PENDING_JOIN} (temp file + rename, under the join lock) for SSID $1 and the
+# profile UUIDs in $2 (newline-separated).
+write_pending_join() {
+  local tmp="${PENDING_JOIN}.tmp.$$" rc=1
+  join_lock || return 1
+  if { printf 'ssid=%s\ncon=%s\n' "${1//$'\n'/ }" "${USER_CON_NAME}"; awk 'NF { print "uuid=" $0 }' <<<"$2"; } >"${tmp}" 2>/dev/null \
+      && mv -fT "${tmp}" "${PENDING_JOIN}" 2>/dev/null; then
+    rc=0
+  fi
+  rm -f "${tmp}" 2>/dev/null
+  join_unlock
+  return "${rc}"
+}
+
+# 0 when a saved profile has not been verified by a join: ${PENDING_JOIN} exists, or a
+# setup marker from an image without pending-join (no pending_join=1 line) sits next to
+# a saved ${USER_CON_NAME}. That image deleted the profile on every failed join before
+# re-arming, so the pair only exists when its handoff was cut short. Sets PENDING_UUIDS
+# to the UUIDs the attempt covers (only these are ever skipped, verified or deleted)
+# and PENDING_SSID. A legacy pair, or a record without a UUID, gets the
+# ${USER_CON_NAME} UUIDs NM shows now, written to ${PENDING_JOIN} so the decision
+# outlives the stale-marker teardown.
 join_pending() {
-  [ -e "${PENDING_JOIN}" ] && return 0
-  [ -e "${ACTIVE_FLAG}" ] || return 1
-  grep -qx 'pending_join=1' "${ACTIVE_FLAG}" 2>/dev/null && return 1
   local uuids
-  uuids="$(user_con_uuids)" && [ -n "${uuids}" ] || return 1
-  log "setup marker from an earlier image next to a saved ${USER_CON_NAME}: its join was never verified"
-  write_pending_join "$("${NMCLI}" -g 802-11-wireless.ssid connection show uuid "${uuids%%$'\n'*}" 2>/dev/null)" \
-    || log "ERROR: could not write ${PENDING_JOIN}; deciding on this boot only"
+  PENDING_UUIDS="" PENDING_SSID=""
+  if [ -e "${PENDING_JOIN}" ]; then
+    PENDING_SSID="$(sed -n 's/^ssid=//p' "${PENDING_JOIN}" 2>/dev/null | head -n1)"
+    PENDING_UUIDS="$(sed -n 's/^uuid=//p' "${PENDING_JOIN}" 2>/dev/null | grep -E "${UUID_RE}")"
+    [ -n "${PENDING_UUIDS}" ] && return 0
+    log "${PENDING_JOIN} names no profile UUID; it covers the ${USER_CON_NAME} saved now"
+  else
+    [ -e "${ACTIVE_FLAG}" ] || return 1
+    grep -qx 'pending_join=1' "${ACTIVE_FLAG}" 2>/dev/null && return 1
+    uuids="$(user_con_uuids)" && [ -n "${uuids}" ] || return 1
+    log "setup marker from an earlier image next to a saved ${USER_CON_NAME}: its join was never verified"
+  fi
+  PENDING_UUIDS="$(user_con_uuids)" || PENDING_UUIDS=""
+  if [ -n "${PENDING_UUIDS}" ]; then
+    [ -n "${PENDING_SSID}" ] \
+      || PENDING_SSID="$("${NMCLI}" -g 802-11-wireless.ssid connection show uuid "${PENDING_UUIDS%%$'\n'*}" 2>/dev/null)"
+    write_pending_join "${PENDING_SSID}" "${PENDING_UUIDS}" \
+      || log "ERROR: could not write ${PENDING_JOIN}; deciding on this boot only"
+  fi
   return 0
 }
 
-# Whether a ${USER_CON_NAME} profile is fully activated right now.
-user_con_activated() {
-  local uuids rows
-  uuids="$(user_con_uuids)" && [ -n "${uuids}" ] || return 1
+# The first of PENDING_UUIDS that NM shows fully activated right now; non-zero if none.
+pending_activated() {
+  local rows
+  [ -n "${PENDING_UUIDS}" ] || return 1
   rows="$("${NMCLI}" -t -f UUID,STATE connection show --active 2>/dev/null)" || return 1
-  awk -F: 'NR == FNR { if (NF) u[$0] = 1; next } ($1 in u) && $2 == "activated" { f = 1 } END { exit !f }' \
-    <(printf '%s\n' "${uuids}") - <<<"${rows}"
+  awk -F: 'NR == FNR { if (NF) u[$0] = 1; next } ($1 in u) && $2 == "activated" { print $1; f = 1; exit } END { exit !f }' \
+    <(printf '%s\n' "${PENDING_UUIDS}") - <<<"${rows}"
 }
 
-# The grace window ran out without the pending join coming up: delete the unverified
-# profile (by UUID; by name only if NM cannot list it), tell the portal why, and clear
-# ${PENDING_JOIN} once the profile is gone. A failed delete keeps ${PENDING_JOIN}, so
-# the next boot still does not count the profile.
+# The grace window ran out without the pending join coming up: delete the profiles the
+# record names (by UUID, whatever they are called now; a profile it does not name is
+# left alone), tell the portal why, and retire ${PENDING_JOIN} once they are gone. A
+# failed delete, or an NM that cannot be read, keeps ${PENDING_JOIN}, so the next boot
+# still does not count them.
 abandon_pending_join() {
-  local ssid uuids u rc=0
-  ssid="$(sed -n 's/^ssid=//p' "${PENDING_JOIN}" 2>/dev/null | head -n1)"
-  if uuids="$(user_con_uuids)"; then
-    for u in ${uuids}; do
+  local ssid="${PENDING_SSID}" list u rc=0
+  if list="$(nm_profiles)"; then
+    for u in ${PENDING_UUIDS}; do
+      awk -F: -v u="${u}" '$1 == u { f = 1 } END { exit !f }' <<<"${list}" || continue
       [ -n "${ssid}" ] || ssid="$("${NMCLI}" -g 802-11-wireless.ssid connection show uuid "${u}" 2>/dev/null)"
       if "${NMCLI}" connection delete uuid "${u}" >/dev/null 2>&1; then
-        log "deleted unverified profile ${USER_CON_NAME} (${u})"
+        log "deleted unverified profile ${u}"
       else
-        log "ERROR: could not delete unverified profile ${USER_CON_NAME} (${u})"
+        log "ERROR: could not delete unverified profile ${u}"
         rc=1
       fi
     done
   else
-    "${NMCLI}" connection delete "${USER_CON_NAME}" >/dev/null 2>&1 || rc=1
+    log "ERROR: could not read NetworkManager profiles; unverified profile not deleted"
+    rc=1
   fi
   mkdir -p "${STATE_DIR}"
   printf 'ssid=%s\nreason=not_verified\n' "${ssid}" >"${ERROR_MARKER}"
   if [ "${rc}" -eq 0 ]; then
-    rm -f "${PENDING_JOIN}"
+    [ -n "${PENDING_UUIDS}" ] && retire_pending_join "${PENDING_UUIDS%%$'\n'*}"
   else
-    log "ERROR: ${USER_CON_NAME} may still be saved; ${PENDING_JOIN} kept"
+    log "ERROR: an unverified profile may still be saved; ${PENDING_JOIN} kept"
   fi
 }
 
@@ -551,10 +619,10 @@ should_start_portal() {
   local pending=0
   if join_pending; then
     pending=1
-    log "${USER_CON_NAME} was saved by the portal but its join was never verified → not counted as a stored profile"
+    log "${USER_CON_NAME} ${PENDING_UUIDS//$'\n'/ } was saved by the portal but its join was never verified → not counted as a stored profile"
   fi
 
-  local n; n="$(stored_wifi_profile_count "${pending}")"
+  local n; n="$(stored_wifi_profile_count "${PENDING_UUIDS:-}")"
   if [ "${n}" -gt 0 ]; then
     log "found ${n} stored WiFi profile(s) on /data → portal not needed (EC4: OTA-preserved profiles keep it down)"
     return 1
@@ -566,9 +634,10 @@ should_start_portal() {
     if have_connectivity; then
       log "connectivity detected after ${waited}s → portal not needed"
       if [ "${pending}" = 1 ]; then
-        if user_con_activated; then
-          log "${USER_CON_NAME} is up → join verified"
-          rm -f "${PENDING_JOIN}"
+        local up
+        if up="$(pending_activated)"; then
+          log "${USER_CON_NAME} (${up}) is up → join verified"
+          retire_pending_join "${up}"
         else
           log "connectivity is not through ${USER_CON_NAME}; it stays unverified (${PENDING_JOIN} kept)"
         fi
@@ -842,22 +911,28 @@ teardown_ap() {
 # written the <con> NM profile (credentials live only in NM storage). This worker
 # switches wlan0 from AP to client mode and joins, then teardown-on-success or
 # re-arm-on-failure.
-con_ssid() { "${NMCLI}" -g 802-11-wireless.ssid connection show "$1" 2>/dev/null; }
+con_ssid() { "${NMCLI}" -g 802-11-wireless.ssid connection show "$@" 2>/dev/null; }
 
 verify_joined() { have_connectivity; }
 
-bounded_connect() {
-  local con="$1"
+bounded_connect() { # connection id args: <name> or uuid <uuid>
   if [ -n "${TIMEOUT_BIN}" ] && command -v "${TIMEOUT_BIN}" >/dev/null 2>&1; then
-    "${TIMEOUT_BIN}" "${CONNECT_HARD_TIMEOUT}" "${NMCLI}" --wait "${CONNECT_WAIT}" connection up "${con}"
+    "${TIMEOUT_BIN}" "${CONNECT_HARD_TIMEOUT}" "${NMCLI}" --wait "${CONNECT_WAIT}" connection up "$@"
   else
-    "${NMCLI}" --wait "${CONNECT_WAIT}" connection up "${con}"
+    "${NMCLI}" --wait "${CONNECT_WAIT}" connection up "$@"
   fi
 }
 
 connect_target() {
-  local con="${1:?connect requires a connection name}"
-  local attempt_ssid; attempt_ssid="$(con_ssid "${con}")"
+  local con="${1:?connect requires a connection name}" uuid="${2:-}" found
+  # The portal passes the attempt's profile UUID. Without one, a single saved profile
+  # of that name stands in for it; otherwise nothing is retired by UUID.
+  if [ -z "${uuid}" ] && found="$(user_con_uuids "${con}")" && [ "$(grep -c . <<<"${found}")" = 1 ]; then
+    uuid="${found}"
+  fi
+  local -a target=("${con}")
+  [ -n "${uuid}" ] && target=(uuid "${uuid}")
+  local attempt_ssid; attempt_ssid="$(con_ssid "${target[@]}")"
   log "credential handoff: attempting to join '${attempt_ssid:-${con}}' (profile ${con})"
 
   # Let the browser receive the "connecting…" page before we drop the AP that is
@@ -873,9 +948,10 @@ connect_target() {
   stop_portal_socket
   down_setup_aps
 
-  if bounded_connect "${con}" && verify_joined; then
+  if bounded_connect "${target[@]}" && verify_joined; then
     log "joined target network (${con}) — finalising provisioning teardown"
-    rm -f "${ERROR_MARKER}" "${PENDING_JOIN}"
+    rm -f "${ERROR_MARKER}"
+    [ -n "${uuid}" ] && retire_pending_join "${uuid}"
     teardown_ap 1     # KEEP_LINK: wlan0 is carrying the new client connection
     exit $?
   fi
@@ -884,10 +960,12 @@ connect_target() {
   # profile (so it neither lingers nor suppresses a re-trigger), record the reason,
   # and re-arm the AP for a retry. Never leave the device headless-dead.
   log "join FAILED for '${attempt_ssid:-${con}}' — returning to AP mode for retry"
-  if "${NMCLI}" connection delete "${con}" >/dev/null 2>&1; then
-    rm -f "${PENDING_JOIN}"
+  if [ -z "${uuid}" ]; then
+    "${NMCLI}" connection delete "${con}" >/dev/null 2>&1 || true
+  elif "${NMCLI}" connection delete uuid "${uuid}" >/dev/null 2>&1; then
+    retire_pending_join "${uuid}"
   else
-    log "ERROR: could not delete profile ${con}; it stays unverified (${PENDING_JOIN} kept)"
+    log "ERROR: could not delete profile ${uuid}; it stays unverified (${PENDING_JOIN} kept)"
   fi
   mkdir -p "${STATE_DIR}"
   printf 'ssid=%s\nreason=auth_or_timeout\n' "${attempt_ssid}" >"${ERROR_MARKER}"
@@ -910,7 +988,7 @@ main() {
     shutdown) stop_ap 1;     exit 0 ;;
     stop)     stop_ap;       exit $? ;;
     teardown) teardown_ap 0; exit $? ;;
-    connect)  connect_target "${2:-}" ;;   # exits inside (success 0 / failure 1)
+    connect)  connect_target "${2:-}" "${3:-}" ;;   # exits inside (success 0 / failure 1)
     start)    ;;
     *)        die "unknown command: ${cmd} (use: start | stop | service-stop | shutdown | teardown | connect <con>)" ;;
   esac
