@@ -6,6 +6,12 @@
 # accepted request is visible without shutting anything down. Phase 2 (only with
 # --shutdown) restores the real targets and powers the container off once, then
 # starts it again and reads the previous boot's journal.
+#
+# With CERALIVE_OS_STAGE_GUARD=<path> (CeraUI's packaged
+# /usr/libexec/ceralive/ceralive-os-stage-guard, e.g. extracted from the
+# ceralive-device .deb), it also checks CeraUI's OS-stage lease: started the way
+# CeraUI starts it, it is let go once CeraUI is gone and RAUC has settled, both
+# by the broker and (with --shutdown) by the drain of a real shutdown.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 container="${CERALIVE_POWER_TEST_CONTAINER:?Set the disposable container name}"
@@ -323,6 +329,109 @@ unlock; reset
 echo "1..$pass"
 INNER
 
+if [[ -n "${CERALIVE_OS_STAGE_GUARD:-}" ]]; then
+put "$CERALIVE_OS_STAGE_GUARD" /usr/libexec/ceralive/ceralive-os-stage-guard 0755
+docker exec -i "$container" tee /usr/local/bin/power-test-stage-lease >/dev/null <<'SH'
+#!/bin/bash
+# CeraUI's OS-stage guard, started the way CeraUI's backend starts it: a private
+# token in /run/ceralive/os-stage, then flock on the update lock in a transient
+# unit. Prints the token once the guard has marked itself ready.
+set -euo pipefail
+systemctl stop ceralive-os-stage-guard.service 2>/dev/null || true
+systemctl reset-failed ceralive-os-stage-guard.service 2>/dev/null || true
+token="$(cat /proc/sys/kernel/random/uuid)"
+mkdir -p /run/ceralive; rm -rf /run/ceralive/os-stage
+mkdir -m 0700 /run/ceralive/os-stage
+(umask 077; printf '%s\n' "$token" > /run/ceralive/os-stage/token)
+systemd-run -q --unit=ceralive-os-stage-guard --description='CeraLive OS stage guard' \
+  --service-type=exec -p RemainAfterExit=yes -p StandardOutput=null -p StandardError=journal \
+  /usr/bin/flock -n -E 75 -x /run/lock/ceralive-update.lock /usr/libexec/ceralive/ceralive-os-stage-guard "$token"
+for _ in $(seq 1 50); do [ "$(cat /run/ceralive/os-stage/ready 2>/dev/null)" = "$token" ] && break; sleep 0.1; done
+[ "$(cat /run/ceralive/os-stage/ready)" = "$token" ]
+echo "$token"
+SH
+docker exec "$container" chmod 0755 /usr/local/bin/power-test-stage-lease
+docker exec -i "$container" bash -s <<'INNER'
+set -euo pipefail
+pass=0
+ok() { echo "ok $((pass+=1)) $1"; }
+fail() { echo "not ok $1: $2"; exit 1; }
+active() { systemctl show -p ActiveState --value "$1.target"; }
+guard() { local p; for p in ActiveState SubState Result ExecMainStatus; do
+  printf '%s ' "$(systemctl show -p "$p" --value ceralive-os-stage-guard.service)"; done; }
+reset() {
+  systemctl stop poweroff.target reboot.target 2>/dev/null || true
+  systemctl stop ceralive-power.service
+  rm -f /run/ceralive-power/state.json /run/ceralive-power/fence.d/*
+  systemctl reset-failed ceralive-power.service 2>/dev/null || true
+  systemctl start ceralive-power.service; sleep 0.5
+}
+button() { systemctl reset-failed ceralive-button.service 2>/dev/null || true
+  systemd-run -q --unit=ceralive-button -p StandardOutput=file:/run/power-test-out /usr/local/bin/power-test-request POWEROFF; }
+P() { busctl get-property de.pengutronix.rauc / de.pengutronix.rauc.Installer Operation; }
+
+reset
+token="$(power-test-stage-lease)"
+# What a stop or a crash cleanup sends the guard itself (flock keeps the lock
+# for it and is the unit's main process).
+pkill -TERM -f "^/bin/bash /usr/libexec/ceralive/ceralive-os-stage-guard $token\$"; sleep 2
+pgrep -f "^/bin/bash /usr/libexec/ceralive/ceralive-os-stage-guard $token\$" >/dev/null || fail "guard" "the packaged guard exited on SIGTERM"
+[[ "$(guard)" == "active running"* ]] || fail "guard" "the guard unit is not running: $(guard)"
+if flock -n -x /run/lock/ceralive-update.lock true; then fail "guard" "the update lock is free"; fi
+ok "the packaged guard holds the update lock and ignores SIGTERM: $(guard)"
+
+# A running CeraUI owns its lease: the request waits for it.
+systemctl reset-failed ceralive.service 2>/dev/null || true
+systemd-run -q --unit=ceralive sleep infinity
+button
+sleep 15
+grep -q "CeraUI's OS update stage" /run/ceralive-power/state.json || fail "live owner" "$(cat /run/ceralive-power/state.json)"
+[ ! -e /run/ceralive/os-stage/release ] && [ "$(active poweroff)" = inactive ] || fail "live owner" "released under a running CeraUI"
+ok "with CeraUI running its lease is left to it: $(cat /run/ceralive-power/state.json)"
+
+# CeraUI gone: the broker lets go of the lease with the token, the guard exits
+# cleanly and the request goes.
+stopped_at=$(date +%s)
+systemctl stop ceralive.service
+for _ in $(seq 1 30); do [ "$(active poweroff)" = active ] && break; sleep 1; done
+[ "$(active poweroff)" = active ] || fail "lease release" "not submitted: $(cat /run/ceralive-power/state.json)"
+took=$(( $(date +%s) - stopped_at ))
+[ "$(cat /run/ceralive/os-stage/release)" = "$token" ] || fail "lease release" "no release token"
+[[ "$(guard)" == "active exited success 0 " ]] || fail "lease release" "guard: $(guard)"
+logged=no
+for _ in $(seq 1 20); do  # journald takes the broker's line asynchronously
+  journalctl -u ceralive-power --no-pager -o cat | grep -q "OS-stage lease .* released with its token" && { logged=yes; break; }
+  sleep 0.5
+done
+[ "$logged" = yes ] || fail "lease release" "not logged"
+ok "with CeraUI stopped the broker writes the release token after RAUC settled; guard exited cleanly ($(guard)), submitted after ${took} s"
+
+# A RAUC install under the lease: kept until RAUC finished, then let go.
+reset
+systemctl stop ceralive-os-stage-guard.service 2>/dev/null || true
+systemctl reset-failed ceralive-os-stage-guard.service installer 2>/dev/null || true
+token="$(power-test-stage-lease)"
+systemd-run -q --unit=installer rauc install /var/tmp/test.raucb
+for _ in $(seq 1 20); do [ "$(P)" = 's "installing"' ] && break; sleep 0.5; done
+systemctl kill -s KILL installer
+button
+sleep 5
+[ ! -e /run/ceralive/os-stage/release ] && [ "$(active poweroff)" = inactive ] || fail "lease during install" "released while RAUC installs"
+for _ in $(seq 1 90); do [ "$(active poweroff)" = active ] && break; sleep 1; done
+[ "$(active poweroff)" = active ] || fail "lease during install" "not submitted: $(cat /run/ceralive-power/state.json)"
+done_at="$(journalctl -u rauc -o json --no-pager | python3 -c 'import json,sys
+t=[int(e["__MONOTONIC_TIMESTAMP"]) for e in map(json.loads, sys.stdin) if "succeeded" in str(e.get("MESSAGE",""))]
+print(t[-1] if t else 0)')"
+target_at="$(systemctl show -p ActiveEnterTimestampMonotonic --value poweroff.target)"
+[ "$done_at" -gt 0 ] && [ $(( target_at - done_at )) -ge 5000000 ] || fail "lease during install" "install done $done_at, target $target_at"
+ok "a RAUC install under the lease is waited for; the lease goes after RAUC settled (target $(( (target_at - done_at) / 1000000 )) s after the install)"
+systemctl stop poweroff.target 2>/dev/null || true
+systemctl stop ceralive-os-stage-guard.service 2>/dev/null || true
+reset
+echo "1..$pass (OS-stage lease)"
+INNER
+fi
+
 shutdown_round() { # $1 label, $2 "short" to add a 10 s forced target deadline (negative control)
   docker exec -i "$container" bash -s "$2" <<'INNER'
 set -euo pipefail
@@ -336,6 +445,10 @@ systemctl daemon-reload
 systemctl enable --now ceralive-write-drain.service >/dev/null 2>&1
 systemctl show -p JobTimeoutUSec --value poweroff.target > /var/tmp/power-test-jobtimeout
 systemctl reset-failed installer 2>/dev/null || true
+if [ "$1" = lease ]; then
+  # CeraUI's lease held over the install, CeraUI itself already gone.
+  power-test-stage-lease > /var/tmp/power-test-token
+fi
 systemd-run -q --unit=installer rauc install /var/tmp/test.raucb
 for i in $(seq 1 20); do busctl get-property de.pengutronix.rauc / de.pengutronix.rauc.Installer Operation | grep -q installing && break; sleep 0.5; done
 systemctl kill -s KILL installer
@@ -355,8 +468,9 @@ INNER
   # A container shares the host's boot ID, so select the shutdown by time.
   since="$(docker exec "$container" cat /var/tmp/power-test-shutdown-requested)"
   echo "# $1: poweroff.target JobTimeoutUSec=$(docker exec "$container" cat /var/tmp/power-test-jobtimeout), container stopped after $stopped s"
-  docker exec "$container" bash -c "journalctl --since=@$since -o short-precise --no-pager | grep -E 'Shutdown waits|All writes finished|Installation .* (succeeded|failed)|Stopped rauc|timed out|Reached target.*Power'" > /dev/stderr || true
+  docker exec "$container" bash -c "journalctl --since=@$since -o short-precise --no-pager | grep -E 'Shutdown waits|All writes finished|OS-stage lease|Installation .* (succeeded|failed)|Stopped rauc|timed out|Reached target.*Power'" > /dev/stderr || true
   order="$(docker exec "$container" bash -c "journalctl --since=@$since -o cat --no-pager | grep -E 'Shutdown waits|Installation .* succeeded|Stopped rauc' | head -3 | tr '\n' '|'")"
+  lease="$(docker exec "$container" bash -c "journalctl --since=@$since -o cat --no-pager | grep -E 'Installation .* succeeded|OS-stage lease|Stopped rauc' | head -3 | tr '\n' '|'")"
 }
 
 if [[ "${1:-}" == --shutdown ]]; then
@@ -373,4 +487,13 @@ if [[ "${1:-}" == --shutdown ]]; then
   [[ "$(docker exec "$container" cat /var/tmp/power-test-jobtimeout)" == infinity ]] || { echo "not ok target deadline"; exit 1; }
   [[ "$order" == Shutdown\ waits*Installation*succeeded*Stopped*rauc* ]] || { echo "not ok shutdown order: $order"; exit 1; }
   echo "ok shutdown waited for the detached RAUC install before stopping rauc.service: $order"
+  if [[ -n "${CERALIVE_OS_STAGE_GUARD:-}" ]]; then
+    # The same shutdown with CeraUI's lease held and CeraUI gone: the drain
+    # waits for the install, then lets go of the lease instead of waiting on it.
+    shutdown_round lease lease
+    [[ "$order" == Shutdown\ waits*Installation*succeeded* ]] || { echo "not ok lease shutdown order: $order"; exit 1; }
+    [[ "$lease" == Installation*succeeded*OS-stage\ lease*released\ with\ its\ token*Stopped*rauc* ]] || { echo "not ok lease shutdown: $lease"; exit 1; }
+    (( stopped < 90 )) || { echo "not ok lease shutdown took $stopped s"; exit 1; }
+    echo "ok a shutdown with CeraUI's lease held and CeraUI gone waits for the install, then lets go of the lease (${stopped} s): $lease"
+  fi
 fi
