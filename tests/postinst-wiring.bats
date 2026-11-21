@@ -271,6 +271,44 @@ os_release_version_writer() {
 }
 
 # ===========================================================================
+# 18c. System locale — Debian's tmpfiles.d/debian.conf links /etc/default/locale
+#      to ../locale.conf on every boot. Image 4 shipped no /etc/locale.conf, so
+#      the link dangled and pam_env warned on every SSH session. The runtime
+#      layer now writes the file itself (LOCALE_CONF points it at a temp path).
+# ===========================================================================
+
+@test "locale: pin_system_locale writes a world-readable C.UTF-8 locale.conf" {
+  local conf="$BATS_TEST_TMPDIR/etc/locale.conf"
+  run env LOCALE_CONF="$conf" bash -c "source '$POSTINST_ENTRY'; pin_system_locale"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$conf")" = "LANG=C.UTF-8" ]
+  [ "$(stat -c %a "$conf")" = "644" ]
+  [ ! -e "$conf.tmp" ]
+}
+
+@test "locale: pin_system_locale replaces a stale locale.conf instead of appending" {
+  local conf="$BATS_TEST_TMPDIR/stale/locale.conf"
+  mkdir -p "${conf%/*}"
+  printf 'LANG=en_US.UTF-8\nLC_ALL=de_DE.UTF-8\n' >"$conf"
+  run env LOCALE_CONF="$conf" bash -c "source '$POSTINST_ENTRY'; pin_system_locale"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$conf")" = "LANG=C.UTF-8" ]
+}
+
+@test "locale: an unwritable target fails the build" {
+  local dir="$BATS_TEST_TMPDIR/ro"
+  mkdir -p "$dir" && chmod 0555 "$dir"
+  [ "$(id -u)" -ne 0 ] || skip "root can write a 0555 directory"
+  run env LOCALE_CONF="$dir/locale.conf" bash -c "source '$POSTINST_ENTRY'; pin_system_locale"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot write $dir/locale.conf"* ]]
+}
+
+@test "locale: image contract wires pin_system_locale into the runtime executor" {
+  grep -Eq '^[[:space:]]+pin_system_locale([[:space:]]|$)' "$REPO_ROOT/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+}
+
+# ===========================================================================
 # 18c. ceralive.service -> cerastream.service boot ordering — ceralive.service's
 #      initPipelines() connects to cerastream's control socket exactly once, so a
 #      cerastream that starts LATE (confirmed live: ~2 min after ceralive.service)

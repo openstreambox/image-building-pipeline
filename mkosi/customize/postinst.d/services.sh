@@ -11,7 +11,7 @@
 #                              that drives the hardware and SSH policy modules
 #   * suppress_unusable_boot_units
 #                              the seven stock units this image cannot use
-#   * configure_ntp, setup_boot_healthcheck,
+#   * configure_ntp, setup_boot_healthcheck, pin_system_locale,
 #     setup_avahi_restart, setup_cerastream_ordering, setup_rtmp_gateway
 #
 # NOT to be confused with customize/services.sh one directory up: that is a
@@ -169,6 +169,23 @@ configure_services() {
   setup_slot_sync
   setup_boot_script_sync
   setup_dpkg_recovery
+}
+
+# ---------------------------------------------------------------------------
+# The appliance speaks only C.UTF-8 (base/mkosi.conf, Task 19). base's Locale=
+# was meant to write /etc/locale.conf, but the shipped image had none, while
+# Debian's tmpfiles.d/debian.conf still links /etc/default/locale to it on every
+# boot. pam_env then warned "Unable to open env file: /etc/default/locale" for
+# each SSH session, and shells got no LANG. Write the file here so it no longer
+# depends on how the layers carry first-boot settings. LOCALE_CONF overrides the
+# path for the offline test.
+# ---------------------------------------------------------------------------
+pin_system_locale() {
+  local conf="${LOCALE_CONF:-/etc/locale.conf}"
+  log "pinning the system locale to C.UTF-8 (${conf})"
+  mkdir -p "$(dirname "${conf}")"
+  printf 'LANG=C.UTF-8\n' >"${conf}.tmp" && chmod 0644 "${conf}.tmp" && mv -f "${conf}.tmp" "${conf}" \
+    || die "cannot write ${conf}"
 }
 
 # Unlike the on-demand slot mirror, recovery must run before the app at boot.
