@@ -970,6 +970,7 @@ main() {
   apply_board_quirks           # board-manifest-gated quirk rows, APPENDED to the rules file setup_hardware_access just truncated (CERALIVE_BOARD_QUIRKS)
   apply_streaming_optimizations
   configure_networking
+  setup_nm_share_helper_shims  # NM's shared-mode probes for NAT helpers this kernel lacks: no-op, not <error>
   configure_services
   pin_system_locale            # /etc/locale.conf = C.UTF-8; Debian links /etc/default/locale to it at boot
   setup_hostname_service

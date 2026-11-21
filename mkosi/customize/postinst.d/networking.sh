@@ -6,6 +6,8 @@
 # about how the board reaches, and is reached over, a network —
 #
 #   * configure_networking      NetworkManager + mDNS + the resolved stub symlink
+#   * setup_nm_share_helper_shims  no-op modprobe entries for the NAT helpers NM
+#                               probes in shared mode and this kernel lacks
 #   * install_interface_naming  the eth0/eth1/wlan0 .link units SRTLA bonding globs
 #     (+ link_path_match)       depend on, and the loose rp_filter multi-WAN needs
 #   * setup_provisioning        the first-boot WiFi AP + captive portal, i.e. how a
@@ -40,6 +42,19 @@ if ! declare -F die >/dev/null 2>&1; then
 fi
 
 # --- 8. Networking (verbatim from postinst section 8) ---------------------
+# NetworkManager probes six NAT protocol helpers on every shared-mode activation
+# (hotspot, shared-LAN port); this kernel builds none of them, so each probe logged
+# an <error>. The committed modprobe.d fragment makes those lookups no-ops.
+# CERALIVE_MODPROBE_DIR overrides the target directory for the offline test.
+setup_nm_share_helper_shims() {
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-nm-share-helpers.modprobe.conf" ]] \
+    || die "nm share helper shim not found: ${src}/ceralive-nm-share-helpers.modprobe.conf (is \$SRCDIR/runtime mounted?)"
+  local dir="${CERALIVE_MODPROBE_DIR:-/etc/modprobe.d}"
+  log "silencing NetworkManager's probes for NAT helpers this kernel does not build (${dir})"
+  install -D -m 0644 "${src}/ceralive-nm-share-helpers.modprobe.conf" "${dir}/ceralive-nm-share-helpers.conf"
+}
+
 configure_networking() {
   log "configuring networking (NetworkManager + mDNS)"
   echo "ceralive" >/etc/hostname
