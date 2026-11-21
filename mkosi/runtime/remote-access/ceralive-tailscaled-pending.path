@@ -1,0 +1,17 @@
+[Unit]
+Description=Start tailscaled for a pending enrollment key while remote access is on
+# The enrollment script never starts or stops tailscaled; switching it on and
+# off is the owner's (CeraUI's Remote access On/Off: enable --now, then down +
+# disable --now). A key that arrives while the box runs (from the card, or from
+# BOOT after tailscaled's own start conditions were checked at boot) still needs
+# a daemon, so this path starts it. It is in tailscaled.service's Also=, so the
+# owner's disable disables it too, and PartOf= stops it with tailscaled: once
+# remote access is switched off, a pending key starts nothing.
+PartOf=tailscaled.service
+
+[Path]
+PathExists=/data/tailscale-enroll/pending-authkey
+Unit=tailscaled.service
+
+[Install]
+WantedBy=paths.target
