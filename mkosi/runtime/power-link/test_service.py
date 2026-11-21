@@ -435,6 +435,14 @@ class ServiceTest(unittest.TestCase):
                 self.assertTrue(state['semantics']['power_healthy'])
                 self.assertTrue(state['expected'])
                 self.assertEqual((root / 'supervisor.json').stat().st_mode & 0o777, 0o644)
+                self.assertEqual(state['semantics']['protection'], 'no_reported_gaps')
+                for seq, mask in enumerate(('0004', '0008', '000c', '0000'), start=1):
+                    with self.subTest(gaps2=mask):
+                        os.write(master, frame(seq, f" power=ok gaps2={mask}"))
+                        state = wait_for(lambda s: s['link'] == 'ok' and s['fields'].get('gaps2') == mask)
+                        self.assertEqual(state['fields']['gaps'], '0000')
+                        protection = 'no_reported_gaps' if mask == '0000' else 'reduced'
+                        self.assertEqual(state['semantics']['protection'], protection)
                 os.write(master, b'OSB1 truncated')
                 stale = wait_for(lambda s: s['stale'], timeout=7)
                 self.assertFalse(stale['semantics']['power_healthy'])

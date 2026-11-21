@@ -266,8 +266,17 @@ protection assurance. Hex flags are bit sets, not decimal counters.
   unknown. Any set bit, including an unknown one, means reduced protection.
   Combined bits 0..17: unarmed, pack_uncal, pack_est, pack_probe, a_probe,
   b_probe, blind, no_alive, shdn, nvs, wdt, skip, loop, blind_start,
-  pack_flaky, sink, supply_unproven, pack_jump. Each set bit denotes missing
-  or weaker protection; zero is not a qualification claim.
+  pack_flaky, sink, supply_unproven, pack_jump.
+  Bit 18 is `a_rest_lost` (`gaps2` mask `0004`), and bit 19 is
+  `b_rest_lost` (`gaps2` mask `0008`). Each means the corresponding bank
+  is unavailable as a reserve after entering or attempting a 5 V rest.
+  The bit is set when the armed supervisor detects that the bank has gone
+  away during stand-down or rest, when a bank at rest stops answering, or
+  when recovery from stand-down times out without a reported 20 V contract.
+  It remains set through absence, replugging and a return to 5 V. It clears
+  when the bank returns at 20 V and is classified as `healthy` or `sagging`.
+  Each set bit denotes missing or weaker protection; zero is not a
+  qualification claim.
 
 The board firmware monitors electrical/thermal limits and controls its own
 protective actions independently of the host reader. This table defines the
