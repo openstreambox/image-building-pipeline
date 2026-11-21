@@ -422,21 +422,27 @@ keep_ceraui_build_stamps() {
 # healthy backend about every 90 s. A unit that already sets 90 s or more must
 # not be shortened either.
 #
-# FAIL CLOSED: the drop-in stays only for the plain form CeraUI ships, exactly
-# one `WatchdogSec=<N>`, `<N>s`, `<N>sec` or `<N>min` line in [Service], N > 0,
-# under 90 s, in a unit with no continuation lines. Anything else (another
-# duration syntax, a second assignment, a backslash continuation anywhere, no
-# unit at all) removes the drop-in, which only gives up the wider margin. Only
-# the packaged unit is read; no image drop-in other than this one sets
-# WatchdogSec (tests/ceralive-watchdog-margin.bats).
+# FAIL CLOSED: the drop-in stays only for the plain layout CeraUI ships. The
+# unit must be printable ASCII with tabs and LF line ends only (no CR, NUL or
+# BOM, which systemd also treats as line breaks or strips), with no indented
+# line and no line ending in a backslash. It must then hold exactly one
+# WatchdogSec assignment in the whole file, in a `[Service]` section, written
+# `WatchdogSec=<N>`, `<N>s`, `<N>sec` or `<N>min` with N > 0 and below 90 s.
+# Anything else (no unit at all included) removes the drop-in, which only gives
+# up the wider margin. Only the packaged unit is read; no image drop-in other
+# than this one sets WatchdogSec (tests/ceralive-watchdog-margin.bats).
 # ---------------------------------------------------------------------------
 CERALIVE_WATCHDOG_MARGIN_DROPIN="etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf"
 CERALIVE_WATCHDOG_MARGIN_SEC=90
 packaged_watchdog_needs_margin() { # <unit file>
-  awk -v margin="${CERALIVE_WATCHDOG_MARGIN_SEC}" '
+  local stray
+  stray="$(LC_ALL=C tr -d '\t\n\040-\176' <"$1" | wc -c)" || return 1
+  [[ "${stray}" -eq 0 ]] || return 1
+  LC_ALL=C awk -v margin="${CERALIVE_WATCHDOG_MARGIN_SEC}" '
     /\\[[:space:]]*$/ { ambiguous = 1 }
-    /^[[:space:]]*\[/ { in_service = ($0 ~ /^\[Service\][[:space:]]*$/); next }
-    in_service && /^[[:space:]]*WatchdogSec([[:space:]]|=|$)/ { n++; line = $0 }
+    /^[[:space:]]+[^[:space:]]/ { ambiguous = 1 }
+    /^\[/ { in_service = ($0 == "[Service]"); next }
+    /^WatchdogSec([[:space:]]|=|$)/ { n++; line = $0; if (!in_service) ambiguous = 1 }
     END {
       if (ambiguous || n != 1 || line !~ /^WatchdogSec=[1-9][0-9]*(s|sec|min)?$/) exit 1
       v = line; sub(/^WatchdogSec=/, "", v)

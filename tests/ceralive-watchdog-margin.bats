@@ -211,6 +211,40 @@ GATE_REMOVES=(
   [ ! -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ]
 }
 
+@test "watchdog gate: byte-level and layout shapes that systemd reads differently remove the drop-in" {
+  local root i=0
+  gate_removes() { # stdin: unit
+    root="$BATS_TEST_TMPDIR/shape-$((i++))"
+    gate_tree "$root"
+    run_gate "$root"
+    [ "$status" -eq 0 ]
+    [ ! -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ]
+  }
+  # An indented header still opens [Service] for systemd: a second section
+  # that disables or lengthens the watchdog.
+  printf '%s\n  [Service]\nWatchdogSec=0\n' "$PACKAGED_WITH_WATCHDOG" | gate_removes
+  printf '%s\n  [Service]\nWatchdogSec=120s\n' "$PACKAGED_WITH_WATCHDOG" | gate_removes
+  printf '%s\n\t[Service]\nWatchdogSec=0\n' "$PACKAGED_WITH_WATCHDOG" | gate_removes
+  # And an indented header closes [Service]: the assignment after it is not a
+  # service setting, so the packaged unit has no watchdog at all.
+  printf '%s\n' "$PACKAGED_WITHOUT_WATCHDOG" | sed 's/^Restart=always$/Restart=always\n  [Unit]\nWatchdogSec=30s/' | gate_removes
+  # Bare CR and NUL end a line for systemd, so the assignment after them counts.
+  printf '%s\n# note\rWatchdogSec=0\n' "$PACKAGED_WITH_WATCHDOG" | gate_removes
+  printf '%s\n# note\0WatchdogSec=0\n' "$PACKAGED_WITH_WATCHDOG" | gate_removes
+  # A BOM before a header is stripped by systemd; reject it outright.
+  printf '%s\n\xef\xbb\xbf[Unit]\nWatchdogSec=30s\n' "$PACKAGED_WITHOUT_WATCHDOG" | gate_removes
+  printf '\xef\xbb\xbf%s\n' "$PACKAGED_WITH_WATCHDOG" | gate_removes
+  # CRLF throughout, an indented key, a key under a header with trailing text.
+  printf '%s\n' "$PACKAGED_WITH_WATCHDOG" | sed 's/$/\r/' | gate_removes
+  printf '%s\n' "$PACKAGED_WITH_WATCHDOG" | sed 's/^WatchdogSec=30s$/  WatchdogSec=30s/' | gate_removes
+  printf '%s\n' "$PACKAGED_WITH_WATCHDOG" | sed 's/^\[Service\]$/[Service] /' | gate_removes
+  # The plain unit itself still keeps it (the shapes above differ only as stated).
+  root="$BATS_TEST_TMPDIR/shape-plain"
+  printf '%s\n' "$PACKAGED_WITH_WATCHDOG" | gate_tree "$root"
+  run_gate "$root"
+  [ -e "$root/etc/systemd/system/ceralive.service.d/60-watchdog-margin.conf" ]
+}
+
 @test "watchdog gate: the app layer runs the gate after the first-party install, on every build" {
   local body
   body="$(sed -n '/^main() {/,/^}/p' "$APP_POSTINST")"
