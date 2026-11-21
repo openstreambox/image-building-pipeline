@@ -1,6 +1,13 @@
 [Unit]
 Description=CeraLive Rock USB-C back-power recheck
 ConditionFirmware=device-tree-compatible(radxa,rock-5b-plus)
+# The timer's first tick (OnBootSec=8s) lands when the boot run of the policy
+# usually starts. Both take the same Rock lock, and a recheck that wins it may
+# spend the whole settle deadline on a blind port_type cycle while the boot run,
+# ordered Before=cerastream/ceralive, waits behind it and holds both back.
+# Ordering only: a pending boot run finishes first (it never cycles without a
+# partner), and once it is done this edge has no effect on later ticks.
+After=ceralive-typec-policy.service
 
 [Service]
 Type=oneshot
