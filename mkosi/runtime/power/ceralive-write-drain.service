@@ -5,7 +5,14 @@ Description=Hold shutdown until running system writes finish
 # idle, and with networking still up for a streamed RAUC install. Any shutdown
 # path gets this, including logind's own power-key handling.
 After=rauc.service ceralive-software-update.service ceralive-os-stage-guard.service ceralive-slot-sync.service
-After=ceralive-boot-script-sync.service ceralive-rauc-activate.service
+After=ceralive-rauc-activate.service
+# Nothing slow at boot: a shutdown queued while this unit's start job still
+# waits cancels it, and then no ExecStop runs. The boot-only oneshots
+# (ceralive-dpkg-recover, the health check, mark-good, ceralive-boot-script-sync)
+# have finished before any unit ordered after them starts, so ordering against
+# them protects nothing. While they run, the broker's update and dpkg locks and
+# its writer check cover deliberate power-offs, and their own writes are
+# journaled (dpkg) or atomic (boot.scr sync).
 # Per-attempt units order themselves: ceralive-rauc-arm@.service and CeraUI's
 # ceralive-kernel-stage-<id>.service carry Before=ceralive-write-drain.service.
 # NetworkManager and ModemManager stop after the drain, so a streamed RAUC
