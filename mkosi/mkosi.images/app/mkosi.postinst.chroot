@@ -138,7 +138,15 @@ install_first_party_apps() {
   log "installing ${#debs[@]} first-party .deb(s) from local staging (no downloads; deps must be staged or in runtime)"
   if ! dpkg -i "${debs[@]}"; then
     log "dpkg left unresolved dependencies; resolving from already-available packages only"
-    apt-get install -y --no-install-recommends --no-download -f
+    if [[ -n "${CERALIVE_DEBIAN_SNAPSHOT:-}" ]]; then
+      (
+        source "${SRCDIR:?}/runtime/build-apt-cache.sh"
+        runtime_snapshot_apt_scope
+        apt-get install -y --no-install-recommends --no-download -f
+      )
+    else
+      apt-get install -y --no-install-recommends --no-download -f
+    fi
   fi
   apt-get check
 

@@ -10,7 +10,7 @@ class LockError(Exception):
     pass
 
 
-def installed_packages(status: pathlib.Path) -> list[dict[str, str]]:
+def installed_packages(status: pathlib.Path, include_source: bool = False) -> list[dict]:
     packages = []
     for paragraph in status.read_text().split("\n\n"):
         fields = {}
@@ -19,13 +19,18 @@ def installed_packages(status: pathlib.Path) -> list[dict[str, str]]:
                 name, value = line.split(": ", 1)
                 fields[name] = value
         if fields.get("Status", "").endswith(" ok installed"):
-            packages.append(
-                {
-                    "name": fields["Package"],
-                    "version": fields["Version"],
-                    "arch": fields["Architecture"],
-                }
-            )
+            identity = {"name": fields["Package"], "version": fields["Version"],
+                        "arch": fields["Architecture"]}
+            if include_source:
+                # Debian binary control defaults Source to the binary name and
+                # its version unless an explicit source version is present.
+                source = fields.get("Source", identity["name"])
+                match = re.fullmatch(r"([^\s]+)(?: \(([^\s]+)\))?", source)
+                if not match:
+                    raise LockError(f"invalid Source field for {identity['name']}: {source}")
+                identity["debian_source"] = {"name": match[1],
+                                             "version": match[2] or identity["version"]}
+            packages.append(identity)
     if not packages:
         raise LockError(f"no installed packages in {status}")
     return packages
@@ -68,8 +73,11 @@ def merge(
     if not epoch.isdecimal():
         raise LockError("invalid SOURCE_DATE_EPOCH")
 
+    marker = root / "usr/lib/ceralive/build-lock/debian-snapshot.json"
+    snapshot = json.loads(marker.read_text()) if marker.is_file() else None
     packages = []
-    for identity in installed_packages(root / "var/lib/dpkg/status"):
+    for identity in installed_packages(root / "var/lib/dpkg/status", bool(snapshot)):
+        source = identity.pop("debian_source", None)
         key = (identity["name"], identity["version"], identity["arch"])
         receipt = receipts.get(key)
         if identity["name"].startswith("linux-image-") and receipt:
@@ -129,12 +137,17 @@ def merge(
             if receipt is None:
                 raise LockError(f"unaccounted installed package {key}: no apt/fetch/generated SHA-256 receipt")
             packages.append(receipt)
+        if source:
+            packages[-1] = {**packages[-1], "debian_source": source}
+
+    snapshot_metadata = {"debian_snapshot": snapshot} if snapshot else {}
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temp = output.with_name(output.name + ".tmp")
     temp.write_text(
         json.dumps(
             {
+                **snapshot_metadata,
                 "debian_release_dates": dates,
                 "built_at": built_at,
                 "source_date_epoch": int(epoch),

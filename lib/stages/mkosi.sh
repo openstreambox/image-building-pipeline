@@ -89,11 +89,21 @@ stage_dry_run_plan() {
       firstparty_dir_plan="/run/ceralive-firstparty"
       workspace_dir_plan="/work/${CERALIVE_REL_MKOSI_WORKSPACE_DIR}"
     fi
-    log_info "[5/9] DRY_RUN=1 (${BUILD_MODE}) — would build with: mkosi --architecture=${mkosi_arch} --release=${RELEASE} --with-network=yes --workspace-directory=${workspace_dir_plan} --cache-directory=cache/${board}/$(ceralive_mkosi_cache_domain) --package-directory ${package_dir_plan} --extra-tree ${firstparty_dir_plan}:/opt/ceralive-staging --force build"
+    local cache_plan snapshot_plan=""
+    cache_plan="cache/${board}/$(ceralive_mkosi_cache_domain)"
+    if [[ -n "${CERALIVE_DEBIAN_SNAPSHOT:-}" ]]; then
+      cache_plan="cache/${BOARD_ID}/$(ceralive_mkosi_cache_domain)/snapshot-${CERALIVE_DEBIAN_SNAPSHOT}"
+      snapshot_plan=" --snapshot=${CERALIVE_DEBIAN_SNAPSHOT}"
+    fi
+    log_info "[5/9] DRY_RUN=1 (${BUILD_MODE}) — would build with: mkosi --architecture=${mkosi_arch} --release=${RELEASE} --with-network=yes --workspace-directory=${workspace_dir_plan} --cache-directory=${cache_plan}${snapshot_plan} --package-directory ${package_dir_plan} --extra-tree ${firstparty_dir_plan}:/opt/ceralive-staging --force build"
     local -a proxy_plan_args=()
     mapfile -t proxy_plan_args < <(container_build_proxy_args)
     if [[ "${BUILD_MODE}" != native && ${#proxy_plan_args[@]} -gt 0 ]]; then
-      log_info "[5/9] DRY_RUN builder apt cache: ${proxy_plan_args[*]}; runtime Debian uses temporary HTTPS/// remap via CERALIVE_BUILD_APT_PROXY=$(apt_proxy_container_url)"
+      if [[ -n "${snapshot_plan}" ]]; then
+        log_info "[5/9] DRY_RUN builder apt cache: ${proxy_plan_args[*]}; runtime Debian uses the dated archive directly"
+      else
+        log_info "[5/9] DRY_RUN builder apt cache: ${proxy_plan_args[*]}; runtime Debian uses temporary HTTPS/// remap via CERALIVE_BUILD_APT_PROXY=$(apt_proxy_container_url)"
+      fi
     fi
     log_success "=== DRY-RUN complete: board='${board}' (${mkosi_arch}) resolved → ${BUILD_MODE} builder plan emitted; no network/hardware touched ==="
     exit 0
@@ -291,6 +301,9 @@ mkosi_invoke() {
       || die "native build (--native/MKOSI_NATIVE=1) requested but 'mkosi' is not on PATH — install mkosi ${MKOSI_VERSION_PIN} (needs Python ${MKOSI_PYTHON_FLOOR}+), or drop --native to use the container builder"
     [[ -f /usr/share/keyrings/debian-archive-keyring.gpg ]] \
       || log_warn "native build: /usr/share/keyrings/debian-archive-keyring.gpg absent — mkosi may fail to verify the Debian repos (install debian-archive-keyring)"
+    if [[ -n "${CERALIVE_DEBIAN_SNAPSHOT:-}" && "$(mkosi --version)" != "mkosi ${MKOSI_VERSION_PIN}" ]]; then
+      die "snapshot image builds require mkosi ${MKOSI_VERSION_PIN}"
+    fi
     assert_cache_privilege_domain "${MKOSI_DIR}/${cache_dir}" "$(id -u)"
     if [[ -n "${APT_GPG_PUBLIC_B64}" ]]; then
       APT_GPG_PUBLIC_B64="$("${DEARMOR_APT_KEYRING_SH}")" \
@@ -357,8 +370,16 @@ mkosi_invoke() {
         export CERALIVE_BUILD_APT_PROXY
         echo "mkosi: nested runtime Debian cache at ${CERALIVE_BUILD_APT_PROXY} (build-only)"
       fi
+      snapshot_args=()
+      if [[ -n "${CERALIVE_DEBIAN_SNAPSHOT:-}" ]]; then
+        [[ "$(mkosi --version)" == "mkosi '"${MKOSI_VERSION_PIN}"'" ]] || {
+          echo "FATAL: snapshot image builds require the pinned mkosi version" >&2
+          exit 1
+        }
+        snapshot_args=(--snapshot="${CERALIVE_DEBIAN_SNAPSHOT}")
+      fi
       cd /work/mkosi
-      mkosi \
+      mkosi "${snapshot_args[@]}" \
         --architecture='"${mkosi_arch}"' \
         --release='"${RELEASE}"' \
         --with-network=yes \

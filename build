@@ -86,6 +86,9 @@ on rk3588 is the PRODUCTION mainline source-built 'edge' track, resolved
 byte-identically to naming it. It is SINGLE-BOARD ONLY and is never inferred: a
 named variant build is always something an operator asked for by name.
 
+Set CERALIVE_DEBIAN_SNAPSHOT=YYYYMMDDTHHMMSSZ to pin Debian archive packages
+during rootfs assembly and emit a CycloneDX SBOM. The default is unset.
+
 Declared variants per family (see docs/kernel-tracks.md):
 $(list_declared_variants)
 EOF

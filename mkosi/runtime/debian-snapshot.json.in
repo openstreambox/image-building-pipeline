@@ -1,0 +1,13 @@
+{
+  "timestamp": "@TIMESTAMP@",
+  "scope": "Debian archive packages resolved during target rootfs assembly",
+  "exclusions": [
+    "RAUC Debian packaging source fetched from its live archive",
+    "RAUC compilation builder APT dependencies",
+    "mkosi builder image APT tools",
+    "Bundle-time live APT in the mkosi builder for squashfs-tools and native RAUC dependencies",
+    "Host disk-assembly tools and live e2fsprogs installs in fallback slot and x86 disk assembly",
+    "Independently staged vendor and first-party packages",
+    "Independently pinned kernel builder inputs"
+  ]
+}
