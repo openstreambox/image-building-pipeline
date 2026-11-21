@@ -38,8 +38,10 @@
 #    the box (e.g. it waited for approval past the timeout, or the box lost
 #    power): that is finished as a join. A login that predates the key makes
 #    the enrollment give up. Without an answer from tailscaled the keyed `up`
-#    does not run. ssh-off-node holds the node key of the login whose SSH this
-#    enrollment turned off; a join that keeps SSH on removes it.
+#    does not run, nor when the record cannot be synced. ssh-off-node holds the
+#    stable node ID of the login whose SSH this enrollment turned off; a join
+#    that keeps SSH on removes it. A join's result is synced before its key is
+#    consumed.
 # 3. Failures are bounded. A final control-plane answer (invalid, expired,
 #    revoked or already used key) ends enrollment at once. Other failures (no
 #    network yet) back off from 2 to 30 minutes and give up after MAX_ATTEMPTS.
@@ -101,13 +103,14 @@ backend_state() { # prints tailscaled's BackendState (empty if it does not answe
 }
 
 put_synced() { # path content tmp-prefix: tmp file in ENROLL, fsync, rename, fsync the directory
+  # Every step is checked: callers run under `||`, where errexit does not apply.
   local tmp
-  tmp="$(mktemp "${ENROLL}/$3.XXXXXX")"
-  printf '%s\n' "$2" >"$tmp"
-  chmod 0644 "$tmp"
-  sync "$tmp"
-  mv -f -- "$tmp" "$1"
-  sync "${ENROLL}"
+  tmp="$(mktemp "${ENROLL}/$3.XXXXXX")" || return 1
+  if ! { printf '%s\n' "$2" >"$tmp" && chmod 0644 "$tmp" && sync "$tmp" && mv -f -- "$tmp" "$1"; }; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  sync "${ENROLL}" || return 1
 }
 
 # The login record of the current pending key: "yes" or "no", empty when there
@@ -304,7 +307,7 @@ pin_auto_update_off() {
     if out="$("${CLI}" --socket="${SOCKET}" set --ssh=false --accept-risk=lose-ssh \
           --auto-update=false --update-check=false 2>&1)"; then
       log "this tailnet does not allow Tailscale SSH: turned SSH off on this box so its settings can change; auto-update pinned off" >&2
-      record_ssh_off
+      record_ssh_off || true
       echo ok-without-tailnet-ssh
       return 0
     fi
@@ -314,12 +317,19 @@ pin_auto_update_off() {
   echo ok-auto-update-not-pinned
 }
 
-record_ssh_off() { # remember which login had its SSH turned off (for CeraUI's card)
-  backend_state >/dev/null
-  local node
-  node="$(grep -o '"PublicKey": *"nodekey:[0-9a-f]*"' <<<"$STATUS_JSON" | head -n1 | grep -o 'nodekey:[0-9a-f]*')" || true
-  [[ -n "$node" ]] && put_synced "${SSH_OFF}" "$node" .sshoff
-  return 0
+record_ssh_off() { # remember which node had its SSH turned off (for CeraUI's card)
+  # The stable node ID (Self.ID) survives a node key rotation; a new login gets a new one.
+  local node="" i
+  for ((i = 0; i < 3; i++)); do
+    backend_state >/dev/null
+    node="$(grep -o '"ID": *"[A-Za-z0-9]*"' <<<"$STATUS_JSON" | head -n1 | grep -o '"[A-Za-z0-9]*"$' | tr -d '"')" || true
+    [[ -n "$node" ]] && break
+    sleep 1
+  done
+  if [[ -z "$node" ]] || ! put_synced "${SSH_OFF}" "$node" .sshoff; then
+    log "could not record which login had Tailscale SSH turned off; the Remote access card will not show its note" >&2
+    return 1
+  fi
 }
 
 finish_join() { # name [refused-ssh]: the second argument says tailscaled refused --ssh here
@@ -330,12 +340,15 @@ finish_join() { # name [refused-ssh]: the second argument says tailscaled refuse
   if [[ -n "${2:-}" && "$reason" == ok ]]; then
     # The plain pin went through, so SSH was already off (an earlier run of
     # this join turned it off before it could record the result).
-    record_ssh_off
+    record_ssh_off || true
     reason=ok-without-tailnet-ssh
   fi
   [[ "$reason" == ok ]] && rm -f -- "${SSH_OFF}"
-  wipe "${PENDING}"
+  # The result goes to disk before the key is consumed: a cut in between leaves
+  # the key, so the next run finishes again instead of leaving "pending".
   write_status joined "$attempts" 0 "$reason"
+  sync "${ENROLL}"
+  wipe "${PENDING}"
   sync "${ENROLL}"
   rm -f -- "${PRIOR}"   # only once the result is on disk
   log "joined Tailscale${1:+ as $1}"
@@ -384,7 +397,12 @@ enroll_pending() {
     fi
     local prior=no
     [[ "$STATUS_JSON" =~ \"HaveNodeKey\"[[:space:]]*:[[:space:]]*true ]] && prior=yes
-    put_synced "${PRIOR}" "$prior $(stat -c %i -- "${PENDING}")" .prior
+    if ! put_synced "${PRIOR}" "$prior $(stat -c %i -- "${PENDING}")" .prior; then
+      log "could not store the login check durably (${attempts}/${MAX_ATTEMPTS}); trying again later"
+      if (( attempts >= MAX_ATTEMPTS )); then give_up "could not store enrollment state after ${attempts} attempts"; return 1; fi
+      write_status pending "$attempts" "$((NOW + delay))" retry
+      return 1
+    fi
   fi
   # The CLI reads a key-only copy (the pending file also carries the name).
   keyfile="$(mktemp "${ENROLL}/.up-key.XXXXXX")"

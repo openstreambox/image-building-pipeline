@@ -6422,11 +6422,16 @@ with the card.
   box: the join is finished with the same pin step and reports
   `ok-without-tailnet-ssh`. Anything else means the login predates the key, and
   the enrollment gives up as described under "Giving up".
-- **What CeraUI may also read:** `ssh-off-node` (0644, one line `nodekey:<hex>`)
-  names the login whose Tailscale SSH the enrollment turned off. It is written
-  when SSH is turned off and removed only by a later join that keeps SSH on, so a
-  failed later key does not erase it. The card shows its note while that node
-  key is the daemon's current one and `RunSSH` is still false.
+- **What CeraUI may also read:** `ssh-off-node` (0644, one line: the stable node
+  ID, `tailscale status --json` `Self.ID`) names the node whose Tailscale SSH the
+  enrollment turned off. The stable ID survives a node key rotation; a new login
+  gets a new one. It is written when SSH is turned off and removed only by a later
+  join that keeps SSH on, so a failed later key does not erase it. The card shows
+  its note while that ID is the daemon's current one and `RunSSH` is still false.
+- **Durability:** `prior-login` and `ssh-off-node` are written through a synced
+  temporary file and a synced rename, and each step is checked; if the login
+  check cannot be stored, the keyed `up` does not run. A join's result line is
+  synced before its pending key is consumed.
 - **Loopback fence:** tailnet peers reach only TCP 18080 (CeraUI backend) on the box
   (`tailscaled-loopback.nft`, matched by tailscaled's account). Tailscale SSH sessions
   run as `ceralive-tailscale` and become root with `sudo`.
