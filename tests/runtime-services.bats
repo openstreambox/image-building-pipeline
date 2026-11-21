@@ -1930,6 +1930,20 @@ SH
   grep -Fxq 'WantedBy=timers.target' "$timer"
 }
 
+@test "typec policy: the first recheck tick waits for a pending boot run instead of racing it for the lock" {
+  local service="$PIPELINE_DIR/mkosi/runtime/ceralive-typec-recheck.service"
+  local policy="$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.service"
+  # Ordering only, in the [Unit] section: the recheck never pulls the boot run in.
+  [ "$(sed -n '/^\[Unit\]/,/^\[/p' "$service" | grep -Exc '^After=ceralive-typec-policy\.service$')" -eq 1 ]
+  run grep -Eq '^(Requires|Requisite|BindsTo|Wants|PartOf)=.*ceralive-typec-policy' "$service"
+  [ "$status" -ne 0 ]
+  # The reverse edge would be a cycle, and the boot run must not wait for a tick.
+  run grep -Eq '^(After|Wants|Requires)=.*ceralive-typec-recheck' "$policy"
+  [ "$status" -ne 0 ]
+  run grep -Eq '^Before=.*ceralive-typec-recheck' "$service"
+  [ "$status" -ne 0 ]
+}
+
 @test "typec policy: udev add events hand off to one systemd service without RUN or change recursion" {
   local rules="$PIPELINE_DIR/mkosi/runtime/99-ceralive-typec-policy.rules"
   [ "$(grep -c 'ACTION=="add"' "$rules")" -eq 2 ]
