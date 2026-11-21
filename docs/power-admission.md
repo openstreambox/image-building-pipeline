@@ -28,7 +28,11 @@ inode as the system's `/dev/pts` entry. That is the case for a Tailscale SSH
 session: `tailscaled.service` gets its own mount namespace from `ReadOnlyPaths=`,
 its sessions inherit it, and their terminals are on the system's devpts. A pty of
 a private devpts instance can carry the number of a different system terminal and
-is refused. The broker opens the device itself
+is refused. The number is also bound to the caller's session: the broker refuses
+when any other session has a process whose controlling terminal shows that number.
+A terminal is the controlling terminal of at most one session, and that session's
+leader keeps it, so this rules out prompting on a terminal another session of the
+same account controls, in any namespace. The broker opens the device itself
 (no symlinks, verified with `fstat`: character device, same device number, owned
 by the caller). It discards anything typed earlier, prints what will happen and
 reads one line within 60 s. Only the exact word (`poweroff` or `reboot`) admits the

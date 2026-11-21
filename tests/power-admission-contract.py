@@ -485,6 +485,156 @@ class NamespacedTerminal(Operator):
         self.assertIsNone(self.broker.committed)
         self.assertNotIn('Type poweroff', self.read_master(sys_master), 'prompted on another terminal')
 
+    def test_a_terminal_of_another_session_of_the_same_account_is_refused(self):
+        # Session V: a system terminal that is its controlling terminal. The
+        # caller, another session of the same account, holds that terminal on
+        # its standard input, while its own controlling terminal is a private
+        # devpts pty with the same number. The prompt must not go to V.
+        v_master, v_slave = os.openpty()
+        self.addCleanup(os.close, v_master)
+        name = os.ttyname(v_slave)
+        number = int(name.rsplit('/', 1)[1])
+        victim = os.fork()
+        if victim == 0:
+            try:
+                os.setsid()
+                fcntl.ioctl(v_slave, __import__('termios').TIOCSCTTY, 0)
+                time.sleep(60)
+            finally:
+                os._exit(0)
+        os.close(v_slave)
+        self.children.append((victim, None))
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(r)
+                held = os.open(name, os.O_RDWR | os.O_NOCTTY)  # V's terminal, same account
+                uid, gid = os.getuid(), os.getgid()
+                self.own_mount_namespace()
+                Path('/proc/self/setgroups').write_text('deny')
+                Path('/proc/self/uid_map').write_text(f'0 {uid} 1')
+                Path('/proc/self/gid_map').write_text(f'0 {gid} 1')
+                subprocess.run(['mount', '-t', 'devpts', '-o', 'newinstance,ptmxmode=0666', 'devpts', '/dev/pts'],
+                               check=True, capture_output=True)
+                subprocess.run(['mount', '--bind', '/dev/pts/ptmx', '/dev/ptmx'], check=True, capture_output=True)
+                for fd in list(self.broker.locks.values()):
+                    if fd is not None:
+                        os.close(fd)
+                ptys = []
+                while True:
+                    master, slave = os.openpty()
+                    ptys.append((master, slave))
+                    if int(os.ttyname(slave).rsplit('/', 1)[1]) >= number:
+                        break
+                os.setsid()
+                fcntl.ioctl(slave, __import__('termios').TIOCSCTTY, 0)
+                os.dup2(held, 0)
+                os.dup2(slave, 1)
+                os.dup2(slave, 2)
+                conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                conn.connect(self.sock_path)
+                conn.sendall(b'POWEROFF\n')
+                while True:
+                    data = conn.recv(4096)
+                    if not data:
+                        break
+                    os.write(w, data)
+            finally:
+                os._exit(0)
+        os.close(w)
+        self.children.append((pid, None))
+        os.set_blocking(r, False)
+        self.addCleanup(os.close, r)
+        answer = ''
+        def refused():
+            nonlocal answer
+            answer += self.read_pipe(r)
+            return 'REFUSED' in answer
+        self.pump(refused)
+        self.assertNotIn('Type poweroff', self.read_master(v_master), 'prompted on another session\'s terminal')
+        self.assertIn('REFUSED', answer)
+        self.assertIsNone(self.broker.committed)
+
+    def test_a_private_pty_passed_into_the_system_namespace_does_not_reach_another_session(self):
+        # The same confusion without a namespaced caller: a helper in its own
+        # namespace makes a private devpts pty numbered like session V's system
+        # terminal and passes it over a socket; the caller, in the system's
+        # namespace, makes it its controlling terminal.
+        v_master, v_slave = os.openpty()
+        self.addCleanup(os.close, v_master)
+        number = int(os.ttyname(v_slave).rsplit('/', 1)[1])
+        victim = os.fork()
+        if victim == 0:
+            try:
+                os.setsid()
+                fcntl.ioctl(v_slave, __import__('termios').TIOCSCTTY, 0)
+                time.sleep(60)
+            finally:
+                os._exit(0)
+        os.close(v_slave)
+        self.children.append((victim, None))
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(r)
+                for fd in list(self.broker.locks.values()):
+                    if fd is not None:
+                        os.close(fd)
+                here, there = socket.socketpair()
+                helper = os.fork()
+                if helper == 0:
+                    try:
+                        uid, gid = os.getuid(), os.getgid()
+                        self.own_mount_namespace()
+                        Path('/proc/self/setgroups').write_text('deny')
+                        Path('/proc/self/uid_map').write_text(f'0 {uid} 1')
+                        Path('/proc/self/gid_map').write_text(f'0 {gid} 1')
+                        subprocess.run(['mount', '-t', 'devpts', '-o', 'newinstance,ptmxmode=0666', 'devpts',
+                                        '/dev/pts'], check=True, capture_output=True)
+                        subprocess.run(['mount', '--bind', '/dev/pts/ptmx', '/dev/ptmx'], check=True,
+                                       capture_output=True)
+                        ptys = []
+                        while True:
+                            master, slave = os.openpty()
+                            ptys.append((master, slave))
+                            if int(os.ttyname(slave).rsplit('/', 1)[1]) >= number:
+                                break
+                        socket.send_fds(there, [b'x'], [master, slave])
+                        time.sleep(30)
+                    finally:
+                        os._exit(0)
+                _, (master, slave), _, _ = socket.recv_fds(here, 1, 2)
+                os.setsid()
+                fcntl.ioctl(slave, __import__('termios').TIOCSCTTY, 0)
+                for fd in (0, 1, 2):
+                    os.dup2(slave, fd)
+                conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                conn.connect(self.sock_path)
+                conn.sendall(b'POWEROFF\n')
+                while True:
+                    data = conn.recv(4096)
+                    if not data:
+                        break
+                    os.write(w, data)
+                os.kill(helper, 9)
+            finally:
+                os._exit(0)
+        os.close(w)
+        self.children.append((pid, None))
+        os.set_blocking(r, False)
+        self.addCleanup(os.close, r)
+        answer = ''
+        def refused():
+            nonlocal answer
+            answer += self.read_pipe(r)
+            return 'REFUSED' in answer
+        self.pump(refused)
+        self.assertNotIn('Type poweroff', self.read_master(v_master), 'prompted on another session\'s terminal')
+        self.assertIn('another session', answer)
+        self.assertIsNone(self.broker.committed)
+
 
 class Origins(Harness):
     def as_unit(self, unit, uid=0):
