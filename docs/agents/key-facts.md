@@ -5943,16 +5943,21 @@ ordered `Before=` the media services. CeraUI started 2.2 s later on each of thos
 boots. With an empty J11 the rebind waits the full `CERALIVE_TYPEC_WAIT`, so expect up to
 about 6 s there (not measured).
 
-The rebind's own waits (`wait_bound` and the partner wait) count `/proc/uptime`, not bash
-`SECONDS`: at about 23 s of uptime NTP steps the clock of a board without an RTC, and a
-wall-clock deadline taken before the step expires at once. A rebind at about 19 s found
-its partner 7.4 s later, but its wait had already given up and recorded `no-partner`.
+Every wait in the policy (the rebind's driver-link and partner waits, the ADC retry, the
+post-cycle settle and the role-attribute wait) counts `/proc/uptime`, not bash `SECONDS`:
+at about 23 s of uptime NTP steps the clock of a board without an RTC, and a wall-clock
+deadline taken before the step expires at once. A rebind at about 19 s found its partner
+7.4 s later, but its wait had already given up and recorded `no-partner`. The epoch stamps
+in `nopartner`, `detached` and `reprobe` stay wall-clock; a forward step can only shorten
+the spacing and settle times they measure.
 
 An early outcome of `no-partner` leaves the late rebind available: after the cycles are
 used up and `CERALIVE_TYPEC_REPROBE_SETTLE`, once (`reprobe-late`), and only while no
-partner has been seen since. That keeps a device plugged in during the first minute or so
-covered as before. A partner seen after the early rebind hands over to the re-arm below
-instead. An empty J11 now costs two info-logged rebinds per boot (early and late). Every
+partner has been seen since. Any partner after the early rebind writes `partner-since-early`,
+which closes the late rebind for the rest of the boot whatever the re-arm state (the re-arm
+clears its own files, and `CERALIVE_TYPEC_REARM_MAX=0` creates none). That keeps a device
+plugged in during the first minute or so covered as before. A partner seen after the early
+rebind hands over to the re-arm below instead. An empty J11 now costs two info-logged rebinds per boot (early and late). Every
 other outcome (`recovered`, `skipped`, `failed-*`, a crash that leaves `attempted`)
 keeps the once-per-boot rule.
 

@@ -1144,6 +1144,9 @@ run_typec_rock() {
             touch "$CERALIVE_TYPEC_IIO_DIR/dual-rejected"
             return 1
           fi
+          if [[ "$2" == dual && -e "$CERALIVE_TYPEC_IIO_DIR/clock-step-after-cycle" ]]; then
+            : >"$CERALIVE_TYPEC_IIO_DIR/clock-armed"
+          fi
           if [[ "$2" == dual && -e "$CERALIVE_TYPEC_IIO_DIR/detach" ]]; then
             rm -rf "$CERALIVE_TYPEC_CLASS_DIR/port0-partner"
           fi
@@ -1182,7 +1185,7 @@ run_typec_rock() {
           if [[ -e "$CERALIVE_TYPEC_IIO_DIR/reprobe-attaches" ]]; then
             mkdir -p "$CERALIVE_TYPEC_CLASS_DIR/port0-partner"
           fi
-          [[ ! -e "$CERALIVE_TYPEC_IIO_DIR/clock-step-after-bind" ]] || : >"$CERALIVE_TYPEC_IIO_DIR/bound"
+          [[ ! -e "$CERALIVE_TYPEC_IIO_DIR/clock-step-after-bind" ]] || : >"$CERALIVE_TYPEC_IIO_DIR/clock-armed"
           [[ ! -e "$CERALIVE_TYPEC_IIO_DIR/bind-errors-but-binds" ]] || return 1
           return 0
           ;;
@@ -1199,11 +1202,12 @@ run_typec_rock() {
       esac
       builtin printf "$@"
     }
-    # clock-step-after-bind: once the fake bind has run, the first poll steps the
-    # wall clock (and with it SECONDS) two weeks ahead, as NTP does on a board
-    # without an RTC, and the partner shows up on the third poll.
+    # clock-step-after-bind / -after-cycle: once the fake bind or the cycle'"'"'s
+    # dual write has run, the first poll steps the wall clock (and with it
+    # SECONDS) two weeks ahead, as NTP does on a board without an RTC, and the
+    # partner shows up on the third poll.
     sleep() {
-      if [[ -e "$CERALIVE_TYPEC_IIO_DIR/bound" ]]; then
+      if [[ -e "$CERALIVE_TYPEC_IIO_DIR/clock-armed" ]]; then
         local n=0
         [[ ! -r "$CERALIVE_TYPEC_IIO_DIR/sleeps" ]] || n="$(command cat "$CERALIVE_TYPEC_IIO_DIR/sleeps")"
         n=$((n + 1))

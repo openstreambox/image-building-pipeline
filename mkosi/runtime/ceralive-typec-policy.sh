@@ -124,15 +124,22 @@ reprobe_defer() {
     || reprobe_log ERROR "cannot record the deferral"
 }
 
-# mono_now — whole seconds since boot into MONO_NOW. The rebind runs early in
+# mono_now — whole seconds since boot into MONO_NOW. The policy runs early in
 # boot, where NTP may step the wall clock (a board without an RTC starts days
 # behind). Bash SECONDS follows that step, and a deadline taken before it would
-# expire at once, so the rebind's waits use /proc/uptime instead.
+# expire at once, so every wait counts /proc/uptime instead. Should a read ever
+# fail, the value continues from the last good one on SECONDS, so a deadline
+# never mixes the two bases (only a step in that same moment could shift it).
+MONO_BASE=""
 mono_now() {
   local up=""
   { read -r up _ </proc/uptime; } 2>/dev/null || up=""
   up="${up%%.*}"
-  [[ "${up}" =~ ^[0-9]+$ ]] || up="${SECONDS}"
+  if [[ "${up}" =~ ^[0-9]+$ ]]; then
+    MONO_BASE=$((up - SECONDS))
+  else
+    up=$((SECONDS + ${MONO_BASE:-0}))
+  fi
   MONO_NOW="${up}"
 }
 
@@ -343,11 +350,13 @@ rock_fusb302_reprobe() {
 
 # rock_late_reprobe_allowed — the late rebind after an early one: only when the
 # early rebind ended in `no-partner`, the late one has not run, and no partner
-# has been seen since (no pending re-arm, detach or re-arm count). Any other
-# recorded outcome, skipped and failed ones included, keeps the once-per-boot rule.
+# has been seen since (`partner-since-early`, kept for the boot; the re-arm
+# files are a second check). Any other recorded outcome, skipped and failed
+# ones included, keeps the once-per-boot rule.
 rock_late_reprobe_allowed() {
   local state=""
-  [[ -e "${RUN_DIR}/reprobe-early" && ! -e "${RUN_DIR}/reprobe-late" ]] || return 1
+  [[ -e "${RUN_DIR}/reprobe-early" && ! -e "${RUN_DIR}/reprobe-late" &&
+     ! -e "${RUN_DIR}/partner-since-early" ]] || return 1
   [[ ! -e "${RUN_DIR}/partner-seen" && ! -e "${RUN_DIR}/detached" &&
      ! -e "${RUN_DIR}/rearm" ]] || return 1
   [[ -r "${RUN_DIR}/reprobe" ]] && read -r state _ <"${RUN_DIR}/reprobe"
@@ -404,7 +413,8 @@ rock_back_power_correction() {
   if [[ ! -e "${PARTNER_DIR}" ]]; then
     rm -f "${RUN_DIR}/failed"
   fi
-  deadline=$((SECONDS + retry))
+  mono_now
+  deadline=$((MONO_NOW + retry))
   while :; do
     for adc in "${CERALIVE_TYPEC_IIO_DIR:-/sys/bus/iio/devices}"/iio:device*; do
       [[ -r "${adc}/name" && "$(cat "${adc}/name")" == fec10000.adc ]] || continue
@@ -420,7 +430,8 @@ rock_back_power_correction() {
       fi
       break
     done
-    [[ "${decision}" == unknown ]] && (( SECONDS < deadline )) || break
+    mono_now
+    [[ "${decision}" == unknown ]] && (( MONO_NOW < deadline )) || break
     sleep 1
   done
   [[ ! -r "${RUN_DIR}/state" ]] || previous="$(cat "${RUN_DIR}/state")"
@@ -463,6 +474,12 @@ rock_back_power_correction() {
     # leaves (rock_reprobe_rearm). Only outcomes that left a working controller
     # qualify; skipped and failed rebinds never re-arm.
     rm -f "${RUN_DIR}/detached"
+    # Any partner after the early rebind rules out the late one for the rest of
+    # the boot, whatever the re-arm state (which the re-arm clears as it goes).
+    if [[ -e "${RUN_DIR}/reprobe-early" && ! -e "${RUN_DIR}/partner-since-early" ]]; then
+      : >"${RUN_DIR}/partner-since-early" \
+        || log "ERROR: cannot record the partner seen after the early rebind"
+    fi
     if [[ ! -e "${RUN_DIR}/partner-seen" && -r "${RUN_DIR}/reprobe" ]]; then
       read -r rstate _ <"${RUN_DIR}/reprobe"
       case "${rstate}" in
@@ -506,9 +523,11 @@ rock_back_power_correction() {
     blind=1
   fi
   if (( blind == 0 )); then
-    deadline=$((SECONDS + WAIT_SECONDS))
+    mono_now
+    deadline=$((MONO_NOW + WAIT_SECONDS))
     while [[ ! -r "${POWER_ROLE}" ]]; do
-      (( SECONDS < deadline )) || return 0
+      mono_now
+      (( MONO_NOW < deadline )) || return 0
       sleep "${POLL_INTERVAL}"
     done
     [[ -e "${PARTNER_DIR}" && "$(active_role "${POWER_ROLE}")" == sink ]] || return 0
@@ -556,7 +575,8 @@ rock_back_power_correction() {
 
   # The cycle removes and re-adds the partner asynchronously. This wait and its
   # failure receipt also run under the periodic recheck, without any DR_SWAP.
-  deadline=$((SECONDS + WAIT_SECONDS))
+  mono_now
+  deadline=$((MONO_NOW + WAIT_SECONDS))
   rock_settle_deadline="${deadline}"
   settled_power="${CERALIVE_TYPEC_SETTLED_POWER_ROLE:-${POWER_ROLE}}"
   while :; do
@@ -565,7 +585,8 @@ rock_back_power_correction() {
         source) rock_settled_source=1; return 0 ;;
         sink)
           # A sink read immediately after the write may still be the old attach.
-          if (( SECONDS >= deadline )); then
+          mono_now
+          if (( MONO_NOW >= deadline )); then
             if [[ -r "${PARTNER_DIR}/identity/id_header" ]]; then
               identity="$(cat "${PARTNER_DIR}/identity/id_header")"
             fi
@@ -574,7 +595,8 @@ rock_back_power_correction() {
           ;;
       esac
     fi
-    (( SECONDS < deadline )) || break
+    mono_now
+    (( MONO_NOW < deadline )) || break
     sleep "${POLL_INTERVAL}"
   done
   printf '%s\n' "${identity}" >"${RUN_DIR}/failed" \
@@ -618,7 +640,8 @@ if [[ ! -e "${PARTNER_DIR}" ]]; then
 fi
 
 # Share the post-cycle deadline rather than adding a third settle budget.
-deadline="${rock_settle_deadline:-$((SECONDS + WAIT_SECONDS))}"
+mono_now
+deadline="${rock_settle_deadline:-$((MONO_NOW + WAIT_SECONDS))}"
 while :; do
   if [[ -r "${POWER_ROLE}" && -r "${DATA_ROLE}" ]]; then
     power="$(active_role "${POWER_ROLE}")"
@@ -632,7 +655,8 @@ while :; do
     break
   fi
 
-  if (( SECONDS >= deadline )); then
+  mono_now
+  if (( MONO_NOW >= deadline )); then
     log "${PORT} role attributes did not settle within ${WAIT_SECONDS}s — no action"
     exit 0
   fi

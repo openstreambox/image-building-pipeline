@@ -1596,7 +1596,8 @@ typec_rock_early_fixture() {
   [ ! -e "$root/run/nopartner" ]
   [ -e "$root/run/reprobe-early" ]
   [ "$(cut -d' ' -f1 "$root/run/reprobe")" = recovered ]
-  [[ "$output" == *"<6>ceralive-typec-policy: INFO: fusb302-reprobe: early: port0 is source with no partner before any cycle: rebinding 4-0022 from typec_fusb302"* ]]
+  # Info here, notice once the recheck journal is capped at notice: either.
+  [[ "$output" == *"<"[56]">ceralive-typec-policy: INFO: fusb302-reprobe: early: port0 is source with no partner before any cycle: rebinding 4-0022 from typec_fusb302"* ]]
   [[ "$output" == *"INFO: fusb302-reprobe: early: partner found after rebinding 4-0022: power_role=source data_role=host"* ]]
 
   # A recovered partner arms the re-arm exactly as after a late rebind.
@@ -1629,7 +1630,8 @@ typec_rock_early_fixture() {
   printf '1 %s\n' "$(( $(date +%s) - 6 ))" >"$root/run/nopartner"
   run run_typec_rock
   [ "$status" -eq 0 ]
-  [[ "$output" == *"INFO: fusb302-reprobe: early: port0 is source with no partner 6s after a cycle: rebinding 4-0022 from typec_fusb302"* ]]
+  # 6 s, or a second or two more on a slow or stepped run; the decision is the point.
+  [[ "$output" == *"INFO: fusb302-reprobe: early: port0 is source with no partner "[6-9]"s after a cycle: rebinding 4-0022 from typec_fusb302"* ]]
   [ "$(cat "$root/iio/i2c-writes")" = $'unbind 4-0022\nbind 4-0022' ]
   [ "$(grep -c '^source$' "$root/iio/writes")" -eq 1 ]
 }
@@ -1642,7 +1644,7 @@ typec_rock_early_fixture() {
   run run_typec_rock
   [ "$status" -eq 0 ]
   [ "$(cut -d' ' -f1 "$root/run/reprobe")" = no-partner ]
-  [[ "$output" == *"<6>ceralive-typec-policy: INFO: fusb302-reprobe: early: no partner 0s after rebinding 4-0022: J11 is empty or the chip is still stuck — the no-partner cycles follow, then one late rebind"* ]]
+  [[ "$output" == *"<"[56]">ceralive-typec-policy: INFO: fusb302-reprobe: early: no partner 0s after rebinding 4-0022: J11 is empty or the chip is still stuck — the no-partner cycles follow, then one late rebind"* ]]
   [ ! -e "$root/iio/writes" ]
 
   for n in 1 2 3 4 5 6 7 8; do
@@ -1695,6 +1697,27 @@ typec_rock_early_fixture() {
   [ "$(cat "$root/run/rearm")" = 1 ]
   [ ! -e "$root/run/reprobe-late" ]
   [ "$(cut -d' ' -f1 "$root/run/reprobe")" = no-partner ]
+}
+
+@test "typec policy: a partner seen after an empty early rebind rules out the late rebind even with re-arm disabled" {
+  local root="$BATS_TEST_TMPDIR/rock" n
+  typec_rock_early_fixture "$root"
+  export CERALIVE_TYPEC_NOPARTNER_SPACING=0 CERALIVE_TYPEC_REPROBE_SETTLE=0 CERALIVE_TYPEC_REARM_SETTLE=0
+  export CERALIVE_TYPEC_REARM_MAX=0
+  run run_typec_rock
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = no-partner ]
+
+  mkdir -p "$root/typec/port0-partner"    # attached on its own
+  run run_typec_rock
+  rm -rf "$root/typec/port0-partner"      # and gone again
+  for n in 1 2 3 4 5 6 7 8; do
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+  done
+  # The re-arm cap clears its own state; the sighting still stands for the boot.
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 1 ]
+  [ ! -e "$root/run/reprobe-late" ]
+  [ -e "$root/run/partner-since-early" ]
 }
 
 @test "typec policy: an early rebind that only finds the wrong driver cycles in the same tick and never rebinds" {
@@ -1777,6 +1800,22 @@ typec_rock_early_fixture() {
   [ "$(cat "$root/iio/sleeps")" -ge 3 ]
   [[ "$output" == *"INFO: fusb302-reprobe: early: partner found after rebinding 4-0022"* ]]
   [ "$(cut -d' ' -f1 "$root/run/reprobe")" = recovered ]
+}
+
+@test "typec policy: a wall-clock step during the post-cycle settle wait does not cut it short" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  printf '[source] sink\n' >"$root/typec/port0/power_role"
+  touch "$root/iio/clock-step-after-cycle"
+  export CERALIVE_TYPEC_MODE=recheck CERALIVE_TYPEC_WAIT=5 CERALIVE_TYPEC_POLL=0
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+  [ "$(cat "$root/iio/sleeps")" -ge 3 ]
+  [ -d "$root/typec/port0-partner" ]
+  [ ! -e "$root/run/failed" ]
 }
 
 @test "typec policy: an unrecordable late marker after an early rebind fails closed" {
@@ -2269,7 +2308,10 @@ SH
     bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"nothing to inspect"* ]]
-  grep -Fq 'deadline=$((SECONDS + WAIT_SECONDS))' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
+  grep -Fq 'deadline=$((MONO_NOW + WAIT_SECONDS))' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
+  # Every wait counts time since boot: no deadline on the wall-clock SECONDS.
+  run grep -E 'deadline.*[^_A-Z]SECONDS|[^_A-Z]SECONDS *(<|>)' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
+  [ "$status" -ne 0 ]
 }
 
 @test "typec policy: missing runtime source fails the build before anything is installed" {
