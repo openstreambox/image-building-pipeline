@@ -101,7 +101,8 @@ from disconnected to connected (`/sys/class/drm/card*-HDMI-A-*/status`, read
 every tick; the kernel updates it in the same hotplug path that sends the drm
 change uevent). It skips both when someone is logged in on the foreground VT,
 meaning any process other than `agetty` or `login` has that terminal. A
-restarted owner does neither again. When the service stops it returns to the
+display stack started on its own VT (for example a kiosk with `TTYPath=`)
+counts the same way and is left alone. A restarted owner does neither again. When the service stops it returns to the
 VT it found at start (fallback tty1) and restores VT8's saved font.
 
 A renderer that fails to load leaves VT8 to critical and fatal conditions
