@@ -635,6 +635,76 @@ class NamespacedTerminal(Operator):
         self.assertIn('another session', answer)
         self.assertIsNone(self.broker.committed)
 
+    def test_an_unrelated_private_devpts_session_with_the_same_number_does_not_block(self):
+        # A container-like session elsewhere: its controlling terminal is a pty of
+        # its own devpts instance, numbered like the caller's system terminal.
+        m, sl = os.openpty()
+        self.addCleanup(os.close, m)
+        number = int(os.ttyname(sl).rsplit('/', 1)[1])
+        ready_r, ready_w = os.pipe()
+        other = os.fork()
+        if other == 0:
+            try:
+                os.close(ready_r)
+                os.close(sl)
+                uid, gid = os.getuid(), os.getgid()
+                self.own_mount_namespace()
+                Path('/proc/self/setgroups').write_text('deny')
+                Path('/proc/self/uid_map').write_text(f'0 {uid} 1')
+                Path('/proc/self/gid_map').write_text(f'0 {gid} 1')
+                subprocess.run(['mount', '-t', 'devpts', '-o', 'newinstance,ptmxmode=0666', 'devpts', '/dev/pts'],
+                               check=True, capture_output=True)
+                subprocess.run(['mount', '--bind', '/dev/pts/ptmx', '/dev/ptmx'], check=True, capture_output=True)
+                ptys = []
+                while True:
+                    pm, ps = os.openpty()
+                    ptys.append((pm, ps))
+                    if int(os.ttyname(ps).rsplit('/', 1)[1]) >= number:
+                        break
+                os.setsid()
+                fcntl.ioctl(ps, __import__('termios').TIOCSCTTY, 0)
+                for fd in (0, 1, 2):
+                    os.dup2(ps, fd)
+                os.write(ready_w, b'x')
+                time.sleep(60)
+            finally:
+                os._exit(0)
+        os.close(ready_w)
+        self.children.append((other, None))
+        self.assertEqual(os.read(ready_r, 1), b'x')
+        os.close(ready_r)
+        # The caller: its own session on the system terminal.
+        out_r, out_w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(out_r)
+                for fd in list(self.broker.locks.values()):
+                    if fd is not None:
+                        os.close(fd)
+                os.setsid()
+                fcntl.ioctl(sl, __import__('termios').TIOCSCTTY, 0)
+                for fd in (0, 1, 2):
+                    os.dup2(sl, fd)
+                conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                conn.connect(self.sock_path)
+                conn.sendall(b'POWEROFF\n')
+                while True:
+                    data = conn.recv(4096)
+                    if not data:
+                        break
+                    os.write(out_w, data)
+            finally:
+                os._exit(0)
+        os.close(out_w)
+        os.close(sl)
+        self.children.append((pid, None))
+        os.set_blocking(out_r, False)
+        self.addCleanup(os.close, out_r)
+        self.assertTrue(self.pump(lambda: 'Type poweroff' in self.read_master(m)), 'no prompt: ' + self.read_pipe(out_r))
+        os.write(m, b'poweroff\n')
+        self.assertTrue(self.pump(lambda: self.system.submissions()))
+
 
 class Origins(Harness):
     def as_unit(self, unit, uid=0):
