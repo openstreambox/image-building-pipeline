@@ -50,7 +50,7 @@ fi
 if [[ -n "${snapshot}" ]]; then
   # shellcheck source=mkosi/runtime/build-apt-cache.sh
   source "${source_dir}/runtime/build-apt-cache.sh"
-  snapshot_require_pockets "$snapshot" "$APT_SUITE" "$APT_SUITE_SECURITY" "${apt_lists_dirs[@]}" || exit 1
+  snapshot_require_pockets "$snapshot" "$APT_SUITE" "$APT_SUITE_SECURITY" "${ARCH:?}" "${apt_lists_dirs[@]}" || exit 1
 fi
 
 lists=()

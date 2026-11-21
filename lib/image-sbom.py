@@ -41,39 +41,52 @@ def property_value(name, value):
     return {"name": f"ceralive:{name}", "value": value}
 
 
-def deb_purl(vendor, name, version, arch, distro):
-    return (f"pkg:deb/{vendor}/{quote(name.lower(), safe='')}@{quote(version, safe=':')}"
-            f"?arch={quote(arch, safe='')}&distro={quote(distro, safe='')}")
+def deb_purl(vendor, name, version, arch, qualifier, repository):
+    return (f"pkg:deb/{quote(vendor, safe='')}/{quote(name.lower(), safe='')}@{quote(version, safe=':')}"
+            f"?arch={quote(arch, safe='')}&{qualifier}={quote(repository, safe=':')}")
 
 
-def userspace_vendors(pin_file):
-    vendors = {}
+def userspace_repositories(pin_file, installed):
+    repositories = {}
     for line in pin_file.read_text().splitlines():
-        if line.strip() and not line.lstrip().startswith("#"):
-            name, _, _, url = line.split()
-            source = urlsplit(url)
-            if source.hostname == "github.com":
-                vendor = source.path.split("/")[1].lower()
-            elif source.hostname == "radxa-repo.github.io":
-                vendor = "radxa"
-            else:
-                raise ValueError(f"missing vendor mapping for pinned package: {name}")
-            vendors[name] = vendor
-    return vendors
+        fields = line.split()
+        if not fields or fields[0] not in installed:
+            continue
+        name, _, _, url = fields[:4]
+        source = urlsplit(url)
+        host = source.hostname or ""
+        # The fetch pin is the source of truth. Preserve the repository path,
+        # and omit credentials, query parameters, and the individual asset.
+        authority = f"[{host}]" if ":" in host else host
+        if source.port:
+            authority += f":{source.port}"
+        vendor = host or "local"
+        path = source.path.rsplit("/", 1)[0]
+        segments = source.path.strip("/").split("/")
+        if host == "github.com" and len(segments) >= 3:
+            vendor = segments[0].lower()
+            path = "/" + "/".join(segments[:2])
+        elif host == "radxa-repo.github.io":
+            vendor = "radxa"
+            path = "/" + segments[0]
+        repositories.setdefault(name, (vendor, f"{source.scheme}://{authority}{path}"))
+    return repositories
 
 
-def package_component(package, debian_suite, armbian_suite, vendor_by_name):
+def package_component(package, debian_suite, armbian_suite, repositories):
     origin = package["origin"]
     name, version, arch = (package[key] for key in ("name", "version", "arch"))
+    qualifier = "distro"
     if origin == "debian":
         vendor, distro = "debian", debian_suite
     elif origin == "bsp":
         vendor, distro = "armbian", armbian_suite
     elif origin == "userspace-pin":
-        vendor, distro = vendor_by_name[name], debian_suite
+        vendor, distro = repositories[name]
+        qualifier = "repository_url"
     else:
         vendor, distro = "ceralive", debian_suite
-    purl = deb_purl(vendor, name, version, arch, distro)
+    purl = deb_purl(vendor, name, version, arch, qualifier, distro)
     props = [property_value("deb:origin", origin)]
     source = package["debian_source"]
     props.extend(property_value(f"deb:source:{key}", source[key]) for key in ("name", "version"))
@@ -90,16 +103,20 @@ def package_component(package, debian_suite, armbian_suite, vendor_by_name):
 
 
 def generate(args):
-    expected = (args.root / "usr/lib/ceralive/build-lock/debian-snapshot").read_text().strip()
-    if expected != args.snapshot:
+    record = args.root / "usr/lib/ceralive/build-lock/debian-snapshot.json"
+    expected = json.loads(record.read_text())
+    if expected["timestamp"] != args.snapshot:
         raise ValueError("final rootfs snapshot marker differs from build option")
     lock = json.loads(args.lock.read_text())
     packages = {item["name"]: item for item in lock["packages"]}
     snapshot = lock["debian_snapshot"]
-    if snapshot["timestamp"] != args.snapshot:
-        raise ValueError("package lock snapshot differs from build option")
-    vendor_by_name = userspace_vendors(args.userspace_pins) if args.userspace_pins else {}
-    components = [package_component(item, args.debian_suite, args.armbian_suite, vendor_by_name)
+    if snapshot != expected:
+        raise ValueError("package lock snapshot differs from the final rootfs record")
+    installed = {item["name"] for item in lock["packages"] if item["origin"] == "userspace-pin"}
+    if installed and not args.userspace_pins:
+        raise ValueError("installed userspace packages require their fetch pin manifest")
+    repositories = userspace_repositories(args.userspace_pins, installed) if installed else {}
+    components = [package_component(item, args.debian_suite, args.armbian_suite, repositories)
                   for item in lock["packages"]]
 
     def add_file(relative, version, root=args.root, name=None):

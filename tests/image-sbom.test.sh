@@ -40,7 +40,7 @@ done
   # Simulate a fresh APT cache after the base pocket succeeded and security failed.
   printf 'Date: fixture\n' >"$work/cold/${base}_InRelease"
   printf 'Package: fixture\n' >"$work/cold/${base}_main_binary-arm64_Packages"
-  if snapshot_require_pockets "$snapshot" fixture fixture-security "$work/cold" 2>"$work/error"; then
+  if snapshot_require_pockets "$snapshot" fixture fixture-security arm64 "$work/cold" 2>"$work/error"; then
     echo "accepted a failed cold-cache security pocket" >&2
     exit 1
   fi
@@ -49,18 +49,27 @@ done
   printf 'Date: fixture\n' >"$work/cold/${security}_InRelease"
   printf 'Package: fixture\n' >"$work/partial/${security}_main_binary-arm64_Packages"
   printf 'Date: fixture\n' >"$work/partial/${security/${snapshot}/20260825T000000Z}_InRelease"
-  if snapshot_require_pockets "$snapshot" fixture fixture-security "$work/cold" "$work/partial"; then
+  if snapshot_require_pockets "$snapshot" fixture fixture-security arm64 "$work/cold" "$work/partial"; then
     echo "accepted an incomplete warm-cache pocket" >&2
     exit 1
   fi
+  cp "$work/partial/${security}_main_binary-arm64_Packages" "$work/cold/${security}_main_binary-all_Packages"
+  if snapshot_require_pockets "$snapshot" fixture fixture-security arm64 "$work/cold"; then
+    echo "accepted a binary-all-only security pocket for arm64" >&2
+    exit 1
+  fi
   mv "$work/partial/${security}_main_binary-arm64_Packages" "$work/cold/"
-  snapshot_require_pockets "$snapshot" fixture fixture-security "$work/cold" "$work/partial"
+  snapshot_require_pockets "$snapshot" fixture fixture-security arm64 "$work/cold" "$work/partial"
 )
 
 root="$work/root"
 receipts="$root/usr/lib/ceralive/build-lock"
 mkdir -p "$receipts" "$root/var/lib/dpkg" "$root/usr/bin" "$root/usr/local/bin" "$root/boot"
-printf '%s\n' "$snapshot" >"$receipts/debian-snapshot"
+# shellcheck source=mkosi/runtime/build-apt-cache.sh
+source "$repo/mkosi/runtime/build-apt-cache.sh"
+template="$repo/mkosi/runtime/debian-snapshot.json.in"
+record="$receipts/debian-snapshot.json"
+write_build_snapshot_record "$snapshot" "$template" "$record"
 printf 'fixture\tSat, 26 Sep 2026 00:00:00 UTC\n' >"$receipts/base.dates"
 sha="$(printf 'fixture\n' | sha256sum | cut -d' ' -f1)"
 for package in ceralive-device srtla; do
@@ -74,6 +83,10 @@ printf '{"name":"bsp+fixture","version":"7.0+b1","arch":"all","origin":"bsp","sh
 printf 'Package: userspace-fixture\nVersion: 1\nArchitecture: arm64\nStatus: install ok installed\n\n' >>"$root/var/lib/dpkg/status"
 printf '{"name":"userspace-fixture","version":"1","arch":"arm64","origin":"userspace-pin","sha256":"%s"}\n' "$sha" >>"$receipts/app.jsonl"
 printf 'userspace-fixture fixture.deb %s https://github.com/Example-Vendor/repo/releases/download/v1/fixture.deb\n' "$sha" >"$work/userspace-pins"
+printf 'Package: custom-fixture\nVersion: 1\nArchitecture: arm64\nStatus: install ok installed\n\n' >>"$root/var/lib/dpkg/status"
+printf '{"name":"custom-fixture","version":"1","arch":"arm64","origin":"userspace-pin","sha256":"%s"}\n' "$sha" >>"$receipts/app.jsonl"
+printf 'custom-fixture custom.deb %s https://packages.example.invalid/vendor-feed/pool/custom.deb?token=fixture # custom repository\n' "$sha" >>"$work/userspace-pins"
+printf 'unused-fixture unused.deb %s https://custom.invalid/unused.deb\n' "$sha" >>"$work/userspace-pins"
 printf 'Package: removed\nVersion: 1\nArchitecture: all\nStatus: deinstall ok config-files\n' >>"$root/var/lib/dpkg/status"
 for payload in usr/bin/srtla_send usr/local/bin/ceralive usr/local/bin/mediamtx boot/vmlinuz-fixture boot/Image; do
   printf 'fixture\n' >"$root/$payload"
@@ -97,7 +110,7 @@ emit=(python3 "$repo/lib/image-sbom.py" emit --root "$root" --lock "$work/packag
       --artifact "$work/fixture.raw.xz.sha256" --artifact "$work/fixture.raucb.sha256")
 "${emit[@]}"
 (cd "$work" && sha256sum --strict -c fixture.sbom.cdx.json.sha256)
-python3 - "$output" "$sha" "$snapshot" "$work/packages.lock.json" <<'PY'
+python3 - "$output" "$sha" "$snapshot" "$work/packages.lock.json" "$record" <<'PY'
 import json
 import sys
 
@@ -108,11 +121,19 @@ parts = {part["name"]: part for part in bom["components"]}
 assert set(parts) == {"ceralive-device", "srtla", "usr/bin/srtla_send",
                      "usr/local/bin/ceralive", "usr/local/bin/mediamtx",
                      "boot/vmlinuz-fixture", "boot/Image", "u-boot.itb", "libstdc++6",
-                     "bsp+fixture", "usr/lib/ceralive/boot/boot.scr", "userspace-fixture"}
+                     "bsp+fixture", "usr/lib/ceralive/boot/boot.scr", "userspace-fixture",
+                     "custom-fixture"}
 assert parts["srtla"]["purl"] == "pkg:deb/ceralive/srtla@1:2.3?arch=arm64&distro=fixture"
 assert parts["libstdc++6"]["purl"] == "pkg:deb/debian/libstdc%2B%2B6@2:3.4-1%2Bb2?arch=arm64&distro=fixture"
 assert parts["bsp+fixture"]["purl"] == "pkg:deb/armbian/bsp%2Bfixture@7.0%2Bb1?arch=all&distro=vendor-fixture"
-assert parts["userspace-fixture"]["purl"] == "pkg:deb/example-vendor/userspace-fixture@1?arch=arm64&distro=fixture"
+assert parts["userspace-fixture"]["purl"] == (
+    "pkg:deb/example-vendor/userspace-fixture@1?arch=arm64"
+    "&repository_url=https:%2F%2Fgithub.com%2FExample-Vendor%2Frepo"
+)
+assert parts["custom-fixture"]["purl"] == (
+    "pkg:deb/packages.example.invalid/custom-fixture@1?arch=arm64"
+    "&repository_url=https:%2F%2Fpackages.example.invalid%2Fvendor-feed%2Fpool"
+)
 assert parts["boot/Image"]["version"] == "fixture"
 with open(sys.argv[4]) as stream:
     lock = json.load(stream)
@@ -126,12 +147,16 @@ assert source["ceralive:deb:source:version"] == "2:3.4-1"
 exclusions = [prop["value"] for prop in bom["metadata"]["properties"]
               if prop["name"] == "ceralive:debian:snapshot-exclusion"]
 assert exclusions == lock["debian_snapshot"]["exclusions"]
-assert len(exclusions) == 5
+with open(sys.argv[5]) as stream:
+    assert json.load(stream) == lock["debian_snapshot"]
+assert any("squashfs-tools" in item and "native RAUC" in item for item in exclusions)
+assert any("e2fsprogs" in item and "x86" in item for item in exclusions)
 assert parts["u-boot.itb"]["type"] == "firmware"
 assert all(part["hashes"] == [{"alg": "SHA-256", "content": sys.argv[2]}]
            for part in parts.values())
 props = {prop["name"]: prop["value"] for prop in bom["metadata"]["properties"]}
 assert props["ceralive:debian:snapshot"] == sys.argv[3]
+assert props["ceralive:debian:snapshot-scope"] == lock["debian_snapshot"]["scope"]
 assert props["ceralive:artifact:sha256:fixture.raw"] == sys.argv[2]
 PY
 verify=(python3 "$repo/lib/image-sbom.py" verify-candidate --sbom "$output"
@@ -163,7 +188,7 @@ xz -c "$work/fixture.raw" >"$work/candidate/fixture.raw.xz"
 cp "$output" "$work/reference"
 "${emit[@]}"
 cmp "$output" "$work/reference"
-printf 'wrong snapshot\n' >"$receipts/debian-snapshot"
+write_build_snapshot_record 20260825T000000Z "$template" "$record"
 if "${emit[@]}"; then
   echo "accepted a rootfs from a different snapshot" >&2
   exit 1

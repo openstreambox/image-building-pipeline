@@ -251,20 +251,23 @@ APT keeps its usual sources. A failed snapshot fetch has no live-mirror
 fallback. The normal build leaves the option unset.
 
 The date covers Debian archive resolution during target rootfs assembly.
-RAUC packaging sources, APT dependencies in the RAUC and mkosi builders,
-independently pinned kernel builder inputs, and staged vendor and first-party
-packages are outside that pin. The
-rootfs records the date at `/usr/lib/ceralive/build-lock/debian-snapshot`. The
-package lock and SBOM record the date, scope and exclusions.
+The rootfs records the date, scope, and exclusions in
+`/usr/lib/ceralive/build-lock/debian-snapshot.json`. The package lock and SBOM
+carry the same record. The exclusions cover RAUC packaging sources and
+builder APT inputs, the bundle-time live install of squashfs-tools and
+native RAUC dependencies, and host disk assembly tools, including fallback
+live e2fsprogs installs. Independently pinned kernel inputs and staged vendor
+and first-party packages have their own provenance.
 
 A warm mkosi cache can supply both authenticated pockets for the same date and
 may skip network metadata sync. The runtime APT update still runs with both
-dated pockets and fails on any update error. A partial cache cannot replace
-a missing pocket.
+dated pockets and fails on any update error. Each pocket needs its
+target-architecture Packages index. A binary-all index alone is incomplete.
 
 The build writes `*.sbom.cdx.json` and its SHA-256 sidecar next to the package lock and
 image artifacts. The CycloneDX inventory covers installed binary packages with
-their source package identities and a selected file subset. That subset includes
+their source package identities and a selected file subset. Directly pinned
+vendor packages use their source repository in the package URL. That subset includes
 CeraUI, srtla_send and MediaMTX executables, kernel and initramfs files, the
 boot.scr injected into RK3588 slots, and raw-gap bootloader blobs. Firmware
 package hashes describe the package archives. Per-file firmware content and

@@ -1005,7 +1005,9 @@ main() {
   # layer's Debian-provenance check must not attempt to verify them against it.
   bash "${SRCDIR}/runtime/packages-lock-capture.sh" runtime rauc rauc-service
   if [[ -n "${CERALIVE_DEBIAN_SNAPSHOT:-}" ]]; then
-    printf '%s\n' "${CERALIVE_DEBIAN_SNAPSHOT}" >/usr/lib/ceralive/build-lock/debian-snapshot
+    write_build_snapshot_record "${CERALIVE_DEBIAN_SNAPSHOT}" \
+      "${CERALIVE_RUNTIME_SRC}/debian-snapshot.json.in" \
+      /usr/lib/ceralive/build-lock/debian-snapshot.json
   fi
   # First-party apps + their staging tree are handled by the APPLICATION layer (mkosi.images/app, Stage 3).
   log "CeraLive runtime customization complete"

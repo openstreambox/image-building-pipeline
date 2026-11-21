@@ -10,15 +10,6 @@ class LockError(Exception):
     pass
 
 
-SNAPSHOT_EXCLUSIONS = (
-    "RAUC Debian packaging source fetched from its live archive",
-    "RAUC builder APT dependencies",
-    "mkosi builder APT tools",
-    "Independent vendor and first-party inputs",
-    "Independently pinned kernel builder inputs",
-)
-
-
 def installed_packages(status: pathlib.Path, include_source: bool = False) -> list[dict]:
     packages = []
     for paragraph in status.read_text().split("\n\n"):
@@ -82,8 +73,8 @@ def merge(
     if not epoch.isdecimal():
         raise LockError("invalid SOURCE_DATE_EPOCH")
 
-    marker = root / "usr/lib/ceralive/build-lock/debian-snapshot"
-    snapshot = marker.read_text().strip() if marker.is_file() else ""
+    marker = root / "usr/lib/ceralive/build-lock/debian-snapshot.json"
+    snapshot = json.loads(marker.read_text()) if marker.is_file() else None
     packages = []
     for identity in installed_packages(root / "var/lib/dpkg/status", bool(snapshot)):
         source = identity.pop("debian_source", None)
@@ -149,13 +140,7 @@ def merge(
         if source:
             packages[-1] = {**packages[-1], "debian_source": source}
 
-    snapshot_metadata = {}
-    if snapshot:
-        snapshot_metadata = {"debian_snapshot": {
-            "timestamp": snapshot,
-            "scope": "Debian archive packages resolved during target rootfs assembly",
-            "exclusions": SNAPSHOT_EXCLUSIONS,
-        }}
+    snapshot_metadata = {"debian_snapshot": snapshot} if snapshot else {}
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temp = output.with_name(output.name + ".tmp")
