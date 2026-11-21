@@ -110,7 +110,8 @@ put_synced() { # path content tmp-prefix: tmp file in ENROLL, fsync, rename, fsy
     rm -f -- "$tmp"
     return 1
   fi
-  sync "${ENROLL}" || return 1
+  # Not durable yet: do not leave it for a later run to trust.
+  sync "${ENROLL}" || { rm -f -- "$1"; return 1; }
 }
 
 # The login record of the current pending key: "yes" or "no", empty when there
@@ -171,12 +172,13 @@ read_status() {
   return 0
 }
 
-write_status() { # state attempts next reason
+write_status() { # state attempts next reason; returns non-zero if it could not
   local tmp
-  tmp="$(mktemp "${ENROLL}/.status.XXXXXX")"
-  printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" >"$tmp"
-  chmod 0644 "$tmp"
-  mv -f -- "$tmp" "${STATUS}"
+  tmp="$(mktemp "${ENROLL}/.status.XXXXXX")" || return 1
+  if ! { printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" >"$tmp" && chmod 0644 "$tmp" && mv -f -- "$tmp" "${STATUS}"; }; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 # Start of every run (under the lock): migrate the pre-split layout, re-adopt a
@@ -345,9 +347,12 @@ finish_join() { # name [refused-ssh]: the second argument says tailscaled refuse
   fi
   [[ "$reason" == ok ]] && rm -f -- "${SSH_OFF}"
   # The result goes to disk before the key is consumed: a cut in between leaves
-  # the key, so the next run finishes again instead of leaving "pending".
-  write_status joined "$attempts" 0 "$reason"
-  sync "${ENROLL}"
+  # the key, so the next run finishes again instead of leaving "pending". If
+  # the result cannot be stored, the key and the login record stay for that run.
+  if ! { write_status joined "$attempts" 0 "$reason" && sync "${ENROLL}"; }; then
+    log "could not store the join result; the next run finishes it"
+    return 1
+  fi
   wipe "${PENDING}"
   sync "${ENROLL}"
   rm -f -- "${PRIOR}"   # only once the result is on disk
@@ -385,6 +390,13 @@ enroll_pending() {
     return 1
   fi
   for ((i = 0; i < WAIT; i++)); do [[ -S "${SOCKET}" ]] && break; sleep 1; done
+  if [[ -n "$(read_prior)" ]] && ! { sync -- "${PRIOR}" && sync "${ENROLL}"; }; then
+    # A record left by an earlier run is trusted only once it is durable.
+    log "could not make the login check durable (${attempts}/${MAX_ATTEMPTS}); trying again later"
+    if (( attempts >= MAX_ATTEMPTS )); then give_up "could not store enrollment state after ${attempts} attempts"; return 1; fi
+    write_status pending "$attempts" "$((NOW + delay))" retry || true
+    return 1
+  fi
   if [[ -z "$(read_prior)" ]]; then
     # Before the keyed up first runs for this key: did the box already hold a
     # login? On disk before the up, so a power cut cannot lose it afterwards.
@@ -415,7 +427,7 @@ enroll_pending() {
   out="$("${CLI}" --socket="${SOCKET}" "${args[@]}" 2>&1)" || rc=$?
   wipe "$keyfile"
   if (( rc == 0 )); then
-    finish_join "$name"
+    finish_join "$name" || return 1
     return 0
   fi
   message="$(clean "$out")"
@@ -441,7 +453,7 @@ enroll_pending() {
     fi
     if [[ "$(backend_state)" == Running ]]; then
       log "an earlier attempt with this key registered the box"
-      finish_join "$name" refused-ssh
+      finish_join "$name" refused-ssh || return 1
       return 0
     fi
   fi

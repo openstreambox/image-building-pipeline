@@ -447,6 +447,50 @@ NO_TAILNET_SSH="Unable to enable local Tailscale SSH server; not enabled on Tail
   no_leftovers
 }
 
+@test "a login record whose directory sync failed is neither kept nor trusted" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  # the directory sync after the record is renamed into place fails
+  printf '#!/bin/sh\n[ "$*" = "%s/enroll" ] && [ -e "%s/enroll/prior-login" ] && exit 1\nexit 0\n' "$T" "$T" >"$T/bin/sync"; chmod +x "$T/bin/sync"
+  enroll CERALIVE_TS_NOW=1000
+  [ "$status" -ne 0 ]
+  ! grep -q ' up --auth-key' "$T/calls"
+  [ ! -e "$T/enroll/prior-login" ]
+  enroll CERALIVE_TS_NOW=1200
+  [ "$status" -ne 0 ]
+  ! grep -q ' up --auth-key' "$T/calls"
+}
+
+@test "an existing login record is synced again before it is trusted" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="no network"
+  [ "$(cut -d' ' -f1 "$T/enroll/prior-login")" = no ]
+  rm "$T/calls"
+  printf '#!/bin/sh\n[ "$*" = "%s/enroll" ] && [ -e "%s/enroll/prior-login" ] && exit 1\nexit 0\n' "$T" "$T" >"$T/bin/sync"; chmod +x "$T/bin/sync"
+  enroll CERALIVE_TS_NOW=1200
+  [ "$status" -ne 0 ]
+  ! grep -q ' up --auth-key' "$T/calls"
+}
+
+@test "a join whose result cannot be stored keeps its key and login record" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  # directory syncs fail only after the keyed up ran
+  printf '#!/bin/sh\nif [ "$*" = "%s/enroll" ] && grep -q " up --auth-key" "%s/calls" 2>/dev/null; then exit 1; fi\nexit 0\n' "$T" "$T" >"$T/bin/sync"; chmod +x "$T/bin/sync"
+  enroll CERALIVE_TS_NOW=1000
+  [ "$status" -ne 0 ]
+  [ -e "$T/enroll/pending-authkey" ]
+  [ "$(cut -d' ' -f1 "$T/enroll/prior-login")" = no ]
+  [[ "$output" == *"could not store the join result"* ]]
+  # storage works again: the next run finishes
+  rm "$T/bin/sync"
+  enroll CERALIVE_TS_NOW=1200
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1,4 "$T/enroll/enroll-status")" = "joined ok" ]
+  [ ! -e "$T/enroll/pending-authkey" ]
+}
+
 @test "the join result is on disk before the pending key is consumed" {
   enroll_env
   printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
