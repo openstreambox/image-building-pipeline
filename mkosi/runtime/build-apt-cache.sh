@@ -110,6 +110,42 @@ runtime_build_apt_scope() {
   log "runtime Debian downloads use build-only HTTPS/// cache remap (${proxy}); shipped debian.sources unchanged"
 }
 
+# Match mkosi 26's base and security pockets in snapshot mode. Keep these
+# sources out of /etc and keep the Debian signature checks enabled.
+runtime_snapshot_apt_scope() {
+  local snapshot="${CERALIVE_DEBIAN_SNAPSHOT:-}"
+  [[ -n "${snapshot}" ]] || return 0
+  [[ "${snapshot}" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || return 1
+  CERALIVE_BUILD_APT_DIR="$(mktemp -d /tmp/ceralive-build-apt.XXXXXX)" || return 1
+  trap runtime_build_apt_cleanup EXIT
+  mkdir -p "${CERALIVE_BUILD_APT_DIR}/sources" || return 1
+  cat >"${CERALIVE_BUILD_APT_DIR}/sources/debian.sources" <<EOF || return 1
+Types: deb
+URIs: https://snapshot.debian.org/archive/debian/${snapshot}/
+Suites: ${APT_SUITE:?}
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+Check-Valid-Until: no
+
+Types: deb
+URIs: https://snapshot.debian.org/archive/debian-security/${snapshot}/
+Suites: ${APT_SUITE_SECURITY:?}
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+Check-Valid-Until: no
+EOF
+  cat >"${CERALIVE_BUILD_APT_DIR}/apt.conf" <<EOF || return 1
+Dir::Etc::sourcelist "/dev/null";
+Dir::Etc::sourceparts "${CERALIVE_BUILD_APT_DIR}/sources";
+APT::Update::Error-Mode "any";
+Acquire::https::Timeout "30";
+EOF
+  # mktemp creates mode 0700. Only public APT sources live here, and _apt
+  # needs traversal for sandboxed downloads.
+  chmod 0755 "${CERALIVE_BUILD_APT_DIR}" || return 1
+  export APT_CONFIG="${CERALIVE_BUILD_APT_DIR}/apt.conf"
+}
+
 runtime_debian_apt_install() {
   runtime_build_apt_scope || return 1
   retry_apt "runtime apt-get update" apt-get update || return 1

@@ -26,7 +26,14 @@ assert candidate["runs-on"] == {
     "group": "image-builder", "labels": ["self-hosted", "ceralive-image-builder"],
 }
 assert workflow["permissions"]["contents"] == "read"
-assert workflow["on"] == {"workflow_call": ""}
+assert set(workflow["on"]) == {"workflow_call"}
+snapshot_input = workflow["on"]["workflow_call"]["inputs"]["debian_snapshot"]
+assert snapshot_input["type"] == "string" and snapshot_input["default"] == ""
+assert candidate["env"]["CERALIVE_DEBIAN_SNAPSHOT"] == "${{ inputs.debian_snapshot }}"
+seal = next(step["run"] for step in steps if step.get("id") == "meta")
+assert 'if [[ -n "${CERALIVE_DEBIAN_SNAPSHOT}" ]]; then' in seal
+assert 'sha256sum --strict -c "$(basename "${sbom}").sha256"' in seal
+assert 'cp "${sbom}" "${sbom}.sha256" candidate/' in seal
 assert "concurrency" not in workflow, "the caller owns release concurrency"
 caller = yaml.load((workflow_path.parent / "release.yml").read_text(), Loader=yaml.BaseLoader)
 assert caller["on"] == {"push": {"branches": ["release/**"], "tags": ["v*"]}}

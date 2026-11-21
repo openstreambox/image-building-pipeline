@@ -424,6 +424,14 @@ sectioned_keys() {
   [[ "$output" == *"--workspace-directory=/work/.mkosi-workspace"* ]]
 }
 
+@test "mkosi-contract: the opted-in DRY_RUN plan names the snapshot and isolated cache" {
+  run env DRY_RUN=1 INSTALL_BOOT_BSP=0 MKOSI_NATIVE=1 CERALIVE_DEBIAN_SNAPSHOT=20260925T000000Z \
+    "$PIPELINE_DIR/build" rock-5b-plus
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--cache-directory=cache/"*"/native/snapshot-20260925T000000Z"* ]]
+  [[ "$output" == *"--snapshot=20260925T000000Z"* ]]
+}
+
 @test "mkosi-contract: the pinned mkosi parses every config with no diagnostics" {
   command -v mkosi >/dev/null 2>&1 || skip "mkosi not on PATH (canonical build is containerized)"
   local have

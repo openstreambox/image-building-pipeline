@@ -218,8 +218,17 @@ install_runtime_packages() {
   local pkgs
   read -r -a pkgs <<<"${SHARED_PACKAGES}"
   log "installing ${#pkgs[@]} runtime package(s) from shared.list: ${pkgs[*]}"
-  bootstrap_ca_trust
-  runtime_debian_apt_install "${pkgs[@]}"
+  if [[ -n "${CERALIVE_DEBIAN_SNAPSHOT:-}" ]]; then
+    runtime_build_apt_prepare_usr || return 1
+    runtime_snapshot_apt_scope || return 1
+    # The pinned base already supplied ca-certificates. A failing HTTPS
+    # snapshot must stop the build rather than use the live CA bootstrap.
+    apt-get update || return 1
+    apt-get install -y --no-install-recommends "${pkgs[@]}"
+  else
+    bootstrap_ca_trust
+    runtime_debian_apt_install "${pkgs[@]}"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -995,6 +1004,9 @@ main() {
   # directory, BEFORE this script runs), never from the Debian archive, so this
   # layer's Debian-provenance check must not attempt to verify them against it.
   bash "${SRCDIR}/runtime/packages-lock-capture.sh" runtime rauc rauc-service
+  if [[ -n "${CERALIVE_DEBIAN_SNAPSHOT:-}" ]]; then
+    printf '%s\n' "${CERALIVE_DEBIAN_SNAPSHOT}" >/usr/lib/ceralive/build-lock/debian-snapshot
+  fi
   # First-party apps + their staging tree are handled by the APPLICATION layer (mkosi.images/app, Stage 3).
   log "CeraLive runtime customization complete"
 }

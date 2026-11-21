@@ -241,6 +241,22 @@ leftover CI access before sshd starts. Legacy single-slot images require a full
 re-flash because their data partition overlaps the new B-slot extent; they cannot
 be converted by OTA.
 
+### Dated Debian build inputs and image SBOM
+
+Set `CERALIVE_DEBIAN_SNAPSHOT=YYYYMMDDTHHMMSSZ` for a build with
+the pinned mkosi version. Use a verified UTC archive import time for Debian
+and Debian Security. mkosi and the runtime install both use the dated base and
+security pockets. mkosi 26 omits the updates pocket in snapshot mode. On-device
+APT keeps its usual sources. A failed snapshot fetch has no live-mirror
+fallback. The normal build leaves the option unset.
+
+The date is recorded at `/usr/lib/ceralive/build-lock/debian-snapshot`. The build
+writes `*.sbom.cdx.json` and its SHA-256 sidecar next to the package lock and
+image artifacts. The CycloneDX document includes final installed packages,
+selected installed binaries and boot payloads, and the digests of the artifacts
+it describes. The reusable candidate workflow accepts the date through its
+`debian_snapshot` input and retains both SBOM files in the candidate upload.
+
 ## Directory Structure
 
 ```

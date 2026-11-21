@@ -243,6 +243,13 @@ main() {
   [[ -n "${board}" ]]    || { usage; die "--board is required"; }
   [[ -n "${manifest}" ]] || { usage; die "--manifest is required"; }
   require_cmd python3
+  export CERALIVE_DEBIAN_SNAPSHOT="${CERALIVE_DEBIAN_SNAPSHOT:-}"
+  if [[ -n "${CERALIVE_DEBIAN_SNAPSHOT}" ]]; then
+    (( kernel_only == 0 )) || die "CERALIVE_DEBIAN_SNAPSHOT applies to image builds only"
+    python3 "${HERE}/image-sbom.py" validate-snapshot "${CERALIVE_DEBIAN_SNAPSHOT}" \
+      || die "CERALIVE_DEBIAN_SNAPSHOT must be a past UTC timestamp in YYYYMMDDTHHMMSSZ format"
+    log_info "Debian build snapshot: ${CERALIVE_DEBIAN_SNAPSHOT}"
+  fi
   require_cmd ar
   require_cmd tar
   require_cmd flock
@@ -314,6 +321,7 @@ main() {
   stage_packages_lock
   stage_parity
   stage_assemble
+  stage_image_sbom
 
   log_info "[9/9] done"
   log_success "=== build complete: board='${board}' → ${artifact} ==="
@@ -355,6 +363,11 @@ run_mkosi_build() {
   local cache_domain
   cache_domain="$(ceralive_mkosi_cache_domain)"
   local cache_dir="cache/${BOARD_ID}/${cache_domain}"
+  local -a snapshot_args=()
+  if [[ -n "${CERALIVE_DEBIAN_SNAPSHOT}" ]]; then
+    cache_dir+="/snapshot-${CERALIVE_DEBIAN_SNAPSHOT}"
+    snapshot_args=(--snapshot="${CERALIVE_DEBIAN_SNAPSHOT}")
+  fi
 
   # The board/product/secret values mkosi must forward into the post-install
   # scripts. Passed as `--environment NAME` CLI flags (bare name = inherit from
@@ -363,7 +376,7 @@ run_mkosi_build() {
   local env_names=(
     ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY CAPABILITIES SERIAL_CONSOLE DTB_NAME UPDATE_BOARD
     OS_VERSION_ID APT_SUITE APT_SUITE_UPDATES APT_SUITE_SECURITY
-    CERALIVE_BUILD_APT_PROXY
+    CERALIVE_BUILD_APT_PROXY CERALIVE_DEBIAN_SNAPSHOT
     INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
     KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
     KERNEL_VARIANT KERNEL_SOURCE_DTB_DEB_DIR KERNEL_SOURCE_DTB_BOOT_DIR
@@ -556,6 +569,7 @@ run_mkosi_build() {
 
   local mkosi_args=(
     --architecture="${mkosi_arch}"
+    "${snapshot_args[@]}"
     --release="${RELEASE}"
     --with-network=yes
     "${env_cli[@]}"
