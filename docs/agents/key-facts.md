@@ -6360,8 +6360,8 @@ with the card.
   `incoming-authkey`. `systemctl enable tailscaled` is not needed: the image ships it
   enabled and conditioned on state or a pending key.
 - **What the unit does:** it is the only writer of `pending-authkey` (same two-line
-  format), `enroll-status`, `joined-once` and `state-ours`, and holds `.lock` (flock)
-  for each whole run.
+  format), `enroll-status`, `joined-once`, `state-ours` and `prior-login`, and holds
+  `.lock` (flock) for each whole run.
   - It claims `incoming-authkey` by renaming it to `.claimed`, so a drop that
     arrives meanwhile stays separate.
   - It validates the key, resets `enroll-status` to `pending 0 0 new-key`, replaces
@@ -6409,6 +6409,13 @@ with the card.
   The enrollment then turns SSH off in the same `set` as the pin and reports
   `ok-without-tailnet-ssh`. To get Tailscale SSH later, allow it in the tailnet
   policy and enroll the box again with a new key.
+  A keyed `up` that times out (for example while waiting for device approval) may
+  still have registered the box; the retry's `up --ssh` is then refused the same
+  way. Before a key's first attempt that reaches tailscaled, the unit writes
+  `prior-login` (`yes` when tailscaled already holds a node key, else `no`). On
+  that refusal, `no` means this key registered the box: the join is finished with
+  the same pin step. `yes`, or no answer, means the login predates the key, and the
+  enrollment gives up as described under "Giving up".
 - **Loopback fence:** tailnet peers reach only TCP 18080 (CeraUI backend) on the box
   (`tailscaled-loopback.nft`, matched by tailscaled's account). Tailscale SSH sessions
   run as `ceralive-tailscale` and become root with `sudo`.

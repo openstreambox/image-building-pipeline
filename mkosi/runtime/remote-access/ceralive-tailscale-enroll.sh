@@ -31,6 +31,11 @@
 #    If the tailnet does not grant Tailscale SSH, tailscaled refuses every later
 #    pref change (this pin, `down`, `logout`) while SSH is on, so SSH is turned
 #    off in the same change as the pin; the status reason says so.
+#    Before a key's first attempt that reaches tailscaled, prior-login records
+#    whether the box already held a login (yes/no). A retry refused that way with no prior login means an earlier
+#    attempt of this key registered the box (e.g. it waited for approval past
+#    the timeout): that is finished as a join. Only a login that predates the
+#    key makes the enrollment give up.
 # 3. Failures are bounded. A final control-plane answer (invalid, expired,
 #    revoked or already used key) ends enrollment at once. Other failures (no
 #    network yet) back off from 2 to 30 minutes and give up after MAX_ATTEMPTS.
@@ -60,12 +65,14 @@ SYSTEMCTL="${SYSTEMCTL_BIN:-systemctl}"
 WAIT="${CERALIVE_TS_SOCKET_WAIT:-30}"
 MAX_ATTEMPTS="${CERALIVE_TS_MAX_ATTEMPTS:-100}"
 LOCK_WAIT="${CERALIVE_TS_LOCK_WAIT:-300}"
+UP_TIMEOUT="${CERALIVE_TS_UP_TIMEOUT:-90s}"
 NOW="${CERALIVE_TS_NOW:-$(date +%s)}"
 PENDING="${ENROLL}/pending-authkey"
 INCOMING="${ENROLL}/incoming-authkey"
 CLAIMED="${ENROLL}/.claimed"
 STATUS="${ENROLL}/enroll-status"
 OURS="${ENROLL}/state-ours"
+PRIOR="${ENROLL}/prior-login"
 REJECTED_NOTE="${BOOT}/TAILSCALE-KEY-REJECTED.txt"
 KEY_RE='^tskey-auth-[A-Za-z0-9_-]{8,200}$'
 NAME_RE='^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$'
@@ -79,6 +86,12 @@ NO_TAILNET_SSH_RE='not enabled on tailnet'
 log() { logger -t ceralive-tailscale-enroll -- "$*" 2>/dev/null || true; echo "ceralive-tailscale-enroll: $*"; }
 
 regular() { [[ -f "$1" && ! -L "$1" ]]; }
+clean() { printf '%s' "$1" | sed -E 's/tskey-[A-Za-z0-9_-]+/<key>/g' | tr '\n' ' ' | cut -c1-160; }
+
+backend_state() { # prints tailscaled's BackendState (empty if it does not answer) and sets STATUS_JSON
+  STATUS_JSON="$("${CLI}" --socket="${SOCKET}" status --json 2>/dev/null)" || { STATUS_JSON=""; return 0; }
+  grep -o '"BackendState": *"[A-Za-z]*"' <<<"$STATUS_JSON" | head -n1 | grep -o '"[A-Za-z]*"$' | tr -d '"' || true
+}
 present() { [[ -e "$1" || -L "$1" ]]; }
 
 wipe() { # never follows a link: a link (or other non-regular file) is only unlinked
@@ -167,6 +180,7 @@ adopt() { # source
   printf '%s\n%s\n' "${KEY}" "${NAME}" >"$tmp"
   sync "$tmp"
   write_status pending 0 0 new-key
+  rm -f -- "${PRIOR}"   # asked again before this key's first attempt
   mv -f -- "$tmp" "${PENDING}"
   sync "${ENROLL}"
   log "new key from $1${NAME:+ for machine name ${NAME}}"
@@ -230,6 +244,7 @@ take_incoming_keys() {
 
 give_up() { # reason
   wipe "${PENDING}"
+  rm -f -- "${PRIOR}"
   if (( joined == 0 )) && [[ -e "${OURS}" ]]; then
     # NoState is also possible for a registered node waiting for control.
     # Keep its state if the status is ambiguous or already has a node key.
@@ -259,15 +274,28 @@ pin_auto_update_off() {
     echo ok
     return 0
   fi
-  if printf '%s' "$out" | grep -qiE "$NO_TAILNET_SSH_RE" \
-     && "${CLI}" --socket="${SOCKET}" set --ssh=false --accept-risk=lose-ssh \
-          --auto-update=false --update-check=false >/dev/null 2>&1; then
-    log "this tailnet does not allow Tailscale SSH: turned SSH off on this box so its settings can change; auto-update pinned off" >&2
-    echo ok-without-tailnet-ssh
-    return 0
+  if printf '%s' "$out" | grep -qiE "$NO_TAILNET_SSH_RE"; then
+    if out="$("${CLI}" --socket="${SOCKET}" set --ssh=false --accept-risk=lose-ssh \
+          --auto-update=false --update-check=false 2>&1)"; then
+      log "this tailnet does not allow Tailscale SSH: turned SSH off on this box so its settings can change; auto-update pinned off" >&2
+      echo ok-without-tailnet-ssh
+      return 0
+    fi
+    log "this tailnet does not allow Tailscale SSH, and turning SSH off failed too" >&2
   fi
-  log "could not pin auto-update off ($(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)); tailscaled re-applies it at start" >&2
+  log "could not pin auto-update off ($(clean "$out")); tailscaled tries again at its next start" >&2
   echo ok-auto-update-not-pinned
+}
+
+finish_join() { # name
+  : >"${ENROLL}/joined-once"
+  rm -f -- "${OURS}" "${PRIOR}"
+  local reason
+  reason="$(pin_auto_update_off)"
+  wipe "${PENDING}"
+  write_status joined "$attempts" 0 "$reason"
+  sync "${ENROLL}"
+  log "joined Tailscale${1:+ as $1}"
 }
 
 enroll_pending() {
@@ -301,28 +329,31 @@ enroll_pending() {
     return 1
   fi
   for ((i = 0; i < WAIT; i++)); do [[ -S "${SOCKET}" ]] && break; sleep 1; done
+  if [[ ! -e "${PRIOR}" ]]; then
+    # Once per key, before its first attempt that reaches tailscaled: did the
+    # box already hold a login? Unanswered stays undetermined (asked again).
+    backend_state >/dev/null
+    if [[ "$STATUS_JSON" =~ \"HaveNodeKey\"[[:space:]]*:[[:space:]]*true ]]; then
+      echo yes >"${PRIOR}"
+    elif [[ -n "$STATUS_JSON" ]]; then
+      echo no >"${PRIOR}"
+    fi
+  fi
   # The CLI reads a key-only copy (the pending file also carries the name).
   keyfile="$(mktemp "${ENROLL}/.up-key.XXXXXX")"
   parse_keyfile "${PENDING}"
   printf '%s' "${KEY}" >"$keyfile"
   KEY=""
   local args=(up "--auth-key=file:${keyfile}" --ssh --accept-risk=lose-ssh
-              --accept-dns=false --accept-routes=false --timeout=90s)
+              --accept-dns=false --accept-routes=false "--timeout=${UP_TIMEOUT}")
   [[ -n "$name" ]] && args+=("--hostname=${name}")
   out="$("${CLI}" --socket="${SOCKET}" "${args[@]}" 2>&1)" || rc=$?
   wipe "$keyfile"
   if (( rc == 0 )); then
-    : >"${ENROLL}/joined-once"
-    rm -f -- "${OURS}"
-    local reason
-    reason="$(pin_auto_update_off)"
-    wipe "${PENDING}"
-    write_status joined "$attempts" 0 "$reason"
-    sync "${ENROLL}"
-    log "joined Tailscale${name:+ as ${name}}"
+    finish_join "$name"
     return 0
   fi
-  message="$(printf '%s' "$out" | sed -E 's/tskey-[A-Za-z0-9_-]+/<key>/g' | tr '\n' ' ' | cut -c1-200)"
+  message="$(clean "$out")"
   log "tailscale up failed (attempt ${attempts}/${MAX_ATTEMPTS}): ${message}"
   # Final refusals: Tailscale's control plane ("invalid key: …", expired, revoked,
   # already used) and headscale ("invalid pre auth key", "… has expired", "… has
@@ -333,10 +364,20 @@ enroll_pending() {
     return 1
   fi
   # Only a box that already holds a netmap from such a tailnet answers this way
-  # (a fresh login has no netmap yet); retrying cannot change it.
+  # (a fresh login has no netmap yet). If that login predates this key, retrying
+  # cannot change it. Otherwise an earlier attempt of this key registered the box
+  # and only timed out: finish that join.
   if printf '%s' "$out" | grep -qiE "$NO_TAILNET_SSH_RE"; then
-    give_up "this tailnet does not allow Tailscale SSH; forget the box there first"
-    return 1
+    # Undetermined counts as a login that predates the key.
+    if [[ "$(cat -- "${PRIOR}" 2>/dev/null)" != no ]]; then
+      give_up "this tailnet does not allow Tailscale SSH; forget the box there first"
+      return 1
+    fi
+    if [[ "$(backend_state)" == Running ]]; then
+      log "an earlier attempt with this key registered the box"
+      finish_join "$name"
+      return 0
+    fi
   fi
   if (( attempts >= MAX_ATTEMPTS )); then
     give_up "no success after ${attempts} attempts"

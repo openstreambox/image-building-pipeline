@@ -199,10 +199,11 @@ case "\$*" in
   *" up "*) f="\${*##*auth-key=file:}"; f="\${f%% *}"; echo "used \$(cut -c12-20 "\$f")" >>"$T/used"
     : >"$T/state/tailscaled.state"; [ -n "\$TS_SLEEP" ] && sleep "\$TS_SLEEP"
     [ -n "\$TS_OUT" ] && echo "\$TS_OUT" >&2; exit "\${TS_RC:-0}";;
-  *"status --json"*) echo "{\"BackendState\": \"\${TS_BACKEND:-NeedsLogin}\"}";;
+  *"status --json"*) [ -n "\$TS_STATUS_RC" ] && exit "\$TS_STATUS_RC"; [ -n "\$TS_NODEKEY" ] && nk=', "HaveNodeKey": true' || nk=''
+    echo "{\"BackendState\": \"\${TS_BACKEND:-NeedsLogin}\"\$nk}";;
   # \$TS_SET_OUT/\$TS_SET_RC model tailscaled refusing a pref change while
   # Tailscale SSH stays on; turning SSH off in the same change is accepted.
-  *" set "*) case "\$*" in *"--ssh=false"*) exit "\${TS_SSHOFF_RC:-0}";; esac
+  *" set "*) case "\$*" in *"--ssh=false"*) [ -n "\$TS_SSHOFF_OUT" ] && echo "\$TS_SSHOFF_OUT" >&2; exit "\${TS_SSHOFF_RC:-0}";; esac
     [ -n "\$TS_SET_OUT" ] && echo "\$TS_SET_OUT" >&2; exit "\${TS_SET_RC:-0}";;
 esac
 exit 0
@@ -282,10 +283,55 @@ NO_TAILNET_SSH="Unable to enable local Tailscale SSH server; not enabled on Tail
   enroll_env
   printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
   : >"$T/state/tailscaled.state"
-  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="$NO_TAILNET_SSH" TS_BACKEND=Running
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="$NO_TAILNET_SSH" TS_BACKEND=Running TS_NODEKEY=1
   [ "$status" -ne 0 ]
   [ "$(cut -d' ' -f1,4- "$T/enroll/enroll-status")" = "gave-up this tailnet does not allow Tailscale SSH; forget the box there first" ]
   [ -e "$T/state/tailscaled.state" ] && [ ! -e "$T/enroll/pending-authkey" ]
+  no_key_anywhere
+}
+
+@test "a join this enrollment registered, refused on retry by a tailnet without Tailscale SSH, still finishes and pins" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  # attempt 1: no login yet; the keyed up registers but times out (approval wait)
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="timeout waiting for the device to be approved"
+  [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 retry" ]
+  # approved meanwhile: Running with a netmap that refuses SSH, so the retry's up is refused
+  enroll CERALIVE_TS_NOW=1130 TS_RC=1 TS_OUT="$NO_TAILNET_SSH" TS_BACKEND=Running TS_NODEKEY=1 \
+    TS_SET_RC=1 TS_SET_OUT="$NO_TAILNET_SSH"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 2 0 ok-without-tailnet-ssh" ]
+  [ "$(tail -n1 "$T/calls")" = "tailscale --socket=$T/none.sock set --ssh=false --accept-risk=lose-ssh --auto-update=false --update-check=false" ]
+  [ ! -e "$T/enroll/pending-authkey" ] && [ -e "$T/enroll/joined-once" ]
+  no_leftovers
+  no_key_anywhere
+}
+
+@test "the login check is made once per key, and an unanswered check stays open" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="no network" TS_BACKEND=Running TS_NODEKEY=1
+  [ "$(cat "$T/enroll/prior-login")" = yes ]
+  # a later attempt sees no login but keeps the first answer
+  enroll CERALIVE_TS_NOW=1130 TS_RC=1 TS_OUT="no network"
+  [ "$(cat "$T/enroll/prior-login")" = yes ]
+  # a new key asks again; a daemon that does not answer leaves it undetermined
+  card_drop "$KEY"
+  enroll CERALIVE_TS_NOW=1140 TS_RC=1 TS_OUT="no network" TS_STATUS_RC=1
+  [ ! -e "$T/enroll/prior-login" ]
+  # ... and undetermined is treated like a login that predates the key
+  enroll CERALIVE_TS_NOW=1400 TS_RC=1 TS_OUT="$NO_TAILNET_SSH" TS_BACKEND=Running TS_NODEKEY=1 TS_STATUS_RC=1
+  [ "$(cut -d' ' -f1 "$T/enroll/enroll-status")" = gave-up ]
+  [ ! -e "$T/enroll/prior-login" ]
+}
+
+@test "a failed SSH-off pin keeps its own error in the log" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_SET_RC=1 TS_SET_OUT="$NO_TAILNET_SSH" TS_SSHOFF_RC=1 TS_SSHOFF_OUT="dial unix: no such socket"
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 1 0 ok-auto-update-not-pinned" ]
+  [[ "$output" == *"dial unix: no such socket"* ]]
+  [[ "$output" == *"tries again"* ]]
   no_key_anywhere
 }
 
