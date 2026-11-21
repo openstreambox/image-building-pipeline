@@ -10,9 +10,11 @@
 # PR_SWAP is never requested: the proven correction is a port_type cycle, always
 # restoring dual, rather than writing power_role. A tmpfs marker suppresses the
 # cycle's partner-add recursion; a failed-attach marker prevents charger loops.
-# When those cycles are used up and the port still shows no partner while it is
-# the source, the recheck rebinds the port's FUSB302 once per boot: the chip can
-# sit toggling without ever raising an attach interrupt until it is reset.
+# The FUSB302 can sit toggling as the source without ever raising an attach
+# interrupt until it is reset, so the first recheck that finds the port source
+# with no partner rebinds the port's FUSB302 before any cycle. If that early
+# rebind finds nothing, the cycles run as before and, once they are used up, one
+# more rebind follows (a device plugged in after the early one).
 #
 # udev starts the systemd oneshot on partner and port add events. The boot enable
 # is a second coldplug path, so every run inspects CURRENT sysfs state and is safe
@@ -33,8 +35,10 @@
 #   CERALIVE_TYPEC_SETTLED_POWER_ROLE post-cycle readback (default power_role)
 #   CERALIVE_TYPEC_NOPARTNER_MAX      recheck cycles per boot with no partner (default 3)
 #   CERALIVE_TYPEC_NOPARTNER_SPACING  seconds between those cycles (default 30)
+#   CERALIVE_TYPEC_EARLY_SETTLE       seconds after a cycle before the early
+#                                     FUSB302 rebind (default 5)
 #   CERALIVE_TYPEC_REPROBE_SETTLE     seconds after the last cycle before the
-#                                     one FUSB302 rebind (default 20)
+#                                     late FUSB302 rebind (default 20)
 #   CERALIVE_TYPEC_REARM_SETTLE       seconds a partner must stay gone after a
 #                                     rebind before one more rebind (default 30)
 #   CERALIVE_TYPEC_REARM_MAX          such re-arm rebinds per boot (default 3)
@@ -67,6 +71,8 @@ NOPARTNER_SPACING="${CERALIVE_TYPEC_NOPARTNER_SPACING:-30}"
   || die "CERALIVE_TYPEC_NOPARTNER_MAX and _SPACING must be unsigned integers"
 REPROBE_SETTLE="${CERALIVE_TYPEC_REPROBE_SETTLE:-20}"
 [[ "${REPROBE_SETTLE}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_REPROBE_SETTLE must be an unsigned integer"
+EARLY_SETTLE="${CERALIVE_TYPEC_EARLY_SETTLE:-5}"
+[[ "${EARLY_SETTLE}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_EARLY_SETTLE must be an unsigned integer"
 REBIND_GAP="${CERALIVE_TYPEC_REBIND_GAP:-1}"
 REARM_SETTLE="${CERALIVE_TYPEC_REARM_SETTLE:-30}"
 REARM_MAX="${CERALIVE_TYPEC_REARM_MAX:-3}"
@@ -147,25 +153,54 @@ reprobe_defer() {
     || reprobe_log ERROR "cannot record the deferral"
 }
 
+# mono_now — whole seconds since boot into MONO_NOW. The policy runs early in
+# boot, where NTP may step the wall clock (a board without an RTC starts days
+# behind). Bash SECONDS follows that step, and a deadline taken before it would
+# expire at once, so every wait counts /proc/uptime instead. The first call
+# picks the clock for the whole run: uptime, or SECONDS if /proc/uptime cannot
+# be read then, so a deadline never compares across the two. On uptime, a
+# later failed read advances the last good value by the SECONDS elapsed since
+# it (only a clock step inside that same gap could shift it).
+MONO_SRC="" MONO_UP=0 MONO_AT=0
+mono_now() {
+  local up=""
+  if [[ "${MONO_SRC}" != seconds ]]; then
+    { read -r up _ </proc/uptime; } 2>/dev/null || up=""
+    up="${up%%.*}"
+  fi
+  if [[ "${up}" =~ ^[0-9]+$ ]]; then
+    MONO_SRC=uptime MONO_UP="${up}" MONO_AT="${SECONDS}" MONO_NOW="${up}"
+  elif [[ "${MONO_SRC}" == uptime ]]; then
+    MONO_NOW=$((MONO_UP + SECONDS - MONO_AT))
+  else
+    MONO_SRC=seconds MONO_NOW="${SECONDS}"
+  fi
+}
+
 # wait_bound <device dir> <want: bound|unbound> — poll the driver link, the only
 # trustworthy result: a deferred probe fails the bind write yet may bind later,
 # and a repeated write to a bound device fails with EBUSY.
 wait_bound() {
-  local deadline=$((SECONDS + BIND_WAIT))
+  local deadline
+  mono_now
+  deadline=$((MONO_NOW + BIND_WAIT))
   while :; do
     if [[ -L "$1/driver" ]]; then
       [[ "$2" == bound ]] && return 0
     else
       [[ "$2" == unbound ]] && return 0
     fi
-    (( SECONDS < deadline )) || return 1
+    mono_now
+    (( MONO_NOW < deadline )) || return 1
     sleep "${POLL_INTERVAL}"
   done
 }
 
-# rock_fusb302_reprobe <last cycle epoch> <now epoch> [re-arm k/max] — returns 2
-# when it did nothing (marker, settle time or a deferral), otherwise 0. Runs only from the Rock
-# recheck with back power present, no partner and the no-partner cycles used up.
+# rock_fusb302_reprobe <last cycle epoch> <now epoch> [early | re-arm k/max] —
+# returns 2 when it did nothing (marker, settle time or a deferral), 3 when it
+# only recorded a driver or I2C skip, otherwise 0. Runs only from the Rock
+# recheck with back power present and no partner: early, before the no-partner
+# cycles; late, once they are used up; or as a re-arm (below).
 # It unbinds and rebinds the one I2C device that owns ${PORT} (the J11 data
 # connector; the board's supply comes from the back input), once per boot, then
 # re-reads the partner. The driver directory comes from the device's own driver
@@ -179,10 +214,18 @@ wait_bound() {
 # the unbind write could block in D state: the unit then times out holding the
 # lock, later runs log a lock timeout, and boot itself is not held (timer-driven).
 #
+# Early: on cold boots with a modem on J11 the chip was stuck in most boots
+# measured, and a rebind recovered every one, while the port_type cycles helped
+# once. So the first recheck that sees the port source with no partner rebinds
+# right away (no cycle run yet, or EARLY_SETTLE after one), once per boot. Only a
+# `no-partner` result leaves the late rebind available, after the cycles and only
+# while no partner has been seen since: that keeps a modem plugged in a minute
+# after power-on covered as before.
+#
 # An empty J11 looks exactly like a stuck one (source, no partner, no CC event in
-# sysfs), so on a back-powered boot with nothing plugged in this rebind runs once
-# and ends in an info line. A working data path without a partner object (a
-# device enumerated under the OTG controller) is left alone.
+# sysfs), so on a back-powered boot with nothing plugged in the early and the late
+# rebind each run once and end in an info line. A working data path without a
+# partner object (a device enumerated under the OTG controller) is left alone.
 #
 # Re-arm: a hot unplug and replug sticks the chip the same way, and a second
 # rebind recovers it. So once a partner has been seen after this boot's rebind
@@ -194,8 +237,15 @@ wait_bound() {
 # only a partner that appears again re-arms it.
 rock_fusb302_reprobe() {
   local last="$1" now="$2" rearm="${3:-}" power dev name driver bus deadline data label="" prev=""
-  [[ -n "${rearm}" || ! -e "${RUN_DIR}/reprobe" ]] || return 2
-  (( now - last >= REPROBE_SETTLE )) || return 2
+  local early=0
+  if [[ "${rearm}" == early ]]; then
+    early=1 rearm=""
+    [[ ! -e "${RUN_DIR}/reprobe" ]] || return 2
+    (( last == 0 || now - last >= EARLY_SETTLE )) || return 2
+  elif [[ -z "${rearm}" ]]; then
+    [[ ! -e "${RUN_DIR}/reprobe" ]] || rock_late_reprobe_allowed || return 2
+    (( now - last >= REPROBE_SETTLE )) || return 2
+  fi
   [[ -z "${rearm}" || ! -r "${RUN_DIR}/reprobe" ]] || read -r prev _ <"${RUN_DIR}/reprobe"
 
   if [[ ! -r "${PORT_DIR}/preferred_role" ||
@@ -224,7 +274,7 @@ rock_fusb302_reprobe() {
     reprobe_log INFO "skipped: ${PORT} is not backed by an I2C device"
     reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
     rm -f "${RUN_DIR}/detached"
-    return 0
+    return 3
   fi
   case "${driver##*/}" in
     typec_fusb302 | fusb302) ;;
@@ -232,7 +282,7 @@ rock_fusb302_reprobe() {
       reprobe_log INFO "skipped: ${name} is bound to '${driver##*/}', not typec_fusb302"
       reprobe_record skipped || reprobe_log ERROR "cannot record the skip"
       rm -f "${RUN_DIR}/detached"
-      return 0
+      return 3
       ;;
   esac
   bus="${driver%/drivers/*}"
@@ -241,6 +291,15 @@ rock_fusb302_reprobe() {
   if ! reprobe_record attempted; then
     reprobe_log ERROR "cannot record the attempt — no rebind"
     return 0
+  fi
+  if (( early )); then
+    : >"${RUN_DIR}/reprobe-early" || reprobe_log ERROR "cannot record the early rebind"
+  elif [[ -z "${rearm}" && -e "${RUN_DIR}/reprobe-early" ]]; then
+    # Unrecorded, the marker stays `attempted`, which allows no further rebind.
+    if ! : >"${RUN_DIR}/reprobe-late"; then
+      reprobe_log ERROR "cannot record the late rebind — no rebind"
+      return 0
+    fi
   fi
   if [[ -e "${PARTNER_DIR}" ]]; then
     reprobe_log INFO "skipped: a partner appeared on ${PORT}"
@@ -264,6 +323,13 @@ rock_fusb302_reprobe() {
   fi
   if [[ -n "${rearm}" ]]; then
     reprobe_log INFO "${label}${PORT} lost its partner and has had none for ${REARM_SETTLE}s or more: rebinding ${name} from ${driver##*/}"
+  elif (( early )); then
+    label="early: "
+    if (( last == 0 )); then
+      reprobe_log INFO "${label}${PORT} is source with no partner before any cycle: rebinding ${name} from ${driver##*/}"
+    else
+      reprobe_log INFO "${label}${PORT} is source with no partner $((now - last))s after a cycle: rebinding ${name} from ${driver##*/}"
+    fi
   else
     reprobe_log INFO "${PORT} is source with no partner $((now - last))s after the last cycle: rebinding ${name} from ${driver##*/}"
   fi
@@ -289,8 +355,11 @@ rock_fusb302_reprobe() {
     return 0
   fi
 
-  deadline=$((SECONDS + WAIT_SECONDS))
-  while [[ ! -e "${PARTNER_DIR}" ]] && (( SECONDS < deadline )); do
+  mono_now
+  deadline=$((MONO_NOW + WAIT_SECONDS))
+  while [[ ! -e "${PARTNER_DIR}" ]]; do
+    mono_now
+    (( MONO_NOW < deadline )) || break
     sleep "${POLL_INTERVAL}"
   done
   if [[ ! -d "${PORT_DIR}" ]]; then
@@ -303,10 +372,39 @@ rock_fusb302_reprobe() {
     reprobe_log INFO "${label}partner found after rebinding ${name}: power_role=${power} data_role=${data}"
     reprobe_record recovered || reprobe_log ERROR "cannot record the result"
   else
-    reprobe_log INFO "${label}no partner ${WAIT_SECONDS}s after rebinding ${name}: J11 is empty or the chip is still stuck — only a partner that appears again re-arms another rebind"
+    if (( early )); then
+      reprobe_log INFO "${label}no partner ${WAIT_SECONDS}s after rebinding ${name}: J11 is empty or the chip is still stuck — the no-partner cycles follow, then one late rebind"
+    else
+      reprobe_log INFO "${label}no partner ${WAIT_SECONDS}s after rebinding ${name}: J11 is empty or the chip is still stuck — only a partner that appears again re-arms another rebind"
+    fi
     reprobe_record no-partner || reprobe_log ERROR "cannot record the result"
   fi
   return 0
+}
+
+# note_partner_since_early — any partner the policy sees after the early rebind
+# rules out the late one for the rest of the boot, whatever the re-arm state
+# (which the re-arm clears as it goes). Called wherever a partner is observed,
+# so even one that leaves before the next run counts.
+note_partner_since_early() {
+  [[ -e "${RUN_DIR}/reprobe-early" && ! -e "${RUN_DIR}/partner-since-early" ]] || return 0
+  : >"${RUN_DIR}/partner-since-early" \
+    || log "ERROR: cannot record the partner seen after the early rebind"
+}
+
+# rock_late_reprobe_allowed — the late rebind after an early one: only when the
+# early rebind ended in `no-partner`, the late one has not run, and no partner
+# has been seen since (`partner-since-early`, kept for the boot; the re-arm
+# files are a second check). Any other recorded outcome, skipped and failed
+# ones included, keeps the once-per-boot rule.
+rock_late_reprobe_allowed() {
+  local state=""
+  [[ -e "${RUN_DIR}/reprobe-early" && ! -e "${RUN_DIR}/reprobe-late" &&
+     ! -e "${RUN_DIR}/partner-since-early" ]] || return 1
+  [[ ! -e "${RUN_DIR}/partner-seen" && ! -e "${RUN_DIR}/detached" &&
+     ! -e "${RUN_DIR}/rearm" ]] || return 1
+  [[ -r "${RUN_DIR}/reprobe" ]] && read -r state _ <"${RUN_DIR}/reprobe"
+  [[ "${state}" == no-partner ]]
 }
 
 # rock_reprobe_rearm <last cycle epoch> <now epoch> — runs in the Rock recheck
@@ -359,7 +457,8 @@ rock_back_power_correction() {
   if [[ ! -e "${PARTNER_DIR}" ]]; then
     rm -f "${RUN_DIR}/failed"
   fi
-  deadline=$((SECONDS + retry))
+  mono_now
+  deadline=$((MONO_NOW + retry))
   while :; do
     for adc in "${CERALIVE_TYPEC_IIO_DIR:-/sys/bus/iio/devices}"/iio:device*; do
       [[ -r "${adc}/name" && "$(cat "${adc}/name")" == fec10000.adc ]] || continue
@@ -375,7 +474,8 @@ rock_back_power_correction() {
       fi
       break
     done
-    [[ "${decision}" == unknown ]] && (( SECONDS < deadline )) || break
+    mono_now
+    [[ "${decision}" == unknown ]] && (( MONO_NOW < deadline )) || break
     sleep 1
   done
   [[ ! -r "${RUN_DIR}/state" ]] || previous="$(cat "${RUN_DIR}/state")"
@@ -418,6 +518,7 @@ rock_back_power_correction() {
     # leaves (rock_reprobe_rearm). Only outcomes that left a working controller
     # qualify; skipped and failed rebinds never re-arm.
     rm -f "${RUN_DIR}/detached"
+    note_partner_since_early
     if [[ ! -e "${RUN_DIR}/partner-seen" && -r "${RUN_DIR}/reprobe" ]]; then
       read -r rstate _ <"${RUN_DIR}/reprobe"
       case "${rstate}" in
@@ -449,6 +550,10 @@ rock_back_power_correction() {
       rock_fusb302_reprobe "${last}" "${now}"
       return 0
     fi
+    # The early rebind goes first; a deferral, a skip that touched nothing or a
+    # rebind already spent lets this tick's cycle run as before.
+    rock_fusb302_reprobe "${last}" "${now}" early
+    case $? in 2 | 3) ;; *) return 0 ;; esac
     (( now - last >= NOPARTNER_SPACING )) || return 0
     if ! mkdir -p "${RUN_DIR}" || ! printf '%s %s\n' "$((tries + 1))" "${now}" >"${RUN_DIR}/nopartner"; then
       log "ERROR: cannot record Rock no-partner try — no port_type write"
@@ -457,9 +562,11 @@ rock_back_power_correction() {
     blind=1
   fi
   if (( blind == 0 )); then
-    deadline=$((SECONDS + WAIT_SECONDS))
+    mono_now
+    deadline=$((MONO_NOW + WAIT_SECONDS))
     while [[ ! -r "${POWER_ROLE}" ]]; do
-      (( SECONDS < deadline )) || return 0
+      mono_now
+      (( MONO_NOW < deadline )) || return 0
       sleep "${POLL_INTERVAL}"
     done
     [[ -e "${PARTNER_DIR}" && "$(active_role "${POWER_ROLE}")" == sink ]] || return 0
@@ -507,16 +614,19 @@ rock_back_power_correction() {
 
   # The cycle removes and re-adds the partner asynchronously. This wait and its
   # failure receipt also run under the periodic recheck, without any DR_SWAP.
-  deadline=$((SECONDS + WAIT_SECONDS))
+  mono_now
+  deadline=$((MONO_NOW + WAIT_SECONDS))
   rock_settle_deadline="${deadline}"
   settled_power="${CERALIVE_TYPEC_SETTLED_POWER_ROLE:-${POWER_ROLE}}"
   while :; do
     if [[ -e "${PARTNER_DIR}" && -r "${settled_power}" ]]; then
+      note_partner_since_early
       case "$(active_role "${settled_power}")" in
         source) rock_settled_source=1; return 0 ;;
         sink)
           # A sink read immediately after the write may still be the old attach.
-          if (( SECONDS >= deadline )); then
+          mono_now
+          if (( MONO_NOW >= deadline )); then
             if [[ -r "${PARTNER_DIR}/identity/id_header" ]]; then
               identity="$(cat "${PARTNER_DIR}/identity/id_header")"
             fi
@@ -525,7 +635,8 @@ rock_back_power_correction() {
           ;;
       esac
     fi
-    (( SECONDS < deadline )) || break
+    mono_now
+    (( MONO_NOW < deadline )) || break
     sleep "${POLL_INTERVAL}"
   done
   printf '%s\n' "${identity}" >"${RUN_DIR}/failed" \
@@ -569,7 +680,8 @@ if [[ ! -e "${PARTNER_DIR}" ]]; then
 fi
 
 # Share the post-cycle deadline rather than adding a third settle budget.
-deadline="${rock_settle_deadline:-$((SECONDS + WAIT_SECONDS))}"
+mono_now
+deadline="${rock_settle_deadline:-$((MONO_NOW + WAIT_SECONDS))}"
 while :; do
   if [[ -r "${POWER_ROLE}" && -r "${DATA_ROLE}" ]]; then
     power="$(active_role "${POWER_ROLE}")"
@@ -583,7 +695,8 @@ while :; do
     break
   fi
 
-  if (( SECONDS >= deadline )); then
+  mono_now
+  if (( MONO_NOW >= deadline )); then
     log "${PORT} role attributes did not settle within ${WAIT_SECONDS}s — no action"
     exit 0
   fi
