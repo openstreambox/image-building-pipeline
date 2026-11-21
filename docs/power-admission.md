@@ -195,9 +195,17 @@ waits for running writes.
 
 ## Every shutdown waits for writes
 
-`ceralive-write-drain.service` is active from boot and ordered after `rauc.service`,
-the update and slot units, slot activation, boot-script sync, NetworkManager and
-ModemManager. Per-attempt units order themselves before it: CeraUI's
+`ceralive-write-drain.service` is active within seconds of boot and ordered after
+`rauc.service`, the update and slot units, slot activation, NetworkManager and
+ModemManager. Its start waits for nothing slow: a shutdown queued while its start
+job still waits would cancel that job, and then no `ExecStop` runs. The boot-only
+oneshots (dpkg recovery, the health check, mark-good, boot-script sync) have
+finished before anything ordered after them can start, so an ordering against
+them would protect nothing and only leave the drain off for the whole boot health
+chain. While they run, deliberate power-offs go through the broker's update and
+dpkg locks and writer check; the drain still counts boot-script sync as a writer,
+dpkg recovery is journaled and re-runs on the next boot, and the boot.scr sync
+replaces its file atomically. Per-attempt units order themselves before it: CeraUI's
 `ceralive-kernel-stage-<id>.service` and the image's `ceralive-rauc-arm@.service`
 carry `Before=ceralive-write-drain.service`. Stop order is the reverse, so during
 any shutdown its `ExecStop` runs first. It writes its own fence,

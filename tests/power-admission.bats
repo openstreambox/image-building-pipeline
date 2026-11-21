@@ -73,6 +73,43 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; P="$ROOT/mkosi/runtime/po
   grep -qx 'RemainAfterExit=yes' "$u"
 }
 
+@test "power admission: the shutdown drain starts early in boot, not after the boot health chain" {
+  # A shutdown queued while the drain's start job still waits cancels that job,
+  # and then no drain ExecStop runs. The drain's start may therefore wait only
+  # for units that start quickly; boot-only oneshots (health check, mark-good,
+  # boot.scr sync, dpkg recovery) finish before it could ever start, so an
+  # ordering against them protects nothing and only delays it.
+  run python3 - "$ROOT/mkosi" <<'PY'
+import pathlib, sys
+units = {}
+for path in pathlib.Path(sys.argv[1]).rglob('*'):
+    if path.suffix in ('.service', '.target') and path.is_file():
+        units.setdefault(path.name, []).append(path)
+def text(name):
+    return '\n'.join(path.read_text() for path in units.get(name, []))
+def after(name):
+    return {dep for line in text(name).splitlines() if line.startswith('After=') for dep in line[6:].split()}
+def at_boot(name):
+    # Only units in the boot transaction delay a start; on-demand units (no
+    # [Install], e.g. slot sync) and transient ones don't.
+    return name.endswith('.target') or 'WantedBy=' in text(name)
+seen, todo = set(), ['ceralive-write-drain.service']
+while todo:
+    for dep in after(todo.pop()) - seen:
+        seen.add(dep)
+        if at_boot(dep):
+            todo.append(dep)
+seen = {name for name in seen if at_boot(name)}
+slow = {'ceralive-healthcheck.service', 'ceralive-mark-good.service', 'boot-complete.target',
+        'ceralive-boot-script-sync.service', 'ceralive-dpkg-recover.service', 'ceralive.service'}
+bad = sorted(seen & slow)
+print(' '.join(bad))
+sys.exit(1 if bad else 0)
+PY
+  echo "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "power admission: the broker never runs systemctl power verbs or starts a target" {
   local b="$P/ceralive-power-broker.py"
   ! grep -Eq "'(poweroff|reboot|halt)\.target'|'systemctl', *'(poweroff|reboot|halt)'|replace-irreversibly" "$b"
@@ -134,9 +171,12 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; P="$ROOT/mkosi/runtime/po
   done
 }
 
-@test "power admission: activation and boot-script writers stop only after the drain" {
-  grep -E '^After=' "$P/ceralive-write-drain.service" | grep -qw ceralive-boot-script-sync.service
+@test "power admission: activation writers stop only after the drain; boot.scr sync is checked, not ordered" {
   grep -E '^After=' "$P/ceralive-write-drain.service" | grep -qw ceralive-rauc-activate.service
+  # Boot-only: it has finished before the drain could start after it. The
+  # broker and the drain still count it as a writer while it runs.
+  [ -z "$(grep -E '^After=' "$P/ceralive-write-drain.service" | grep -w ceralive-boot-script-sync.service)" ]
+  grep -Fq "'ceralive-boot-script-sync.service')" "$P/ceralive-power-broker.py"
   grep -qx 'Before=ceralive-write-drain.service' "$ROOT/mkosi/runtime/ceralive-rauc-arm@.service"
 }
 
