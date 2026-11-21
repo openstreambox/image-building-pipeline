@@ -335,8 +335,15 @@ retire_pending_join() {
   return "${rc}"
 }
 
-# NM's profile listing (NAME:UUID:TYPE); non-zero when NM cannot be read.
-nm_profiles() { "${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null; }
+# NM's profile listing, as in ceralive-provision: UUID and TYPE are fields 1 and 2, the
+# name (nmcli-escaped: `\:`, `\\`) is the rest; NM_AWK's nm_name() unescapes it.
+# Non-zero when NM cannot be read.
+nm_profiles() { "${NMCLI}" -t -f UUID,TYPE,NAME connection show 2>/dev/null; }
+# shellcheck disable=SC2016
+NM_AWK='function nm_name(  s, o, i, c) { s = substr($0, length($1) + length($2) + 3); o = ""
+          for (i = 1; i <= length(s); i++) { c = substr(s, i, 1); if (c == "\\" && i < length(s)) c = substr(s, ++i, 1); o = o c }
+          return o }
+'
 
 # Persist the user's network as a NM profile with UUID $3 (credentials land ONLY in NM
 # storage). The fixed con-name is what the provision trigger and worker look for.
@@ -382,7 +389,7 @@ save_join() {
   uuid="$(tr -d '[:space:]' <"${JOIN_UUID_SOURCE}" 2>/dev/null)"
   [[ "${uuid}" =~ ${UUID_RE} ]] || { log "could not choose a UUID for '${USER_CON_NAME}'"; return 1; }
   list="$(nm_profiles)" || { log "could not read NetworkManager profiles; '${USER_CON_NAME}' not saved"; return 1; }
-  old="$(awk -F: -v n="${USER_CON_NAME}" 'NF == 3 && $1 == n && $3 == "802-11-wireless" { print $2 }' <<<"${list}")"
+  old="$(awk -F: -v n="${USER_CON_NAME}" "${NM_AWK}"'$2 == "802-11-wireless" && nm_name() == n { print $1 }' <<<"${list}")"
   for u in ${old}; do
     if ! "${NMCLI}" connection delete uuid "${u}" >/dev/null 2>&1; then
       log "could not delete the earlier '${USER_CON_NAME}' (${u}); new profile not saved"
@@ -391,7 +398,7 @@ save_join() {
   done
   mark_join_pending "${ssid}" "${uuid}" || return 1
   if ! write_user_profile "${ssid}" "${psk}" "${uuid}"; then
-    if list="$(nm_profiles)" && ! awk -F: -v u="${uuid}" '$2 == u { f = 1 } END { exit !f }' <<<"${list}"; then
+    if list="$(nm_profiles)" && ! awk -F: -v u="${uuid}" '$1 == u { f = 1 } END { exit !f }' <<<"${list}"; then
       retire_pending_join "${uuid}" || log "could not remove ${PENDING_JOIN}"
     else
       log "profile ${uuid} may be saved after a failed add; ${PENDING_JOIN} kept"

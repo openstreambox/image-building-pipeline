@@ -75,6 +75,12 @@ echo "$m nmcli $*" >>"$MARKER_LOG"
 args="$*"
 P="$NMSTATE/profiles" D="$NMSTATE/details" A="$NMSTATE/active"
 drop_uuid() { for f in "$P" "$D" "$A"; do grep -v -- "$1" "$f" >"$f.tmp"; mv "$f.tmp" "$f"; done; }
+# Profile rows as nmcli -t prints them: the model keeps raw names (UUID and TYPE are its
+# last two fields); output escapes '\' and ':' in the name like NM does.
+rows() { while IFS= read -r line; do [ -n "$line" ] || continue
+           t="${line##*:}"; r="${line%:*}"; u="${r##*:}"; n="${r%:*}"; n="${n//\\/\\\\}"; n="${n//:/\\:}"
+           case "$1" in nut) echo "$n:$u:$t" ;; utn) echo "$u:$t:$n" ;; nt) echo "$n:$t" ;; esac
+         done <"$P"; }
 case "$args" in
   *"dev wifi list"*) [ -n "${STUB_SCAN_FILE:-}" ] && cat "$STUB_SCAN_FILE"; exit 0 ;;
   *"-f CONNECTIVITY general status"*) printf "%s\n" "${STUB_CONNECTIVITY:-full}"; exit 0 ;;
@@ -90,14 +96,15 @@ case "$args" in
   *"-g GENERAL.STATE device show"*) [ -n "${STUB_DEV_READ_RC:-}" ] && exit "$STUB_DEV_READ_RC"
                                     if [ -n "${STUB_DEV_STATE:-}" ]; then echo "$STUB_DEV_STATE"
                                     elif [ -s "$A" ]; then echo "100 (connected)"; else echo "30 (disconnected)"; fi; exit 0 ;;
-  *"-f NAME,UUID,TYPE connection show"*) [ -n "${STUB_NM_READ_RC:-}" ] && exit "$STUB_NM_READ_RC"; cat "$P"; exit 0 ;;
+  *"-f NAME,UUID,TYPE connection show"*) [ -n "${STUB_NM_READ_RC:-}" ] && exit "$STUB_NM_READ_RC"; rows nut; exit 0 ;;
+  *"-f UUID,TYPE,NAME connection show"*) [ -n "${STUB_NM_READ_RC:-}" ] && exit "$STUB_NM_READ_RC"; rows utn; exit 0 ;;
   *"-g 802-11-wireless.mode connection show uuid "*) [ -n "${STUB_MODE_READ_RC:-}" ] && exit "$STUB_MODE_READ_RC"
                              set -- $args; field="$2"; uuid="${!#}"
                              awk -v u="$uuid" -v f="$field" '$1 == u && $2 == f { sub(/^[^ ]+ [^ ]+ /, ""); print }' "$D"; exit 0 ;;
   *"connection show uuid "*) set -- $args; field="$2"; uuid="${!#}"
                              awk -v u="$uuid" -v f="$field" '$1 == u && $2 == f { sub(/^[^ ]+ [^ ]+ /, ""); print }' "$D"; exit 0 ;;
   *"802-11-wireless.ssid connection show"*) printf "%s\n" "${STUB_CON_SSID:-HomeNet}"; exit 0 ;;
-  *"-f NAME,TYPE connection show"*) if [ -n "${STUB_PROFILES_FILE:-}" ]; then cat "$STUB_PROFILES_FILE"; else cut -d: -f1,3 "$P"; fi; exit 0 ;;
+  *"-f NAME,TYPE connection show"*) if [ -n "${STUB_PROFILES_FILE:-}" ]; then cat "$STUB_PROFILES_FILE"; else rows nt; fi; exit 0 ;;
   *"connection add"*ceralive-ap*)
     [ "${STUB_AP_ADD_RC:-0}" -ne 0 ] && exit "$STUB_AP_ADD_RC"
     u=""; prev=""; for a in "$@"; do [ "$prev" = connection.uuid ] && u="$a"; prev="$a"; done
@@ -810,6 +817,39 @@ printf 'not-a-uuid\n' >"$(state_file ap-uuid)"
 offline_boot
 grep -q "leaving out every profile called ceralive-ap" "${OUTF}" && grep -q "no stored WiFi profiles" "${OUTF}" \
                                                  && pass "unreadable setup AP identity: count falls back to the name" || fail "unreadable setup AP identity: count falls back to the name"
+
+# Names with ':' come escaped from nmcli -t (`\:`). The recorded setup AP renamed to
+# such a name is still the setup AP: not counted offline, and on a boot that needs no
+# portal it is deleted by UUID; its record never goes while the profile is saved.
+reset_state; boot_units
+echo "setup:old:${AP_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+printf '%s\n' "${AP_UUID}" >"$(state_file ap-uuid)"
+offline_boot; rc=$?
+[ "${rc}" -eq 0 ] && called "${AP_UP_CALL}"      && pass "recorded setup AP renamed with ':' is not counted" || fail "recorded setup AP renamed with ':' is not counted (rc=${rc})"
+reset_state; boot_units
+echo "setup:old:${AP_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+printf '%s\n' "${AP_UUID}" >"$(state_file ap-uuid)"
+env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_CONNECTIVITY=full bash "${PROVISION}" start >"${OUTF}" 2>&1
+called "nmcli connection delete uuid ${AP_UUID}" && ! grep -q ":${AP_UUID}:" "${NMSTATE}/profiles" \
+  && { grep -q ":${AP_UUID}:" "${NMSTATE}/profiles" || [ ! -s "$(state_file ap-uuid)" ]; } \
+                                                 && pass "renamed setup AP with ':' deleted by UUID, record kept until it is gone" || fail "renamed setup AP with ':' deleted by UUID, record kept until it is gone"
+# A station called a:b is one saved network, also when the count falls back to names.
+reset_state; boot_units
+echo "a:b:${STATION_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+offline_boot
+grep -q "found 1 stored WiFi profile" "${OUTF}"  && pass "station named a:b counts once" || fail "station named a:b counts once"
+reset_state; boot_units
+echo "a:b:${STATION_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+printf 'not-a-uuid\n' >"$(state_file ap-uuid)"
+offline_boot
+grep -q "found 1 stored WiFi profile" "${OUTF}"  && pass "station named a:b counts once in the name fallback" || fail "station named a:b counts once in the name fallback"
+# The user profile is found by its unescaped name too (here a name with ':').
+reset_state; boot_units; seed_setup_ap
+printf 'ssid=CeraLive-Setup-f00d\ncon=ceralive-ap\n' >"$(state_file portal-active)"
+echo "cera:wifi:${STATION_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+offline_boot CERALIVE_USER_CON_NAME='cera:wifi'; rc=$?
+called "${AP_UP_CALL}" && ! grep -q ":${STATION_UUID}:" "${NMSTATE}/profiles" \
+                                                 && pass "user profile named with ':' is found (earlier image's handoff)" || fail "user profile named with ':' is found (earlier image's handoff) (rc=${rc})"
 
 # No setup AP at all: nothing deleted, exit 0.
 reset_state; boot_units

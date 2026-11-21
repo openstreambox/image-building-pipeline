@@ -64,6 +64,12 @@ called `ceralive-ap` counts as a saved network. If the setup AP's identity canno
 read (NetworkManager or `ap-uuid` unreadable), every profile called `ceralive-ap` is
 left out, as older images did.
 
+Every profile listing is `nmcli -t -f UUID,TYPE,NAME connection show`: UUID and type
+never contain `:`, so they are always the first two fields, and the name is the rest
+of the line with nmcli's escaping (`\:`, `\\`) undone. The trigger, the setup AP
+lookup, record pruning and the user-profile lookup all read it that way, so a name
+with a colon cannot shift the UUID.
+
 ## Bring-up (`bring_up_ap`)
 
 1. **Scan + cache** visible SSIDs to `scan.txt`. A single radio cannot scan while in AP

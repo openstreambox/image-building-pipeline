@@ -206,14 +206,28 @@ ap_ssid() {
   printf 'CeraLive-Setup-%s' "${mid}"
 }
 
+# --- NetworkManager profile listings --------------------------------------------
+# Every profile listing is `nmcli -t -f UUID,TYPE,NAME connection show`: UUID and TYPE
+# never contain ':', so they are always fields 1 and 2, and the name is the rest of the
+# line with nmcli's escaping (`\:` for ':', `\\` for '\'). NM_AWK gives awk programs
+# nm_name(), the unescaped name of the current row. Non-zero when NM cannot be read.
+nm_profiles() { "${NMCLI}" -t -f UUID,TYPE,NAME connection show 2>/dev/null; }
+# shellcheck disable=SC2016
+NM_AWK='function nm_name(  s, o, i, c) { s = substr($0, length($1) + length($2) + 3); o = ""
+          for (i = 1; i <= length(s); i++) { c = substr(s, i, 1); if (c == "\\" && i < length(s)) c = substr(s, ++i, 1); o = o c }
+          return o }
+'
+# The same unescaping for one name in shell.
+# shellcheck disable=SC2001  # a backreference, which ${var//} cannot do
+nm_unescape() { sed 's/\\\(.\)/\1/g' <<<"$1"; }
+
 # --- stored WiFi profile count (EXCLUDING our own AP profile) ------------------
 # A real user WiFi profile means the device can rejoin an uplink, so the portal must
 # NOT start (EC4). Our own setup AP is excluded — it is created by THIS script and must
 # never suppress its own re-trigger. It is recognised the way cleanup recognises it
 # (setup_ap_uuids: recorded UUID or settings fingerprint), so a user's station profile
 # that happens to be called ${AP_CON_NAME} still counts. If that identity cannot be
-# read, every profile called ${AP_CON_NAME} is excluded, as before. Type and UUID are
-# the last two fields (they never contain ':'; a name may, escaped). Profiles with the
+# read, every profile called ${AP_CON_NAME} is excluded, as before. Profiles with the
 # UUIDs in $1 (newline-separated) are left out as well: their join is still pending
 # (header §PENDING JOIN).
 stored_wifi_profile_count() {
@@ -221,22 +235,16 @@ stored_wifi_profile_count() {
   if list="$(nm_profiles)" && ap="$(setup_ap_uuids 2>/dev/null)"; then
     awk -F: '
         NR == FNR { if (NF) s[$0] = 1; next }
-        NF >= 3 && $NF == "802-11-wireless" && !($(NF-1) in s) { n++ }
+        $2 == "802-11-wireless" && !($1 in s) { n++ }
         END { print n + 0 }' <(printf '%s\n%s\n' "${ap}" "${skip}") - <<<"${list}"
     return
   fi
   log "could not identify the setup AP profile; leaving out every profile called ${AP_CON_NAME}" >&2
-  n="$("${NMCLI}" -t -f NAME,TYPE connection show 2>/dev/null \
-    | awk -F: -v ap="${AP_CON_NAME}" '
-        $2 == "802-11-wireless" && $1 != ap { n++ }
-        END { print n + 0 }')"
-  if [ -n "${skip}" ] && list="$(nm_profiles)"; then
-    n=$(( n - $(awk -F: -v ap="${AP_CON_NAME}" '
+  "${NMCLI}" -t -f UUID,TYPE,NAME connection show 2>/dev/null \
+    | awk -F: -v ap="${AP_CON_NAME}" "${NM_AWK}"'
         NR == FNR { if (NF) s[$0] = 1; next }
-        NF == 3 && $3 == "802-11-wireless" && $1 != ap && ($2 in s) { k++ }
-        END { print k + 0 }' <(printf '%s\n' "${skip}") - <<<"${list}") ))
-  fi
-  printf '%s\n' "${n}"
+        $2 == "802-11-wireless" && nm_name() != ap && !($1 in s) { n++ }
+        END { print n + 0 }' <(printf '%s\n' "${skip}") -
 }
 
 # --- the image's own setup AP profiles -----------------------------------------
@@ -336,11 +344,11 @@ settle_uncertain_record() {
   return 1
 }
 
-# Legacy setup APs in a NAME:UUID:TYPE listing ($1), by the settings fingerprint.
+# Legacy setup APs in an nm_profiles listing ($1), by the settings fingerprint.
 fingerprint_ap_uuids() {
   local name uuid type mode ssid addr
-  while IFS=: read -r name uuid type; do
-    [ "${name}" = "${AP_CON_NAME}" ] && [ "${type}" = 802-11-wireless ] && [ -n "${uuid}" ] || continue
+  while IFS=: read -r uuid type name; do
+    [ "$(nm_unescape "${name}")" = "${AP_CON_NAME}" ] && [ "${type}" = 802-11-wireless ] && [ -n "${uuid}" ] || continue
     mode="$("${NMCLI}" -g 802-11-wireless.mode connection show uuid "${uuid}" 2>/dev/null)" || return 1
     ssid="$("${NMCLI}" -g 802-11-wireless.ssid connection show uuid "${uuid}" 2>/dev/null)" || return 1
     addr="$("${NMCLI}" -g ipv4.addresses connection show uuid "${uuid}" 2>/dev/null)" || return 1
@@ -356,10 +364,10 @@ fingerprint_ap_uuids() {
 setup_ap_uuids() {
   local rec list legacy
   rec="$(recorded_ap_uuids)" || return 1
-  list="$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" || return 1
+  list="$(nm_profiles)" || return 1
   legacy="$(fingerprint_ap_uuids "${list}")" || return 1
   {
-    awk -F: 'NR == FNR { r[$0] = 1; next } ($2 in r) { print $2 }' <(printf '%s\n' "${rec}") - <<<"${list}"
+    awk -F: 'NR == FNR { r[$0] = 1; next } ($1 in r) { print $1 }' <(printf '%s\n' "${rec}") - <<<"${list}"
     printf '%s\n' "${legacy}"
   } | awk 'NF && !seen[$0]++'
 }
@@ -390,7 +398,7 @@ down_setup_aps() {
   rec="$(recorded_ap_uuids 2>/dev/null)" || rec=""
   # With an uncertain record, still bring down what the settings fingerprint finds.
   uuids="$(setup_ap_uuids 2>/dev/null)" \
-    || uuids="$(fingerprint_ap_uuids "$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" 2>/dev/null)" \
+    || uuids="$(fingerprint_ap_uuids "$(nm_profiles)" 2>/dev/null)" \
     || uuids=""
   for u in $(printf '%s\n%s\n' "${rec}" "${uuids}" | awk 'NF && !seen[$0]++'); do
     "${NMCLI}" "$@" connection down uuid "${u}" >/dev/null 2>&1 || true
@@ -425,10 +433,10 @@ prune_ap_record() {
   local rec list active keep
   rec="$(recorded_ap_uuids)" || return 1
   [ -n "${rec}" ] || return 0
-  list="$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" || return 1
+  list="$(nm_profiles)" || return 1
   active="$(active_uuids)" || return 1
   keep="$(awk -F: 'NR == FNR { if (NF) k[$NF] = 1; next } ($0 in k)' \
-            <(printf '%s\n%s\n' "$(cut -d: -f2 <<<"${list}")" "${active}") <(printf '%s\n' "${rec}"))"
+            <(printf '%s\n%s\n' "$(cut -d: -f1 <<<"${list}")" "${active}") <(printf '%s\n' "${rec}"))"
   if ! write_ap_record "${keep}"; then
     log "ERROR: could not rewrite the setup AP record ${AP_UUID_FILE}"
     return 1
@@ -475,15 +483,12 @@ have_connectivity() {
 }
 
 # --- unverified join (header §PENDING JOIN) -------------------------------------
-# NM's profile listing (NAME:UUID:TYPE); non-zero when NM cannot be read.
-nm_profiles() { "${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null; }
-
 # UUIDs of saved Wi-Fi profiles called $1 (default ${USER_CON_NAME}), one per line;
 # non-zero when NM cannot be read.
 user_con_uuids() {
   local list
   list="$(nm_profiles)" || return 1
-  awk -F: -v n="${1:-${USER_CON_NAME}}" 'NF == 3 && $1 == n && $3 == "802-11-wireless" { print $2 }' <<<"${list}"
+  awk -F: -v n="${1:-${USER_CON_NAME}}" "${NM_AWK}"'$2 == "802-11-wireless" && nm_name() == n { print $1 }' <<<"${list}"
 }
 
 # The join lock, shared with the portal. Non-zero when it is not held.
@@ -582,7 +587,7 @@ abandon_pending_join() {
   local ssid="${PENDING_SSID}" list u rc=0
   if list="$(nm_profiles)"; then
     for u in ${PENDING_UUIDS}; do
-      awk -F: -v u="${u}" '$2 == u { f = 1 } END { exit !f }' <<<"${list}" || continue
+      awk -F: -v u="${u}" '$1 == u { f = 1 } END { exit !f }' <<<"${list}" || continue
       [ -n "${ssid}" ] || ssid="$("${NMCLI}" -g 802-11-wireless.ssid connection show uuid "${u}" 2>/dev/null)"
       if "${NMCLI}" connection delete uuid "${u}" >/dev/null 2>&1; then
         log "deleted unverified profile ${u}"
