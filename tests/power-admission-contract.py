@@ -46,7 +46,36 @@ class FakeSystem:
         self.jobs = []  # queued systemd jobs, as `systemctl list-jobs` rows
         self.system_state = 'running'
         self.logind = 'ok'  # ok | refuse | hang
+        self.ceraui = 'inactive'  # ceralive.service ActiveState
+        self.guard = None  # CeraUI's OS-stage guard: {'dir', 'token', 'holder' fd or None}
+        self.guard_exits = True  # the guard reads its release token (the packaged loop does)
         self.calls = []
+
+    def hold_stage_lease(self, directory, token, holder=None):
+        """The packaged guard's state while it holds the update lock: a 0700
+        directory with its token and its ready mark, the unit executing."""
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        for name in ('token', 'ready'):
+            path = os.path.join(directory, name)
+            with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as out:
+                out.write(token + '\n')
+        self.guard = {'dir': directory, 'token': token, 'holder': holder}
+
+    def guard_gone(self):
+        if self.guard and self.guard['holder'] is not None:
+            os.close(self.guard['holder'])
+        self.guard = None
+
+    def guard_tick(self):
+        """The guard's loop: it exits once the release file holds its token."""
+        if not self.guard or not self.guard_exits:
+            return
+        try:
+            release = Path(self.guard['dir'], 'release').read_text()
+        except OSError:
+            return
+        if release.strip() == self.guard['token']:
+            self.guard_gone()
 
     def __call__(self, argv, timeout):
         self.calls.append(argv)
@@ -78,11 +107,19 @@ class FakeSystem:
                 return out(1, '', 'Failed to open connection to "system" message bus\n')
             return out(0, 'method return time=1\n')
         if argv[:2] == ['systemctl', 'list-units']:
+            self.guard_tick()
             rows = [f'{unit} loaded active running x' for unit in self.units]
+            if self.guard:
+                rows.append('ceralive-os-stage-guard.service loaded active running x')
             rows += [f'{unit} loaded active exited x' for unit in self.receipts]
             return out(0, ''.join(row + '\n' for row in rows))
         if argv[:2] == ['systemctl', 'show'] and 'rauc.service' in argv:
             return out(0, self.rauc_unit + '\n')
+        if argv[:2] == ['systemctl', 'show'] and 'ceralive.service' in argv:
+            return out(0, self.ceraui + '\n')
+        if argv[:2] == ['systemctl', 'kill'] and 'ceralive-os-stage-guard.service' in argv:
+            self.guard_gone()
+            return out(0)
         if argv[:2] == ['systemctl', 'is-system-running']:
             return out(0, self.system_state + '\n')
         if argv[:2] == ['systemctl', 'is-active']:
@@ -91,6 +128,9 @@ class FakeSystem:
 
     def submissions(self):
         return [argv for argv in self.calls if argv[:1] == ['dbus-send']]
+
+    def kills(self):
+        return [argv for argv in self.calls if argv[:2] == ['systemctl', 'kill']]
 
 
 class Harness(unittest.TestCase):
@@ -897,6 +937,63 @@ class Drain(unittest.TestCase):
         self.assertEqual(len(ticks), 3)
         self.assertTrue(os.path.exists(os.path.join(fences, 'shutdown')))
 
+    def stage_lease(self, system):
+        stage = os.path.join(self.scratch_dir(), 'os-stage')
+        system.hold_stage_lease(stage, StageLease.TOKEN)
+        for p in (patch.object(broker, 'OS_STAGE_DIR', stage),
+                  patch.object(broker, 'DPKG_LOCK', '/nonexistent/lock-frontend'),
+                  patch.object(broker, 'FENCE_DIR', self.scratch_dir()),
+                  patch.object(broker, 'ACTIVATION_LOCK', self.scratch_path())):
+            p.start()
+            self.addCleanup(p.stop)
+        return stage
+
+    def test_shutdown_lets_go_of_a_lease_without_ceraui_once_rauc_settles(self):
+        system = self.fake()
+        system.system_state = 'stopping'
+        system.installing = True
+        stage = self.stage_lease(system)
+        clock = [0.0]
+        def sleep(s):
+            clock[0] += s
+            if clock[0] >= 10:
+                system.installing = False
+            if clock[0] > 600:
+                raise AssertionError('the drain still waits on the lease')
+        self.assertEqual(broker.drain(sleep=sleep, now=lambda: clock[0], runner=system), 0)
+        self.assertEqual(Path(stage, 'release').read_text(), StageLease.TOKEN + '\n')
+        self.assertGreaterEqual(clock[0], 10 + broker.LEASE_SETTLE_S, 'released while RAUC still installed')
+        self.assertLess(clock[0], 10 + broker.LEASE_SETTLE_S + 5)
+        self.assertEqual(system.kills(), [])
+
+    def test_shutdown_gives_a_live_ceraui_a_bounded_grace(self):
+        system = self.fake()
+        system.system_state = 'stopping'
+        system.ceraui = 'active'
+        stage = self.stage_lease(system)
+        clock = [0.0]
+        def sleep(s):
+            clock[0] += s
+            if clock[0] > 600:
+                raise AssertionError('the drain still waits on the lease')
+        self.assertEqual(broker.drain(sleep=sleep, now=lambda: clock[0], runner=system), 0)
+        self.assertEqual(Path(stage, 'release').read_text(), StageLease.TOKEN + '\n')
+        self.assertGreaterEqual(clock[0], broker.LEASE_GRACE_S)
+        self.assertLess(clock[0], broker.LEASE_GRACE_S + broker.LEASE_SETTLE_S + 5)
+
+    def test_shutdown_kills_a_guard_that_ignores_its_token(self):
+        system = self.fake()
+        system.system_state = 'stopping'
+        system.guard_exits = False
+        self.stage_lease(system)
+        clock = [0.0]
+        def sleep(s):
+            clock[0] += s
+            if clock[0] > 600:
+                raise AssertionError('the drain still waits on the lease')
+        self.assertEqual(broker.drain(sleep=sleep, now=lambda: clock[0], runner=system), 0)
+        self.assertEqual(len(system.kills()), 1)
+
     def test_unreadable_rauc_counts_as_busy_and_absent_service_as_idle(self):
         def absent(argv, t):
             if argv[:2] == ['systemctl', 'show']:
@@ -905,6 +1002,124 @@ class Drain(unittest.TestCase):
         broken = lambda argv, t: subprocess.CompletedProcess(argv, 1, '', 'Failed to connect to bus\n')
         self.assertFalse(broker.rauc_installing(absent))
         self.assertTrue(broker.rauc_installing(broken))
+
+
+class StageLease(Harness):
+    """CeraUI's OS-stage guard holds the update lock as a lease and lets go
+    only on CeraUI's release token; it ignores SIGTERM. Without CeraUI it is
+    not a writer: once RAUC has settled it is let go, so a power-off never
+    waits on it forever."""
+    TOKEN = '0b5e7d2c-1f3a-4c8e-9d6b-7a2e4f1c3b5d'
+
+    def setUp(self):
+        super().setUp()
+        self.stage = os.path.join(self.dir, 'os-stage')
+        p = patch.object(broker, 'OS_STAGE_DIR', self.stage)
+        p.start()
+        self.addCleanup(p.stop)
+        holder = os.open(self.paths['update.lock'], os.O_RDWR)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        self.system.hold_stage_lease(self.stage, self.TOKEN, holder)
+        self.addCleanup(self.system.guard_gone)
+        self.slept = []
+        p = patch.object(broker.time, 'sleep', lambda s: self.slept.append(s))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def admit_button(self):
+        conn = Draining.admit_button(self)
+        self.addCleanup(conn.close)
+        return conn
+
+    def advance(self, seconds, step=1.0):
+        for _ in range(int(seconds / step)):
+            self.clock[0] += step
+            self.pump(lambda: False, rounds=1)
+
+    def release_file(self):
+        try:
+            return Path(self.stage, 'release').read_text()
+        except OSError:
+            return None
+
+    def test_a_lease_left_by_a_stopped_ceraui_is_released_once_rauc_settles(self):
+        self.admit_button()
+        self.advance(2)
+        self.assertEqual(self.system.submissions(), [])
+        self.assertIsNone(self.release_file(), 'released before RAUC had settled')
+        self.assertIn('update lock', self.state_json())
+        self.advance(broker.LEASE_SETTLE_S + 2)
+        self.assertEqual(self.release_file(), self.TOKEN + '\n')
+        self.assertEqual(oct(os.stat(os.path.join(self.stage, 'release')).st_mode & 0o777), '0o600')
+        self.assertIsNone(self.system.guard)
+        self.assertEqual(self.system.kills(), [], 'the token is enough for the packaged guard')
+        self.assertTrue(self.pump(lambda: self.system.submissions()))
+
+    def test_a_lease_is_kept_while_rauc_installs(self):
+        self.system.installing = True
+        self.admit_button()
+        self.advance(broker.LEASE_SETTLE_S * 4)
+        self.assertIsNone(self.release_file())
+        self.assertEqual(self.system.submissions(), [])
+        self.system.installing = False
+        self.advance(broker.LEASE_SETTLE_S - 2)
+        self.assertIsNone(self.release_file(), 'the settle time starts when RAUC goes idle')
+        self.advance(4)
+        self.assertEqual(self.release_file(), self.TOKEN + '\n')
+        self.assertTrue(self.pump(lambda: self.system.submissions()))
+
+    def test_a_running_ceraui_lets_go_itself(self):
+        self.system.ceraui = 'active'
+        self.admit_button()
+        self.advance(broker.LEASE_GRACE_S * 3)
+        self.assertIsNone(self.release_file(), 'a live CeraUI owns its release')
+        self.assertEqual(self.system.submissions(), [])
+        self.system.ceraui = 'activating'  # restarting: it adopts its guard
+        self.advance(broker.LEASE_GRACE_S)
+        self.assertIsNone(self.release_file())
+        self.system.ceraui = 'failed'  # gave up restarting
+        self.advance(broker.LEASE_SETTLE_S + 2)
+        self.assertEqual(self.release_file(), self.TOKEN + '\n')
+
+    def test_a_guard_that_does_not_exit_on_its_token_is_killed(self):
+        self.system.guard_exits = False
+        self.admit_button()
+        self.advance(broker.LEASE_SETTLE_S + 2)
+        self.assertEqual(len(self.system.kills()), 1)
+        self.assertIn('--signal=SIGKILL', self.system.kills()[0])
+        self.assertTrue(self.pump(lambda: self.system.submissions()))
+
+    def test_the_token_is_written_only_once_the_guard_is_ready(self):
+        os.unlink(os.path.join(self.stage, 'ready'))  # not in its release loop yet
+        self.admit_button()
+        self.advance(broker.LEASE_SETTLE_S + 2)
+        self.assertIsNone(self.release_file())
+        self.assertEqual(len(self.system.kills()), 1)
+
+    def test_a_ready_mark_of_another_attempt_is_not_answered(self):
+        Path(self.stage, 'ready').write_text('11111111-2222-4333-8444-555555555555\n')
+        self.admit_button()
+        self.advance(broker.LEASE_SETTLE_S + 2)
+        self.assertIsNone(self.release_file())
+        self.assertEqual(len(self.system.kills()), 1)
+
+    def test_rauc_busy_again_restarts_the_settle_time(self):
+        self.admit_button()
+        self.advance(broker.LEASE_SETTLE_S - 2)
+        self.system.installing = True
+        self.advance(1)
+        self.system.installing = False
+        self.advance(broker.LEASE_SETTLE_S - 2)
+        self.assertIsNone(self.release_file(), 'idle time before the install counted')
+        self.advance(3)
+        self.assertEqual(self.release_file(), self.TOKEN + '\n')
+
+    def test_a_foreign_token_directory_is_not_written(self):
+        os.chmod(self.stage, 0o755)  # not the guard's private directory
+        self.admit_button()
+        self.advance(broker.LEASE_SETTLE_S + 2)
+        self.assertIsNone(self.release_file())
+        self.assertEqual(len(self.system.kills()), 1)
 
 
 class RecheckThree(Harness):
