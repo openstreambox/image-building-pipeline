@@ -1,10 +1,9 @@
-# Status screen (renderer only)
+# Status screen
 
 A plain page for a monitor plugged into the box, written to be photographed
-and sent to support when the box has no network. This change ships the
-renderer, `/usr/libexec/ceralive/ceralive-status-screen`, and the `qrencode`
-package it uses; nothing starts it yet. The console wiring below is the
-proposed next step.
+and sent to support when the box has no network. The renderer is
+`/usr/libexec/ceralive/ceralive-status-screen` and uses the `qrencode`
+package; the attention owner paints it on VT8 (see "Console wiring").
 
 ## What the page shows
 
@@ -77,21 +76,37 @@ beside a text block of at most 60 columns when the console has its width plus
 32 columns and its height plus one row (a local address needs 66x33 cells),
 else below the text when it fits, else it is left out. The `Open` and
 `Address` lines come right after the header, so on a crowded page the
-uplink, SIM and attention detail is cut first. On a 1024x600 panel the 8x16 font gives 128x37 and shows the code; the
-attention owner's 16x32 font gives 64x18 and does not. When printing to a
+uplink, SIM and attention detail is cut first. On a 1024x600 panel the 8x16 font
+the page uses gives 128x37 and shows the code; the condition
+16x32 font would give 64x18 and does not. When printing to a
 terminal the renderer emits no trailing newline, so the first row does not
 scroll away.
 
-## Proposed console wiring (not in this change)
+## Console wiring
 
-- The attention owner (`ceralive-attention watch`) already owns VT8 and
-  repaints it every two seconds. When no critical or fatal condition holds VT8,
-  it would paint this page there instead of clearing it, with the 8x16 font and
-  the default palette (light foreground on black).
-- It would switch to VT8 once at boot and when an HDMI connector changes from
-  disconnected to connected (`/sys/class/drm/card*-HDMI-A-*/status`), never
-  while an operator is on another VT, as it does today.
-- Critical and fatal conditions keep precedence and keep their current text.
+`ceralive-attention watch` already owns VT8 and repaints it every two seconds.
+When the renderer is installed it loads it in its own process and VT8 always
+shows something:
+
+- A critical or fatal condition: the condition text in the 16x32 font, as
+  before. It switches to VT8 once per condition, even from a login, and hands
+  the operator back to that VT when the condition clears.
+- Otherwise: this page in the 8x16 font (`Lat15-TerminusBold16`), with the
+  default palette (light foreground on black). It is overwritten in place
+  rather than cleared, so a camera does not catch a blank frame. `qrencode`
+  runs only when the address changes.
+
+The owner switches to VT8 once per boot and whenever an HDMI connector goes
+from disconnected to connected (`/sys/class/drm/card*-HDMI-A-*/status`, read
+every tick; the kernel updates it in the same hotplug path that sends the drm
+change uevent). It skips both when someone is logged in on the foreground VT,
+meaning any process other than `agetty` or `login` has that terminal. A
+restarted owner does neither again. When the service stops it returns to the
+VT it found at start (fallback tty1) and restores VT8's saved font.
+
+A renderer that fails to load leaves VT8 to critical and fatal conditions
+only, as before; a renderer error while painting shows a short fallback with
+the login line.
 
 HDMI output, the real palette and a phone reading the code off a monitor at an
-angle still need a board and a monitor before this is enabled.
+angle still need a board and a monitor.

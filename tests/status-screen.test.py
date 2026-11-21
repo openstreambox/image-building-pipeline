@@ -238,7 +238,9 @@ class PageTests(Temp):
     def test_versions_must_look_like_releases(self):
         for good in ('2026.11.21', '1.2.3', '2026.11.21-osb', '1.2.3+git.abc'):
             self.assertEqual(self.snap(ceraui=good)['ceraui'], good, good)
-        for bad in ('350000000000000', 'live_secret', 'HomeSSID', '2026', '1.2.3-' + 'x' * 20):
+        # Other scripts' digits (Arabic-Indic, fullwidth) are not ASCII and never reach the page.
+        for bad in ('350000000000000', 'live_secret', 'HomeSSID', '2026', '1.2.3-' + 'x' * 20,
+                    '\u0662\u0660\u0662\u0666.\u0661\u0661', '\uff12\uff10\uff12\uff16.1.2', '2026.\u0661\u0661.21'):
             self.assertIsNone(self.snap(ceraui=bad)['ceraui'], bad)
 
     def test_small_panel_drops_the_code_but_keeps_the_address(self):

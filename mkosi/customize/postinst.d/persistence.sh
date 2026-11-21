@@ -93,7 +93,7 @@ setup_data_persistence() {
 
   install -D -m 0755 "${CERALIVE_RUNTIME_SRC:?}/ceralive-data-diagnostic.sh" /usr/libexec/ceralive/ceralive-data-diagnostic
   install -D -m 0755 "${CERALIVE_RUNTIME_SRC:?}/ceralive-attention.py" /usr/libexec/ceralive/ceralive-attention
-  # Renderer only (uses qrencode): nothing starts it yet (docs/status-screen.md).
+  # Status page renderer (uses qrencode); the attention owner paints it on VT8 (docs/status-screen.md).
   install -D -m 0755 "${CERALIVE_RUNTIME_SRC:?}/ceralive-status-screen.py" /usr/libexec/ceralive/ceralive-status-screen
   mkdir -p /etc/systemd/system/multi-user.target.wants
   ln -sfn ../ceralive-attention.service /etc/systemd/system/multi-user.target.wants/ceralive-attention.service

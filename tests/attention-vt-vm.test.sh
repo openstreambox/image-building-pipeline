@@ -45,7 +45,9 @@ for index, source in enumerate(shlex.split(os.environ.get('CERALIVE_ATTENTION_VM
     loads.append('/bin/busybox insmod /modules/'+destination.name)
 (root/'load-modules.sh').write_text('\n'.join(loads)+'\n')
 copy(Path('/usr/share/consolefonts/Lat15-TerminusBold32x16.psf.gz'))
+copy(Path('/usr/share/consolefonts/Lat15-TerminusBold16.psf.gz'))
 shutil.copy2('mkosi/runtime/ceralive-attention.py',root/'attention.py')
+shutil.copy2('mkosi/runtime/ceralive-status-screen.py',root/'status-screen.py')
 for folder in ['dev','proc','sys','run','tmp','etc','bin']:
     (root/folder).mkdir(exist_ok=True)
 for name in ['sh','mount','poweroff','login']:
@@ -76,7 +78,8 @@ spec=importlib.util.spec_from_file_location('attention','/attention.py')
 a=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(a)
 owner=a.Console()
-top=dict(severity='fatal',line='The card is not ready.',fix='Check the card.',detail='Synthetic storage refusal.')
+owners=[owner]
+top=dict(id='example',severity='fatal',line='The card is not ready.',fix='Check the card.',detail='Synthetic storage refusal.')
 gettys=[]
 def cmd(*args):
     return subprocess.run(args,capture_output=True,text=True,check=True).stdout.strip()
@@ -124,9 +127,54 @@ try:
     owner.release()
     capture('stop-handback')
     assert cmd('fgconsole')=='1'
+    # Status page: the owner with the renderer installed. The guest has no
+    # network or qrencode, so the address and the module matrix are stand-ins.
+    status=a.StatusPage.load(Path('/status-screen.py'))
+    status.module.ipv4_addresses=lambda *args,**kwargs:[('wlan0','192.168.42.1')]
+    status.module.qr_matrix=lambda url,**kwargs:[[(x*y)%3==0 for x in range(25)] for y in range(25)]
+    monitors=set()
+    viewer=a.Console(Path('/run/status-console'),status=status,connectors=lambda:set(monitors))
+    owners.append(viewer)
+    viewer.update(None)
+    capture('status-boot')
+    assert cmd('fgconsole')=='8', 'boot switch with only login prompts on tty1'
+    screen=Path('/dev/vcsa8').read_bytes()
+    rows,columns=screen[0],screen[1]
+    assert (rows,columns)==tuple(geometry), 'the 8x16 font keeps the panel geometry'
+    text=Path('/dev/vcs8').read_bytes()
+    assert b'support code' in text and b'https://192.168.42.1/' in text and b'Alt+F1 to log in.' in text
+    attributes=screen[4+1::2]
+    assert attributes.count(attributes[0]^0x77)>=25*25, 'QR modules drawn in reverse video'
+    viewer.update(top)
+    capture('status-fatal')
+    assert b'The card is not ready.' in Path('/dev/vcs8').read_bytes()
+    assert Path('/dev/vcsa8').read_bytes()[:2]!=bytes(geometry)
+    viewer.update(None)
+    capture('status-after-fatal')
+    assert b'The card is not ready.' not in Path('/dev/vcs8').read_bytes()
+    assert b'support code' in Path('/dev/vcs8').read_bytes()
+    assert cmd('fgconsole')=='8'
+    cmd('chvt','1')
+    viewer.update(None)
+    assert cmd('fgconsole')=='1', 'repaints never pull the operator back'
+    monitors.add('card0-HDMI-A-1')
+    viewer.update(None)
+    capture('status-hotplug')
+    assert cmd('fgconsole')=='8', 'a new monitor shows VT8'
+    shell=subprocess.Popen(['/bin/busybox','setsid','-c','/bin/sh','-c','sleep 60'],stdin=open('/dev/tty2'),stdout=open('/dev/tty2','w'),stderr=subprocess.STDOUT)
+    gettys.append(shell)
+    time.sleep(1)
+    cmd('chvt','2')
+    monitors.add('card0-HDMI-A-2')
+    viewer.update(None)
+    assert cmd('fgconsole')=='2', 'a logged-in operator is never pulled away by a plug'
+    viewer.release()
+    cmd('setfont','-C','/dev/tty8','-O','/run/after-status.psf')
+    assert Path('/run/after-status.psf').read_bytes()==baseline
     print('ATTENTION-VM PASS',flush=True)
 finally:
-    owner.release()
+    for console in owners:
+        console.release()
     for process in gettys:
         process.terminate()
 PY
@@ -151,5 +199,5 @@ for line in log.splitlines():
         for key in ('vcs1','vcs8'):
             (root/(item['stage']+'-'+key+'.txt')).write_bytes(base64.b64decode(item[key]))
         (root/(item['stage']+'.json')).write_text(json.dumps(item))
-print('real VT/getty startup race, reachable login, text/font hand-back: PASS')
+print('real VT/getty startup race, reachable login, text/font hand-back, status page and hotplug: PASS')
 PY

@@ -14,11 +14,13 @@ setup() {
   run python3 "$ROOT/tests/status-screen.test.py" PageTests FactTests TextTests UrlTests
   [ "$status" -eq 0 ]
 }
-@test "status screen: the renderer is installed and nothing starts it" {
+@test "status screen: the renderer is installed and only the attention owner runs it" {
   run grep -Fq 'ceralive-status-screen.py" /usr/libexec/ceralive/ceralive-status-screen' "$ROOT/mkosi/customize/postinst.d/persistence.sh"
   [ "$status" -eq 0 ]
   run grep -rlF 'ceralive-status-screen' "$ROOT/mkosi" --include='*.service' --include='*.timer' --include='*.socket'
   [ -z "$output" ]
+  run grep -Fq "STATUS_SCREEN = Path('/usr/libexec/ceralive/ceralive-status-screen')" "$ROOT/mkosi/runtime/ceralive-attention.py"
+  [ "$status" -eq 0 ]
 }
 @test "status screen: qrencode is in the shared package list" {
   run grep -Eq '^[[:space:]]*qrencode([[:space:]]|$)' "$ROOT/manifests/packages/shared.list"

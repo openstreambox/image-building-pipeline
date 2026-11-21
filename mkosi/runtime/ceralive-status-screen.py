@@ -47,8 +47,8 @@ LIGHT = '\x01'  # internal marker for a light QR cell; never survives clean()
 FOOTER = 'Photograph this screen for support. Alt+F1 to log in.'
 FOOTER_SHORT = 'Alt+F1 to log in.'
 CODE = re.compile(r'[A-Za-z0-9_]{1,48}\Z')
-# A release version: dotted numbers, at most two short suffixes (no bare digit runs).
-VERSION = re.compile(r'\d{1,4}(\.\d{1,4}){1,3}([.+~-][0-9A-Za-z]{1,12}){0,2}\Z')
+# A release version: dotted ASCII numbers, at most two short suffixes (no bare digit runs).
+VERSION = re.compile(r'[0-9]{1,4}(\.[0-9]{1,4}){1,3}([.+~-][0-9A-Za-z]{1,12}){0,2}\Z')
 
 # Fixed wording for the codes CeraUI's stream-ready flag reports; any other
 # code gets fixed generic wording, never its own text.

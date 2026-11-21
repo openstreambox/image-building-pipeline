@@ -109,6 +109,13 @@ Info/warn never acquire a console. There is no effect on reboot, slot health,
 stream ownership or the read-only HTTP contract. Physical display/keyboard
 availability still requires board qualification.
 
+When the status screen renderer is installed, VT8 shows the status page in
+the 8x16 font whenever no critical or fatal condition holds it, and the owner
+also switches to VT8 once per boot and on HDMI hotplug unless someone is logged
+in on the foreground VT ([status screen](status-screen.md#console-wiring)). A
+condition that clears then leaves the page behind instead of an empty VT; an
+operator it pulled from a login is still returned there.
+
 Console regression tests cover startup repaint, unchanged conditions, operator
 VT selection, clear/expiry/stop, restart, font-save/restore failures and bounded
 text. `tests/systemd-ordering-cycle.test.sh` probes the actual installed getty

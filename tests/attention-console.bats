@@ -14,6 +14,22 @@ setup() {
   run python3 "$ROOT/tests/attention-console.test.py" ConsoleTests.test_login_remains_reachable_and_not_stolen ConsoleTests.test_restart_keeps_original_snapshot_and_does_not_steal_login ConsoleTests.test_warning_has_no_console_effect_and_long_detail_keeps_shortcut
   [ "$status" -eq 0 ]
 }
+@test "status page: VT8 shows it at boot in the 8x16 font, conditions take precedence" {
+  run python3 "$ROOT/tests/attention-console.test.py" StatusConsoleTests.test_boot_shows_the_page_once_in_the_small_font StatusConsoleTests.test_critical_takes_over_and_the_page_returns StatusConsoleTests.test_condition_pulls_from_a_login_and_hands_it_back StatusConsoleTests.test_renderer_fault_keeps_the_login_line StatusConsoleTests.test_full_width_last_line_is_not_erased
+  [ "$status" -eq 0 ]
+}
+@test "status page: boot and HDMI hotplug switch to VT8, never away from a logged-in operator" {
+  run python3 "$ROOT/tests/attention-console.test.py" StatusConsoleTests.test_boot_switch_skips_a_logged_in_operator StatusConsoleTests.test_failed_boot_switch_retries_then_stops StatusConsoleTests.test_hdmi_plug_switches_unless_someone_is_logged_in StatusConsoleTests.test_restart_keeps_the_operator_where_they_are StatusConsoleTests.test_stop_returns_to_the_login_and_restores_the_font InputTests
+  [ "$status" -eq 0 ]
+}
+@test "status page: earlier VT8 rules still hold with the page installed" {
+  run python3 "$ROOT/tests/attention-console.test.py" StatusConsoleTests.test_startup_getty_and_unchanged_fatal StatusConsoleTests.test_login_remains_reachable_and_not_stolen StatusConsoleTests.test_restart_keeps_original_snapshot_and_does_not_steal_login
+  [ "$status" -eq 0 ]
+}
+@test "status page: the owner loads the real renderer and survives a broken one" {
+  run python3 "$ROOT/tests/attention-console.test.py" StatusPageTests
+  [ "$status" -eq 0 ]
+}
 @test "attention console: unit reserves VT8 and starts independent rescue gettys first" {
   run python3 - "$ROOT" <<'PY'
 from pathlib import Path

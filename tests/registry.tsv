@@ -264,7 +264,7 @@ tests/rock-ota.test.sh	shell	unit	default-shell	Signed update geometry and measu
 tests/bounded-apt.test.sh	shell	unit	default-shell	Bounded APT metadata rendering and real APT configuration
 tests/bounded-apt-runtime.test.sh	shell	integration	opt-in	Real APT transaction and size-limited volatile index mount
 tests/attention.test.sh	shell	unit	default-shell	Shared attention producers, output activation, expiry and safety
-tests/attention-console.bats	bats	unit	default-bats	Dedicated diagnostic VT startup persistence and login/font hand-back
+tests/attention-console.bats	bats	unit	default-bats	Dedicated diagnostic VT startup persistence and login/font hand-back; status page on VT8, boot and HDMI hotplug switch
 tests/attention-console.test.py	tool	unit	invoked-by-suite	Fake VT state machine driven by attention-console.bats
 tests/attention-vt-vm.test.sh	shell	integration	opt-in	Disposable RAM-only guest exercises real getty and VT persistence/font hand-back
 tests/status-screen.bats	bats	unit	default-bats	Status screen page layout, snapshot contract and qrencode drawing
