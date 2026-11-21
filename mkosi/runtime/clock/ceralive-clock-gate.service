@@ -1,0 +1,47 @@
+[Unit]
+Description=CeraLive: start persistent calendar timers once their stamps can be trusted
+Documentation=man:systemd.timer(5) man:chronyc(1)
+# WHY THIS EXISTS (Rock 5B+ booted from an SD card, cold boots):
+#
+# The board's RTC (hym8563) has no battery, so after a power cut it holds no
+# valid time and PID 1 starts the clock at /usr/lib/clock-epoch, the image
+# build date. Every persistent calendar timer then logs
+#   "Not using persistent file timestamp <last run> as it is in the future"
+# and treats its job as overdue. chrony steps the clock about 20 s later, but
+# a timer only reads its stamp when it starts, so the damage is done: each of
+# these jobs ran on every boot. fstrim.service discarded about 51 GiB
+# (all free space on /data, / and /boot) within the first 100 minutes of every
+# boot, while streams were starting, instead of once a week.
+#
+# systemd's own guard is that calendar timers are ordered after
+# time-sync.target, but nothing holds that target back on this image:
+# chrony-wait.service is masked because it delayed multi-user.target by ~21 s
+# (suppress_unusable_boot_units). Unmasking it, or ordering the timers behind a
+# similar waiter, would leave a start job queued until the clock syncs, so
+# `systemctl is-system-running` would read "starting" for that time, and for
+# up to the waiter's timeout on a box without an uplink.
+#
+# Instead the timers carry ConditionPathExists=/run/ceralive/clock-gate-open
+# (50-ceralive-clock-gate.conf), so they are skipped at boot, and this unit
+# starts the enabled ones once the wall clock is usable: chrony reports a
+# synchronised clock, or the boot time is clearly past /usr/lib/clock-epoch
+# (the clock came from the RTC or a person, not from systemd's build-date
+# floor). Each timer then reads its stamp against a real date. While the clock
+# is not usable, an enabled dpkg-db-backup still runs after an hour of uptime
+# and then daily; the trim, apt and certificate expiry jobs wait, since
+# without a real date there is no telling whether they are due.
+After=chrony.service chronyd-restricted.service
+
+[Service]
+# exec, not oneshot: the unit is active as soon as the gate runs, so nothing at
+# boot waits for the clock.
+Type=exec
+ExecStart=/usr/libexec/ceralive/ceralive-clock-gate
+# A failed flag write (exit 1) is retried; giving up on a timer that kept
+# failing to start for 10 minutes (exit 2) is not.
+Restart=on-failure
+RestartSec=30s
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=multi-user.target
