@@ -47,7 +47,9 @@
 #    box cannot tell which tailnet a key belongs to without sending it, and an
 #    `up` without --force-reauth keeps the old login anyway. The key is removed,
 #    BOOT gets TAILSCALE-KEY-NOT-USED.txt naming the network the box is in, and
-#    the status reads "joined … already-joined". Moving the box is an explicit
+#    the status reads "joined … already-joined"; the note is on BOOT before
+#    the key goes. Every exit before the keyed up leaves tailscaled as it was
+#    found (one that was not running is stopped again). Moving the box is an explicit
 #    step: remove it from its tailnet (admin console, or Forget on the card),
 #    then add the key again. A login that is still connecting (NoState or
 #    Starting) is asked again at the next attempt. An expired, logged-out or
@@ -263,7 +265,7 @@ take_boot_key() {
   adopt "the BOOT partition"
   KEY=""
   wipe "$f"
-  rm -f -- "${REJECTED_NOTE}" "${NOT_USED_NOTE}"
+  rm -f -- "${REJECTED_NOTE}" "${NOT_USED_NOTE}" 2>/dev/null || true   # an old note is not worth stopping for
   sync -f "${BOOT}" 2>/dev/null || true
 }
 
@@ -383,16 +385,50 @@ tailnet_name() {
   return 0
 }
 
-# The box already holds a working login: leave it as it is, remove the key and
-# say so on BOOT. backend is Running or Stopped; was_active says whether
-# tailscaled ran before this attempt started it.
-key_not_used() { # backend was_active
+# Is tailscaled running or on its way up (a restart pending counts too)?
+daemon_up() {
+  local state rc=0
+  state="$("${SYSTEMCTL}" is-active tailscaled.service 2>/dev/null)" || rc=$?
+  (( rc == 0 )) || [[ "$state" == activating || "$state" == reloading ]]
+}
+
+# Every exit before the keyed up leaves tailscaled as this attempt found it: a
+# daemon that was not running (the owner switched remote access off) is
+# stopped again, and that is checked.
+settle_back() {
+  (( was_active == 1 )) && return 0
+  "${SYSTEMCTL}" stop tailscaled.service 2>/dev/null || true
+  if daemon_up; then
+    log 4 "could not stop tailscaled again after asking it; the next run tries again"
+    return 1
+  fi
+}
+
+# The box already holds a working login: leave it as it is and say so on BOOT
+# before the key goes. backend is Running or Stopped.
+key_not_used() { # backend
   local where off=""
   where="$(tailnet_name)"
-  [[ "$1" == Stopped ]] && off=1
-  if [[ -n "$off" && "$2" != 1 ]]; then
-    # Started only to ask; the owner had it off.
-    "${SYSTEMCTL}" stop tailscaled.service 2>/dev/null || true
+  [[ "$1" == Stopped || "$was_active" != 1 ]] && off=1
+  if ! settle_back; then
+    write_status pending "$attempts" "$((NOW + delay))" retry || true
+    return 1
+  fi
+  # The note is what the owner sees, so it is on the card before the key goes.
+  if ! {
+    {
+      printf 'This box is already in a Tailscale network%s, so the new key was not used.\n' "${where:+ (${where})}"
+      printf 'The key file was removed from this card. An unused key stays valid until it expires.\n'
+      [[ -z "$off" ]] || printf 'Remote access is switched off on this box; it keeps its login.\n'
+      printf 'If that is the network you meant, there is nothing to do.\n'
+      printf 'To move the box to another network, first remove it from the one it is in: delete it in that\n'
+      printf "network's admin console, or press Forget this device under Settings, Developer, Remote access\n"
+      printf 'in CeraUI. Then put a key file for the new network on this card again.\n'
+    } >"${NOT_USED_NOTE}" && sync -f "${BOOT}"
+  } 2>/dev/null; then
+    log 4 "could not write ${NOT_USED_NOTE##*/} on BOOT; the key stays and the next run tries again"
+    write_status pending "$attempts" "$((NOW + delay))" retry || true
+    return 1
   fi
   # The result goes to disk before the key is removed, as in finish_join.
   if ! { write_status joined "$attempts" 0 already-joined && sync "${ENROLL}"; }; then
@@ -402,15 +438,6 @@ key_not_used() { # backend was_active
   wipe "${PENDING}"
   sync "${ENROLL}" 2>/dev/null || true
   rm -f -- "${PRIOR}"
-  {
-    printf 'This box is already in a Tailscale network%s, so the new key was not used.\n' "${where:+ (${where})}"
-    printf 'The key file was removed from this card. An unused key stays valid until it expires.\n'
-    [[ -n "$off" ]] && printf 'Remote access is switched off on this box; it keeps its login.\n'
-    printf 'If that is the network you meant, there is nothing to do.\n'
-    printf 'To move the box to another network, first remove it from the one it is in: delete it in that\n'
-    printf "network's admin console, or press Forget this device under Settings, Developer, Remote access\n"
-    printf 'in CeraUI. Then put a key file for the new network on this card again.\n'
-  } >"${NOT_USED_NOTE}" 2>/dev/null || true
   rm -f -- "${REJECTED_NOTE}"
   sync -f "${BOOT}" 2>/dev/null || true
   log 5 "this box is already in a Tailscale network${where:+ as ${where}}${off:+ (switched off)}; the new key was not used and was removed. To move it, remove it from that network first, then add the key again."
@@ -438,7 +465,7 @@ enroll_pending() {
   (( delay > 1800 )) && delay=1800
   write_status pending "$attempts" "$((NOW + delay))" trying
   local was_active=0
-  "${SYSTEMCTL}" is-active --quiet tailscaled.service 2>/dev/null && was_active=1
+  daemon_up && was_active=1
   # Any state that appears from now on, where none existed, is ours to clean up.
   if [[ ! -e "${TS_STATE}/tailscaled.state" && ! -L "${TS_STATE}/tailscaled.state" ]]; then
     : >"${OURS}"
@@ -452,6 +479,7 @@ enroll_pending() {
   if [[ -n "$(read_prior)" ]] && ! { sync -- "${PRIOR}" && sync "${ENROLL}"; }; then
     # A record left by an earlier run is trusted only once it is durable.
     log 4 "could not make the login check durable (${attempts}/${MAX_ATTEMPTS}); trying again later"
+    settle_back || true
     if (( attempts >= MAX_ATTEMPTS )); then give_up "could not store enrollment state after ${attempts} attempts"; return 1; fi
     write_status pending "$attempts" "$((NOW + delay))" retry || true
     return 1
@@ -462,6 +490,7 @@ enroll_pending() {
     backend_state >/dev/null
     if [[ -z "$STATUS_JSON" ]]; then
       log 4 "tailscaled did not answer before the attempt (${attempts}/${MAX_ATTEMPTS}); trying again later"
+      settle_back || true
       if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not answer after ${attempts} attempts"; return 1; fi
       write_status pending "$attempts" "$((NOW + delay))" retry
       return 1
@@ -472,12 +501,13 @@ enroll_pending() {
       prior=yes
       case "$backend" in
         Running|Stopped)
-          key_not_used "$backend" "$was_active" || return 1
+          key_not_used "$backend" || return 1
           return 0
           ;;
         NoState|Starting|"")
           # A login that is still connecting may be working or expired; ask again.
           log 5 "tailscaled is still connecting with its current login (${attempts}/${MAX_ATTEMPTS}); asking again later"
+          settle_back || true
           if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not settle after ${attempts} attempts"; return 1; fi
           write_status pending "$attempts" "$((NOW + delay))" retry
           return 1
@@ -486,6 +516,7 @@ enroll_pending() {
     fi
     if ! put_synced "${PRIOR}" "$prior $(stat -c %i -- "${PENDING}")" .prior; then
       log 4 "could not store the login check durably (${attempts}/${MAX_ATTEMPTS}); trying again later"
+      settle_back || true
       if (( attempts >= MAX_ATTEMPTS )); then give_up "could not store enrollment state after ${attempts} attempts"; return 1; fi
       write_status pending "$attempts" "$((NOW + delay))" retry
       return 1
