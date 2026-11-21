@@ -19,7 +19,7 @@
 # mark-bad/mark-good other`) so the SAME state machine every other RAUC
 # consumer already trusts also governs a slot this script wrote.
 #
-# TWO SUBCOMMANDS:
+# SUBCOMMANDS:
 #   check   — print the current value of every gate input as JSON and exit 0.
 #             Read-only: takes no locks, mounts nothing, changes nothing. This
 #             is what an operator or CeraUI calls to see WHY a sync would (or
@@ -29,7 +29,12 @@
 #             first failing gate; performs full read-verified, fail-closed
 #             mirror otherwise.
 #
-# REFUSAL GATES (run only, checked in this exact order — every one must pass):
+#   observe — record a healthy boot without mirroring (called by mark-good).
+#   confirm — root-only acknowledgement of the current slot generation.
+#             Takes both locks and requires every preceding gate to pass.
+#             Allows a subsequent mirror or kernel stage without copying now.
+#
+# REFUSAL GATES (every one must pass before mirroring):
 #   1. /run/ceralive/partlabel-guard.failed exists (the boot healthcheck's own
 #      partition-safety observation; the same file ceralive-healthcheck.sh
 #      writes and reads).
@@ -48,7 +53,10 @@
 #      already survived a reboot and the boot healthcheck may ever be mirrored
 #      — an absent or stale healthy-state.json refuses closed).
 #
-# LOCK ORDER (run only, both `flock -n`, both held for the whole operation):
+#   7. fallback-hold: after a bundle install, retain the other slot until
+#      three distinct healthy boots have been observed or support confirms.
+#
+# LOCK ORDER (for commands that write state, both `flock -n`, both held for the whole operation):
 #   1. /run/lock/ceralive-update.lock  — the SAME lock /usr/local/bin/ceralive-
 #      update takes, so a local mirror and a real bundle install can never race.
 #   2. /var/lib/dpkg/lock-frontend      — so a concurrent apt/dpkg transaction on
@@ -109,7 +117,7 @@
 
 set -uo pipefail
 
-# Also sourceable as the shared, read-only six-gate reader for kernel staging.
+# Also sourced by kernel staging for the shared preflight gates.
 # shellcheck source=mkosi/runtime/ceralive-slot-mirror-lib.sh
 if [[ -f "$(dirname "${BASH_SOURCE[0]}")/ceralive-slot-mirror-lib.sh" ]]; then
   source "$(dirname "${BASH_SOURCE[0]}")/ceralive-slot-mirror-lib.sh"
@@ -270,10 +278,12 @@ json_has_object() {
   printf '%s' "${obj}" | grep -qP "\"${field}\":\\{"
 }
 
+load_rauc_status() {
+  RAUC_STATUS_JSON="$("${RAUC_BIN}" status --detailed --output-format=json 2>/dev/null)" || RAUC_STATUS_JSON=""
+}
+
 rauc_status_json() {
-  if [[ -z "${RAUC_STATUS_JSON}" ]]; then
-    RAUC_STATUS_JSON="$("${RAUC_BIN}" status --detailed --output-format=json 2>/dev/null)"
-  fi
+  [[ -n "${RAUC_STATUS_JSON}" ]] || load_rauc_status
   printf '%s' "${RAUC_STATUS_JSON}"
 }
 
@@ -381,6 +391,8 @@ gate_rauc_idle() {
 }
 
 gate_other_slot_pending() {
+  # Reuse the same RAUC status snapshot for both slots throughout preflight.
+  [[ -n "${RAUC_STATUS_JSON}" ]] || load_rauc_status
   resolve_other_rootfs_slot || return 1
   if json_has_object "${OTHER_SLOT_OBJECT}" installed && ! json_has_object "${OTHER_SLOT_OBJECT}" activated; then
     REFUSE_REASON="other-slot-pending-activation"
@@ -442,6 +454,75 @@ gate_healthy_state() {
   return 1
 }
 
+# The first OTA has an install record on only one slot. Check both so a
+# factory-origin fallback also stays intact. RAUC metadata survives local
+# copies, and version strings can repeat, so key the hold by the booted slot,
+# build and both install identities. Activation timestamps change on slot
+# selection and must not reset the count.
+gate_fallback_hold() {
+  local mode="$1" booted bootname generation source_install target_install
+  local file saved="" record boot_id entry
+  local -a boots=()
+  local -r required=3
+  REFUSE_REASON="fallback-hold-identity-unavailable"
+  booted="$(booted_rootfs_slot_object)" || return 1
+  bootname="$(json_field "${booted}" bootname)"
+  [[ "${bootname}" =~ ^[AB]$ ]] || return 1
+  source_install="$(kernel_json_object "${booted}" installed)"
+  target_install="$(kernel_json_object "${OTHER_SLOT_OBJECT}" installed)"
+  [[ -n "${source_install}${target_install}" ]] || return 0
+  generation="$(printf '%s\0' "${bootname}" "$(current_build_id)"     "${source_install}" "$(json_field "${booted}" hash)"     "${target_install}" "$(json_field "${OTHER_SLOT_OBJECT}" hash)" |
+    sha256sum)" || return 1
+  generation="${generation%% *}"
+  file="${UPDATE_STATE_DIR}/healthy-boots-${bootname}"
+  if [[ -e "${file}" ]]; then
+    REFUSE_REASON="fallback-hold-state-unavailable"
+    saved="$(<"${file}")" || return 1
+  fi
+
+  record="${generation}"
+  if [[ "${mode}" == confirm ]]; then
+    record+=$'\n'confirmed
+  else
+    [[ "${saved}" != "${generation}"$'\n'confirmed ]] || return 0
+    if [[ "${saved}" == "${generation}"$'\n'* ]]; then
+      while IFS= read -r entry; do
+        if [[ ! "${entry}" =~ ^[[:alnum:]-]{1,64}$ ||
+              "${record}"$'\n' == *$'\n'"${entry}"$'\n'* ||
+              "${#boots[@]}" -ge "${required}" ]]; then
+          boots=()
+          record="${generation}"
+          break
+        fi
+        boots+=("${entry}")
+        record+=$'\n'"${entry}"
+      done <<<"${saved#*$'\n'}"
+    fi
+
+    boot_id="$(current_boot_id)"
+    REFUSE_REASON="fallback-hold-identity-unavailable"
+    [[ "${boot_id}" =~ ^[[:alnum:]-]{1,64}$ ]] || return 1
+    if [[ "${#boots[@]}" -lt "${required}" &&
+          "${record}"$'\n' != *$'\n'"${boot_id}"$'\n'* ]]; then
+      boots+=("${boot_id}")
+      record+=$'\n'"${boot_id}"
+    fi
+  fi
+
+  if [[ "${mode}" != check && "${saved}" != "${record}" ]]; then
+    REFUSE_REASON="fallback-hold-state-write-failed"
+    mkdir -p -- "${UPDATE_STATE_DIR}" && kernel_atomic_write "${file}" "${record}" || return 1
+  fi
+  if [[ "${mode}" == confirm || "${#boots[@]}" -ge "${required}" ]]; then
+    return 0
+  fi
+  REFUSE_REASON="fallback-hold"
+  if [[ "${mode}" != check ]]; then
+    log "fallback-hold: preserving ${OTHER_SLOT_NAME} (${#boots[@]}/${required} healthy boots)"
+  fi
+  return 1
+}
+
 # --- dpkg --verify comparison, filtered through prune-paths.list (todo 29) ---
 # Absence of that file is a safe no-op: compare the raw --verify output.
 # --- adaptive index cleanup (RAUC 1.13 layout: <data-directory>/slot.<name>/
@@ -500,33 +581,26 @@ EOF
 # check — print every gate INPUT as JSON. Read-only: no locks, no mounts.
 # ---------------------------------------------------------------------------
 cmd_check() {
-  local partlabel_bad=0 dpkg_bad=0 rauc_bad=0 other_bad=0 hawkbit_bad=0 healthy_bad=0
+  local partlabel_bad=0 dpkg_bad=0 hawkbit_bad=0
   local other_installed=0 other_activated=0 first_reason=""
 
   gate_partlabel_guard || { partlabel_bad=1; [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"; }
   gate_dpkg_audit || { dpkg_bad=1; [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"; }
-  gate_rauc_idle || { rauc_bad=1; [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"; }
-  gate_kernel_pending || { other_bad=1; [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"; }
+  gate_rauc_idle || { [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"; }
+  gate_kernel_pending || { [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"; }
 
-  if resolve_other_rootfs_slot; then
-    json_has_object "${OTHER_SLOT_OBJECT}" installed && other_installed=1
-    json_has_object "${OTHER_SLOT_OBJECT}" activated && other_activated=1
-    if [[ "${other_installed}" -eq 1 && "${other_activated}" -eq 0 ]]; then
-      other_bad=1
-      [[ -z "${first_reason}" ]] && first_reason="other-slot-pending-activation"
-    fi
-  else
-    other_bad=1
-    [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"
-  fi
+  gate_other_slot_pending || { [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"; }
+  json_has_object "${OTHER_SLOT_OBJECT}" installed && other_installed=1
+  json_has_object "${OTHER_SLOT_OBJECT}" activated && other_activated=1
 
   gate_hawkbit_idle || { hawkbit_bad=1; [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"; }
-  gate_healthy_state || { healthy_bad=1; [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"; }
+  gate_healthy_state || { [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"; }
 
-  local would_refuse=0
-  if [[ "${partlabel_bad}" -eq 1 || "${dpkg_bad}" -eq 1 || "${rauc_bad}" -eq 1 || "${other_bad}" -eq 1 || "${hawkbit_bad}" -eq 1 || "${healthy_bad}" -eq 1 ]]; then
-    would_refuse=1
+  if [[ -z "${first_reason}" ]]; then
+    gate_fallback_hold check || first_reason="${REFUSE_REASON}"
   fi
+  local would_refuse=0
+  [[ -z "${first_reason}" ]] || would_refuse=1
 
   printf '{'
   printf '"partlabel_guard_failed":%s,' "$(json_bool "${partlabel_bad}")"
@@ -554,17 +628,15 @@ refuse_exit() {
   exit "${EX_REFUSE}"
 }
 
-cmd_run() {
+locked_preflight() {
   mkdir -p "$(dirname "${LOCK_UPDATE}")" "$(dirname "${LOCK_DPKG_FRONTEND}")" 2>/dev/null || true
 
-  exec 9>"${LOCK_UPDATE}"
-  if ! flock -n -x 9; then
+  if ! exec 9>"${LOCK_UPDATE}" || ! flock -n -x 9; then
     REFUSE_REASON="update-lock-busy"
     refuse_exit
   fi
 
-  exec 8>"${LOCK_DPKG_FRONTEND}"
-  if ! flock -n -x 8; then
+  if ! exec 8>"${LOCK_DPKG_FRONTEND}" || ! flock -n -x 8; then
     REFUSE_REASON="dpkg-lock-busy"
     refuse_exit
   fi
@@ -578,6 +650,26 @@ cmd_run() {
   gate_other_slot_pending || refuse_exit
   gate_hawkbit_idle || refuse_exit
   gate_healthy_state || refuse_exit
+}
+
+cmd_observe() {
+  locked_preflight
+  if ! gate_fallback_hold observe && [[ "${REFUSE_REASON}" != fallback-hold ]]; then
+    refuse_exit
+  fi
+  return 0
+}
+
+cmd_confirm() {
+  [[ "$(id -u)" == 0 ]] || die "confirmation requires root"
+  locked_preflight
+  gate_fallback_hold confirm || refuse_exit
+  log "fallback hold cleared for the current slot generation"
+}
+
+cmd_run() {
+  locked_preflight
+  gate_fallback_hold run || refuse_exit
 
   [[ -n "${OTHER_SLOT_DEVICE}" ]] || die "other slot device could not be resolved from rauc status"
   log "all gates passed — mirroring booted slot onto ${OTHER_SLOT_NAME} (${OTHER_SLOT_DEVICE})"
@@ -680,8 +772,10 @@ main() {
   case "${1:-}" in
     check) cmd_check ;;
     run) cmd_run ;;
+    observe) cmd_observe ;;
+    confirm) cmd_confirm ;;
     *)
-      printf 'usage: %s check|run\n' "${PROG}" >&2
+      printf 'usage: %s check|run|observe|confirm\n' "${PROG}" >&2
       exit 2
       ;;
   esac

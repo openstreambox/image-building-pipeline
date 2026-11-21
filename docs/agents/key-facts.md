@@ -3641,7 +3641,7 @@ that stale slot is ever activated (rollback, a bench A/B flip, an operator
 mistake), it boots an old, unpatched image. `check` prints every gate INPUT as
 JSON and takes no lock; `run` takes `/run/lock/ceralive-update.lock` then
 `/var/lib/dpkg/lock-frontend` (both `flock -n`, in that order, held for the
-whole operation) and refuses (exit 75, named reason) on the first of six gates
+whole operation) and refuses (exit 75, named reason) on the first gate
 to fail: `/run/ceralive/partlabel-guard.failed` present, `dpkg --audit`
 non-empty, RAUC `Operation` != idle (`busctl get-property … Installer
 Operation`), the OTHER rootfs-class slot installed-but-not-activated (a genuine
@@ -3649,6 +3649,22 @@ pending OTA must never be silently overwritten), `rauc-hawkbit-updater.service`
 active, or `healthy-state.json` (todo 27) not matching the current boot_id +
 dpkg status sha256 + build_id — the G3 lagged-mirror gate: only a state that has
 already survived a reboot and the boot healthcheck may ever be mirrored.
+
+After a RAUC bundle install, gate 7 retains the other slot until confirmation
+or three distinct healthy boot IDs for this generation. The mark-good unit
+records healthy boots after successful confirmation. A mirror or kernel stage
+can also record the current healthy boot under the shared locks. The count
+is stored on /data with a file sync, atomic rename and directory sync. It is
+scoped to the running build, boot slot and install records for both slots.
+Install records survive local copies. A factory pair without install records
+can mirror immediately, including on its first boot.
+
+`/usr/libexec/ceralive/ceralive-slot-sync check` reports `fallback-hold` when the
+next mirror would be held. Root can run
+`/usr/libexec/ceralive/ceralive-slot-sync confirm` after verifying the new image
+and deciding to release the fallback. Confirmation records that decision for
+this generation. Mirror and kernel staging still run their usual preflight
+and can overwrite the previous release on their next attempt.
 
 The OTHER slot's device and name are resolved from `rauc status --detailed
 --output-format=json`, never a hardcoded PARTLABEL — RAUC's JSON shape nests
@@ -3723,7 +3739,7 @@ the script's open flock'd lock fd — killing only the parent orphans that child
 which then keeps the lock held for as long as it happens to keep running,
 producing a spurious `update-lock-busy` refusal on the very next invocation.
 
-Tests: `tests/slot-sync.test.sh` — the full six-gate + two-lock refusal matrix,
+Tests: `tests/slot-sync.test.sh` — the preflight and lock refusal matrix,
 the `check` JSON shape, the dpkg-verify comparison (mismatch aborts, identical
 non-empty passes, a prune-paths.list-matched difference is a non-issue), the
 mark-bad-before-mark-good ordering, target repair (rc 1 recovery, rc 2/3/4/8

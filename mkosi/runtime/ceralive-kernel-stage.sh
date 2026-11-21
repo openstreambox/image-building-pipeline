@@ -5,7 +5,7 @@
 # allow: SIZE_OK - one device transaction owns the write-ahead and mount lifetime.
 set -uo pipefail
 
-# Reuse slot-sync's exact six gates, identity readers and COPY/VERIFY library.
+# Reuse slot-sync's preflight gates, identity readers and COPY/VERIFY library.
 # Sourcing does not run its CLI or acquire either lock.
 # shellcheck source=mkosi/runtime/ceralive-slot-sync.sh
 source "${CERALIVE_SLOT_SYNC_LIB:-/usr/libexec/ceralive/ceralive-slot-sync}"
@@ -204,7 +204,8 @@ validate_deb() {
 
 resolve_stage_slots() {
   local json name obj primary count=0
-  json="$(rauc_status_json)"
+  load_rauc_status
+  json="${RAUC_STATUS_JSON}"
   primary="$(json_field "${json}" boot_primary)"
   resolve_other_rootfs_slot || die "${REFUSE_REASON}"
   while IFS= read -r name; do
@@ -325,6 +326,7 @@ stage_main() {
   [[ "$(kernel_json_field "${HEALTHY_STATE_FILE}" slot)" == "${BOOTED_NAME}" ||
      "$(kernel_json_field "${HEALTHY_STATE_FILE}" slot)" == "${BOOTED_SLOT}" ]] || die healthy_slot_mismatch
   capture_base_identity || { log booted_rauc_byte_identity_unavailable; die kernel_identity_mismatch; }
+  gate_fallback_hold run || die "${REFUSE_REASON}"
 
   mkdir -p "${UPDATE_STATE_DIR}" || die state_directory_failed
   STATE_TIMESTAMPS=()

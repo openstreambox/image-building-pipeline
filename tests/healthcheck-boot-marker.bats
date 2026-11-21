@@ -443,7 +443,7 @@ assess_boot() {
   command -v systemd-analyze >/dev/null
   local root="$BATS_TEST_TMPDIR/root" units
   units="$root/etc/systemd/system"
-  mkdir -p "$units" "$root/usr/local/bin" "$root/usr/bin"
+  mkdir -p "$units" "$root/usr/local/bin" "$root/usr/bin" "$root/usr/libexec/ceralive"
   cp "$ROOT/mkosi/runtime/ceralive-"{healthcheck,mark-good}.service "$units/"
   cp /usr/lib/systemd/system/boot-complete.target "$units/"
   local name
@@ -453,8 +453,8 @@ assess_boot() {
   for name in ceralive NetworkManager; do
     printf '[Service]\nExecStart=/usr/bin/true\n' > "$units/$name.service"
   done
-  touch "$root/usr/local/bin/ceralive-healthcheck.sh" "$root/usr/bin/true"
-  chmod +x "$root/usr/local/bin/ceralive-healthcheck.sh" "$root/usr/bin/true"
+  touch "$root/usr/local/bin/ceralive-healthcheck.sh" "$root/usr/bin/true"     "$root/usr/libexec/ceralive/ceralive-slot-sync"
+  chmod +x "$root/usr/local/bin/ceralive-healthcheck.sh" "$root/usr/bin/true"     "$root/usr/libexec/ceralive/ceralive-slot-sync"
   systemctl --root="$root" enable ceralive-healthcheck.service ceralive-mark-good.service
   [ -L "$units/boot-complete.target.requires/ceralive-healthcheck.service" ]
   [ -L "$units/multi-user.target.wants/ceralive-mark-good.service" ]
