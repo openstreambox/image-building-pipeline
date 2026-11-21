@@ -40,6 +40,13 @@ changes in memory only after its write happened.
 `drain` is the same writer check used at shutdown by ceralive-write-drain.service,
 which is ordered after the writer units, so any shutdown path (also logind's own
 power-key handling) waits for running writes before they are stopped.
+
+CeraUI's OS-stage guard is a lease on the update lock, not a writer: it holds
+the lock for an OS stage and lets go only when CeraUI writes its release token,
+ignoring SIGTERM so a CeraUI crash can't drop it mid-install. When CeraUI is
+gone (stopped, crashed for good, or stopping with the system), nobody would
+write that token. With the install fence in place and RAUC settled, the broker
+and the drain write it themselves (StageLease), so neither waits on it forever.
 """
 import errno
 import fcntl
@@ -48,6 +55,7 @@ import json
 import os
 import pwd
 import queue
+import re
 import selectors
 import signal
 import socket
@@ -94,6 +102,18 @@ WRITER_UNITS = ('ceralive-software-update.service', 'ceralive-os-stage-guard.ser
                 'ceralive-slot-sync.service', 'ceralive-boot-script-sync.service')
 WRITER_UNIT_PATTERNS = ('ceralive-kernel-stage-*.service', 'ceralive-rauc-arm@*.service')
 ESCALATE_S = 900
+# CeraUI's OS-stage guard (deployment/ceralive-os-stage-guard in CeraUI): it runs
+# as `flock -x <update lock> ceralive-os-stage-guard <token>` in this transient
+# unit and exits once <dir>/release holds its token.
+OS_STAGE_GUARD_UNIT = 'ceralive-os-stage-guard.service'
+OS_STAGE_DIR = os.environ.get('CERALIVE_OS_STAGE_DIR', '/run/ceralive/os-stage')
+STAGE_TOKEN = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}')
+# RAUC idle with nothing mounted this long, under the fence, before the lease is
+# let go; a live CeraUI gets LEASE_GRACE_S more at shutdown to let go itself; the
+# guard checks its token every second and gets LEASE_EXIT_S to exit.
+LEASE_SETTLE_S = 5
+LEASE_GRACE_S = 30
+LEASE_EXIT_S = 5
 PROMPT_S = 60
 FIRST_READ_S = 5
 MAX_CONNECTIONS = 32
@@ -222,12 +242,16 @@ def rauc_mounts(runner=run):
         return ['(RAUC mount table unreadable)']
 
 
-def rauc_unit_state(runner=run):
+def unit_state(unit, runner=run):
     try:
-        out = runner(['systemctl', 'show', '--property=ActiveState', '--value', 'rauc.service'], 10)
+        out = runner(['systemctl', 'show', '--property=ActiveState', '--value', unit], 10)
     except (OSError, subprocess.SubprocessError):
         return 'unknown'
     return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else 'unknown'
+
+
+def rauc_unit_state(runner=run):
+    return unit_state('rauc.service', runner)
 
 
 def rauc_busy(runner=run, attempts=3):
@@ -404,6 +428,104 @@ def drop_fence(owner):
         pass
 
 
+# --- CeraUI's OS-stage lease ----------------------------------------------------
+
+def stage_token():
+    """The token the running guard waits for, or None. Read only from the
+    guard's own private directory, and only once the guard has marked itself
+    ready with that token (it is in its release loop)."""
+    try:
+        info = os.lstat(OS_STAGE_DIR)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o777 != 0o700:
+            return None
+        values = []
+        for name in ('token', 'ready'):
+            fd = os.open(os.path.join(OS_STAGE_DIR, name), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            with os.fdopen(fd) as source:
+                values.append(source.read(128).strip())
+    except OSError:
+        return None
+    token, ready = values
+    return token if STAGE_TOKEN.fullmatch(token) and ready == token else None
+
+
+def write_stage_release(token):
+    """<dir>/release with the token, as the guard checks it: a regular root file,
+    mode 0600, one link; written whole and renamed into place."""
+    temp = os.path.join(OS_STAGE_DIR, f'.release.{uuid.uuid4()}')
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        with os.fdopen(fd, 'w') as out:
+            out.write(token + '\n')
+        os.replace(temp, os.path.join(OS_STAGE_DIR, 'release'))
+    except OSError:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
+def release_stage_lease(runner=run, sleep=time.sleep):
+    """Let go of the guard's lease the way CeraUI does, with its release token.
+    A guard that doesn't exit on it (no readable token, a foreign directory) is
+    killed: it ignores SIGTERM by design. Only called with the install fence in
+    place and RAUC settled, so no OS stage can write any more."""
+    token = stage_token()
+    if token:
+        try:
+            write_stage_release(token)
+        except OSError as error:
+            log(f'Could not write the OS-stage release token: {error}')
+            token = None
+    if token:
+        for _ in range(int(LEASE_EXIT_S / 0.2)):
+            if OS_STAGE_GUARD_UNIT not in executing_writer_units(runner):
+                return 'released with its token'
+            sleep(0.2)
+    try:
+        runner(['systemctl', 'kill', '--signal=SIGKILL', OS_STAGE_GUARD_UNIT], 10)
+    except (OSError, subprocess.SubprocessError) as error:
+        return f'could not be stopped ({error})'
+    return 'stopped (SIGKILL)'
+
+
+class StageLease:
+    """When the guard's lease may be let go for CeraUI: RAUC has been idle with
+    nothing mounted for LEASE_SETTLE_S under the install fence, and CeraUI is
+    not there to do it (inactive or failed; a restarting CeraUI adopts its guard
+    and lets go itself). At shutdown CeraUI is stopped in parallel with the
+    drain, so there a CeraUI that is still active gets LEASE_GRACE_S, then the
+    lease goes anyway: a lease with no running write never holds a shutdown
+    longer than that. A running RAUC install still holds it without a bound."""
+
+    def __init__(self, runner, now, shutdown):
+        self.runner, self.now, self.shutdown = runner, now, shutdown
+        self.quiet_since = None
+
+    def due(self, rauc_idle):
+        t = self.now()
+        if not rauc_idle:
+            self.quiet_since = None
+            return False
+        if self.quiet_since is None:
+            self.quiet_since = t
+        quiet = t - self.quiet_since
+        if quiet < LEASE_SETTLE_S:
+            return False
+        owner = unit_state(CERAUI_UNIT, self.runner)
+        if owner in ('inactive', 'failed'):
+            return True
+        return self.shutdown and (owner != 'active' or quiet >= LEASE_SETTLE_S + LEASE_GRACE_S)
+
+    def let_go(self, sleep=time.sleep):
+        outcome = release_stage_lease(self.runner, sleep)
+        log(f'CeraUI\'s OS-stage lease held the update lock with RAUC idle and CeraUI '
+            f'{unit_state(CERAUI_UNIT, self.runner)}; {outcome}.')
+        self.quiet_since = None
+        return outcome
+
+
 def drain(sleep=time.sleep, now=time.monotonic, runner=run):
     """ExecStop of ceralive-write-drain.service: wait for running writes while
     the system is shutting down. Only a state that says the system is up counts
@@ -415,6 +537,7 @@ def drain(sleep=time.sleep, now=time.monotonic, runner=run):
     if state in ('running', 'degraded', 'starting', 'initializing', 'maintenance'):
         return 0
     started, last, escalated, fenced = now(), None, False, False
+    lease = StageLease(runner, now, shutdown=True)
     while True:
         if not fenced:
             # No install that hasn't started writing may begin now. Without the
@@ -425,6 +548,10 @@ def drain(sleep=time.sleep, now=time.monotonic, runner=run):
             except OSError as error:
                 busy = [f'install fence ({error.strerror or error})']
         busy = busy_writers(runner=runner) if fenced else busy
+        if fenced and OS_STAGE_GUARD_UNIT in busy and \
+                lease.due(not any(item.startswith('os-install') for item in busy)):
+            lease.let_go(sleep)
+            continue
         if not busy:
             if last:
                 log('All writes finished; shutdown continues.')
@@ -680,6 +807,7 @@ class Committer(threading.Thread):
     def __init__(self, broker, runner, clock, interval=1.0):
         super().__init__(daemon=True)
         self.broker, self.runner, self.clock, self.interval = broker, runner, clock, interval
+        self.lease = StageLease(runner, clock, shutdown=False)
         self.locks = {}
         self.wake = threading.Event()
         self.stop_requested = False
@@ -695,6 +823,20 @@ class Committer(threading.Thread):
             return False
         self.locks['update'] = fd
         return True
+
+    def update_lock_freed(self):
+        """The update lock is held. When CeraUI's OS-stage guard holds it with
+        no CeraUI to let go and RAUC settled (the fence is already in place), let
+        go of the lease and take the lock."""
+        if OS_STAGE_GUARD_UNIT not in executing_writer_units(self.runner):
+            self.lease.quiet_since = None
+            self.update_lock_holder = 'update lock (an update or slot sync is running)'
+            return False
+        self.update_lock_holder = "update lock (CeraUI's OS update stage)"
+        if not self.lease.due(not rauc_busy(self.runner)):
+            return False
+        self.lease.let_go()
+        return self.take_update()
 
     def take_dpkg(self):
         """One owned fd for the fcntl lock; nothing in this process opens the
@@ -740,8 +882,8 @@ class Committer(threading.Thread):
                 if broker.committed is c:
                     c['stage'] = 'drain'
         waiting = []
-        if not self.take_update():
-            waiting.append('update lock (an update or slot sync is running)')
+        if not self.take_update() and not self.update_lock_freed():
+            waiting.append(self.update_lock_holder)
         elif not self.take_dpkg():
             waiting.append('package-install (dpkg)')
         if not waiting:
