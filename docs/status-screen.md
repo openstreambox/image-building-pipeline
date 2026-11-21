@@ -92,7 +92,9 @@ shows something:
   before. It switches to VT8 once per condition, never away from a VT someone
   is logged in on (Alt+F8 shows it there), and hands an operator it took from
   a login prompt back to that VT when the condition clears. A monitor plugged
-  in meanwhile does not switch again.
+  in meanwhile does not switch again, including one first seen on the tick
+  that clears the condition or while its hand-back is still being retried.
+  The hand-back target is the prompt of the pull that actually happened.
 - Otherwise: this page in the 8x16 font (`Lat15-TerminusBold16`), with the
   default palette (light foreground on black). It is overwritten in place
   rather than cleared, so a camera does not catch a blank frame. `qrencode`
@@ -102,12 +104,15 @@ The owner switches to VT8 once per boot and whenever an HDMI connector goes
 from disconnected to connected (`/sys/class/drm/card*-HDMI-A-*/status`, read
 every tick; the kernel updates it in the same hotplug path that sends the drm
 change uevent). It skips both when someone is logged in on the foreground VT,
-meaning any process other than `agetty` or `login` has that terminal. A
+meaning any process outside the owner's own session other than `agetty` or
+`login` has that terminal, and waits for the next tick while `fgconsole` gives
+no answer. A
 display stack started on its own VT (for example a kiosk with `TTYPath=`)
 counts the same way and is left alone. A restarted owner repeats none of these switches: markers in
 `/run/ceralive/attention-console/` survive a service stop, and the one for a
 condition goes when a tick sees no condition. When the service stops it returns to the
-VT it found at start (fallback tty1) and restores VT8's saved font.
+VT it found at start (fallback tty1), unless someone is logged in on VT8, and
+restores VT8's saved font.
 
 A renderer that fails to load leaves VT8 to critical and fatal conditions
 only, as before; a renderer error while painting shows a short fallback with

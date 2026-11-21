@@ -115,8 +115,13 @@ also switches to VT8 once per boot and on HDMI hotplug unless someone is logged
 in on the foreground VT ([status screen](status-screen.md#console-wiring)). A
 condition that clears then leaves the page behind instead of an empty VT; an
 operator it pulled from a login is still returned there. With or without the page, the
-owner never switches away from a VT someone is logged in on, and a service
-restart never repeats the switch for a condition that is still showing.
+owner never switches away from a VT someone is logged in on, VT8 included: the
+hand-back on clear and the return on service stop skip a login on VT8 the same
+way. Before every switch it reads the foreground VT again, after its own state
+writes; when `fgconsole` gives no answer it switches nothing and looks again on
+the next tick. A service restart never repeats the switch for a condition that
+is still showing. A hand-back or font restore that fails is retried on later
+ticks without keeping the next condition from switching.
 
 Console regression tests cover startup repaint, unchanged conditions, operator
 VT selection, clear/expiry/stop, restart, font-save/restore failures and bounded

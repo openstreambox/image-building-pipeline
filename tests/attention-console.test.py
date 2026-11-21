@@ -2,6 +2,7 @@
 """VT ownership regressions; fake devices never touch the host's consoles."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -30,11 +31,33 @@ class ConsoleTests(unittest.TestCase):
         self.fail_switch = False
         self.fail_restore = False
         self.logged_in = getattr(self, 'logged_in', set())
+        self.unknown = False  # fgconsole gives no answer
+        self.during_scan = None  # runs inside the next login scan
         self.controller = self.owner()
 
     def owner(self):
         return a.Console(self.root / 'state', str(self.tty), self.run_command,
-                         lambda: self.vt, operator=lambda vt: vt in self.logged_in)
+                         self.foreground, operator=self.operator)
+
+    def foreground(self):
+        return '' if self.unknown else self.vt
+
+    def operator(self, vt):
+        hook, self.during_scan = self.during_scan, None
+        if hook:
+            hook()
+        return vt in self.logged_in
+
+    def switch_during_state_write(self, vt, login=True):
+        """The operator changes VT while the owner writes its alarm state."""
+        real = a.atomic
+        def atomic(path, value):
+            real(path, value)
+            if path.name == 'state.json' and '"alarm": true' in value:
+                self.vt = vt
+                if login:
+                    self.logged_in.add(vt)
+        return mock.patch.object(a, 'atomic', atomic)
 
     def run_command(self, *args):
         self.calls.append(args)
@@ -178,6 +201,45 @@ class ConsoleTests(unittest.TestCase):
         self.controller.update(TOP)
         self.assertEqual(self.vt, '8')
 
+    def test_stop_never_switches_away_from_a_login_on_vt8(self):
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '8')
+        self.logged_in.add('8')  # a maintenance session on tty8
+        self.controller.release()
+        self.assertEqual(self.vt, '8')
+        self.assertNotIn(('chvt', '1'), self.calls)
+        self.assertEqual(self.font, b'original-font-and-unicode-map')
+        self.assertFalse(self.controller.state.exists())
+
+    def test_unknown_foreground_never_switches(self):
+        self.unknown = True
+        self.controller.update(TOP)
+        self.controller.update(TOP)
+        self.assertNotIn(('chvt', '8'), self.calls)
+        self.unknown = False  # an answer again: the condition is shown now
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '8')
+
+    def test_unknown_foreground_at_stop_keeps_the_hand_back_for_later(self):
+        self.controller.update(TOP)
+        self.unknown = True
+        self.controller.release()
+        self.assertEqual(self.vt, '8')
+        self.assertTrue(self.controller.state.exists())
+        self.unknown = False
+        self.controller.release()
+        self.assertEqual(self.vt, '1')
+        self.assertFalse(self.controller.state.exists())
+
+    def test_foreground_is_read_again_after_the_state_writes(self):
+        with self.switch_during_state_write('3'):  # Alt+F3 to an open login meanwhile
+            self.controller.update(TOP)
+        self.assertEqual(self.vt, '3')
+        self.assertNotIn(('chvt', '8'), self.calls)
+        self.controller.update(TOP)  # next tick sees the login: still no switch
+        self.assertEqual(self.vt, '3')
+        self.assertNotIn(('chvt', '8'), self.calls)
+
     def test_watch_repaints_every_tick_and_releases_on_stop(self):
         frames, stops = [], []
         def sleep(_):
@@ -210,6 +272,34 @@ class LegacyTests(ConsoleTests):
         self.assertEqual(self.vt, '8')
         self.controller.update(None)
         self.assertEqual(self.vt, '1')
+
+    def test_failed_font_restore_does_not_suppress_the_next_condition(self):
+        self.controller.update(TOP)
+        self.fail_restore = True
+        self.controller.update(None)  # handed back to tty1, font restore failed
+        self.assertEqual(self.vt, '1')
+        self.assertTrue(self.controller.state.exists())
+        self.controller.update(TOP | dict(id='other'))
+        self.assertEqual(self.vt, '8')
+        self.controller.update(None)
+        self.controller = self.owner()  # a restart after the failed cleanup
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '8')
+        self.fail_restore = False
+        self.controller.update(None)
+        self.assertEqual(self.vt, '1')
+        self.assertEqual(self.font, b'original-font-and-unicode-map')
+        self.assertFalse(self.controller.state.exists())
+
+    def test_failed_pull_and_failed_restore_leave_no_condition_behind(self):
+        self.fail_switch = True
+        self.controller.update(TOP)  # the pull fails
+        self.fail_switch = False
+        self.fail_restore = True
+        self.controller.update(None)  # cleared before a retry; restore fails
+        self.controller = self.owner()  # restarted with the cleanup still owed
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '8')
 
     def test_large_font_is_loaded_once_per_acquisition(self):
         self.controller.update(TOP)
@@ -250,10 +340,10 @@ class StatusConsoleTests(ConsoleTests):
         super().setUp()
 
     def owner(self):
-        return a.Console(self.root / 'state', str(self.tty), self.run_command, lambda: self.vt,
+        return a.Console(self.root / 'state', str(self.tty), self.run_command, self.foreground,
                          status=self.page,
                          connectors=lambda: None if self.monitors is None else set(self.monitors),
-                         operator=lambda vt: vt in self.logged_in)
+                         operator=self.operator)
 
     def switches(self):
         return self.calls.count(('chvt', '8'))
@@ -372,6 +462,98 @@ class StatusConsoleTests(ConsoleTests):
         self.controller.update(None)
         self.assertEqual(self.vt, '1')
         self.assertEqual(self.switches(), 1)
+
+    def test_hand_back_never_switches_away_from_a_login_on_vt8(self):
+        self.controller.update(None)
+        self.vt = '2'
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '8')
+        self.logged_in.add('8')
+        self.controller.update(None)
+        self.assertEqual(self.vt, '8')
+        self.logged_in.clear()  # leaving later does not replay the hand-back
+        self.controller.update(None)
+        self.assertEqual(self.vt, '8')
+        self.assertNotIn(('chvt', '2'), self.calls)
+
+    def test_unknown_foreground_keeps_the_hand_back_for_the_next_tick(self):
+        self.controller.update(None)
+        self.vt = '2'
+        self.controller.update(TOP)
+        self.unknown = True
+        self.controller.update(None)
+        self.assertEqual(self.vt, '8')
+        self.unknown = False
+        self.controller.update(None)
+        self.assertEqual(self.vt, '2')
+
+    def test_unknown_foreground_defers_the_boot_and_plug_switches(self):
+        self.unknown = True
+        self.controller.update(None)
+        self.assertEqual(self.switches(), 0)
+        self.assertFalse(self.controller.booted.exists())
+        self.unknown = False
+        self.controller.update(None)
+        self.assertEqual(self.vt, '8')
+        self.vt = '1'
+        self.monitors = {'card0-HDMI-A-1'}
+        self.unknown = True
+        self.controller.update(None)
+        self.assertEqual(self.switches(), 1)
+        self.unknown = False
+        self.controller.update(None)  # same monitor set: the deferred plug still counts
+        self.assertEqual(self.vt, '8')
+
+    def test_monitor_switch_reads_the_foreground_again_after_the_login_scan(self):
+        def alt_f2():
+            self.vt = '2'
+            self.logged_in.add('2')
+        self.during_scan = alt_f2
+        self.controller.update(None)
+        self.assertEqual(self.vt, '2')
+        self.assertEqual(self.switches(), 0)
+        self.controller.update(None)
+        self.assertEqual(self.vt, '2')
+        self.assertTrue(self.controller.booted.exists())
+
+    def test_plug_first_seen_on_the_clear_tick_keeps_the_hand_back(self):
+        self.controller.update(None)
+        self.vt = '2'
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '8')
+        self.monitors = {'card0-HDMI-A-1'}  # plugged after the last condition tick
+        self.controller.update(None)
+        self.assertEqual(self.vt, '2')
+        self.controller.update(None)
+        self.assertEqual(self.vt, '2')
+        self.assertEqual(self.switches(), 2)
+
+    def test_retried_pull_hands_back_to_the_vt_it_was_taken_from(self):
+        self.controller.update(None)
+        self.vt = '2'
+        self.fail_switch = True
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '2')
+        self.vt = '3'  # another prompt before the retry
+        self.fail_switch = False
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '8')
+        self.controller.update(None)
+        self.assertEqual(self.vt, '3')
+
+    def test_failed_hand_back_does_not_suppress_the_next_condition(self):
+        self.controller.update(None)
+        self.vt = '2'
+        self.controller.update(TOP)
+        self.fail_switch = True
+        self.controller.update(None)  # cleared, hand-back failed
+        self.assertEqual(self.vt, '8')
+        self.vt = '3'  # the operator picks a prompt
+        self.fail_switch = False
+        self.controller.update(TOP | dict(id='other'))
+        self.assertEqual(self.vt, '8')
+        self.controller.update(None)
+        self.assertEqual(self.vt, '3')
 
     def test_unreadable_connector_is_not_a_plug(self):
         self.monitors = None  # read failed: the boot switch still happens
@@ -548,6 +730,34 @@ class InputTests(unittest.TestCase):
         self.assertTrue(a.operator_on('2', self.root))
         self.assertFalse(a.operator_on('3', self.root))
         self.assertFalse(a.operator_on('x', self.root))
+
+    def test_the_owner_itself_is_never_a_login_on_vt8(self):
+        # A service is a session leader; its own session never counts, even if
+        # tty8 became its controlling terminal.
+        session = os.getsid(0)
+        (self.root / '200').mkdir()
+        (self.root / '200' / 'stat').write_text('200 (ceralive-attent) S 1 %d %d 1032 -1 4194560 0 0\n' % (session, session))
+        self.assertFalse(a.operator_on('8', self.root))
+        (self.root / '201').mkdir()
+        (self.root / '201' / 'stat').write_text('201 (sh) S 1 201 201 1032 -1 4194560 0 0\n')
+        self.assertTrue(a.operator_on('8', self.root))
+
+    def test_the_owner_opens_vt8_without_taking_it_as_controlling_terminal(self):
+        tty = self.root / 'tty8'
+        tty.write_text('')
+        flags = []
+        real = os.open
+        def record(path, flag, *rest, **kw):
+            if str(path) == str(tty):
+                flags.append(flag)
+            return real(path, flag, *rest, **kw)
+        owner = a.Console(self.root / 'state', str(tty), lambda *args: True, lambda: '8',
+                          operator=lambda vt: False)
+        with mock.patch.object(a.os, 'open', record):
+            owner.update(TOP)
+            owner.release()
+        self.assertTrue(flags)
+        self.assertTrue(all(flag & os.O_NOCTTY for flag in flags))
 
 
 if __name__ == '__main__':
