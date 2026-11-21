@@ -690,7 +690,10 @@ The portal mark is vendored under `mkosi/runtime/brand/`, pinned by `brand-asset
   connectivity appears within a **60-90s boot grace window** (default 75s). Either
   a stored profile or any connectivity (NM `full`/`limited`/`portal`, or a default
   route) suppresses it. A `/data/ceralive/provision/force-portal` flag
-  (factory-reset hook) re-triggers it even when profiles exist.
+  (factory-reset hook) re-triggers it even when profiles exist. A portal-saved
+  `ceralive-wifi` whose join was never verified (`pending-join`, e.g. power lost
+  mid-handoff) does not count; if it does not come up within the grace window it is
+  deleted, `last-error` says `not_verified` and the AP returns.
 - **EC4 — OTA-safe:** a RAUC update that preserves `/data` keeps the WiFi profiles,
   so the portal correctly does **not** start after an update.
 - **Conflict safety:** the AP only runs when there is zero connectivity, so srtla
