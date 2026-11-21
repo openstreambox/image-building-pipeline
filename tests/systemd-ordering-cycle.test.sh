@@ -576,6 +576,82 @@ rm "${ETC}/ssh.service.d/zz-bad-requirement.conf"
 check_rescue_dependencies || fail 'restored dependency graph failed'
 echo 'systemd-ordering-cycle: Part F ROCK growth, growfs, readiness, consumers and SSH/rescue ordering OK'
 
+# --- Part G: shutdown order CeraUI -> NetworkManager -> ModemManager ------------
+# Stop order is the reverse of start order. Neither package orders NetworkManager
+# against ModemManager, so ModemManager stopped at the start of a power-off while
+# NetworkManager and CeraUI still used it. The image's drop-in orders
+# NetworkManager after ModemManager. The stand-ins below carry the packaged
+# ordering of the units involved (NetworkManager 1.52, ModemManager 1.24, CeraUI's
+# ceralive.service, modem-stack's FCC reconciler); the write drain and the netns
+# retirement are the image's real units. The drop-in is rendered by the real
+# installer.
+for dep in polkit.service dbus.service; do
+  [[ -f "${S}/usr/lib/systemd/system/${dep}" ]] \
+    || printf '[Unit]\nDescription=%s stand-in\n[Service]\nExecStart=/bin/true\n' "${dep}" \
+      >"${S}/usr/lib/systemd/system/${dep}"
+done
+cat >"${ETC}/NetworkManager.service" <<'EOF'
+[Unit]
+Description=NetworkManager stand-in (packaged ordering)
+Wants=network.target
+After=network-pre.target dbus.service
+Before=network.target
+[Service]
+ExecStart=/bin/true
+[Install]
+WantedBy=multi-user.target
+EOF
+cat >"${ETC}/ModemManager.service" <<'EOF'
+[Unit]
+Description=ModemManager stand-in (packaged ordering)
+After=polkit.service
+Requires=polkit.service
+[Service]
+ExecStart=/bin/true
+[Install]
+WantedBy=multi-user.target
+EOF
+cat >"${ETC}/ceralive-fcc-reconcile.service" <<'EOF'
+[Unit]
+Description=FCC reconciler stand-in (packaged ordering)
+Before=ModemManager.service
+After=ceralive-migrate-data.service
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+[Install]
+WantedBy=multi-user.target
+EOF
+mkdir -p "${ETC}/ceralive.service.d"
+printf '[Unit]\nAfter=network.target\n' >"${ETC}/ceralive.service.d/00-packaged-order.conf"
+cp "${RUNTIME}/power/ceralive-write-drain.service" "${ETC}/ceralive-write-drain.service"
+cp "${RUNTIME}/ceralive-dongle-netns-retire.service" "${ETC}/ceralive-dongle-netns-retire.service"
+CERALIVE_RUNTIME_SRC="${RUNTIME}" CERALIVE_NM_DROPIN_DIR="${ETC}/NetworkManager.service.d" \
+  bash -c "source '${POSTINST_ENTRY}'; setup_nm_modem_ordering" >/dev/null \
+  || fail 'setup_nm_modem_ordering did not install the NetworkManager drop-in'
+systemctl --root "${S}" enable ModemManager.service ceralive-fcc-reconcile.service \
+  ceralive-write-drain.service ceralive-dongle-netns-retire.service >/dev/null 2>&1 || true
+
+(( $(count_cycles) == 0 )) || fail 'ordering NetworkManager after ModemManager introduces a cycle'
+probe_orders_after NetworkManager.service ModemManager.service \
+  || fail 'NetworkManager.service is NOT ordered after ModemManager.service (ModemManager stops first at power-off)'
+probe_orders_after ceralive.service ModemManager.service \
+  || fail 'ceralive.service is NOT ordered after ModemManager.service (CeraUI loses ModemManager while it stops)'
+probe_orders_after ceralive-write-drain.service NetworkManager.service \
+  || fail 'the write drain is NOT ordered after NetworkManager.service (a streamed RAUC write can lose the network)'
+probe_orders_after ceralive-write-drain.service ModemManager.service \
+  || fail 'the write drain is NOT ordered after ModemManager.service'
+probe_orders_after ModemManager.service polkit.service \
+  || fail 'ModemManager.service is NOT ordered after polkit.service'
+probe_orders_after ModemManager.service ceralive-fcc-reconcile.service \
+  || fail 'ModemManager.service is NOT ordered after the FCC reconciler'
+# Non-vacuity: without the drop-in nothing else orders the two.
+mv "${ETC}/NetworkManager.service.d/20-ceralive-after-modemmanager.conf" "${TMP}/nm-mm-dropin"
+probe_orders_after NetworkManager.service ModemManager.service \
+  && fail 'NetworkManager is ordered after ModemManager even without the drop-in (probe is vacuous)'
+mv "${TMP}/nm-mm-dropin" "${ETC}/NetworkManager.service.d/20-ceralive-after-modemmanager.conf"
+echo 'systemd-ordering-cycle: Part G shutdown order OK (CeraUI and the drain, then NetworkManager, then ModemManager, then polkit)'
+
 echo "systemd-ordering-cycle regression: PASS"
 
 # Activation uses the opposite default-dependency rule from the early boot

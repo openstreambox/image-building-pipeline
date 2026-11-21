@@ -125,20 +125,23 @@ mask_service() {
 }
 
 # --- 8c. NTP configuration (chrony pools) --------------------------------
+# CERALIVE_CHRONY_CONF_DIR overrides the target directory for the offline tests.
 configure_ntp() {
-  log "configuring NTP (chrony pools)"
-  mkdir -p /etc/chrony/conf.d
+  log "configuring NTP (chrony pools, no UDP command port)"
+  local dir="${CERALIVE_CHRONY_CONF_DIR:-/etc/chrony/conf.d}"
+  mkdir -p "${dir}"
   # Install the ceralive-ntp.conf drop-in with explicit public NTP pools.
   # This file is staged into the image at build time by the customize layer.
   if [[ -f "${CERALIVE_CUSTOMIZE_SRC:-}/ceralive-ntp.conf" ]]; then
-    cp "${CERALIVE_CUSTOMIZE_SRC}/ceralive-ntp.conf" /etc/chrony/conf.d/ceralive-ntp.conf
+    cp "${CERALIVE_CUSTOMIZE_SRC}/ceralive-ntp.conf" "${dir}/ceralive-ntp.conf"
   else
     # Fallback: inline the config if the file is not available (e.g., in the
     # standalone postinst context where the customize dir is not mounted).
-    cat >/etc/chrony/conf.d/ceralive-ntp.conf <<'EOF'
+    cat >"${dir}/ceralive-ntp.conf" <<'EOF'
 pool pool.ntp.org iburst
 pool ntp.ubuntu.com iburst
 makestep 1 3
+cmdport 0
 EOF
   fi
 }

@@ -978,6 +978,7 @@ main() {
   apply_streaming_optimizations
   configure_networking
   setup_nm_share_helper_shims  # NM's shared-mode probes for NAT helpers this kernel lacks: no-op, not <error>
+  setup_nm_modem_ordering      # NetworkManager After=ModemManager: shutdown stops NM (and CeraUI) before MM
   configure_services
   pin_system_locale            # /etc/locale.conf = C.UTF-8; Debian links /etc/default/locale to it at boot
   setup_hostname_service

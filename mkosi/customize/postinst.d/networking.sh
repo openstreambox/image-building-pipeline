@@ -8,6 +8,8 @@
 #   * configure_networking      NetworkManager + mDNS + the resolved stub symlink
 #   * setup_nm_share_helper_shims  no-op modprobe entries for the NAT helpers NM
 #                               probes in shared mode and this kernel lacks
+#   * setup_nm_modem_ordering   NetworkManager after ModemManager, so shutdown
+#                               stops NetworkManager first
 #   * install_interface_naming  the eth0/eth1/wlan0 .link units SRTLA bonding globs
 #     (+ link_path_match)       depend on, and the loose rp_filter multi-WAN needs
 #   * setup_provisioning        the first-boot WiFi AP + captive portal, i.e. how a
@@ -53,6 +55,19 @@ setup_nm_share_helper_shims() {
   local dir="${CERALIVE_MODPROBE_DIR:-/etc/modprobe.d}"
   log "silencing NetworkManager's probes for NAT helpers this kernel does not build (${dir})"
   install -D -m 0644 "${src}/ceralive-nm-share-helpers.modprobe.conf" "${dir}/ceralive-nm-share-helpers.conf"
+}
+
+# NetworkManager after ModemManager, so a shutdown stops CeraUI and NetworkManager
+# before ModemManager instead of all three in parallel. Ordering only; the reasons
+# are in the committed drop-in. CERALIVE_NM_DROPIN_DIR overrides the target
+# directory for the offline tests.
+setup_nm_modem_ordering() {
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-nm-after-modemmanager.dropin.conf" ]] \
+    || die "nm modem ordering drop-in not found: ${src}/ceralive-nm-after-modemmanager.dropin.conf (is \$SRCDIR/runtime mounted?)"
+  local dir="${CERALIVE_NM_DROPIN_DIR:-/etc/systemd/system/NetworkManager.service.d}"
+  log "ordering NetworkManager after ModemManager (shutdown stops NetworkManager first)"
+  install -D -m 0644 "${src}/ceralive-nm-after-modemmanager.dropin.conf" "${dir}/20-ceralive-after-modemmanager.conf"
 }
 
 configure_networking() {

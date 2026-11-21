@@ -373,6 +373,103 @@ NM_SHARE_HELPERS="nf_nat_ftp nf_nat_irc nf_nat_sip nf_nat_tftp nf_nat_pptp nf_na
 }
 
 # ===========================================================================
+# 18e. NetworkManager after ModemManager — neither package orders one against
+#      the other, so at power-off ModemManager stopped first, about three seconds
+#      before NetworkManager and a second before CeraUI, both of which still talk
+#      to it. Ordering NetworkManager after ModemManager reverses at shutdown:
+#      CeraUI, then NetworkManager, then ModemManager. The dynamic proof (no
+#      cycle, the stop order) is Part G of systemd-ordering-cycle.test.sh.
+# ===========================================================================
+
+NM_MM_DROPIN_SRC="mkosi/runtime/ceralive-nm-after-modemmanager.dropin.conf"
+
+@test "nm after mm: the drop-in only orders NetworkManager after ModemManager" {
+  local conf="$PIPELINE_DIR/$NM_MM_DROPIN_SRC"
+  [ -f "$conf" ]
+  [ "$(grep -vE '^(#|$)' "$conf")" = "$(printf '[Unit]\nAfter=ModemManager.service')" ]
+}
+
+@test "nm after mm: setup installs the drop-in world-readable into NetworkManager.service.d" {
+  local dir="$BATS_TEST_TMPDIR/NetworkManager.service.d"
+  run env CERALIVE_RUNTIME_SRC="$PIPELINE_DIR/mkosi/runtime" CERALIVE_NM_DROPIN_DIR="$dir" \
+    bash -c "source '$POSTINST_ENTRY'; setup_nm_modem_ordering"
+  [ "$status" -eq 0 ]
+  cmp "$PIPELINE_DIR/$NM_MM_DROPIN_SRC" "$dir/20-ceralive-after-modemmanager.conf"
+  [ "$(stat -c %a "$dir/20-ceralive-after-modemmanager.conf")" = "644" ]
+}
+
+@test "nm after mm: missing runtime source fails the build without writing anything" {
+  local dir="$BATS_TEST_TMPDIR/nm-fail.d"
+  run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" CERALIVE_NM_DROPIN_DIR="$dir" \
+    bash -c "source '$POSTINST_ENTRY'; setup_nm_modem_ordering"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"nm modem ordering drop-in not found"* ]]
+  [ ! -e "$dir" ]
+}
+
+@test "nm after mm: image contract wires the setup into the runtime executor" {
+  grep -Eq '^[[:space:]]+setup_nm_modem_ordering([[:space:]]|$)' "$REPO_ROOT/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+}
+
+# ===========================================================================
+# 18f. chrony command port — chronyd also listens for chronyc on UDP port 323 on
+#      loopback. The image runs Debian's chronyd-restricted.service, which cannot
+#      bind that port and logged two errors per boot; every chronyc caller on the
+#      image (NM's chrony dispatcher scripts, the clock gate) is root and uses the
+#      Unix socket. `cmdport 0` drops the UDP port; the socket stays.
+# ===========================================================================
+
+@test "chrony: the shipped config closes the UDP command port" {
+  grep -Fxq 'cmdport 0' "$PIPELINE_DIR/mkosi/customize/ceralive-ntp.conf"
+  run grep -E '^(bindcmdaddress|cmdallow)' "$PIPELINE_DIR/mkosi/customize/ceralive-ntp.conf"
+  [ "$status" -ne 0 ]
+}
+
+@test "chrony: configure_ntp installs the committed config" {
+  local dir="$BATS_TEST_TMPDIR/chrony-conf.d"
+  run env CERALIVE_CUSTOMIZE_SRC="$PIPELINE_DIR/mkosi/customize" CERALIVE_CHRONY_CONF_DIR="$dir" \
+    bash -c "source '$POSTINST_ENTRY'; configure_ntp"
+  [ "$status" -eq 0 ]
+  cmp "$PIPELINE_DIR/mkosi/customize/ceralive-ntp.conf" "$dir/ceralive-ntp.conf"
+}
+
+@test "chrony: the inline fallback carries the same directives as the committed config" {
+  local dir="$BATS_TEST_TMPDIR/chrony-fallback.d"
+  run env CERALIVE_CUSTOMIZE_SRC="$BATS_TEST_TMPDIR/no-customize" CERALIVE_CHRONY_CONF_DIR="$dir" \
+    bash -c "source '$POSTINST_ENTRY'; configure_ntp"
+  [ "$status" -eq 0 ]
+  diff <(grep -vE '^(#|$)' "$PIPELINE_DIR/mkosi/customize/ceralive-ntp.conf") \
+       <(grep -vE '^(#|$)' "$dir/ceralive-ntp.conf")
+}
+
+@test "chrony: chronyd accepts the shipped config" {
+  local chronyd
+  chronyd="$(command -v chronyd || true)"
+  [ -n "$chronyd" ] || [ ! -x /usr/sbin/chronyd ] || chronyd=/usr/sbin/chronyd
+  [ -n "$chronyd" ] || skip "chronyd not installed"
+  # A copy, because a distribution AppArmor profile attaches to the installed
+  # path and refuses to read a config outside /etc/chrony.
+  cp "$chronyd" "$BATS_TEST_TMPDIR/chronyd"
+  run "$BATS_TEST_TMPDIR/chronyd" -p -f "$PIPELINE_DIR/mkosi/customize/ceralive-ntp.conf"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cmdport 0"* ]]
+}
+
+@test "chrony: the clock gate reaches chronyd over the Unix socket, not UDP" {
+  local unit="$PIPELINE_DIR/mkosi/runtime/clock/ceralive-clock-gate.service"
+  local script="$PIPELINE_DIR/mkosi/runtime/clock/ceralive-clock-gate.sh"
+  # chronyc uses /run/chrony/chronyd.sock when it runs as root and no -h names
+  # a host; only then does it work with cmdport 0.
+  run grep -E '^(User|DynamicUser|PrivateUsers)=' "$unit"
+  [ "$status" -ne 0 ]
+  run grep -E '^RestrictAddressFamilies=' "$unit"
+  [ "$status" -ne 0 ] || [[ "$output" == *AF_UNIX* ]]
+  grep -Eq '"\$CHRONYC" -n waitsync ' "$script"
+  run grep -E '"\$CHRONYC"[^#]*[[:space:]]-h[[:space:]]' "$script"
+  [ "$status" -ne 0 ]
+}
+
+# ===========================================================================
 # 18c. ceralive.service -> cerastream.service boot ordering — ceralive.service's
 #      initPipelines() connects to cerastream's control socket exactly once, so a
 #      cerastream that starts LATE (confirmed live: ~2 min after ceralive.service)
