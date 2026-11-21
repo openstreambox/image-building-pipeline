@@ -49,6 +49,7 @@ tests/kernel-state-machine.bats	bats	unit	default-bats	kernel activation and hea
 tests/hdmirx-edid-contract.bats	bats	unit	default-bats	HDMI-RX EDID install/enable wiring, unit ordering, per-profile blob hashes, runtime profile resolution + fallback, negative conformance fixtures
 tests/journal-diagnosability.bats	bats	unit	default-bats	journald retention budget, validated persistent machine-id, one-time journal-dir migration
 tests/clock-gated-timers.bats	bats	unit	default-bats	persistent calendar timers held until chrony sets the clock (no RTC battery), gate script, units, installer
+tests/srtla-send-unit.bats	bats	unit	default-bats	srtla_send in its own unit so a CeraUI restart keeps the stream: launcher, unit, installer, real user manager
 tests/variant-contract.bats	bats	unit	default-bats	family variants, kernel-source pins, production-baseline byte parity
 tests/bootloader-variant.bats	bats	unit	default-bats	per-variant U-Boot selection, committed blob-identity map, readback verification and unmapped-tuple refusal
 tests/rk3588-ab-contract.bats	bats	integration	default-bats	real RK3588 A/B disk geometry and preflash gate, no hardware
