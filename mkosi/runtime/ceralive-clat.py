@@ -150,6 +150,10 @@ def prefix_from_answers(answers):
     return candidates.pop()
 
 
+class DiscoveryError(ValueError):
+    pass
+
+
 def discover(interface, source, resolvers):
     import dns.exception
     import dns.flags
@@ -158,6 +162,9 @@ def discover(interface, source, resolvers):
     import dns.rdatatype
     # Only IP6Config DNS servers, through a link/source-bound socket.
     question = dns.message.make_query('ipv4only.arpa.', dns.rdatatype.AAAA)
+    if not resolvers:
+        raise DiscoveryError('no-dns64-resolvers')
+    reason = 'dns64-unreachable'
     for resolver in resolvers:
         try:
             with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as sock:
@@ -166,9 +173,16 @@ def discover(interface, source, resolvers):
                 sock.settimeout(2)
                 sock.connect((resolver, 53, 0, socket.if_nametoindex(interface)))
                 sock.send(question.to_wire())
-                answer = dns.message.from_wire(sock.recv(4096))
-            if (not question.is_response(answer) or answer.rcode() != dns.rcode.NOERROR
-                    or answer.flags & dns.flags.TC):
+                wire = sock.recv(4096)
+            if reason == 'dns64-unreachable':
+                reason = 'dns64-query-failed'
+            answer = dns.message.from_wire(wire)
+            if not question.is_response(answer) or answer.flags & dns.flags.TC:
+                continue
+            if answer.rcode() not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN):
+                continue
+            reason = 'no-nat64-prefix'
+            if answer.rcode() != dns.rcode.NOERROR:
                 continue
             addresses = [str(record.address) for rrset in answer.answer
                          if rrset.name == question.question[0].name
@@ -176,7 +190,7 @@ def discover(interface, source, resolvers):
             return prefix_from_answers(addresses)
         except (OSError, ValueError, dns.exception.DNSException):
             continue
-    raise ValueError('No validated RFC 7050 prefix from uplink DNS')
+    raise DiscoveryError(reason)
 
 
 def set_forwarding(value):
@@ -214,12 +228,31 @@ def retry(action):
 class Controller:
     def __init__(self):
         self.links = {}
+        self.discovery_errors = {}
+
+    def record_discovery(self, interface, signature, index, error):
+        if error is None:
+            self.discovery_errors.pop(interface, None)
+            return
+        failure = (signature, index, error)
+        if self.discovery_errors.get(interface) != failure:
+            print(f'<4>CLAT {interface} DNS64 discovery failed: {error}',
+                  file=sys.stderr, flush=True)
+        self.discovery_errors[interface] = failure
 
     def sync(self, wanted, observed_at=None, sharing=None):
         """sharing: whether NetworkManager runs IPv6 sharing (None: unknown)."""
         observed_at = boot_time() if observed_at is None else observed_at
+        for interface, (signature, index, _) in list(self.discovery_errors.items()):
+            try:
+                current = wanted.get(interface) == signature and socket.if_nametoindex(interface) == index
+            except OSError:
+                current = False
+            if not current:
+                del self.discovery_errors[interface]
         # Retry orphaned inverses even if their NM grant never returns.
-        cleanup(exclude={link.index for _, link in self.links.values()}, sharing=sharing)
+        cleanup(exclude={link.index for _, link in self.links.values()}, sharing=sharing,
+                discovery_errors={index: error for _, index, error in self.discovery_errors.values()})
         for interface, (signature, link) in list(self.links.items()):
             try:
                 same_index = socket.if_nametoindex(interface) == link.index
@@ -236,7 +269,8 @@ class Controller:
                     continue
                 if any(other.index == link.index for _, other in self.links.values()):
                     continue
-                link.start(observed_at=observed_at)
+                error = link.start(observed_at=observed_at)
+                self.record_discovery(interface, signature, link.index, error)
                 if link.undo:
                     self.links[interface] = (signature, link)
             else:
@@ -254,12 +288,15 @@ class Controller:
                     try:
                         prefix = discover(link.interface, link.source, link.resolvers)
                         link.failures = 0
+                        self.record_discovery(interface, signature, link.index, None)
                         if prefix != link.prefix:
                             if link.stop():
                                 del self.links[interface]
                             continue
                     except ValueError as error:
                         link.failures += 1
+                        if isinstance(error, DiscoveryError):
+                            self.record_discovery(interface, signature, link.index, str(error))
                         if link.failures >= 3:
                             if link.stop('error', str(error)):
                                 del self.links[interface]
@@ -268,14 +305,16 @@ class Controller:
                         continue
                     finally:
                         link.refreshed = time.monotonic()
-                link.status('up')
+                failure = self.discovery_errors.get(interface)
+                link.status('up', failure[2] if failure else None)
         if sharing:
             try:
                 hand_over_forwarding()
             except (OSError, ValueError, subprocess.SubprocessError) as error:
                 print(f'CLAT forwarding handover failed: {error}', file=sys.stderr, flush=True)
         if not self.links:
-            cleanup(sharing=sharing)
+            cleanup(sharing=sharing,
+                    discovery_errors={index: error for _, index, error in self.discovery_errors.values()})
 
 
 GUARD = 'clat_guard'
@@ -557,6 +596,9 @@ add rule inet {self.nft} forward meta nfproto ipv6 oifname "{self.tun}" drop
                 raise RuntimeError('tayga exited during startup')
             self.tun_index = socket.if_nametoindex(self.tun)
             self.status('up')
+        except DiscoveryError as error:
+            self.status('down', str(error))
+            return str(error)
         except Exception as error:
             self.stop('error', str(error))
 
@@ -665,7 +707,7 @@ def main():
     return settled and not controller.links
 
 
-def cleanup(exclude=(), sharing=None):
+def cleanup(exclude=(), sharing=None, discovery_errors=None):
     failed = False
     # Invalidate *all* old snapshots before the first destructive command.
     snapshots = {}
@@ -674,6 +716,9 @@ def cleanup(exclude=(), sharing=None):
             continue
         try:
             data = json.loads(path.read_text())
+            discovery_error = (discovery_errors or {}).get(int(path.stem))
+            if data.get('last_error') != discovery_error:
+                discovery_error = None
             now = boot_time()
             for key, value in dict(ifindex=int(path.stem), tun_ifindex=None, boot_id=BOOT_ID,
                                    invocation_id=INVOCATION_ID, generation=uuid.uuid4().hex).items():
@@ -681,7 +726,7 @@ def cleanup(exclude=(), sharing=None):
             data.update(schema_version=2, state='unavailable', last_error='cleanup in progress',
                         updated_at=int(time.time()), observed_at=now, expires_at=now)
             atomic_json(path, data)
-            snapshots[path.stem] = data
+            snapshots[path.stem] = (data, discovery_error)
         except (OSError, ValueError) as error:
             print(f'CLAT invalidation failed: {error}', file=sys.stderr, flush=True)
             return False
@@ -701,10 +746,10 @@ def cleanup(exclude=(), sharing=None):
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             print(f'CLAT forwarding restore failed: {error}', file=sys.stderr, flush=True)
             failed = True
-    for index, data in snapshots.items():
+    for index, (data, discovery_error) in snapshots.items():
         now = boot_time()
         data.update(state='error' if index in pending or failed else 'down',
-                    last_error='cleanup incomplete' if index in pending or failed else None,
+                    last_error='cleanup incomplete' if index in pending or failed else discovery_error,
                     updated_at=int(time.time()), observed_at=now, expires_at=now)
         atomic_json(RUN / f'{index}.json', data)
     return not pending and not failed
