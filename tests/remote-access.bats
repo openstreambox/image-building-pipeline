@@ -76,6 +76,8 @@ module() { # env assignments... -> runs setup_remote_access with stubbed enable_
 }
 
 @test "the enrollment unit starts for any case of the key file name" {
+  grep -Fxq 'LogLevelMax=notice' "$SRC/ceralive-tailscale-enroll.service"
+  grep -Fxq 'SyslogLevel=notice' "$SRC/ceralive-tailscale-enroll.service"
   grep -qx 'ConditionPathExistsGlob=|/boot/\[oO\]\[sS\]\[bB\]-\[tT\]\[aA\]\[iI\]\[lL\]\[sS\]\[cC\]\[aA\]\[lL\]\[eE\]\*' "$SRC/ceralive-tailscale-enroll.service"
 }
 
@@ -245,6 +247,7 @@ fresh() { # wipe the per-scenario state inside this test's own tmpdir
   printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
   enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="connection refused"
   [ "$status" -ne 0 ]
+  [[ "$output" == *"<4>ceralive-tailscale-enroll: tailscale up failed (attempt 1/"*"connection refused"* ]]
   [ -z "$(ls -A "$T/boot")" ]
   [ "$(pending_key)" = "$KEY" ]
   [ "$(stat -c %a "$T/enroll/pending-authkey")" = 600 ] && [ "$(stat -c %a "$T/enroll")" = 700 ]
@@ -286,7 +289,7 @@ fresh() { # wipe the per-scenario state inside this test's own tmpdir
   [ ! -e "$T/state/tailscaled.state" ] && [ ! -e "$T/enroll/state-ours" ]
   grep -q 'systemctl stop tailscaled.service' "$T/calls"
   [[ "$(cat "$T/enroll/enroll-status")" == "gave-up 1 0 the control server refused the key" ]]
-  [[ "$output" == *"gave up Tailscale enrollment"* ]]
+  [[ "$output" == *"<4>ceralive-tailscale-enroll: gave up Tailscale enrollment"* ]]
   rm "$T/calls"; enroll CERALIVE_TS_NOW=5000
   [ ! -e "$T/calls" ]                  # nothing left to retry
 }
@@ -537,7 +540,7 @@ STUB
   sleep 1
   enroll CERALIVE_TS_NOW=5000 CERALIVE_TS_LOCK_WAIT=0
   [ "$status" -eq 0 ]
-  [[ "$output" == *"another enrollment run holds the lock"* ]]
+  [[ "$output" == *"<6>ceralive-tailscale-enroll: another enrollment run holds the lock"* ]]
   wait "$pid" || true
   [ "$(grep -c used "$T/used")" -eq 1 ]
 }
