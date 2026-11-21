@@ -127,20 +127,25 @@ reprobe_defer() {
 # mono_now — whole seconds since boot into MONO_NOW. The policy runs early in
 # boot, where NTP may step the wall clock (a board without an RTC starts days
 # behind). Bash SECONDS follows that step, and a deadline taken before it would
-# expire at once, so every wait counts /proc/uptime instead. Should a read ever
-# fail, the value continues from the last good one on SECONDS, so a deadline
-# never mixes the two bases (only a step in that same moment could shift it).
-MONO_BASE=""
+# expire at once, so every wait counts /proc/uptime instead. The first call
+# picks the clock for the whole run: uptime, or SECONDS if /proc/uptime cannot
+# be read then, so a deadline never compares across the two. On uptime, a
+# later failed read advances the last good value by the SECONDS elapsed since
+# it (only a clock step inside that same gap could shift it).
+MONO_SRC="" MONO_UP=0 MONO_AT=0
 mono_now() {
   local up=""
-  { read -r up _ </proc/uptime; } 2>/dev/null || up=""
-  up="${up%%.*}"
-  if [[ "${up}" =~ ^[0-9]+$ ]]; then
-    MONO_BASE=$((up - SECONDS))
-  else
-    up=$((SECONDS + ${MONO_BASE:-0}))
+  if [[ "${MONO_SRC}" != seconds ]]; then
+    { read -r up _ </proc/uptime; } 2>/dev/null || up=""
+    up="${up%%.*}"
   fi
-  MONO_NOW="${up}"
+  if [[ "${up}" =~ ^[0-9]+$ ]]; then
+    MONO_SRC=uptime MONO_UP="${up}" MONO_AT="${SECONDS}" MONO_NOW="${up}"
+  elif [[ "${MONO_SRC}" == uptime ]]; then
+    MONO_NOW=$((MONO_UP + SECONDS - MONO_AT))
+  else
+    MONO_SRC=seconds MONO_NOW="${SECONDS}"
+  fi
 }
 
 # wait_bound <device dir> <want: bound|unbound> — poll the driver link, the only
@@ -348,6 +353,16 @@ rock_fusb302_reprobe() {
   return 0
 }
 
+# note_partner_since_early — any partner the policy sees after the early rebind
+# rules out the late one for the rest of the boot, whatever the re-arm state
+# (which the re-arm clears as it goes). Called wherever a partner is observed,
+# so even one that leaves before the next run counts.
+note_partner_since_early() {
+  [[ -e "${RUN_DIR}/reprobe-early" && ! -e "${RUN_DIR}/partner-since-early" ]] || return 0
+  : >"${RUN_DIR}/partner-since-early" \
+    || log "ERROR: cannot record the partner seen after the early rebind"
+}
+
 # rock_late_reprobe_allowed — the late rebind after an early one: only when the
 # early rebind ended in `no-partner`, the late one has not run, and no partner
 # has been seen since (`partner-since-early`, kept for the boot; the re-arm
@@ -474,12 +489,7 @@ rock_back_power_correction() {
     # leaves (rock_reprobe_rearm). Only outcomes that left a working controller
     # qualify; skipped and failed rebinds never re-arm.
     rm -f "${RUN_DIR}/detached"
-    # Any partner after the early rebind rules out the late one for the rest of
-    # the boot, whatever the re-arm state (which the re-arm clears as it goes).
-    if [[ -e "${RUN_DIR}/reprobe-early" && ! -e "${RUN_DIR}/partner-since-early" ]]; then
-      : >"${RUN_DIR}/partner-since-early" \
-        || log "ERROR: cannot record the partner seen after the early rebind"
-    fi
+    note_partner_since_early
     if [[ ! -e "${RUN_DIR}/partner-seen" && -r "${RUN_DIR}/reprobe" ]]; then
       read -r rstate _ <"${RUN_DIR}/reprobe"
       case "${rstate}" in
@@ -581,6 +591,7 @@ rock_back_power_correction() {
   settled_power="${CERALIVE_TYPEC_SETTLED_POWER_ROLE:-${POWER_ROLE}}"
   while :; do
     if [[ -e "${PARTNER_DIR}" && -r "${settled_power}" ]]; then
+      note_partner_since_early
       case "$(active_role "${settled_power}")" in
         source) rock_settled_source=1; return 0 ;;
         sink)

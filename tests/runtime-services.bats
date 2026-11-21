@@ -1619,19 +1619,19 @@ typec_rock_early_fixture() {
   [ ! -e "$root/iio/i2c-writes" ]
   [ ! -e "$root/run/reprobe" ]
 
-  # The cycle made the port source; 3 s after it is too soon.
+  # The cycle made the port source. Settle times far from the real elapsed
+  # time keep the decision independent of how fast this runs: a cycle 100 s
+  # ago is too soon for a 1000 s settle (and no cycle is due), and due for 50 s.
   printf '[source] sink\n' >"$root/typec/port0/power_role"
-  printf '1 %s\n' "$(( $(date +%s) - 3 ))" >"$root/run/nopartner"
-  run run_typec_rock
+  printf '1 %s\n' "$(( $(date +%s) - 100 ))" >"$root/run/nopartner"
+  CERALIVE_TYPEC_EARLY_SETTLE=1000 CERALIVE_TYPEC_NOPARTNER_SPACING=1000 run run_typec_rock
   [ "$status" -eq 0 ]
   [ ! -e "$root/iio/i2c-writes" ]
   [ "$(grep -c '^source$' "$root/iio/writes")" -eq 1 ]
 
-  printf '1 %s\n' "$(( $(date +%s) - 6 ))" >"$root/run/nopartner"
-  run run_typec_rock
+  CERALIVE_TYPEC_EARLY_SETTLE=50 run run_typec_rock
   [ "$status" -eq 0 ]
-  # 6 s, or a second or two more on a slow or stepped run; the decision is the point.
-  [[ "$output" == *"INFO: fusb302-reprobe: early: port0 is source with no partner "[6-9]"s after a cycle: rebinding 4-0022 from typec_fusb302"* ]]
+  [[ "$output" == *"INFO: fusb302-reprobe: early: port0 is source with no partner "*"s after a cycle: rebinding 4-0022 from typec_fusb302"* ]]
   [ "$(cat "$root/iio/i2c-writes")" = $'unbind 4-0022\nbind 4-0022' ]
   [ "$(grep -c '^source$' "$root/iio/writes")" -eq 1 ]
 }
@@ -1715,6 +1715,30 @@ typec_rock_early_fixture() {
     [ "$status" -eq 0 ]
   done
   # The re-arm cap clears its own state; the sighting still stands for the boot.
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 1 ]
+  [ ! -e "$root/run/reprobe-late" ]
+  [ -e "$root/run/partner-since-early" ]
+}
+
+@test "typec policy: a short-lived partner seen only by a cycle's settle wait still rules out the late rebind" {
+  local root="$BATS_TEST_TMPDIR/rock" n
+  typec_rock_early_fixture "$root"
+  export CERALIVE_TYPEC_NOPARTNER_SPACING=0 CERALIVE_TYPEC_REPROBE_SETTLE=0 CERALIVE_TYPEC_REARM_SETTLE=0
+  run run_typec_rock
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = no-partner ]
+
+  # Cycle 1: the partner shows up during its settle wait and settles as source.
+  touch "$root/iio/clock-step-after-cycle"
+  CERALIVE_TYPEC_WAIT=5 run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^source$' "$root/iio/writes")" -eq 1 ]
+  [ ! -e "$root/run/failed" ]
+  # ... and is gone before any other run sees it.
+  rm -rf "$root/typec/port0-partner" "$root/iio/clock-step-after-cycle" "$root/iio/clock-armed"
+  for n in 1 2 3 4 5 6; do
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+  done
   [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 1 ]
   [ ! -e "$root/run/reprobe-late" ]
   [ -e "$root/run/partner-since-early" ]
