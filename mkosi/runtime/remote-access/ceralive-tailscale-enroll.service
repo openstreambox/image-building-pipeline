@@ -15,5 +15,8 @@ After=local-fs.target ceralive-migrate-data.service NetworkManager.service
 RequiresMountsFor=/boot /var/lib/tailscale /data/tailscale-enroll
 
 [Service]
+LogLevelMax=notice
+SyslogLevel=notice
+SyslogIdentifier=ceralive-tailscale-enroll
 Type=oneshot
 ExecStart=/usr/local/sbin/ceralive-tailscale-enroll

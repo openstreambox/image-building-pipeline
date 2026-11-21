@@ -169,9 +169,9 @@ POLL_INTERVAL="${CERALIVE_FAN_KICK_POLL:-0.25}"
 WAIT_SECONDS="${CERALIVE_FAN_KICK_WAIT:-10}"
 MAX_CYCLES="${CERALIVE_FAN_KICK_MAX_CYCLES:-0}"
 
-log() { printf 'ceralive-fan-kickstart: %s\n' "$*"; }
-warn() { printf 'ceralive-fan-kickstart: WARNING: %s\n' "$*"; }
-die() { printf 'ceralive-fan-kickstart: %s\n' "$*" >&2; exit 1; }
+log() { local priority="$1"; shift; printf '<%s>ceralive-fan-kickstart: %s\n' "$priority" "$*"; }
+warn() { printf '<4>ceralive-fan-kickstart: WARNING: %s\n' "$*"; }
+die() { printf '<3>ceralive-fan-kickstart: %s\n' "$*" >&2; exit 1; }
 
 [[ "${KICK_MILLISECONDS}" =~ ^[0-9]+$ ]] \
   || die "CERALIVE_FAN_KICK_MS must be an unsigned integer of milliseconds"
@@ -191,11 +191,17 @@ read_attr() {
 }
 
 write_attr() {
-  { printf '%s\n' "$2" >"$1"; } 2>/dev/null
+  local diagnostic rc=0
+  # Redirect stderr first so a failed open of the sysfs path is captured too.
+  diagnostic="$(printf '%s\n' "$2" 2>&1 >"$1")" || rc=$?
+  if (( rc != 0 )); then
+    warn "write of state $2 to $1 failed (exit status ${rc}): ${diagnostic}"
+  fi
+  return "$rc"
 }
 
 if [[ ! -d "${THERMAL_DIR}" ]]; then
-  log "no thermal class at ${THERMAL_DIR} — no fan to kick-start"
+  log 5 "no thermal class at ${THERMAL_DIR} — no fan to kick-start"
   exit 0
 fi
 
@@ -225,7 +231,7 @@ find_pwm_fan_cdevs() {
 deadline=$(( SECONDS + WAIT_SECONDS ))
 while ! find_pwm_fan_cdevs; do
   if (( SECONDS >= deadline )); then
-    log "no '${WANTED_CDEV_TYPE}' cooling device under ${THERMAL_DIR} after ${WAIT_SECONDS}s — this board has no fan to kick-start, nothing to do"
+    log 5 "no '${WANTED_CDEV_TYPE}' cooling device under ${THERMAL_DIR} after ${WAIT_SECONDS}s — this board has no fan to kick-start, nothing to do"
     exit 0
   fi
   sleep "${POLL_INTERVAL}"
@@ -238,7 +244,7 @@ for (( i = 0; i < ${#FAN_CDEVS[@]}; i++ )); do
   cdev="${FAN_CDEVS[i]}"
   max_state="${FAN_MAX_STATES[i]}"
   if (( max_state < MIN_KICKABLE_MAX_STATE )); then
-    log "${cdev##*/}: max_state=${max_state}, so its only active state already commands full PWM — there is nothing to kick above, skipping it"
+    log 5 "${cdev##*/}: max_state=${max_state}, so its only active state already commands full PWM — there is nothing to kick above, skipping it"
     continue
   fi
   WATCH_CDEVS+=("${cdev}")
@@ -246,7 +252,7 @@ for (( i = 0; i < ${#FAN_CDEVS[@]}; i++ )); do
 done
 
 if (( ${#WATCH_CDEVS[@]} == 0 )); then
-  log "found ${WANTED_CDEV_TYPE} cooling device(s) but none has room for a kick above its first active state — nothing to do"
+  log 5 "found ${WANTED_CDEV_TYPE} cooling device(s) but none has room for a kick above its first active state — nothing to do"
   exit 0
 fi
 
@@ -260,7 +266,7 @@ for (( i = 0; i < ${#WATCH_CDEVS[@]}; i++ )); do
   state="$(read_attr "${cdev}/cur_state" || true)"
   [[ "${state}" =~ ^[0-9]+$ ]] || state=0
   PREV_STATES+=("${state}")
-  log "watching ${cdev##*/} (max_state=${WATCH_MAX_STATES[i]}, currently state ${state}); a 0 -> nonzero transition gets a ${KICK_MILLISECONDS} ms full-PWM nudge, then the governor's own state is written straight back"
+  log 5 "watching ${cdev##*/} (max_state=${WATCH_MAX_STATES[i]}, currently state ${state}); a 0 -> nonzero transition gets a ${KICK_MILLISECONDS} ms full-PWM nudge, then the governor's own state is written straight back"
 done
 
 # --- Monitor ---------------------------------------------------------------
@@ -299,7 +305,7 @@ while :; do
     # that device's sysfs at discovery, never a hand-invented "100 %".
     for i in "${kick_indices[@]}"; do
       cdev="${WATCH_CDEVS[i]}"
-      log "${cdev##*/}: governor moved it 0 -> ${edge_states[i]} from a dead stop; nudging to state ${WATCH_MAX_STATES[i]} (max_state) for ${KICK_MILLISECONDS} ms to break stiction"
+      log 6 "${cdev##*/}: governor moved it 0 -> ${edge_states[i]} from a dead stop; nudging to state ${WATCH_MAX_STATES[i]} (max_state) for ${KICK_MILLISECONDS} ms to break stiction"
       if ! write_attr "${cdev}/cur_state" "${WATCH_MAX_STATES[i]}"; then
         warn "${cdev##*/}/cur_state refused the kick write — leaving this transition to the governor alone"
       fi
@@ -320,12 +326,12 @@ while :; do
         # Something moved the state during the kick window — that can only be
         # the governor making a fresher decision than the one we interrupted.
         # Its verdict is newer than ours, so leave it exactly as it is.
-        log "${cdev##*/}: governor re-asserted state ${now} during the nudge — honouring its newer decision instead of restoring ${edge_states[i]}"
+        log 5 "${cdev##*/}: governor re-asserted state ${now} during the nudge — honouring its newer decision instead of restoring ${edge_states[i]}"
         PREV_STATES[i]="${now}"
         continue
       fi
       if write_attr "${cdev}/cur_state" "${edge_states[i]}"; then
-        log "${cdev##*/}: nudge over, governor's own state ${edge_states[i]} handed back; the kernel drives it from here"
+        log 6 "${cdev##*/}: nudge over, governor's own state ${edge_states[i]} handed back; the kernel drives it from here"
         PREV_STATES[i]="${edge_states[i]}"
       else
         warn "${cdev##*/}/cur_state refused the restore write — the fan may stay at state ${WATCH_MAX_STATES[i]} until the governor's next real decision"
@@ -336,7 +342,7 @@ while :; do
 
   cycles=$(( cycles + 1 ))
   if (( MAX_CYCLES > 0 && cycles >= MAX_CYCLES )); then
-    log "reached CERALIVE_FAN_KICK_MAX_CYCLES=${MAX_CYCLES} — exiting (test seam; production runs unbounded)"
+    log 6 "reached CERALIVE_FAN_KICK_MAX_CYCLES=${MAX_CYCLES} — exiting (test seam; production runs unbounded)"
     exit 0
   fi
 

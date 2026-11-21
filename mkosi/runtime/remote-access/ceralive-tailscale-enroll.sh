@@ -90,7 +90,8 @@ REFUSED_RE='^(backend error: )?(invalid key|key (has )?(been )?(expired|revoked|
 # tailnet's policy does not grant this node the SSH capability.
 NO_TAILNET_SSH_RE='not enabled on tailnet'
 
-log() { logger -t ceralive-tailscale-enroll -- "$*" 2>/dev/null || true; echo "ceralive-tailscale-enroll: $*"; }
+# Use the unit's journal stream once per message.
+log() { local priority="$1"; shift; printf '<%s>ceralive-tailscale-enroll: %s\n' "$priority" "$*"; }
 
 regular() { [[ -f "$1" && ! -L "$1" ]]; }
 clean() { printf '%s' "$1" | sed -E 's/tskey-[A-Za-z0-9_-]+/<key>/g' | tr '\n' ' ' | cut -c1-160; }
@@ -141,7 +142,7 @@ discard_claim() {
     local rejected
     rejected="$(mktemp -d "${ENROLL}/.rejected.XXXXXX")"
     mv -T -- "${CLAIMED}" "${rejected}/incoming-authkey"
-    log "quarantined a populated incoming-authkey directory"
+    log 4 "quarantined a populated incoming-authkey directory"
   fi
 }
 
@@ -214,7 +215,7 @@ adopt() { # source
   write_status pending 0 0 new-key
   mv -f -- "$tmp" "${PENDING}"
   sync "${ENROLL}"
-  log "new key from $1${NAME:+ for machine name ${NAME}}"
+  log 5 "new key from $1${NAME:+ for machine name ${NAME}}"
 }
 
 reject_all() { # reason files...
@@ -224,7 +225,7 @@ reject_all() { # reason files...
   printf 'These files were removed from this card and not used: %s\nReason: %s\nAsk for a new key file.\n' \
     "${names[*]}" "$reason" >"${REJECTED_NOTE}" 2>/dev/null || true
   sync -f "${BOOT}" 2>/dev/null || true
-  log "removed unusable key file(s) ${names[*]}: ${reason}"
+  log 4 "removed unusable key file(s) ${names[*]}: ${reason}"
 }
 
 take_boot_key() {
@@ -264,7 +265,7 @@ take_incoming_keys() {
     mv -fT -- "${INCOMING}" "${CLAIMED}"
     parse_keyfile "${CLAIMED}"
     if [[ -z "${KEY}" ]]; then
-      log "removed incoming-authkey: not a regular file holding one tskey-auth- key (and an optional name)"
+      log 4 "removed incoming-authkey: not a regular file holding one tskey-auth- key (and an optional name)"
     else
       adopt "a local writer"
       KEY=""
@@ -288,13 +289,13 @@ give_up() { # reason
       rm -f -- "${TS_STATE}/tailscaled.state"   # rm never follows a link
       rm -f -- "${OURS}"
     else
-      log "kept tailscaled.state (tailscaled state '${backend:-unknown}')"
+      log 5 "kept tailscaled.state (tailscaled state '${backend:-unknown}')"
     fi
   fi
   write_status gave-up "$attempts" 0 "$1"
   sync "${ENROLL}" 2>/dev/null || true
   rm -f -- "${PRIOR}"
-  log "gave up Tailscale enrollment: $1; the key was removed. Put a new key file on BOOT to retry."
+  log 4 "gave up Tailscale enrollment: $1; the key was removed. Put a new key file on BOOT to retry."
 }
 
 # `up` resets the auto-update preference to "unset" (then the tailnet default
@@ -308,14 +309,14 @@ pin_auto_update_off() {
   if printf '%s' "$out" | grep -qiE "$NO_TAILNET_SSH_RE"; then
     if out="$("${CLI}" --socket="${SOCKET}" set --ssh=false --accept-risk=lose-ssh \
           --auto-update=false --update-check=false 2>&1)"; then
-      log "this tailnet does not allow Tailscale SSH: turned SSH off on this box so its settings can change; auto-update pinned off" >&2
+      log 4 "this tailnet does not allow Tailscale SSH: turned SSH off on this box so its settings can change; auto-update pinned off" >&2
       record_ssh_off || true
       echo ok-without-tailnet-ssh
       return 0
     fi
-    log "this tailnet does not allow Tailscale SSH, and turning SSH off failed too" >&2
+    log 4 "this tailnet does not allow Tailscale SSH, and turning SSH off failed too" >&2
   fi
-  log "could not pin auto-update off ($(clean "$out")); tailscaled tries again at its next start" >&2
+  log 4 "could not pin auto-update off ($(clean "$out")); tailscaled tries again at its next start" >&2
   echo ok-auto-update-not-pinned
 }
 
@@ -329,7 +330,7 @@ record_ssh_off() { # remember which node had its SSH turned off (for CeraUI's ca
     sleep 1
   done
   if [[ -z "$node" ]] || ! put_synced "${SSH_OFF}" "$node" .sshoff; then
-    log "could not record which login had Tailscale SSH turned off; the Remote access card will not show its note" >&2
+    log 4 "could not record which login had Tailscale SSH turned off; the Remote access card will not show its note" >&2
     return 1
   fi
 }
@@ -350,13 +351,13 @@ finish_join() { # name [refused-ssh]: the second argument says tailscaled refuse
   # the key, so the next run finishes again instead of leaving "pending". If
   # the result cannot be stored, the key and the login record stay for that run.
   if ! { write_status joined "$attempts" 0 "$reason" && sync "${ENROLL}"; }; then
-    log "could not store the join result; the next run finishes it"
+    log 4 "could not store the join result; the next run finishes it"
     return 1
   fi
   wipe "${PENDING}"
   sync "${ENROLL}"
   rm -f -- "${PRIOR}"   # only once the result is on disk
-  log "joined Tailscale${1:+ as $1}"
+  log 5 "joined Tailscale${1:+ as $1}"
 }
 
 enroll_pending() {
@@ -364,7 +365,7 @@ enroll_pending() {
   parse_keyfile "${PENDING}"
   if [[ -z "${KEY}" ]]; then
     wipe "${PENDING}"
-    log "removed pending-authkey: not a regular file holding one tskey-auth- key"
+    log 4 "removed pending-authkey: not a regular file holding one tskey-auth- key"
     return 0
   fi
   local name="${NAME}"
@@ -385,14 +386,14 @@ enroll_pending() {
     : >"${OURS}"
   fi
   if ! "${SYSTEMCTL}" start tailscaled.service; then
-    log "tailscaled did not start (attempt ${attempts}/${MAX_ATTEMPTS})"
+    log 4 "tailscaled did not start (attempt ${attempts}/${MAX_ATTEMPTS})"
     if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not start after ${attempts} attempts"; fi
     return 1
   fi
   for ((i = 0; i < WAIT; i++)); do [[ -S "${SOCKET}" ]] && break; sleep 1; done
   if [[ -n "$(read_prior)" ]] && ! { sync -- "${PRIOR}" && sync "${ENROLL}"; }; then
     # A record left by an earlier run is trusted only once it is durable.
-    log "could not make the login check durable (${attempts}/${MAX_ATTEMPTS}); trying again later"
+    log 4 "could not make the login check durable (${attempts}/${MAX_ATTEMPTS}); trying again later"
     if (( attempts >= MAX_ATTEMPTS )); then give_up "could not store enrollment state after ${attempts} attempts"; return 1; fi
     write_status pending "$attempts" "$((NOW + delay))" retry || true
     return 1
@@ -402,7 +403,7 @@ enroll_pending() {
     # login? On disk before the up, so a power cut cannot lose it afterwards.
     backend_state >/dev/null
     if [[ -z "$STATUS_JSON" ]]; then
-      log "tailscaled did not answer before the attempt (${attempts}/${MAX_ATTEMPTS}); trying again later"
+      log 4 "tailscaled did not answer before the attempt (${attempts}/${MAX_ATTEMPTS}); trying again later"
       if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not answer after ${attempts} attempts"; return 1; fi
       write_status pending "$attempts" "$((NOW + delay))" retry
       return 1
@@ -410,7 +411,7 @@ enroll_pending() {
     local prior=no
     [[ "$STATUS_JSON" =~ \"HaveNodeKey\"[[:space:]]*:[[:space:]]*true ]] && prior=yes
     if ! put_synced "${PRIOR}" "$prior $(stat -c %i -- "${PENDING}")" .prior; then
-      log "could not store the login check durably (${attempts}/${MAX_ATTEMPTS}); trying again later"
+      log 4 "could not store the login check durably (${attempts}/${MAX_ATTEMPTS}); trying again later"
       if (( attempts >= MAX_ATTEMPTS )); then give_up "could not store enrollment state after ${attempts} attempts"; return 1; fi
       write_status pending "$attempts" "$((NOW + delay))" retry
       return 1
@@ -431,7 +432,7 @@ enroll_pending() {
     return 0
   fi
   message="$(clean "$out")"
-  log "tailscale up failed (attempt ${attempts}/${MAX_ATTEMPTS}): ${message}"
+  log 4 "tailscale up failed (attempt ${attempts}/${MAX_ATTEMPTS}): ${message}"
   # Final refusals: Tailscale's control plane ("invalid key: …", expired, revoked,
   # already used) and headscale ("invalid pre auth key", "… has expired", "… has
   # already been used"). Every phrase must be about the key: a TLS error such as
@@ -452,7 +453,7 @@ enroll_pending() {
       return 1
     fi
     if [[ "$(backend_state)" == Running ]]; then
-      log "an earlier attempt with this key registered the box"
+      log 5 "an earlier attempt with this key registered the box"
       finish_join "$name" refused-ssh || return 1
       return 0
     fi
@@ -466,13 +467,13 @@ enroll_pending() {
 }
 
 if present "${ENROLL}" && { [[ -L "${ENROLL}" ]] || [[ ! -d "${ENROLL}" ]]; }; then
-  log "refusing: ${ENROLL} is not a plain directory"
+  log 3 "refusing: ${ENROLL} is not a plain directory"
   exit 1
 fi
 install -d -m 0700 "${ENROLL}"
 chmod 0700 "${ENROLL}"
 exec 9>"${ENROLL}/.lock"
-flock -w "${LOCK_WAIT}" 9 || { log "another enrollment run holds the lock; the timer retries"; exit 0; }
+flock -w "${LOCK_WAIT}" 9 || { log 6 "another enrollment run holds the lock; the timer retries"; exit 0; }
 
 recover
 take_boot_key
