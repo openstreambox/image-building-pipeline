@@ -197,7 +197,10 @@ waits for running writes.
 
 `ceralive-write-drain.service` is active within seconds of boot and ordered after
 `rauc.service`, the update and slot units, slot activation, NetworkManager and
-ModemManager. Its start waits for nothing slow: a shutdown queued while its start
+ModemManager. NetworkManager is itself ordered after ModemManager
+(`NetworkManager.service.d/20-ceralive-after-modemmanager.conf`), so once the
+drain is done a shutdown stops CeraUI, then NetworkManager, then ModemManager.
+Its start waits for nothing slow: a shutdown queued while its start
 job still waits would cancel that job, and then no `ExecStop` runs. The boot-only
 oneshots (dpkg recovery, the health check, mark-good, boot-script sync) have
 finished before anything ordered after them can start, so an ordering against

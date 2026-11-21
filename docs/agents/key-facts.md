@@ -4515,7 +4515,8 @@ the clock synced ONLY because the 2-minute networkd stall pushed
 fixed here, not a contract, since there is no ordering edge between the two units.
 Masking therefore removes no guarantee that ever existed. `chronyd` itself is
 untouched, still enabled by `configure_services`, and still steps the clock
-(`makestep 1 3` in `customize/ceralive-ntp.conf`). **Never mask `chrony.service`** —
+(`makestep 1 3` in `customize/ceralive-ntp.conf`, which also sets `cmdport 0`:
+chronyc reaches chronyd only over its Unix socket in `/run/chrony`). **Never mask `chrony.service`** —
 only its boot-blocking `chrony-wait` sibling. RAUC bundle signature verification IS
 time-sensitive, but it is an on-demand OTA operation, not a boot one.
 
