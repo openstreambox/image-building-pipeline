@@ -250,12 +250,29 @@ security pockets. mkosi 26 omits the updates pocket in snapshot mode. On-device
 APT keeps its usual sources. A failed snapshot fetch has no live-mirror
 fallback. The normal build leaves the option unset.
 
-The date is recorded at `/usr/lib/ceralive/build-lock/debian-snapshot`. The build
-writes `*.sbom.cdx.json` and its SHA-256 sidecar next to the package lock and
-image artifacts. The CycloneDX document includes final installed packages,
-selected installed binaries and boot payloads, and the digests of the artifacts
-it describes. The reusable candidate workflow accepts the date through its
-`debian_snapshot` input and retains both SBOM files in the candidate upload.
+The date covers Debian archive resolution during target rootfs assembly.
+RAUC packaging sources, APT dependencies in the RAUC and mkosi builders,
+independently pinned kernel builder inputs, and staged vendor and first-party
+packages are outside that pin. The
+rootfs records the date at `/usr/lib/ceralive/build-lock/debian-snapshot`. The
+package lock and SBOM record the date, scope and exclusions.
+
+A warm mkosi cache can supply both authenticated pockets for the same date and
+may skip network metadata sync. The runtime APT update still runs with both
+dated pockets and fails on any update error. A partial cache cannot replace
+a missing pocket.
+
+The build writes `*.sbom.cdx.json` and its SHA-256 sidecar next to the package lock and
+image artifacts. The CycloneDX inventory covers installed binary packages with
+their source package identities and a selected file subset. That subset includes
+CeraUI, srtla_send and MediaMTX executables, kernel and initramfs files, the
+boot.scr injected into RK3588 slots, and raw-gap bootloader blobs. Firmware
+package hashes describe the package archives. Per-file firmware content and
+factory boot-partition scripts are outside the subset. The reusable candidate
+workflow accepts the date through its `debian_snapshot` input, verifies the
+actual raw XZ, decompressed raw data and renamed RAUC bundle against the SBOM,
+and retains both SBOM files in the candidate upload. Public release promotion
+requires separate SBOM publication wiring.
 
 ## Directory Structure
 

@@ -321,7 +321,6 @@ main() {
   stage_packages_lock
   stage_parity
   stage_assemble
-  stage_image_sbom
 
   log_info "[9/9] done"
   log_success "=== build complete: board='${board}' → ${artifact} ==="

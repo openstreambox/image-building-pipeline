@@ -34,6 +34,9 @@ seal = next(step["run"] for step in steps if step.get("id") == "meta")
 assert 'if [[ -n "${CERALIVE_DEBIAN_SNAPSHOT}" ]]; then' in seal
 assert 'sha256sum --strict -c "$(basename "${sbom}").sha256"' in seal
 assert 'cp "${sbom}" "${sbom}.sha256" candidate/' in seal
+assert 'cp --reflink=auto "${raws[0]}.xz" candidate/' in seal
+assert 'python3 lib/image-sbom.py verify-candidate' in seal
+assert '--bundle candidate/good.raucb --snapshot "${CERALIVE_DEBIAN_SNAPSHOT}"' in seal
 assert "concurrency" not in workflow, "the caller owns release concurrency"
 caller = yaml.load((workflow_path.parent / "release.yml").read_text(), Loader=yaml.BaseLoader)
 assert caller["on"] == {"push": {"branches": ["release/**"], "tags": ["v*"]}}

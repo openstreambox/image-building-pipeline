@@ -15,7 +15,10 @@ stage_packages_lock() {
 stage_image_sbom() {
   [[ -n "${CERALIVE_DEBIAN_SNAPSHOT:-}" ]] || return 0
   local stem="${out_dir}/${ts}" boot_blobs="" mediamtx_version
-  local -a checksums=(--artifact "${artifact}.sha256")
+  local -a payload_args=() checksums=(--artifact "${artifact}.sha256")
+  if [[ -n "${1:-}" ]]; then
+    payload_args=(--boot-payload "$1")
+  fi
   if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
     checksums+=(--artifact "${stem}.raw.sha256" --artifact "${stem}.raw.xz.sha256"
                 --artifact "${stem}.raucb.sha256")
@@ -34,7 +37,9 @@ stage_image_sbom() {
     --board "${board}" --snapshot "${CERALIVE_DEBIAN_SNAPSHOT}" \
     --image-version "${CERALIVE_OS_RELEASE_VERSION:-${build_version}}" \
     --mediamtx-version "${mediamtx_version}" --boot-blobs "${boot_blobs}" \
-    "${checksums[@]}" --output "${stem}.sbom.cdx.json" \
-    || die "cannot emit image SBOM"
+    --debian-suite "${APT_SUITE}" --armbian-suite "${ARMBIAN_SUITE}" \
+    --userspace-pins "${RK3588_USERSPACE_DEB_VERSIONS_FILE:-${PIPELINE_DIR}/manifests/rk3588-userspace-deb-versions.txt}" \
+    --kernel-release "${KERNEL_SOURCE_KERNEL_RELEASE:-}" "${payload_args[@]}" \
+    "${checksums[@]}" --output "${stem}.sbom.cdx.json" || return 1
   log_success "image SBOM: ${stem}.sbom.cdx.json"
 }

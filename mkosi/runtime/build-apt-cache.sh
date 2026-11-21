@@ -146,6 +146,33 @@ EOF
   export APT_CONFIG="${CERALIVE_BUILD_APT_DIR}/apt.conf"
 }
 
+# A warm mkosi cache may bypass network sync. Require both signed Release
+# files and their binary indexes, together in a verified APT lists directory.
+snapshot_require_pockets() (
+  local snapshot="$1" suite="$2" security="$3"
+  shift 3
+  shopt -s nullglob
+  local archive pocket dir stem found
+  local -a indexes
+  for archive in debian debian-security; do
+    pocket="$suite"
+    [[ "$archive" != debian-security ]] || pocket="$security"
+    stem="snapshot.debian.org_archive_${archive}_${snapshot}_dists_${pocket}"
+    found=0
+    for dir in "$@"; do
+      indexes=("$dir/${stem}_main_binary-"*_Packages*)
+      if [[ -s "$dir/${stem}_InRelease" && ${#indexes[@]} -gt 0 && -s "${indexes[0]}" ]]; then
+        found=1
+        break
+      fi
+    done
+    if (( ! found )); then
+      printf 'packages lock: missing authenticated snapshot Release or Packages for %s\n' "$pocket" >&2
+      return 1
+    fi
+  done
+)
+
 runtime_debian_apt_install() {
   runtime_build_apt_scope || return 1
   retry_apt "runtime apt-get update" apt-get update || return 1

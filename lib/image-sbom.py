@@ -4,10 +4,11 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import lzma
 from pathlib import Path
 import re
 import sys
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 
 def validate_snapshot(value):
@@ -24,24 +25,58 @@ def digest(value):
     return {"alg": "SHA-256", "content": value}
 
 
-def file_hash(path):
+def stream_sha256(stream):
     hasher = hashlib.sha256()
+    for block in iter(lambda: stream.read(1024 * 1024), b""):
+        hasher.update(block)
+    return hasher.hexdigest()
+
+
+def file_hash(path):
     with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            hasher.update(block)
-    return digest(hasher.hexdigest())
+        return digest(stream_sha256(stream))
 
 
 def property_value(name, value):
     return {"name": f"ceralive:{name}", "value": value}
 
 
-def package_component(package):
+def deb_purl(vendor, name, version, arch, distro):
+    return (f"pkg:deb/{vendor}/{quote(name.lower(), safe='')}@{quote(version, safe=':')}"
+            f"?arch={quote(arch, safe='')}&distro={quote(distro, safe='')}")
+
+
+def userspace_vendors(pin_file):
+    vendors = {}
+    for line in pin_file.read_text().splitlines():
+        if line.strip() and not line.lstrip().startswith("#"):
+            name, _, _, url = line.split()
+            source = urlsplit(url)
+            if source.hostname == "github.com":
+                vendor = source.path.split("/")[1].lower()
+            elif source.hostname == "radxa-repo.github.io":
+                vendor = "radxa"
+            else:
+                raise ValueError(f"missing vendor mapping for pinned package: {name}")
+            vendors[name] = vendor
+    return vendors
+
+
+def package_component(package, debian_suite, armbian_suite, vendor_by_name):
     origin = package["origin"]
     name, version, arch = (package[key] for key in ("name", "version", "arch"))
-    namespace = "debian/" if origin == "debian" else ""
-    purl = f"pkg:deb/{namespace}{name}@{quote(version, safe='')}?arch={quote(arch, safe='')}"
+    if origin == "debian":
+        vendor, distro = "debian", debian_suite
+    elif origin == "bsp":
+        vendor, distro = "armbian", armbian_suite
+    elif origin == "userspace-pin":
+        vendor, distro = vendor_by_name[name], debian_suite
+    else:
+        vendor, distro = "ceralive", debian_suite
+    purl = deb_purl(vendor, name, version, arch, distro)
     props = [property_value("deb:origin", origin)]
+    source = package["debian_source"]
+    props.extend(property_value(f"deb:source:{key}", source[key]) for key in ("name", "version"))
     if "source" in package:
         props.extend(property_value(f"source:{key}", value)
                      for key, value in sorted(package["source"].items()))
@@ -60,14 +95,21 @@ def generate(args):
         raise ValueError("final rootfs snapshot marker differs from build option")
     lock = json.loads(args.lock.read_text())
     packages = {item["name"]: item for item in lock["packages"]}
-    components = [package_component(item) for item in lock["packages"]]
+    snapshot = lock["debian_snapshot"]
+    if snapshot["timestamp"] != args.snapshot:
+        raise ValueError("package lock snapshot differs from build option")
+    vendor_by_name = userspace_vendors(args.userspace_pins) if args.userspace_pins else {}
+    components = [package_component(item, args.debian_suite, args.armbian_suite, vendor_by_name)
+                  for item in lock["packages"]]
 
-    def add_file(relative, version):
-        path = (args.root / relative).resolve(strict=True)
-        if not path.is_relative_to(args.root.resolve()) or not path.is_file():
+    def add_file(relative, version, root=args.root, name=None):
+        path = (root / relative).resolve(strict=True)
+        if not path.is_relative_to(root.resolve()) or not path.is_file():
             raise ValueError(f"invalid installed payload path: {relative}")
-        components.append({"type": "file", "name": relative, "version": version,
-                           "hashes": [file_hash(path)]})
+        component = {"type": "file", "name": name or relative, "hashes": [file_hash(path)]}
+        if version:
+            component["version"] = version
+        components.append(component)
 
     add_file("usr/local/bin/mediamtx", args.mediamtx_version)
     for package, relative in (("ceralive-device", "usr/local/bin/ceralive"),
@@ -79,7 +121,18 @@ def generate(args):
             add_file(f"boot/{payload.name}", payload.name.split("-", 1)[1])
     boot_image = args.root / "boot/Image"
     if boot_image.exists():
-        add_file("boot/Image", args.image_version)
+        version = args.kernel_release
+        if not version:
+            resolved_name = boot_image.resolve().name
+            if resolved_name.startswith("vmlinuz-"):
+                version = resolved_name.removeprefix("vmlinuz-")
+            else:
+                kernels = list((args.root / "boot").glob("vmlinuz-*"))
+                if len(kernels) == 1:
+                    version = kernels[0].name.removeprefix("vmlinuz-")
+        add_file("boot/Image", version)
+    if args.boot_payload:
+        add_file("boot.scr", args.image_version, args.boot_payload, "usr/lib/ceralive/boot/boot.scr")
 
     for row in args.boot_blobs.splitlines():
         name, sector, _, sha256, package, version = row.split("\t")
@@ -90,6 +143,15 @@ def generate(args):
 
     properties = [property_value("debian:snapshot", args.snapshot),
                   property_value("board", args.board)]
+    properties.append(property_value("debian:snapshot-scope", snapshot["scope"]))
+    properties.extend(property_value("debian:snapshot-exclusion", exclusion)
+                      for exclusion in snapshot["exclusions"])
+    properties.append(property_value(
+        "inventory-scope",
+        "Installed binary packages and selected executables, kernel, initramfs, slot boot.scr and raw-gap blobs. "
+        "Firmware package hashes cover archives. Per-file firmware and factory boot-partition files "
+        "are outside this subset.",
+    ))
     for suite, date in sorted(lock["debian_release_dates"].items()):
         properties.append(property_value(f"debian:release-date:{suite}", date))
     for sidecar in args.artifact:
@@ -115,6 +177,40 @@ def generate(args):
     temporary.replace(checksum)
 
 
+def verify_candidate(args):
+    bom = json.loads(args.sbom.read_text())
+    properties = {}
+    for prop in bom["metadata"]["properties"]:
+        key = prop["name"]
+        if key == "ceralive:debian:snapshot" or key.startswith("ceralive:artifact:sha256:"):
+            if key in properties:
+                raise ValueError(f"duplicate SBOM property: {key}")
+            properties[key] = prop["value"]
+    if properties.get("ceralive:debian:snapshot") != args.snapshot:
+        raise ValueError("candidate snapshot does not match SBOM")
+
+    raw = args.compressed.name.removesuffix(".xz")
+    bundle_name = str(Path(raw).with_suffix(".raucb"))
+    expected = {}
+    for name in (raw, args.compressed.name, bundle_name):
+        expected[name] = digest(properties[f"ceralive:artifact:sha256:{name}"])["content"]
+    for path, name in ((args.compressed, args.compressed.name), (args.bundle, bundle_name)):
+        if file_hash(path)["content"] != expected[name]:
+            raise ValueError(f"candidate digest differs from SBOM: {path.name}")
+    with lzma.open(args.compressed, "rb") as stream:
+        if stream_sha256(stream) != expected[raw]:
+            raise ValueError("uncompressed candidate raw digest differs from SBOM")
+
+    # These are consumed by the candidate metadata step and later release
+    # tooling. Write them from the verified bytes and the published filenames.
+    for path, name, value in (
+        (args.compressed.parent / "raw.sha256", raw, expected[raw]),
+        (args.compressed.with_suffix(".xz.sha256"), args.compressed.name, expected[args.compressed.name]),
+        (args.bundle.with_suffix(".raucb.sha256"), args.bundle.name, expected[bundle_name]),
+    ):
+        path.write_text(f"{value}  {name}\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -122,16 +218,25 @@ def main():
     emit = commands.add_parser("emit")
     for argument in ("root", "lock", "output"):
         emit.add_argument(f"--{argument}", type=Path, required=True)
-    for argument in ("board", "snapshot", "image-version", "mediamtx-version"):
+    for argument in ("board", "snapshot", "image-version", "mediamtx-version", "debian-suite", "armbian-suite"):
         emit.add_argument(f"--{argument}", required=True)
     emit.add_argument("--boot-blobs", default="")
+    emit.add_argument("--boot-payload", type=Path)
+    emit.add_argument("--userspace-pins", type=Path)
+    emit.add_argument("--kernel-release", default="")
     emit.add_argument("--artifact", action="append", type=Path, required=True)
+    verify = commands.add_parser("verify-candidate")
+    for argument in ("sbom", "compressed", "bundle"):
+        verify.add_argument(f"--{argument}", type=Path, required=True)
+    verify.add_argument("--snapshot", required=True)
     args = parser.parse_args()
     try:
         validate_snapshot(args.snapshot)
         if args.command == "emit":
             generate(args)
-    except (KeyError, OSError, ValueError) as exc:
+        elif args.command == "verify-candidate":
+            verify_candidate(args)
+    except (EOFError, KeyError, OSError, ValueError, lzma.LZMAError) as exc:
         print(f"image SBOM: {exc}", file=sys.stderr)
         return 1
     return 0

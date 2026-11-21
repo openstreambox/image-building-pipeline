@@ -47,6 +47,12 @@ if [[ -n "${snapshot}" ]]; then
   archive="_${snapshot}_dists_"
 fi
 
+if [[ -n "${snapshot}" ]]; then
+  # shellcheck source=mkosi/runtime/build-apt-cache.sh
+  source "${source_dir}/runtime/build-apt-cache.sh"
+  snapshot_require_pockets "$snapshot" "$APT_SUITE" "$APT_SUITE_SECURITY" "${apt_lists_dirs[@]}" || exit 1
+fi
+
 lists=()
 for apt_lists_dir in "${apt_lists_dirs[@]}"; do
   if [[ -n "$snapshot" ]]; then
@@ -157,19 +163,3 @@ for apt_lists_dir in "${apt_lists_dirs[@]}"; do
     printf '%s\t%s\n' "$suite" "$date" >>"$dates"
   done
 done
-
-if [[ -n "${snapshot}" ]]; then
-  for suite in "$APT_SUITE" "$APT_SUITE_SECURITY"; do
-    has_index=0
-    for list in "${lists[@]}"; do
-      if [[ "${list##*_dists_}" == "${suite}_"* ]]; then
-        has_index=1
-        break
-      fi
-    done
-    if (( ! has_index )) || ! awk -F '\t' -v suite="$suite" '$1 == suite { found=1 } END { exit !found }' "$dates"; then
-      log_error "$layer: missing authenticated snapshot Release for $suite"
-      exit 1
-    fi
-  done
-fi

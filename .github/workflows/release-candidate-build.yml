@@ -299,7 +299,11 @@ jobs:
           mapfile -t locks < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.packages.lock.json')
           (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 && ${#dev_debs[@]} == 1 && ${#locks[@]} == 1 ))
           mkdir -p candidate/dev-debs
-          ./ci/seal-raw-candidate.sh --raw "${raws[0]}" --candidate-dir candidate
+          if [[ -z "${CERALIVE_DEBIAN_SNAPSHOT}" ]]; then
+            ./ci/seal-raw-candidate.sh --raw "${raws[0]}" --candidate-dir candidate
+          else
+            cp --reflink=auto "${raws[0]}.xz" candidate/
+          fi
           cp "${RUNNER_TEMP}/release-pki/root-ca.pem" candidate/
           cp "${bundles[0]}" candidate/good.raucb
           cp "${RUNNER_TEMP}/rollback-bundle/bad.raucb" candidate/bad.raucb
@@ -308,8 +312,11 @@ jobs:
           cp "${locks[0]}" candidate/packages.lock.json
           if [[ -n "${CERALIVE_DEBIAN_SNAPSHOT}" ]]; then
             sbom="${raws[0]%.raw}.sbom.cdx.json"
-            (cd "$(dirname "${sbom}")" && sha256sum --strict -c "$(basename "${sbom}").sha256")
             cp "${sbom}" "${sbom}.sha256" candidate/
+            (cd candidate && sha256sum --strict -c "$(basename "${sbom}").sha256")
+            python3 lib/image-sbom.py verify-candidate \
+              --sbom "candidate/$(basename "${sbom}")" --compressed "candidate/$(basename "${raws[0]}").xz" \
+              --bundle candidate/good.raucb --snapshot "${CERALIVE_DEBIAN_SNAPSHOT}"
           fi
           cp "mkosi/.staging/${CERALIVE_RELEASE_BOARD}/kernel-build/kernel-artifact.json" candidate/
           printf '%s\n' "${CERALIVE_OS_RELEASE_VERSION}" > candidate/os-release-version
@@ -317,7 +324,9 @@ jobs:
           loader_name=rk3588_spl_loader_v1.15.113.bin
           bundle_release_name="$(basename "${bundles[0]}")"
           [[ "${bundle_release_name}" =~ ^[0-9]{8}T[0-9]{6}Z\.raucb$ ]]
-          ( cd candidate && sha256sum good.raucb > good.raucb.sha256 )
+          if [[ -z "${CERALIVE_DEBIAN_SNAPSHOT}" ]]; then
+            ( cd candidate && sha256sum good.raucb > good.raucb.sha256 )
+          fi
           printf '%s\n' "${bundle_release_name}" > candidate/release-bundle-name.txt
           {
             echo "artifact_name=${CERALIVE_RELEASE_BOARD}-${GITHUB_SHA}"
