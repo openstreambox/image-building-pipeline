@@ -42,12 +42,13 @@
 #    stable node ID of the login whose SSH this enrollment turned off; a join
 #    that keeps SSH on removes it. A join's result is synced before its key is
 #    consumed.
-#    Checking for a login never starts or stops tailscaled: switching it on and
-#    off is the owner's (the card's On/Off). While tailscaled runs it is asked;
-#    while it does not, tailscaled.state is read (root, read-only, no links,
-#    size-capped; nothing from it is logged). tailscaled is started only for a
-#    keyed up on a box that holds no login, and it then stays running, as for
-#    any join. A box that already holds a working login (Running, or Stopped
+#    This script never starts or stops tailscaled: switching it on and off is
+#    the owner's (the card's On/Off: enable --now, down + disable --now). For a
+#    join, ceralive-tailscaled-pending.path starts it once a key is pending, and
+#    only while the owner has it enabled (it is in the unit's Also=, so Off
+#    disables and stops it too); this script waits for that. While tailscaled
+#    runs it is asked; while it does not, tailscaled.state is read (root,
+#    read-only, no links, size-capped; nothing from it is logged). A box that already holds a working login (Running, or Stopped
 #    because remote access is switched off), or that holds one in its state
 #    while tailscaled is not running, does not use a new key: the box cannot
 #    tell which tailnet a key belongs to without sending it, and an `up`
@@ -62,11 +63,13 @@
 #    unapproved login reported by a running tailscaled uses the key as before.
 # 3. Failures are bounded. A final control-plane answer (invalid, expired,
 #    revoked or already used key) ends enrollment at once. Other failures (no
-#    network yet) back off from 2 to 30 minutes and give up after MAX_ATTEMPTS.
+#    network yet) back off from 2 to 30 minutes and give up after MAX_ATTEMPTS;
+#    a key that cannot be judged yet, or waits for the owner, never gives up.
 #    Giving up removes the key. It also removes tailscaled.state, but only when
 #    this enrollment created it (state-ours, written before tailscaled first ran
-#    without state), the box never joined, and tailscaled reports NeedsLogin
-#    without a node key. A state that existed before is never touched.
+#    without state), the box never joined, tailscaled is not running and the
+#    state holds no login. A state that existed before is never touched, and
+#    giving up never stops tailscaled.
 # 4. A key that arrives while a run is busy is adopted when that attempt ends.
 #
 # Unusable inputs (several key files, not a tskey-auth- key, links, non-regular
@@ -100,6 +103,8 @@ PRIOR="${ENROLL}/prior-login"
 SSH_OFF="${ENROLL}/ssh-off-node"
 REJECTED_NOTE="${BOOT}/TAILSCALE-KEY-REJECTED.txt"
 NOT_USED_NOTE="${BOOT}/TAILSCALE-KEY-NOT-USED.txt"
+UNUSED="${ENROLL}/key-unused"
+START_WAIT="${CERALIVE_TS_START_WAIT:-30}"
 PYTHON="${CERALIVE_TS_PYTHON:-python3}"
 KEY_RE='^tskey-auth-[A-Za-z0-9_-]{8,200}$'
 NAME_RE='^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$'
@@ -136,12 +141,16 @@ put_synced() { # path content tmp-prefix: tmp file in ENROLL, fsync, rename, fsy
 }
 
 # The login record of the current pending key: "yes" or "no", empty when there
-# is none for this key (another key's record does not count).
+# is none for this key (another key's record does not count), "error" when it
+# cannot be read.
 read_prior() {
-  regular "${PRIOR}" && regular "${PENDING}" || return 0
-  local value inode
-  read -r value inode <"${PRIOR}" || true
-  [[ "$inode" == "$(stat -c %i -- "${PENDING}")" && "$value" =~ ^(yes|no)$ ]] && echo "$value"
+  present "${PRIOR}" || return 0
+  regular "${PRIOR}" && regular "${PENDING}" || { echo error; return 0; }
+  local value="" inode="" current
+  { read -r value inode <"${PRIOR}"; } 2>/dev/null || [[ -n "$value" ]] || { echo error; return 0; }
+  current="$(stat -c %i -- "${PENDING}" 2>/dev/null)" || { echo error; return 0; }
+  [[ "$inode" == "$current" ]] || return 0
+  if [[ "$value" =~ ^(yes|no)$ ]]; then echo "$value"; else echo error; fi
   return 0
 }
 present() { [[ -e "$1" || -L "$1" ]]; }
@@ -202,6 +211,19 @@ write_status() { # state attempts next reason; returns non-zero if it could not
   fi
 }
 
+# The terminal result: file contents synced before the rename, then the
+# directory, every step checked. Unlike put_synced, a failed directory sync
+# keeps the new status (the key is still there, so the next run redoes it).
+write_status_synced() { # state attempts next reason
+  local tmp
+  tmp="$(mktemp "${ENROLL}/.status.XXXXXX")" || return 1
+  if ! { printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" >"$tmp" && chmod 0644 "$tmp" && sync "$tmp" && mv -f -- "$tmp" "${STATUS}"; }; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  sync "${ENROLL}"
+}
+
 # Start of every run (under the lock): migrate the pre-split layout, re-adopt a
 # claim a crash left behind, and remove temporary files.
 recover() {
@@ -222,7 +244,7 @@ recover() {
     fi
   fi
   shopt -s nullglob dotglob
-  for f in "${ENROLL}"/.pending.* "${ENROLL}"/.status.* "${ENROLL}"/.up-key.* "${ENROLL}"/.prior.* "${ENROLL}"/.sshoff.*; do wipe "$f"; done
+  for f in "${ENROLL}"/.pending.* "${ENROLL}"/.status.* "${ENROLL}"/.up-key.* "${ENROLL}"/.prior.* "${ENROLL}"/.sshoff.* "${ENROLL}"/.unused.*; do wipe "$f"; done
   shopt -u nullglob dotglob
 }
 
@@ -235,6 +257,9 @@ adopt() { # source
   write_status pending 0 0 new-key
   mv -f -- "$tmp" "${PENDING}"
   sync "${ENROLL}"
+  # A new key supersedes an earlier "not used" outcome and its note.
+  rm -f -- "${UNUSED}" "${NOT_USED_NOTE}" 2>/dev/null || true
+  sync -f "${BOOT}" 2>/dev/null || true
   log 5 "new key from $1${NAME:+ for machine name ${NAME}}"
 }
 
@@ -272,7 +297,7 @@ take_boot_key() {
   adopt "the BOOT partition"
   KEY=""
   wipe "$f"
-  rm -f -- "${REJECTED_NOTE}" "${NOT_USED_NOTE}" 2>/dev/null || true   # an old note is not worth stopping for
+  rm -f -- "${REJECTED_NOTE}" 2>/dev/null || true   # an old note is not worth stopping for
   sync -f "${BOOT}" 2>/dev/null || true
 }
 
@@ -297,19 +322,17 @@ take_incoming_keys() {
 give_up() { # reason
   wipe "${PENDING}"
   if (( joined == 0 )) && [[ -e "${OURS}" ]]; then
-    # NoState is also possible for a registered node waiting for control.
-    # Keep its state if the status is ambiguous or already has a node key.
-    local backend="" status_json node_key_re='"HaveNodeKey"[[:space:]]*:[[:space:]]*true'
-    if status_json="$("${CLI}" --socket="${SOCKET}" status --json 2>/dev/null)"; then
-      backend="$(grep -o '"BackendState": *"[A-Za-z]*"' <<<"$status_json" \
-        | head -n1 | grep -o '"[A-Za-z]*"$' | tr -d '"')" || true
-    fi
-    if [[ "$backend" == NeedsLogin && ! "$status_json" =~ $node_key_re ]]; then
-      "${SYSTEMCTL}" stop tailscaled.service 2>/dev/null || true
+    # Only a state with no login, while tailscaled is not running, goes; this
+    # never stops tailscaled. A running daemon (the owner's, or one the
+    # pending-key path started) keeps its state until a later key or Forget.
+    local daemon saved=""
+    daemon="$(daemon_state)"
+    [[ "$daemon" == down ]] && saved="$(saved_login)"
+    if [[ "$saved" == no-login ]]; then
       rm -f -- "${TS_STATE}/tailscaled.state"   # rm never follows a link
       rm -f -- "${OURS}"
     else
-      log 5 "kept tailscaled.state (tailscaled state '${backend:-unknown}')"
+      log 5 "kept tailscaled.state (tailscaled ${daemon}${saved:+, saved state: ${saved}})"
     fi
   fi
   write_status gave-up "$attempts" 0 "$1"
@@ -370,7 +393,7 @@ finish_join() { # name [refused-ssh]: the second argument says tailscaled refuse
   # The result goes to disk before the key is consumed: a cut in between leaves
   # the key, so the next run finishes again instead of leaving "pending". If
   # the result cannot be stored, the key and the login record stay for that run.
-  if ! { write_status joined "$attempts" 0 "$reason" && sync "${ENROLL}"; }; then
+  if ! write_status_synced joined "$attempts" 0 "$reason"; then
     log 4 "could not store the join result; the next run finishes it"
     return 1
   fi
@@ -390,6 +413,29 @@ tailnet_name() {
   name="${name%.}"
   [[ "$name" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,250})$ ]] && echo "$name"
   return 0
+}
+
+# tailscaled's answer from STATUS_JSON, checked as a whole: "<BackendState>
+# yes|no" (node key; HaveNodeKey is omitted when false), or "unknown" for
+# anything that is not a JSON object with a known BackendState.
+# shellcheck disable=SC2016
+LIVE_READER='
+import json, sys
+try:
+    status = json.loads(sys.stdin.read())
+except Exception:
+    status = None
+known = ("NoState", "NeedsLogin", "NeedsMachineAuth", "Stopped", "Starting", "Running")
+if not isinstance(status, dict) or status.get("BackendState") not in known \
+        or not isinstance(status.get("HaveNodeKey", False), bool):
+    print("unknown")
+else:
+    print(status["BackendState"], "yes" if status.get("HaveNodeKey", False) else "no")
+'
+live_login() {
+  local answer
+  answer="$("${PYTHON}" -I -c "${LIVE_READER}" <<<"$STATUS_JSON" 2>/dev/null)" || answer=""
+  [[ "$answer" =~ ^[A-Za-z]+\ (yes|no)$ ]] && echo "$answer" || echo unknown
 }
 
 # Is tailscaled running? Prints running, down (inactive or failed), busy
@@ -501,24 +547,33 @@ saved_login() {
   esac
 }
 
-# An attempt that cannot decide now keeps the key and asks again after the
-# back-off (attempts and delay are enroll_pending's).
-retry_later() { # give-up reason
-  if (( attempts >= MAX_ATTEMPTS )); then give_up "$1"; return 0; fi
+# An attempt that cannot decide now (or waits for the owner) keeps the key,
+# does nothing else and asks again after the back-off, without a cap: giving
+# up would decide something about a key it could not judge (attempts and
+# delay are enroll_pending's).
+retry_later() {
   write_status pending "$attempts" "$((NOW + delay))" retry || true
 }
 
 # The box already holds a login: leave it as it is and say so on BOOT before
 # the key goes. how: running (tailscaled answered; $2 its state, Running or
 # Stopped) or saved (tailscaled is not running; $2 the saved WantRunning).
-key_not_used() { # how state
-  local where="" off="" checked=1
+key_not_used() { # how state [where]
+  local where="${3:-}" off="" checked=1
   if [[ "$1" == running ]]; then
-    where="$(tailnet_name)"
+    [[ -n "$where" ]] || where="$(tailnet_name)"
     [[ "$2" == Stopped ]] && off=switched-off
   else
     checked=""
     [[ "$2" == off ]] && off=switched-off || off=not-running
+  fi
+  # The outcome is recorded for this key before anything is published, so a
+  # retry finishes it as it is instead of deciding again (and maybe using a
+  # key the note already says was not used).
+  if ! put_synced "${UNUSED}" "$(stat -c %i -- "${PENDING}") $1 $2 ${where}" .unused; then
+    log 4 "could not record that the key is not used; the key stays and the next run tries again"
+    write_status pending "$attempts" "$((NOW + delay))" retry || true
+    return 1
   fi
   # The note is what the owner sees, so it is on the card before the key goes.
   if ! {
@@ -550,13 +605,13 @@ key_not_used() { # how state
     return 1
   fi
   # The result goes to disk before the key is removed, as in finish_join.
-  if ! { write_status joined "$attempts" 0 already-joined && sync "${ENROLL}"; }; then
+  if ! write_status_synced joined "$attempts" 0 already-joined; then
     log 4 "could not store the enrollment result; the next run tries again"
     return 1
   fi
   wipe "${PENDING}"
   sync "${ENROLL}" 2>/dev/null || true
-  rm -f -- "${PRIOR}"
+  rm -f -- "${PRIOR}" "${UNUSED}"
   rm -f -- "${REJECTED_NOTE}"
   sync -f "${BOOT}" 2>/dev/null || true
   log 5 "this box already holds a Tailscale login${where:+ as ${where}}${off:+ (${off/-/ })}; the new key was not used and was removed. To move it, remove it from that network first, then add the key again."
@@ -583,22 +638,59 @@ enroll_pending() {
   delay=$(( 120 << (attempts > 4 ? 4 : attempts - 1) ))
   (( delay > 1800 )) && delay=1800
   write_status pending "$attempts" "$((NOW + delay))" trying
-  # Whether tailscaled runs is the owner's choice: this attempt never starts it
-  # to ask and never stops it. A running one is asked below. One that is not
-  # running is judged from its saved state.
+  local prior_now
+  prior_now="$(read_prior)"
+  if [[ "$prior_now" == error ]]; then
+    log 4 "cannot read this key's login record; the key stays pending (${attempts}/${MAX_ATTEMPTS})"
+    retry_later
+    return 1
+  fi
+  # An earlier attempt already decided not to use this key: finish that.
+  local unused_inode="" unused_how="" unused_state="" unused_where=""
+  if regular "${UNUSED}"; then
+    { read -r unused_inode unused_how unused_state unused_where <"${UNUSED}"; } 2>/dev/null || true
+  fi
+  if [[ -n "$unused_inode" && "$unused_inode" == "$(stat -c %i -- "${PENDING}" 2>/dev/null)" ]] \
+      && [[ "$unused_how" =~ ^(running|saved)$ && "$unused_state" =~ ^[A-Za-z]+$ ]]; then
+    key_not_used "$unused_how" "$unused_state" "$unused_where" || return 1
+    return 0
+  fi
+  # This script never starts or stops tailscaled; whether it runs is the
+  # owner's. A running one is asked below. One that is not running is judged
+  # from its saved state. Anything inconclusive keeps the key, does nothing
+  # and asks again after the back-off, without a cap.
   local daemon saved=""
   daemon="$(daemon_state)"
+  # Any state that appears from now on, where none existed, is ours to clean up.
+  if [[ ! -e "${TS_STATE}/tailscaled.state" && ! -L "${TS_STATE}/tailscaled.state" ]]; then
+    : >"${OURS}"
+  fi
   case "$daemon" in
     running) ;;
     down)
       saved="$(saved_login)"
       case "$saved" in
-        no-login) ;;   # a key on a box without a login asks to join: start it for the keyed up
+        no-login)
+          # A key on a box without a login asks to join. The pending-key path
+          # unit starts tailscaled while the owner has it enabled; wait for it.
+          for ((i = 0; i < START_WAIT; i++)); do
+            daemon="$(daemon_state)"
+            [[ "$daemon" == running ]] && break
+            sleep 1
+          done
+          daemon="$(daemon_state)"
+          if [[ "$daemon" != running ]]; then
+            log 5 "tailscaled is not running (remote access switched off, or not started yet); the key waits (${attempts}/${MAX_ATTEMPTS})"
+            retry_later
+            return 1
+          fi
+          saved=started
+          ;;
         login\ *)
-          if [[ -n "$(read_prior)" ]]; then
+          if [[ -n "$prior_now" ]]; then
             # This key's join began while tailscaled ran, and it was stopped since.
             log 5 "tailscaled is not running; this key's join goes on once remote access is switched on (${attempts}/${MAX_ATTEMPTS})"
-            retry_later "remote access stayed off for ${attempts} attempts"
+            retry_later
             return 1
           fi
           key_not_used saved "${saved#login }" || return 1
@@ -606,7 +698,7 @@ enroll_pending() {
           ;;
         *)
           log 4 "cannot tell from tailscaled.state whether this box holds a login (${saved#unknown }); the key stays pending (${attempts}/${MAX_ATTEMPTS})"
-          retry_later "tailscaled.state could not be read after ${attempts} attempts"
+          retry_later
           return 1
           ;;
       esac
@@ -617,62 +709,50 @@ enroll_pending() {
       else
         log 4 "systemd did not say whether tailscaled runs; asking again later (${attempts}/${MAX_ATTEMPTS})"
       fi
-      retry_later "tailscaled did not settle after ${attempts} attempts"
+      retry_later
       return 1
       ;;
   esac
-  # Any state that appears from now on, where none existed, is ours to clean up.
-  if [[ ! -e "${TS_STATE}/tailscaled.state" && ! -L "${TS_STATE}/tailscaled.state" ]]; then
-    : >"${OURS}"
-  fi
-  if [[ "$daemon" == down ]] && ! "${SYSTEMCTL}" start tailscaled.service; then
-    log 4 "tailscaled did not start (attempt ${attempts}/${MAX_ATTEMPTS})"
-    if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not start after ${attempts} attempts"; fi
-    return 1
-  fi
   for ((i = 0; i < WAIT; i++)); do [[ -S "${SOCKET}" ]] && break; sleep 1; done
-  if [[ -n "$(read_prior)" ]] && ! { sync -- "${PRIOR}" && sync "${ENROLL}"; }; then
+  if [[ -n "$prior_now" ]] && ! { sync -- "${PRIOR}" && sync "${ENROLL}"; }; then
     # A record left by an earlier run is trusted only once it is durable.
     log 4 "could not make the login check durable (${attempts}/${MAX_ATTEMPTS}); trying again later"
-    if (( attempts >= MAX_ATTEMPTS )); then give_up "could not store enrollment state after ${attempts} attempts"; return 1; fi
-    write_status pending "$attempts" "$((NOW + delay))" retry || true
+    retry_later
     return 1
   fi
-  if [[ -z "$(read_prior)" ]]; then
+  if [[ -z "$prior_now" ]]; then
     # Before the keyed up first runs for this key: did the box already hold a
     # login? On disk before the up, so a power cut cannot lose it afterwards.
     backend_state >/dev/null
-    if [[ -z "$STATUS_JSON" ]]; then
-      log 4 "tailscaled did not answer before the attempt (${attempts}/${MAX_ATTEMPTS}); trying again later"
-      if (( attempts >= MAX_ATTEMPTS )); then give_up "tailscaled did not answer after ${attempts} attempts"; return 1; fi
-      write_status pending "$attempts" "$((NOW + delay))" retry
+    local live backend nodekey prior=no
+    live="$(live_login)"
+    if [[ "$live" == unknown ]]; then
+      log 4 "tailscaled gave no usable answer before the attempt (${attempts}/${MAX_ATTEMPTS}); trying again later"
+      retry_later
       return 1
     fi
-    local prior=no backend
-    backend="$(grep -o '"BackendState": *"[A-Za-z]*"' <<<"$STATUS_JSON" | head -n1 | grep -o '"[A-Za-z]*"$' | tr -d '"')" || true
-    if [[ "$STATUS_JSON" =~ \"HaveNodeKey\"[[:space:]]*:[[:space:]]*true ]]; then
+    backend="${live% *}" nodekey="${live#* }"
+    if [[ "$nodekey" == yes ]]; then
       prior=yes
       case "$backend" in
         Running|Stopped)
-          if [[ "$daemon" == down ]]; then
-            # Started for a box whose state showed no login; it stays running.
-            log 4 "tailscaled.state showed no login, but tailscaled reports one; leaving it running"
+          if [[ "$saved" == started ]]; then
+            log 4 "tailscaled.state showed no login, but tailscaled reports one; the key is not used"
           fi
           key_not_used running "$backend" || return 1
           return 0
           ;;
-        NoState|Starting|"")
+        NoState|Starting)
           # A login that is still connecting may be working or expired; ask again.
           log 5 "tailscaled is still connecting with its current login (${attempts}/${MAX_ATTEMPTS}); asking again later"
-          retry_later "tailscaled did not settle after ${attempts} attempts"
+          retry_later
           return 1
           ;;
       esac
     fi
     if ! put_synced "${PRIOR}" "$prior $(stat -c %i -- "${PENDING}")" .prior; then
       log 4 "could not store the login check durably (${attempts}/${MAX_ATTEMPTS}); trying again later"
-      if (( attempts >= MAX_ATTEMPTS )); then give_up "could not store enrollment state after ${attempts} attempts"; return 1; fi
-      write_status pending "$attempts" "$((NOW + delay))" retry
+      retry_later
       return 1
     fi
   fi
@@ -707,10 +787,18 @@ enroll_pending() {
   if printf '%s' "$out" | grep -qiE "$NO_TAILNET_SSH_RE"; then
     # Only a record that this key found no login counts; anything else means
     # the login predates the key.
-    if [[ "$(read_prior)" != no ]]; then
-      give_up "this tailnet does not allow Tailscale SSH; forget the box there first"
-      return 1
-    fi
+    case "$(read_prior)" in
+      no) ;;
+      error)
+        log 4 "cannot read this key's login record; the key stays pending (${attempts}/${MAX_ATTEMPTS})"
+        retry_later
+        return 1
+        ;;
+      *)
+        give_up "this tailnet does not allow Tailscale SSH; forget the box there first"
+        return 1
+        ;;
+    esac
     if [[ "$(backend_state)" == Running ]]; then
       log 5 "an earlier attempt with this key registered the box"
       finish_join "$name" refused-ssh || return 1

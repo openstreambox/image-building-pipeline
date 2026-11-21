@@ -45,3 +45,5 @@ Type=notify
 
 [Install]
 WantedBy=multi-user.target
+# Starts it for a pending key while enabled; disabled with it (the owner's Off).
+Also=ceralive-tailscaled-pending.path

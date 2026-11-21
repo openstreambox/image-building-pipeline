@@ -6415,8 +6415,8 @@ with the card.
   `incoming-authkey`. `systemctl enable tailscaled` is not needed: the image ships it
   enabled and conditioned on state or a pending key.
 - **What the unit does:** it is the only writer of `pending-authkey` (same two-line
-  format), `enroll-status`, `joined-once`, `state-ours`, `prior-login` and
-  `ssh-off-node`, and holds
+  format), `enroll-status`, `joined-once`, `state-ours`, `prior-login`,
+  `ssh-off-node` and `key-unused`, and holds
   `.lock` (flock) for each whole run.
   - It claims `incoming-authkey` by renaming it to `.claimed`, so a drop that
     arrives meanwhile stays separate.
@@ -6442,8 +6442,13 @@ with the card.
   re-applies it at its next start). `already-joined` means a new key arrived
   while the box already held a login, and the key was not used (see below).
 - **Whether tailscaled runs is the owner's:** the card's On/Off (`enable --now`,
-  `down` then `disable --now`) is the only thing that switches it. Checking a
-  new key never starts or stops it. The unit asks
+  `down` then `disable --now`) is the only thing that switches it. The
+  enrollment never starts or stops it, on any path (giving up included). For a
+  join, `ceralive-tailscaled-pending.path` (`PathExists=` the pending key,
+  `PartOf=tailscaled.service`, listed in tailscaled's `Also=`) starts it once a
+  key is pending, so the owner's `disable --now` disables and stops that path
+  too: after Off, a pending key starts nothing until On (measured on systemd
+  259 with user units). The enrollment asks
   `systemctl is-active tailscaled.service` first:
   - `active`: tailscaled is asked (`status --json`), as below.
   - `inactive`/`failed`: `/var/lib/tailscale/tailscaled.state` is read, as
@@ -6462,8 +6467,11 @@ with the card.
   - `activating`/`deactivating`, or any other answer: asked again later.
 
   "Can't tell" is never read as "no login": the key stays pending, the reason
-  is logged and the attempt backs off like any other (and gives up at the
-  cap without touching the state).
+  is logged, nothing else happens, and the attempt backs off without a cap
+  (giving up would decide about a key it could not judge). The same holds for
+  a live `status --json` reply that is not a JSON object with a known
+  `BackendState` (and a boolean or omitted `HaveNodeKey`), and for a
+  `prior-login` record that cannot be read.
 - **A new key on a box that is already in a tailnet:** the box cannot tell
   which tailnet a key belongs to without sending it, and an `up` without
   `--force-reauth` keeps the current login anyway (it would only re-send the
@@ -6480,21 +6488,27 @@ with the card.
   - tailscaled runs and reports `NeedsLogin` (expired or logged out) or
     `NeedsMachineAuth`: the key is used as before.
   - tailscaled is not running and its state holds no login: the key asks to
-    join, so the unit starts tailscaled for the keyed `up`, and it stays running
-    (as for any join). If tailscaled then reports a login after all, the key is
-    not used and tailscaled is left running, with a warning in the log.
+    join. The unit waits up to 30 s for the pending-key path to start
+    tailscaled; if it does not run by then (switched off, or not started yet),
+    the key waits for the next attempt. If tailscaled then reports a login after
+    all, the key is not used, with a warning in the log.
 
   An unused key ends with `TAILSCALE-KEY-NOT-USED.txt` on BOOT (synced) with the
   box's MagicDNS name when tailscaled answered (`Self.DNSName`, else the
   tailnet's MagicDNS suffix; never the account name) and how to move it, then
-  `joined <attempts> 0 already-joined` (synced), then the key is removed. If
-  the note or the result cannot be stored, the key stays for the next run. Moving
+  `joined <attempts> 0 already-joined` (contents and directory synced), then
+  the key is removed. Before the note, `key-unused` (`<pending inode> <how>
+  <state> [name]`, synced) records the decision, so a retry after a failed
+  write or a power cut finishes it as decided and never uses a key the note
+  already called unused. If the note or the result cannot be stored, the key
+  stays for the next run. Adopting any new key (BOOT or card) removes
+  `key-unused` and the note. Moving
   a box to another tailnet is an explicit step: remove it from the current
   tailnet (its admin console, or the card's Forget), then add the key again. The
   next adopted BOOT key removes the note. A join that began while tailscaled
   ran (a `prior-login` record exists) and then finds it switched off waits,
   key pending, until the owner switches it on.
-- **Giving up:** a refused key, or 100 failed attempts (back-off 2 to 30 minutes),
+- **Giving up:** a refused key, or 100 failed keyed attempts (back-off 2 to 30 minutes),
   ends in `gave-up` and removes the key. So does a new key for a box that is still
   logged in to a tailnet without Tailscale SSH: tailscaled refuses that `up` until
   the box is forgotten there. `/var/lib/tailscale/tailscaled.state` is
@@ -6502,8 +6516,9 @@ with the card.
   - this enrollment created it (`state-ours`, written before tailscaled first ran
     without state);
   - the box never joined;
-  - tailscaled reports `NeedsLogin` without a node key. `NoState` can describe
-    a registered node waiting for control, so the state is kept.
+  - tailscaled is not running and its saved state holds no login. A running
+    daemon is never stopped for this, so its state is kept (it then idles in
+    `NeedsLogin` until a new key, Forget, or the owner's Off).
 
   A state that existed before (for example an older box after an OTA) is never
   removed.

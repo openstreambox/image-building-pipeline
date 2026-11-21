@@ -110,9 +110,11 @@ setup_remote_access() {
     install -D -m 0755 "${src}/ceralive-tailscale-enroll.sh" "${dest}/usr/local/sbin/ceralive-tailscale-enroll"
     install -D -m 0644 "${src}/ceralive-tailscale-enroll.service" "${dest}/etc/systemd/system/ceralive-tailscale-enroll.service"
     install -D -m 0644 "${src}/ceralive-tailscale-enroll.timer" "${dest}/etc/systemd/system/ceralive-tailscale-enroll.timer"
+    install -D -m 0644 "${src}/ceralive-tailscaled-pending.path" "${dest}/etc/systemd/system/ceralive-tailscaled-pending.path"
     # Mountpoint for the /data/tailscale bind (persistence.sh).
     install -d -m 0700 "${dest}/var/lib/tailscale"
     enable_service tailscaled.service
+    enable_service ceralive-tailscaled-pending.path
     enable_service ceralive-tailscale-enroll.timer
   elif [[ "${tailscale}" != 0 ]]; then
     die "CERALIVE_TAILSCALE must be 0 or 1, got '${tailscale}'"
