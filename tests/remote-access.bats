@@ -195,11 +195,32 @@ enroll_env() {
   cat >"$T/bin/tailscale" <<STUB
 #!/bin/sh
 echo "tailscale \$*" >>"$T/calls"
+crash_enroll() { # kill the enrollment run, like a power cut: the outermost of the
+  # enrollment's own processes (its subshells share its command line), and nothing above
+  p=\$PPID; top=""
+  while [ "\$p" -gt 1 ]; do
+    case "\$(tr '\\0' ' ' </proc/\$p/cmdline)" in
+      "bash $ENROLL "|"bash $ENROLL") top=\$p;;
+      *) [ -n "\$top" ] && break;;
+    esac
+    p=\$(ps -o ppid= -p \$p | tr -d ' ')
+  done
+  [ -n "\$top" ] && kill -9 \$top
+}
 case "\$*" in
   *" up "*) f="\${*##*auth-key=file:}"; f="\${f%% *}"; echo "used \$(cut -c12-20 "\$f")" >>"$T/used"
     : >"$T/state/tailscaled.state"; [ -n "\$TS_SLEEP" ] && sleep "\$TS_SLEEP"
+    # a crash right after the keyed up registered the box
+    [ -n "\$TS_UP_CRASH" ] && crash_enroll
     [ -n "\$TS_OUT" ] && echo "\$TS_OUT" >&2; exit "\${TS_RC:-0}";;
-  *"status --json"*) echo "{\"BackendState\": \"\${TS_BACKEND:-NeedsLogin}\"}";;
+  *"status --json"*) [ -n "\$TS_STATUS_RC" ] && exit "\$TS_STATUS_RC"; [ -n "\$TS_NODEKEY" ] && nk=', "HaveNodeKey": true' || nk=''
+    if [ -n "\$TS_NO_SELF" ]; then echo "{\"BackendState\": \"\${TS_BACKEND:-NeedsLogin}\"\$nk}"
+    else echo "{\"BackendState\": \"\${TS_BACKEND:-NeedsLogin}\"\$nk, \"Self\": {\"ID\": \"\${TS_NODE:-nStable1}\", \"PublicKey\": \"nodekey:aa11\"}}"; fi;;
+  # \$TS_SET_OUT/\$TS_SET_RC model tailscaled refusing a pref change while
+  # Tailscale SSH stays on; turning SSH off in the same change is accepted.
+  *" set "*) case "\$*" in *"--ssh=false"*) [ -n "\$TS_SSHOFF_CRASH" ] && crash_enroll
+      [ -n "\$TS_SSHOFF_OUT" ] && echo "\$TS_SSHOFF_OUT" >&2; exit "\${TS_SSHOFF_RC:-0}";; esac
+    [ -n "\$TS_SET_OUT" ] && echo "\$TS_SET_OUT" >&2; exit "\${TS_SET_RC:-0}";;
 esac
 exit 0
 STUB
@@ -238,6 +259,265 @@ fresh() { # wipe the per-scenario state inside this test's own tmpdir
   [ -e "$T/enroll/joined-once" ] && [ ! -e "$T/enroll/state-ours" ]
   no_leftovers
   no_key_anywhere
+}
+
+NO_TAILNET_SSH="Unable to enable local Tailscale SSH server; not enabled on Tailnet."
+
+@test "on a tailnet without Tailscale SSH, enrollment turns SSH off so the auto-update pin still applies" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_SET_RC=1 TS_SET_OUT="$NO_TAILNET_SSH"
+  [ "$status" -eq 0 ]
+  # the plain pin was refused, then SSH off and both pins went in one change
+  [ "$(grep -c ' set ' "$T/calls")" -eq 2 ]
+  grep -qx "tailscale --socket=$T/none.sock set --ssh=false --accept-risk=lose-ssh --auto-update=false --update-check=false" "$T/calls"
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 1 0 ok-without-tailnet-ssh" ]
+  [[ "$output" == *"does not allow Tailscale SSH"* ]]
+  [ ! -e "$T/enroll/pending-authkey" ] && [ -e "$T/enroll/joined-once" ]
+  no_leftovers
+  no_key_anywhere
+}
+
+@test "a pin that still fails is reported in the status, not as a plain ok" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_SET_RC=1 TS_SET_OUT="$NO_TAILNET_SSH" TS_SSHOFF_RC=1
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 1 0 ok-auto-update-not-pinned" ]
+  fresh; enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_SET_RC=1 TS_SET_OUT="some other error"
+  [ "$status" -eq 0 ]
+  # an unrelated refusal never turns SSH off
+  ! grep -q -- '--ssh=false' "$T/calls"
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 1 0 ok-auto-update-not-pinned" ]
+  [[ "$output" == *"could not pin auto-update off"* ]]
+  no_key_anywhere
+}
+
+@test "a new key for a box already on a tailnet without Tailscale SSH ends at once, keeping its state" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  : >"$T/state/tailscaled.state"
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="$NO_TAILNET_SSH" TS_BACKEND=Running TS_NODEKEY=1
+  [ "$status" -ne 0 ]
+  [ "$(cut -d' ' -f1,4- "$T/enroll/enroll-status")" = "gave-up this tailnet does not allow Tailscale SSH; forget the box there first" ]
+  [ -e "$T/state/tailscaled.state" ] && [ ! -e "$T/enroll/pending-authkey" ]
+  no_key_anywhere
+}
+
+@test "a join this enrollment registered, refused on retry by a tailnet without Tailscale SSH, still finishes and pins" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  # attempt 1: no login yet; the keyed up registers but times out (approval wait)
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="timeout waiting for the device to be approved"
+  [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 retry" ]
+  # approved meanwhile: Running with a netmap that refuses SSH, so the retry's up is refused
+  enroll CERALIVE_TS_NOW=1130 TS_RC=1 TS_OUT="$NO_TAILNET_SSH" TS_BACKEND=Running TS_NODEKEY=1 \
+    TS_SET_RC=1 TS_SET_OUT="$NO_TAILNET_SSH"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 2 0 ok-without-tailnet-ssh" ]
+  grep -qx "tailscale --socket=$T/none.sock set --ssh=false --accept-risk=lose-ssh --auto-update=false --update-check=false" "$T/calls"
+  [ ! -e "$T/enroll/pending-authkey" ] && [ -e "$T/enroll/joined-once" ]
+  no_leftovers
+  no_key_anywhere
+}
+
+@test "the login check is made once per key" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="no network" TS_BACKEND=Running TS_NODEKEY=1
+  [ "$(cut -d' ' -f1 "$T/enroll/prior-login")" = yes ]
+  # a later attempt sees no login but keeps the first answer
+  enroll CERALIVE_TS_NOW=1130 TS_RC=1 TS_OUT="no network"
+  [ "$(cut -d' ' -f1 "$T/enroll/prior-login")" = yes ]
+  # ... so a refusal on a tailnet without Tailscale SSH gives up
+  enroll CERALIVE_TS_NOW=1400 TS_RC=1 TS_OUT="$NO_TAILNET_SSH" TS_BACKEND=Running TS_NODEKEY=1
+  [ "$(cut -d' ' -f1 "$T/enroll/enroll-status")" = gave-up ]
+  [ ! -e "$T/enroll/prior-login" ]
+}
+
+@test "a failed SSH-off pin keeps its own error in the log" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_SET_RC=1 TS_SET_OUT="$NO_TAILNET_SSH" TS_SSHOFF_RC=1 TS_SSHOFF_OUT="dial unix: no such socket"
+  [ "$(cat "$T/enroll/enroll-status")" = "joined 1 0 ok-auto-update-not-pinned" ]
+  [[ "$output" == *"dial unix: no such socket"* ]]
+  [[ "$output" == *"tries again"* ]]
+  no_key_anywhere
+}
+
+@test "the login record is on disk, synced, before the keyed up runs" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  # sync stub: records what it flushes; the up stub records whether the record exists then
+  printf '#!/bin/sh\necho "sync $*" >>"%s/calls"\n' "$T" >"$T/bin/sync"; chmod +x "$T/bin/sync"
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="no network"
+  local up_line rec_line dir_line
+  up_line=$(grep -n ' up --auth-key' "$T/calls" | head -1 | cut -d: -f1)
+  rec_line=$(grep -n "^sync $T/enroll/\.prior\." "$T/calls" | head -1 | cut -d: -f1)
+  dir_line=$(awk -v d="sync $T/enroll" -v r="$rec_line" 'NR>r && $0==d {print NR; exit}' "$T/calls")
+  [ -n "$up_line" ]
+  [ -n "$rec_line" ]
+  [ -n "$dir_line" ]
+  [ "$rec_line" -lt "$dir_line" ]
+  [ "$dir_line" -lt "$up_line" ]
+  [ "$(cut -d' ' -f1 "$T/enroll/prior-login")" = no ]
+}
+
+@test "a crash after the keyed up registered the box still finishes the join on the next run" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_UP_CRASH=1
+  [ -e "$T/enroll/pending-authkey" ]
+  [ "$(cut -d' ' -f1 "$T/enroll/prior-login")" = no ]
+  # the box came up on a tailnet without Tailscale SSH: the retry's up is refused
+  enroll CERALIVE_TS_NOW=1130 TS_RC=1 TS_OUT="$NO_TAILNET_SSH" TS_BACKEND=Running TS_NODEKEY=1 \
+    TS_SET_RC=1 TS_SET_OUT="$NO_TAILNET_SSH"
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1,4 "$T/enroll/enroll-status")" = "joined ok-without-tailnet-ssh" ]
+  no_key_anywhere
+}
+
+@test "a crash while turning SSH off keeps the login record until the join is recorded" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_SET_RC=1 TS_SET_OUT="$NO_TAILNET_SSH" TS_SSHOFF_CRASH=1
+  [ -e "$T/enroll/pending-authkey" ]
+  [ "$(cut -d' ' -f1 "$T/enroll/prior-login")" = no ]
+  # SSH may or may not be off now; either way the retry's up --ssh is refused
+  enroll CERALIVE_TS_NOW=1130 TS_RC=1 TS_OUT="$NO_TAILNET_SSH" TS_BACKEND=Running TS_NODEKEY=1
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1,4 "$T/enroll/enroll-status")" = "joined ok-without-tailnet-ssh" ]
+  [ ! -e "$T/enroll/prior-login" ]
+  [ ! -e "$T/enroll/pending-authkey" ]
+}
+
+@test "without an answer from tailscaled the keyed up does not run" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_STATUS_RC=1
+  [ "$status" -ne 0 ]
+  ! grep -q ' up --auth-key' "$T/calls"
+  [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 retry" ]
+  [ ! -e "$T/enroll/prior-login" ]
+  [ -e "$T/enroll/pending-authkey" ]
+}
+
+@test "a login record belongs to its pending key" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="no network"
+  [ "$(cut -d' ' -f1 "$T/enroll/prior-login")" = no ]
+  # a new key arrives while the box is logged in: it is asked again
+  card_drop "$KEY"
+  enroll CERALIVE_TS_NOW=1140 TS_RC=1 TS_OUT="no network" TS_BACKEND=Running TS_NODEKEY=1
+  [ "$(cut -d' ' -f1 "$T/enroll/prior-login")" = yes ]
+}
+
+@test "turning SSH off records the login it applies to, and a join with SSH clears it" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_SET_RC=1 TS_SET_OUT="$NO_TAILNET_SSH" TS_NODE=nBB22
+  [ "$(cat "$T/enroll/ssh-off-node")" = "nBB22" ]
+  [ "$(stat -c %a "$T/enroll/ssh-off-node")" = 644 ]
+  # a later failed key leaves it alone
+  card_drop "tskey-auth-other0000-zzzzzzzzzzzz"
+  enroll CERALIVE_TS_NOW=2000 TS_RC=1 TS_OUT="invalid key: unable to validate API key"
+  [ "$(cut -d' ' -f1 "$T/enroll/enroll-status")" = gave-up ]
+  [ "$(cat "$T/enroll/ssh-off-node")" = "nBB22" ]
+  # a join that keeps SSH on removes it
+  card_drop "$KEY"
+  enroll CERALIVE_TS_NOW=3000
+  [ "$(cut -d' ' -f1,4 "$T/enroll/enroll-status")" = "joined ok" ]
+  [ ! -e "$T/enroll/ssh-off-node" ]
+}
+
+@test "a login record that cannot be made durable stops the keyed up" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  # fsync of the record's temporary file fails
+  printf '#!/bin/sh\ncase "$*" in *"/.prior."*) exit 1;; esac\nexit 0\n' >"$T/bin/sync"; chmod +x "$T/bin/sync"
+  enroll CERALIVE_TS_NOW=1000
+  [ "$status" -ne 0 ]
+  ! grep -q ' up --auth-key' "$T/calls"
+  [ "$(cat "$T/enroll/enroll-status")" = "pending 1 1120 retry" ]
+  [ ! -e "$T/enroll/prior-login" ]
+  [ -e "$T/enroll/pending-authkey" ]
+  no_leftovers
+}
+
+@test "a login record whose directory sync failed is neither kept nor trusted" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  # the directory sync after the record is renamed into place fails
+  printf '#!/bin/sh\n[ "$*" = "%s/enroll" ] && [ -e "%s/enroll/prior-login" ] && exit 1\nexit 0\n' "$T" "$T" >"$T/bin/sync"; chmod +x "$T/bin/sync"
+  enroll CERALIVE_TS_NOW=1000
+  [ "$status" -ne 0 ]
+  ! grep -q ' up --auth-key' "$T/calls"
+  [ ! -e "$T/enroll/prior-login" ]
+  enroll CERALIVE_TS_NOW=1200
+  [ "$status" -ne 0 ]
+  ! grep -q ' up --auth-key' "$T/calls"
+}
+
+@test "an existing login record is synced again before it is trusted" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_RC=1 TS_OUT="no network"
+  [ "$(cut -d' ' -f1 "$T/enroll/prior-login")" = no ]
+  rm "$T/calls"
+  printf '#!/bin/sh\n[ "$*" = "%s/enroll" ] && [ -e "%s/enroll/prior-login" ] && exit 1\nexit 0\n' "$T" "$T" >"$T/bin/sync"; chmod +x "$T/bin/sync"
+  enroll CERALIVE_TS_NOW=1200
+  [ "$status" -ne 0 ]
+  ! grep -q ' up --auth-key' "$T/calls"
+}
+
+@test "a join whose result cannot be stored keeps its key and login record" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  # directory syncs fail only after the keyed up ran
+  printf '#!/bin/sh\nif [ "$*" = "%s/enroll" ] && grep -q " up --auth-key" "%s/calls" 2>/dev/null; then exit 1; fi\nexit 0\n' "$T" "$T" >"$T/bin/sync"; chmod +x "$T/bin/sync"
+  enroll CERALIVE_TS_NOW=1000
+  [ "$status" -ne 0 ]
+  [ -e "$T/enroll/pending-authkey" ]
+  [ "$(cut -d' ' -f1 "$T/enroll/prior-login")" = no ]
+  [[ "$output" == *"could not store the join result"* ]]
+  # storage works again: the next run finishes
+  rm "$T/bin/sync"
+  enroll CERALIVE_TS_NOW=1200
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1,4 "$T/enroll/enroll-status")" = "joined ok" ]
+  [ ! -e "$T/enroll/pending-authkey" ]
+}
+
+@test "the join result is on disk before the pending key is consumed" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  # cut the run when the pending key is shredded at the end of a join
+  cat >"$T/bin/shred" <<STUB
+#!/bin/sh
+for a in "\$@"; do case "\$a" in */pending-authkey)
+  p=\$PPID; top=""
+  while [ "\$p" -gt 1 ]; do
+    case "\$(tr '\\0' ' ' </proc/\$p/cmdline)" in "bash $ENROLL "|"bash $ENROLL") top=\$p;; *) [ -n "\$top" ] && break;; esac
+    p=\$(ps -o ppid= -p \$p | tr -d ' ')
+  done
+  [ -n "\$top" ] && kill -9 \$top;; esac; done
+exec /usr/bin/shred "\$@"
+STUB
+  chmod +x "$T/bin/shred"
+  enroll CERALIVE_TS_NOW=1000
+  [ "$(cut -d' ' -f1,4 "$T/enroll/enroll-status")" = "joined ok" ]
+}
+
+@test "a turned-off SSH whose login cannot be read is logged, not silently recorded" {
+  enroll_env
+  printf '%s' "$KEY" >"$T/boot/osb-tailscale.key"
+  enroll CERALIVE_TS_NOW=1000 TS_SET_RC=1 TS_SET_OUT="$NO_TAILNET_SSH" TS_NO_SELF=1
+  [ "$(cut -d' ' -f1,4 "$T/enroll/enroll-status")" = "joined ok-without-tailnet-ssh" ]
+  [ ! -e "$T/enroll/ssh-off-node" ]
+  [[ "$output" == *"could not record which login"* ]]
 }
 
 @test "a transient failure keeps the key pending in the root-only directory, backs off, then joins" {
@@ -461,7 +741,8 @@ race() { # old-up-output -> run with an old pending key, drop the writer's key m
 case "\$*" in *" up "*)
   f="\${*##*auth-key=file:}"; f="\${f%% *}"; echo "used \$(cut -c12-20 "\$f")" >>"$T/used"
   [ "\$(cut -c12-14 "\$f")" = OLD ] && { sleep 2; echo "$1" >&2; exit 1; }
-  exit 0;; esac
+  exit 0;;
+  *"status --json"*) echo '{"BackendState": "NeedsLogin"}';; esac
 exit 0
 STUB
   chmod +x "$T/bin/tailscale"
@@ -520,8 +801,9 @@ STUB
     # shellcheck disable=SC2046
     $(enroll_cmd) CERALIVE_TS_NOW=5000 bash "$ENROLL" >/dev/null 2>&1 || true
     rm "$T/bin/sync"
+    # past the back-off a crash inside an attempt schedules
     # shellcheck disable=SC2046
-    $(enroll_cmd) CERALIVE_TS_NOW=5000 bash "$ENROLL" >/dev/null 2>&1 || true
+    $(enroll_cmd) CERALIVE_TS_NOW=5200 bash "$ENROLL" >/dev/null 2>&1 || true
     [ "$(tail -n1 "$T/used")" = "used NEWNEWNEW" ] || { echo "crash point $n: $(cat "$T/used")"; return 1; }
     grep -q -- '--hostname=white' "$T/calls" || { echo "crash point $n lost the name"; return 1; }
     no_leftovers || { echo "crash point $n left $(ls -A "$T/enroll")"; return 1; }
