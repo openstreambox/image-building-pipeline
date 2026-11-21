@@ -1,0 +1,40 @@
+[Unit]
+Description=CeraLive: no file huge pages under the persistent journal (THP madvise)
+Documentation=file:///etc/systemd/journald.conf.d/10-ceralive-journal.conf
+# WHY THIS EXISTS (measured on an idle Rock 5B+ booted from an SD card):
+#
+#   card writes                      ~570 MB/h, ~547 MB/h of it journald
+#   journal entries                  ~50 per minute
+#   writeback of system.journal      1024 pages (4 MiB) every ~30 s
+#   journald's mapping in smaps      FilePmdMapped: 4096 kB
+#
+# The kernel is built with CONFIG_TRANSPARENT_HUGEPAGE_ALWAYS, so the journal
+# file that journald mmaps is cached in 2 MiB folios. ext4 marks a whole folio
+# dirty on the first store through a shared mapping, so each new entry made
+# the 2 MiB folios it touched dirty again, and writeback rewrote 4 MiB of card
+# for a few hundred bytes of log every 30 seconds.
+#
+# With this unit in place from boot, the same idle board wrote ~260 MB/h in
+# total and journald's writeback fell to about 2 MiB per pass. The rest comes
+# from smaller readahead folios and from rewriting the same hot pages every
+# 30 s; this unit removes only the 2 MiB part. Anonymous memory that asks for
+# huge pages (madvise(MADV_HUGEPAGE)) still gets them; madvise is the upstream
+# kernel's recommended mode and what Debian's own kernels ship.
+#
+# Pulled in and ordered by the systemd-journal-flush.service drop-in
+# (10-ceralive-journal-flush.conf): the flush is the first time journald maps
+# /var/log/journal, and folios created before this runs would stay huge for the
+# life of that journal file. No [Install]: nothing else needs it.
+DefaultDependencies=no
+Before=systemd-journal-flush.service sysinit.target shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/sys/kernel/mm/transparent_hugepage/enabled
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'echo madvise > /sys/kernel/mm/transparent_hugepage/enabled'
+# Trust the kernel's readback, not the write: if the knob refused the value the
+# unit fails (systemctl --failed, journal) while the soft dependency still lets
+# the flush run.
+ExecStartPost=/bin/grep -Fq [madvise] /sys/kernel/mm/transparent_hugepage/enabled

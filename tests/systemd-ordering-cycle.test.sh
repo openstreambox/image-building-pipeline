@@ -49,11 +49,12 @@ FIRSTBOOT="${RUNTIME}/ceralive-ssh-firstboot.service"
 CIUART="${RUNTIME}/ceralive-ci-uart-bootstrap.service"
 MACHINEID="${RUNTIME}/machine-id/ceralive-machine-id.service"
 JOURNAL_FLUSH_DROPIN="${RUNTIME}/journald/10-ceralive-journal-flush.conf"
+JOURNAL_THP="${RUNTIME}/journald/ceralive-journal-thp.service"
 DPKG_RECOVER="${RUNTIME}/ceralive-dpkg-recover.service"
 
 fail() { printf 'systemd-ordering-cycle regression: %s\n' "$1" >&2; exit 1; }
 
-for f in "${FIRSTBOOT}" "${CIUART}" "${MACHINEID}" "${JOURNAL_FLUSH_DROPIN}" "${DPKG_RECOVER}" "${POSTINST_ENTRY}"; do
+for f in "${FIRSTBOOT}" "${CIUART}" "${MACHINEID}" "${JOURNAL_FLUSH_DROPIN}" "${JOURNAL_THP}" "${DPKG_RECOVER}" "${POSTINST_ENTRY}"; do
   [[ -f "${f}" ]] || fail "missing source file: ${f}"
 done
 [[ -d "${POSTINST_D}" ]] || fail "missing module dir: ${POSTINST_D}"
@@ -135,6 +136,18 @@ grep -Eq '^After=.*\bceralive-machine-id\.service\b' "${JOURNAL_FLUSH_DROPIN}" \
   || fail "systemd-journal-flush.service can race the machine-id-triggered journald restart"
 grep -Eq '^RequiresMountsFor=.*\B/var/log/journal\b' "${JOURNAL_FLUSH_DROPIN}" \
   || fail "systemd-journal-flush.service does not explicitly retain the persistent /var/log mount guard"
+
+# The flush is the first time journald maps /var/log/journal. THP must already be
+# madvise then, or the persistent journal is cached in huge folios for its whole
+# life. The unit runs before sysinit.target, so it must not take default deps.
+grep -Eq '^Wants=.*\bceralive-journal-thp\.service\b' "${JOURNAL_FLUSH_DROPIN}" \
+  || fail "systemd-journal-flush.service no longer pulls in ceralive-journal-thp.service"
+grep -Eq '^After=.*\bceralive-journal-thp\.service\b' "${JOURNAL_FLUSH_DROPIN}" \
+  || fail "systemd-journal-flush.service can map the journal before THP is madvise"
+grep -Eq '^DefaultDependencies=no$' "${JOURNAL_THP}" \
+  || fail "ceralive-journal-thp.service is ordered before sysinit.target but takes default dependencies (cycle)"
+grep -Eq '^Before=.*\bsystemd-journal-flush\.service\b' "${JOURNAL_THP}" \
+  || fail "ceralive-journal-thp.service is not ordered before the journal flush"
 
 grep -Fxq 'After=local-fs.target' "${DPKG_RECOVER}" || fail 'dpkg recovery must follow local filesystems'
 grep -Fxq 'Before=ceralive.service ceralive-healthcheck.service' "${DPKG_RECOVER}" || fail 'dpkg recovery must precede app and health confirmation'
@@ -255,6 +268,7 @@ cp "${RUNTIME}/ceralive-healthcheck.service" "${ETC}/ceralive-healthcheck.servic
 install -D -m 0755 "${RUNTIME}/ceralive-healthcheck.sh" "${S}/usr/local/bin/ceralive-healthcheck.sh"
 mkdir -p "${ETC}/systemd-journal-flush.service.d"
 cp "${JOURNAL_FLUSH_DROPIN}" "${ETC}/systemd-journal-flush.service.d/10-ceralive-persistence.conf"
+cp "${JOURNAL_THP}" "${ETC}/ceralive-journal-thp.service"
 
 systemctl --root "${S}" enable \
   ssh.socket ceralive-ssh-firstboot.service ceralive-ci-uart-bootstrap.service \

@@ -347,7 +347,7 @@ setup_boot_script_sync() {
 # ci/postinst-drift-check.sh line ceiling on the runtime executor, and the same
 # standalone-artifact idiom as setup_avahi_restart / setup_tls_proxy).
 #
-# Test seams: JOURNALD_DROPIN_DIR, MACHINE_ID_{SBIN,UNIT}_DIR,
+# Test seams: JOURNALD_DROPIN_DIR, JOURNAL_FLUSH_DROPIN_DIR, JOURNALD_THP_UNIT_DIR, MACHINE_ID_{SBIN,UNIT}_DIR,
 # JOURNAL_GC_{SBIN,UNIT}_DIR.
 # ---------------------------------------------------------------------------
 
@@ -358,15 +358,18 @@ setup_journald_retention() {
   log "installing journald retention and flush-ordering drop-ins (persistent storage, explicit /data budget, per-unit rate limits)"
   local src="${CERALIVE_RUNTIME_SRC:-}/journald"
   local artifact
-  for artifact in 10-ceralive-journal.conf 10-ceralive-journal-flush.conf; do
+  for artifact in 10-ceralive-journal.conf 10-ceralive-journal-flush.conf ceralive-journal-thp.service; do
     [[ -n "${CERALIVE_RUNTIME_SRC:-}" && -f "${src}/${artifact}" ]] \
       || die "journald drop-in source not found: ${src}/${artifact} (is \$SRCDIR/runtime mounted?)"
   done
   local dropin_dir="${JOURNALD_DROPIN_DIR:-/etc/systemd/journald.conf.d}"
   local flush_dropin_dir="${JOURNAL_FLUSH_DROPIN_DIR:-/etc/systemd/system/systemd-journal-flush.service.d}"
-  mkdir -p "${dropin_dir}" "${flush_dropin_dir}"
+  local unit_dir="${JOURNALD_THP_UNIT_DIR:-/etc/systemd/system}"
+  mkdir -p "${dropin_dir}" "${flush_dropin_dir}" "${unit_dir}"
   install -m 0644 "${src}/10-ceralive-journal.conf" "${dropin_dir}/10-ceralive-journal.conf"
   install -m 0644 "${src}/10-ceralive-journal-flush.conf" "${flush_dropin_dir}/10-ceralive-persistence.conf"
+  # Pulled in by the flush drop-in above, so it needs no enablement of its own.
+  install -m 0644 "${src}/ceralive-journal-thp.service" "${unit_dir}/ceralive-journal-thp.service"
 }
 
 # The A/B-stable board identity. Its whole reason for existing is that the
