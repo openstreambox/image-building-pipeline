@@ -17,7 +17,7 @@ package; the attention owner paints it on VT8 (see "Console wiring").
 | Uplinks | Snapshot: role labels (`Cellular 1`, `Ethernet 1`, `Wi-Fi 1`) and `up`/`degraded`/`down` |
 | SIMs | Snapshot: `Modem N` and `present`/`absent`/`locked`/`unknown` |
 | Last err | Snapshot: the failure class of the last failed start (CeraUI clears it when a start succeeds), shown as fixed wording, unknown codes generically |
-| Attention | The highest shared attention condition's `line`, cleaned like all text |
+| Attention | The highest shared attention condition as fixed wording by id (`data-readiness`, `temperature-high`, `clock-unset`) or severity; a producer's own text never reaches the page |
 | Address, Open, QR | Global IPv4 addresses from `ip -j -4 addr`, client-facing interfaces (`ap`, `wlan`, `br`, `eth`) before uplinks; the QR always encodes the image's TLS front, `https://<address>/`: the snapshot `url` may only choose which of these addresses, its scheme, port and path are ignored |
 
 Without a snapshot the page says that the application has not reported and
@@ -89,8 +89,10 @@ When the renderer is installed it loads it in its own process and VT8 always
 shows something:
 
 - A critical or fatal condition: the condition text in the 16x32 font, as
-  before. It switches to VT8 once per condition, even from a login, and hands
-  the operator back to that VT when the condition clears.
+  before. It switches to VT8 once per condition, never away from a VT someone
+  is logged in on (Alt+F8 shows it there), and hands an operator it took from
+  a login prompt back to that VT when the condition clears. A monitor plugged
+  in meanwhile does not switch again.
 - Otherwise: this page in the 8x16 font (`Lat15-TerminusBold16`), with the
   default palette (light foreground on black). It is overwritten in place
   rather than cleared, so a camera does not catch a blank frame. `qrencode`
@@ -102,7 +104,9 @@ every tick; the kernel updates it in the same hotplug path that sends the drm
 change uevent). It skips both when someone is logged in on the foreground VT,
 meaning any process other than `agetty` or `login` has that terminal. A
 display stack started on its own VT (for example a kiosk with `TTYPath=`)
-counts the same way and is left alone. A restarted owner does neither again. When the service stops it returns to the
+counts the same way and is left alone. A restarted owner repeats none of these switches: markers in
+`/run/ceralive/attention-console/` survive a service stop, and the one for a
+condition goes when a tick sees no condition. When the service stops it returns to the
 VT it found at start (fallback tty1) and restores VT8's saved font.
 
 A renderer that fails to load leaves VT8 to critical and fatal conditions

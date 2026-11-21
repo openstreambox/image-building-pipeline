@@ -168,6 +168,11 @@ try:
     monitors.add('card0-HDMI-A-2')
     viewer.update(None)
     assert cmd('fgconsole')=='2', 'a logged-in operator is never pulled away by a plug'
+    viewer.update(top)
+    capture('status-fatal-over-login')
+    assert cmd('fgconsole')=='2', 'a condition never pulls a logged-in operator away'
+    assert b'The card is not ready.' in Path('/dev/vcs8').read_bytes()
+    viewer.update(None)
     viewer.release()
     cmd('setfont','-C','/dev/tty8','-O','/run/after-status.psf')
     assert Path('/run/after-status.psf').read_bytes()==baseline

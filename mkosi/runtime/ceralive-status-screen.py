@@ -11,7 +11,7 @@ Two sources, so the page still says something when the application is down:
 
 - The image's own facts: release, uptime, support code (the same four hex
   digits the setup hotspot and hostname carry), local IPv4 addresses and the
-  highest shared attention condition.
+  highest shared attention condition (fixed wording by id or severity).
 - A snapshot CeraUI writes to /run/ceralive/status-screen/snapshot.json. It
   carries codes, role labels and states only, never free text; the page maps
   codes to fixed wording. A snapshot that is missing, oversized, not a regular
@@ -63,7 +63,7 @@ READY_TEXT = {
     'source_lost': 'the video source is not connected',
     'source_unavailable': 'the video source is not sending',
     'receiver_not_set': 'no destination is set',
-    'receiver_invalid': 'the destination is not available',
+    'receiver_invalid': 'the destination settings are incomplete',
     'receiver_refused': 'the destination refused the last test',
     'no_uplink': 'no uplink is connected',
     'no_uplink_passes': 'no uplink reaches the internet',
@@ -83,6 +83,20 @@ START_TEXT = {
     'mutation_blocked': 'a modem change could not be undone',
 }
 ERROR_TEXT = {**READY_TEXT, **START_TEXT}
+# Shared attention conditions are shown by id and severity only; a producer's
+# own text never reaches this page (the critical/fatal console keeps it).
+ATTENTION_ID = re.compile(r'[a-z][a-z0-9-]{0,63}\Z')
+ATTENTION_TEXT = {
+    'data-readiness': 'the card is not ready',
+    'temperature-high': 'the device is hot',
+    'clock-unset': 'the clock is not set',
+}
+SEVERITY_TEXT = {
+    'info': 'a notice is reported (see the device page)',
+    'warn': 'a warning is reported (see the device page)',
+    'critical': 'a critical condition is reported (see the device page)',
+    'fatal': 'a fatal condition is reported (see the device page)',
+}
 KIND_LABEL = {'cellular': 'Cellular', 'ethernet': 'Ethernet', 'wifi': 'Wi-Fi', 'other': 'Link'}
 
 
@@ -226,6 +240,17 @@ def load_snapshot(path=SNAPSHOT, now=None):
     return result
 
 
+def attention_text(highest):
+    """Fixed wording for the highest shared condition, or None."""
+    if not isinstance(highest, dict):
+        return None
+    ident, severity = highest.get('id'), highest.get('severity')
+    if not (isinstance(ident, str) and ATTENTION_ID.fullmatch(ident)) or \
+            not (isinstance(severity, str) and severity in SEVERITY_TEXT):
+        return None
+    return ATTENTION_TEXT.get(ident, SEVERITY_TEXT[severity])
+
+
 def support_code(machine_id=Path('/etc/machine-id')):
     """The last four hex digits of the machine id, as the setup hotspot shows them."""
     try:
@@ -308,7 +333,7 @@ def facts(now=None):
         'uptime': uptime,
         'code': support_code(),
         'addresses': ipv4_addresses(),
-        'attention': clean(attention.get('line'), 120) if isinstance(attention, dict) else None,
+        'attention': attention_text(attention),
         'now': now,
     }
 

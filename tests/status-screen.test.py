@@ -8,6 +8,7 @@ import re
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 
 SPEC = importlib.util.spec_from_file_location(
     'status_screen', Path(__file__).resolve().parents[1] / 'mkosi/runtime/ceralive-status-screen.py')
@@ -284,6 +285,31 @@ class PageTests(Temp):
         page = '\n'.join(s.page_lines(dict(FACTS, addresses=[]), None, columns=128, rows=37, qr=fake_qr()))
         self.assertIn('no local address', page)
         self.assertNotIn(s.LIGHT, page)
+
+
+class AttentionTextTests(unittest.TestCase):
+    def test_attention_shows_fixed_wording_never_the_producer_text(self):
+        leaky = {'id': 'modem-sim', 'severity': 'warn', 'line': 'Joined HomeSSID with hunter2', 'fix': 'x', 'detail': 'y'}
+        self.assertEqual(s.attention_text(leaky), 'a warning is reported (see the device page)')
+        self.assertEqual(s.attention_text(dict(leaky, id='clock-unset')), 'the clock is not set')
+        self.assertEqual(s.attention_text(dict(leaky, id='temperature-high', severity='critical')),
+                         'the device is hot')
+        self.assertEqual(s.attention_text(dict(leaky, severity='info')), 'a notice is reported (see the device page)')
+        for bad in (None, 'text', {'id': 'Bad Id', 'severity': 'warn'}, {'id': 'x', 'severity': 'loud'}):
+            self.assertIsNone(s.attention_text(bad))
+
+    def test_the_page_never_prints_attention_prose(self):
+        with tempfile.TemporaryDirectory() as temp:
+            status = Path(temp) / 'status.json'
+            status.write_text(json.dumps({'highest': {'id': 'modem-sim', 'severity': 'warn',
+                                                      'line': 'Joined HomeSSID'}}))
+            with unittest.mock.patch.object(s, 'ATTENTION', status):
+                facts = s.facts()
+        self.assertNotIn('HomeSSID', json.dumps(facts))
+        self.assertEqual(facts['attention'], 'a warning is reported (see the device page)')
+
+    def test_local_destination_settings_are_not_called_unavailable(self):
+        self.assertEqual(s.READY_TEXT['receiver_invalid'], 'the destination settings are incomplete')
 
 
 class FactTests(unittest.TestCase):

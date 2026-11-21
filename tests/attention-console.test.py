@@ -29,11 +29,12 @@ class ConsoleTests(unittest.TestCase):
         self.fail_save = False
         self.fail_switch = False
         self.fail_restore = False
+        self.logged_in = getattr(self, 'logged_in', set())
         self.controller = self.owner()
 
     def owner(self):
         return a.Console(self.root / 'state', str(self.tty), self.run_command,
-                         lambda: self.vt)
+                         lambda: self.vt, operator=lambda vt: vt in self.logged_in)
 
     def run_command(self, *args):
         self.calls.append(args)
@@ -147,6 +148,36 @@ class ConsoleTests(unittest.TestCase):
         self.assertIn('Alt+F1 to log in.', self.tty.read_text())
         self.assertIn(TOP['line'], self.tty.read_text())
 
+    def test_condition_never_pulls_from_a_logged_in_vt(self):
+        self.logged_in.add('1')
+        self.controller.update(TOP)
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '1')
+        self.assertNotIn(('chvt', '8'), self.calls)
+        self.assertIn(TOP['line'], self.tty.read_text())  # still there for Alt+F8
+        self.logged_in.clear()  # logging out later does not pull either
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '1')
+
+    def test_service_restart_during_a_condition_never_pulls_again(self):
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '8')
+        self.vt = '1'  # Alt+F1 to the login prompt
+        self.controller.release()  # SIGTERM: watch() releases on the way out
+        self.controller = self.owner()
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '1')
+        self.logged_in.add('1')
+        self.controller.release()
+        self.controller = self.owner()
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '1')
+        self.assertEqual(self.calls.count(('chvt', '8')), 1)
+        self.controller.update(None)  # cleared: a later condition may pull again
+        self.logged_in.clear()
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '8')
+
     def test_watch_repaints_every_tick_and_releases_on_stop(self):
         frames, stops = [], []
         def sleep(_):
@@ -167,6 +198,28 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(self.vt, '1')
 
 
+class LegacyTests(ConsoleTests):
+    """Without the renderer VT8 behaves as before the status page existed."""
+
+    def test_return_target_is_the_vt_found_at_acquisition(self):
+        self.fail_switch = True
+        self.controller.update(TOP)
+        self.vt = '2'
+        self.fail_switch = False
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '8')
+        self.controller.update(None)
+        self.assertEqual(self.vt, '1')
+
+    def test_large_font_is_loaded_once_per_acquisition(self):
+        self.controller.update(TOP)
+        self.controller.update(TOP)
+        self.controller = self.owner()  # process replaced while the condition holds
+        self.controller.update(TOP)
+        loads = [c for c in self.calls if c[0] == 'setfont' and c[-1] == a.ATTENTION_FONT]
+        self.assertEqual(len(loads), 1)
+
+
 PAGE = ['BOX STATUS  support code 3F9A', 'Open      https://192.168.42.1/',
         'Photograph this screen for support. Alt+F1 to log in.']
 
@@ -175,12 +228,13 @@ class FakePage:
     def __init__(self):
         self.fail = False
         self.sizes = []
+        self.lines = PAGE
 
     def __call__(self, columns, rows):
         self.sizes.append((columns, rows))
         if self.fail:
             raise RuntimeError('renderer fault')
-        return list(PAGE)
+        return list(self.lines)
 
     def console(self, line):
         return line
@@ -197,7 +251,8 @@ class StatusConsoleTests(ConsoleTests):
 
     def owner(self):
         return a.Console(self.root / 'state', str(self.tty), self.run_command, lambda: self.vt,
-                         status=self.page, connectors=lambda: set(self.monitors),
+                         status=self.page,
+                         connectors=lambda: None if self.monitors is None else set(self.monitors),
                          operator=lambda vt: vt in self.logged_in)
 
     def switches(self):
@@ -268,12 +323,11 @@ class StatusConsoleTests(ConsoleTests):
         self.assertEqual(self.vt, '8')  # was already watching VT8: stays there
         self.assertNotIn(('chvt', '1'), self.calls)
 
-    def test_condition_pulls_from_a_login_and_hands_it_back(self):
+    def test_condition_pulls_from_a_login_prompt_and_hands_it_back(self):
         self.controller.update(None)
-        self.vt = '2'
-        self.logged_in.add('2')
+        self.vt = '2'  # a login prompt, nobody logged in
         self.controller.update(TOP)
-        self.assertEqual(self.vt, '8')  # critical and fatal keep precedence over a login
+        self.assertEqual(self.vt, '8')
         self.controller.update(TOP)
         self.controller.update(None)
         self.assertEqual(self.vt, '2')
@@ -297,6 +351,38 @@ class StatusConsoleTests(ConsoleTests):
         self.assertEqual(self.vt, '1')
         self.assertEqual(self.switches(), 2)
 
+    def test_stop_returns_to_the_vt_found_at_start_not_the_last_pull(self):
+        self.controller.update(None)  # boot: tty1 -> VT8
+        self.vt = '2'
+        self.controller.update(TOP)  # pulled from the tty2 prompt
+        self.controller.update(None)
+        self.assertEqual(self.vt, '2')
+        self.vt = '8'  # someone goes back to the page
+        self.controller.release()
+        self.assertEqual(self.vt, '1')
+
+    def test_hdmi_plug_during_a_condition_does_not_switch(self):
+        self.controller.update(None)
+        self.controller.update(TOP)  # already on VT8: no pull
+        self.vt = '1'  # Alt+F1 to the prompt
+        self.monitors = {'card0-HDMI-A-1'}
+        self.controller.update(TOP)
+        self.assertEqual(self.vt, '1')
+        self.controller.update(None)  # cleared; the plug is not replayed as a new edge
+        self.controller.update(None)
+        self.assertEqual(self.vt, '1')
+        self.assertEqual(self.switches(), 1)
+
+    def test_unreadable_connector_is_not_a_plug(self):
+        self.monitors = None  # read failed: the boot switch still happens
+        self.controller.update(None)
+        self.assertEqual(self.vt, '8')
+        self.vt = '1'
+        self.controller.update(None)
+        self.monitors = {'card0-HDMI-A-1'}
+        self.controller.update(None)
+        self.assertEqual(self.vt, '1')
+
     def test_renderer_fault_keeps_the_login_line(self):
         self.page.fail = True
         self.controller.update(None)
@@ -316,9 +402,16 @@ class StatusConsoleTests(ConsoleTests):
 
     def test_full_width_last_line_is_not_erased(self):
         self.controller.update(None)
-        with mock.patch.object(a.os, 'get_terminal_size', return_value=(len(PAGE[-1]), 10)):
+        width = len(PAGE[-1])
+        self.page.lines = ['one', 'two', 'three', 'four', PAGE[-1]]
+        with mock.patch.object(a.os, 'get_terminal_size', return_value=(width, 5)):
             self.controller.update(None)
-        self.assertTrue(self.tty.read_text().endswith(PAGE[-1]))
+        self.assertTrue(self.tty.read_text().endswith(PAGE[-1]))  # bottom row: nothing below
+        self.page.lines = PAGE
+        with mock.patch.object(a.os, 'get_terminal_size', return_value=(width, 10)):
+            self.controller.update(None)
+        # Rows remain below a full-width footer: step down, then erase them.
+        self.assertTrue(self.tty.read_text().endswith(PAGE[-1] + '\n\033[J'))
         self.controller.update(None)
         self.assertTrue(self.tty.read_text().endswith(PAGE[-1] + '\033[J'))
 
@@ -328,6 +421,8 @@ class StatusConsoleTests(ConsoleTests):
     test_return_to_previous_vt_on_critical_clear_and_stop = None
     test_warning_has_no_console_effect_and_long_detail_keeps_shortcut = None
     test_watch_repaints_every_tick_and_releases_on_stop = None
+    test_return_target_is_the_vt_found_at_acquisition = None
+    test_large_font_is_loaded_once_per_acquisition = None
     test_failed_save_never_changes_font_and_failed_restore_retries = None
     test_failed_switch_keeps_message_and_shortcut_until_retry = None
 
@@ -373,6 +468,22 @@ class StatusPageTests(unittest.TestCase):
         self.assertIn('Alt+F1 to log in.', screen)
         self.assertIn('\033[7m', screen)
 
+    def test_failed_qr_encode_is_retried_at_most_every_30_s(self):
+        m = self.page.module
+        clock = [100.0]
+        tries = []
+        with mock.patch.object(m, 'qr_matrix', lambda url: tries.append(url)), \
+             mock.patch.object(a.time, 'monotonic', lambda: clock[0]):
+            self.page.qr('https://192.168.42.9/')
+            self.page.qr('https://192.168.42.9/')
+            clock[0] += 31
+            self.page.qr('https://192.168.42.9/')
+        self.assertEqual(len(tries), 2)
+
+    def test_load_reads_the_install_path_at_call_time(self):
+        with mock.patch.object(a, 'STATUS_SCREEN', Path('/nonexistent/ceralive-status-screen')):
+            self.assertIsNone(a.StatusPage.load())
+
     def test_missing_renderer_leaves_vt8_to_conditions(self):
         self.assertIsNone(a.StatusPage.load(Path('/nonexistent/ceralive-status-screen')))
 
@@ -409,6 +520,11 @@ class InputTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+
+    def test_unreadable_connector_status_gives_no_answer(self):
+        (self.root / 'card0-HDMI-A-1').mkdir()
+        (self.root / 'card0-HDMI-A-1' / 'status').mkdir()  # reading a directory fails
+        self.assertIsNone(a.hdmi_connected(self.root))
 
     def test_only_hdmi_connectors_with_a_monitor_count(self):
         for name, status in (('card0-HDMI-A-1', 'connected\n'), ('card0-HDMI-A-2', 'disconnected\n'),

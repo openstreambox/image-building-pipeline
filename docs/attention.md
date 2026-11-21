@@ -114,7 +114,9 @@ the 8x16 font whenever no critical or fatal condition holds it, and the owner
 also switches to VT8 once per boot and on HDMI hotplug unless someone is logged
 in on the foreground VT ([status screen](status-screen.md#console-wiring)). A
 condition that clears then leaves the page behind instead of an empty VT; an
-operator it pulled from a login is still returned there.
+operator it pulled from a login is still returned there. With or without the page, the
+owner never switches away from a VT someone is logged in on, and a service
+restart never repeats the switch for a condition that is still showing.
 
 Console regression tests cover startup repaint, unchanged conditions, operator
 VT selection, clear/expiry/stop, restart, font-save/restore failures and bounded

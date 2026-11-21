@@ -164,7 +164,7 @@ def hdmi_connected(drm=DRM):
             if path.read_text().strip() == 'connected':
                 found.add(path.parent.name)
         except OSError:
-            pass
+            return None  # no answer this tick; a failed read must not look like a plug
     return found
 
 
@@ -190,10 +190,13 @@ class StatusPage:
 
     def __init__(self, module):
         self.module = module
-        self.code = (None, None)  # last URL and its QR matrix; qrencode runs on change only
+        # Last URL, its QR matrix and when it was encoded: qrencode runs when the
+        # address changes, and a failed encode is retried at most every 30 s.
+        self.code = (None, None, 0.0)
 
     @classmethod
-    def load(cls, path=STATUS_SCREEN):
+    def load(cls, path=None):
+        path = STATUS_SCREEN if path is None else path
         if not path.exists():
             return None
         sys.dont_write_bytecode = True  # never write a cache next to the image's tools
@@ -203,8 +206,9 @@ class StatusPage:
         return cls(module)
 
     def qr(self, url):
-        if self.code[0] != url or self.code[1] is None:
-            self.code = (url, self.module.qr_matrix(url))
+        last, matrix, at = self.code
+        if last != url or (matrix is None and time.monotonic() - at >= 30):
+            self.code = (url, self.module.qr_matrix(url), time.monotonic())
         return self.code[1]
 
     def __call__(self, columns, rows):
@@ -221,6 +225,8 @@ class Console:
     With the status screen installed VT8 always shows something: the highest
     critical or fatal condition in the large font, else the status page in the
     8x16 font. Without it VT8 is only taken for critical and fatal conditions.
+    The owner never switches away from a VT someone is logged in on, and a
+    restarted owner never repeats a switch it already made this boot.
     """
 
     def __init__(self, directory=Path('/run/ceralive/attention-console'), terminal='/dev/tty8',
@@ -235,12 +241,15 @@ class Console:
         self.operator = operator
         self.state = directory / 'state.json'
         self.font = directory / 'font.psf'
-        # Survives a service stop: the boot switch happens once per boot.
+        # Both survive a service stop (release), so a restarted owner does not
+        # switch again: the boot switch, and the switch for the condition that
+        # is still showing. The second goes once a tick sees no condition.
         self.booted = directory / 'boot-switch-done'
+        self.handled = directory / 'condition-switch-done'
         self.loaded_font = None
         self.seen = None  # HDMI connectors at the previous tick; None until the first look
-        # A restarted owner must not pull an operator away from their login.
-        self.entered = self.saved().get('alarm', True) if self.state.exists() else False
+        self.entered = self.handled.exists() or (
+            self.state.exists() and self.saved().get('alarm', True))
 
     def saved(self):
         try:
@@ -260,12 +269,14 @@ class Console:
         if not valid_vt(previous):
             previous = '1'
         # Persist the return VT before changing either font or foreground VT.
-        atomic(self.state, json.dumps({'return_vt': previous, 'alarm': False, 'pulled': False}))
+        atomic(self.state, json.dumps({'return_vt': previous, 'alarm': False}))
         # Never change the font unless its original bytes were saved successfully.
         temporary_font = self.directory / 'font.tmp'
         temporary_font.unlink(missing_ok=True)
         if self.run('setfont', '-C', self.terminal, '-O', str(temporary_font)) and temporary_font.exists():
             temporary_font.replace(self.font)
+            if self.status is None:  # Without the page the large font is loaded once, here.
+                self.run('setfont', '-C', self.terminal, ATTENTION_FONT)
         else:
             temporary_font.unlink(missing_ok=True)
 
@@ -275,13 +286,16 @@ class Console:
 
     def update(self, top):
         alarm = bool(top) and top['severity'] in ('critical', 'fatal')
-        if not alarm and self.status is None:
-            self.release()
-            return
+        if not alarm:
+            self.handled.unlink(missing_ok=True)
+            if self.status is None:
+                self.release()
+                return
         self.acquire()
         if not alarm and self.entered:
             self.end_alarm()
-        self.use_font(ATTENTION_FONT if alarm else STATUS_FONT)
+        if self.status is not None:
+            self.use_font(ATTENTION_FONT if alarm else STATUS_FONT)
         try:
             with open(self.terminal, 'w') as terminal:
                 try:
@@ -291,16 +305,29 @@ class Console:
                 columns, rows = max(20, columns), max(5, rows)
                 terminal.write(self.alarm_text(top, columns, rows) if alarm else self.status_text(columns, rows))
             if alarm and not self.entered:
-                previous = self.foreground()
-                if valid_vt(previous):
-                    # Taken from another VT: hand it back when the condition clears.
-                    self.save(return_vt=previous, pulled=True)
-                self.save(alarm=True)
-                self.entered = self.run('chvt', '8')
+                self.start_alarm()
         except OSError:
             return
         if self.status is not None:
-            self.follow_monitor()
+            self.follow_monitor(alarm)
+
+    def start_alarm(self):
+        """Show a new condition once: switch to VT8 unless someone is logged in."""
+        previous = self.foreground()
+        if previous == '8' or self.operator(previous):
+            # Already showing, or someone is logged in: never switch away from a
+            # login; Alt+F8 shows the condition.
+            self.save(alarm=True)
+            atomic(self.handled, '')
+            self.entered = True
+            return
+        if self.status is not None and valid_vt(previous) and not self.saved().get('pulled'):
+            # Taken from a login prompt: hand it back when the condition clears.
+            self.save(alarm_return=previous, pulled=True)
+        self.save(alarm=True)
+        if self.run('chvt', '8'):
+            atomic(self.handled, '')
+            self.entered = True
 
     def alarm_text(self, top, columns, rows):
         lines = []
@@ -321,25 +348,41 @@ class Console:
         # Overwrite in place, without clearing first, so a phone camera sees no flicker.
         # The page ends without a newline so the first row never scrolls away.
         text = '\033[H\033[?25l' + '\n'.join('\033[2K' + line for line in painted)
-        # Erase what is left below, unless the cursor already sits in the last column.
-        return text + ('\033[J' if len(lines[-1]) < columns else '')
+        # Erase what is left below. A footer filling the last column would lose
+        # its last cell to an erase there, so step to the next row first; on the
+        # bottom row there is nothing below to erase.
+        if len(lines[-1]) < columns:
+            return text + '\033[J'
+        return text + ('\n\033[J' if len(lines) < rows else '')
 
     def end_alarm(self):
-        """The condition is gone: return an operator it pulled away, then show the status page."""
+        """The condition is gone: return an operator it pulled from a prompt, then show the page."""
         state = self.saved()
         if state.get('pulled') and self.foreground() == '8':
-            previous = state.get('return_vt')
+            previous = state.get('alarm_return')
             if not self.run('chvt', previous if valid_vt(previous) else '1'):
                 return  # Retry next tick; VT8 still shows something useful.
-        self.save(alarm=False, pulled=False)
+        state = self.saved()
+        state.pop('alarm_return', None)
+        atomic(self.state, json.dumps(state | {'alarm': False, 'pulled': False}))
         self.entered = False
 
-    def follow_monitor(self):
-        """Show VT8 once per boot and when a monitor is plugged in, unless someone is logged in."""
+    def follow_monitor(self, alarm):
+        """Show VT8 once per boot and when a monitor is plugged in, unless someone is logged in.
+
+        While a condition holds VT8 its own switch rule applies: plugs only
+        move the baseline, and the boot switch counts as done.
+        """
         connected = self.connectors()
-        plugged = self.seen is not None and bool(connected - self.seen)
-        self.seen = connected
+        plugged = False
+        if connected is not None:  # unreadable this tick: keep the previous baseline
+            plugged = self.seen is not None and bool(connected - self.seen)
+            self.seen = connected
         boot = not self.booted.exists()
+        if alarm:
+            if boot:
+                atomic(self.booted, '')
+            return
         if not (boot or plugged):
             return
         current = self.foreground()
@@ -364,7 +407,7 @@ class Console:
                 return  # The private backup survives even a manual service stop.
             self.font.unlink(missing_ok=True)
             self.state.unlink()
-            self.entered = False
+            self.entered = self.handled.exists()
             self.loaded_font = None
         except (OSError, ValueError, KeyError, TypeError):
             pass

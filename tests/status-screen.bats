@@ -11,7 +11,7 @@ setup() {
   [ "$status" -eq 0 ]
 }
 @test "status screen: page fits the console and keeps the login line" {
-  run python3 "$ROOT/tests/status-screen.test.py" PageTests FactTests TextTests UrlTests
+  run python3 "$ROOT/tests/status-screen.test.py" PageTests FactTests TextTests UrlTests AttentionTextTests
   [ "$status" -eq 0 ]
 }
 @test "status screen: the renderer is installed and only the attention owner runs it" {
