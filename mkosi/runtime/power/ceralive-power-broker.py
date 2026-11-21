@@ -651,6 +651,31 @@ def same_mount_namespace(pid):
     return os.readlink(f'/proc/{pid}/ns/mnt') == os.readlink(SYSTEM_MOUNT_NS)
 
 
+def holds_system_terminal(pid, rdev):
+    """For a caller in another mount namespace (a Tailscale SSH session runs in
+    tailscaled.service's): whether one of its standard streams is the system
+    terminal with this device number. The file the caller has open is compared
+    by device and inode with the system's /dev/pts entry, so a pty of a private
+    devpts instance, whose number can match a different system terminal, is not
+    taken for it. Path and namespace of the caller are not used."""
+    path = tty_path(rdev)
+    if path is None:
+        return False
+    try:
+        system = os.stat(path)
+    except OSError:
+        return False
+    for n in (0, 1, 2):
+        try:
+            held = os.stat(f'/proc/{pid}/fd/{n}')
+        except OSError:
+            continue
+        if stat.S_ISCHR(held.st_mode) and held.st_rdev == rdev and \
+                (held.st_dev, held.st_ino) == (system.st_dev, system.st_ino):
+            return True
+    return False
+
+
 def tty_path(rdev):
     major, minor = os.major(rdev), os.minor(rdev)
     if 136 <= major <= 143:
@@ -663,8 +688,9 @@ def tty_path(rdev):
 
 
 def check_terminal(uid, pidfd, fd=None, expected_rdev=None):
-    """The caller's own foreground controlling terminal, in the system's mount
-    namespace; with an opened fd, also that fd's device and owner."""
+    """The caller's own foreground controlling terminal, a system terminal
+    (in the system's mount namespace, or held open on a standard stream); with
+    an opened fd, also that fd's device and owner."""
     pid, data = read_bracketed(pidfd, 'stat')
     proc = parse_stat(data)
     if proc['tty_nr'] == 0:
@@ -673,7 +699,7 @@ def check_terminal(uid, pidfd, fd=None, expected_rdev=None):
         raise PeerError('terminal changed')
     if proc['tpgid'] != proc['pgrp']:
         raise PeerError('not in the foreground of its terminal')
-    if not same_mount_namespace(pid):
+    if not same_mount_namespace(pid) and not holds_system_terminal(pid, proc['tty_nr']):
         raise PeerError('terminal in another mount namespace')
     if fd is not None:
         info = os.fstat(fd)

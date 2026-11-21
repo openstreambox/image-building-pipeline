@@ -130,6 +130,32 @@ print(out.decode(errors='replace').replace('\r', '').strip().splitlines()[-1] if
 PY
 docker exec "$container" chmod 0755 /usr/local/bin/power-test-operator
 
+docker exec -i "$container" tee /usr/local/bin/power-test-pty >/dev/null <<'PY'
+#!/usr/bin/python3
+"""Run a command on a new pty of this process (argv: command, word) and type the
+word at the broker's prompt, like a shell that a namespaced SSH server (Tailscale
+SSH in tailscaled.service) opened."""
+import os, pty, select, sys, time
+command, word = sys.argv[1:3]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp('sh', ['sh', '-c', command])
+out, typed, end = b'', False, time.time() + 60
+while time.time() < end:
+    if select.select([fd], [], [], 0.2)[0]:
+        try:
+            data = os.read(fd, 4096)
+        except OSError:
+            break
+        if not data:
+            break
+        out += data
+    if not typed and b'press Enter' in out:
+        os.write(fd, word.encode() + b'\r'); typed = True
+print(out.decode(errors='replace').replace('\r', '').strip().splitlines()[-1] if out.strip() else '(no output)')
+PY
+docker exec "$container" chmod 0755 /usr/local/bin/power-test-pty
+
 phase1
 docker exec -i "$container" bash -s <<'INNER'
 set -euo pipefail
@@ -213,6 +239,18 @@ reset
 out="$(timeout 75 /usr/local/bin/power-test-operator root ceralive-poweroff poweroff)"
 [[ "$out" == *"Shutting down"* && "$(active poweroff)" = active ]] || fail "root own tty" "$out"
 ok "root on its own terminal, typed word"
+
+reset
+# A shell in another mount namespace on the system's devpts, as Tailscale SSH
+# gives it (tailscaled.service: ReadOnlyPaths=, sessions inherit its namespace).
+systemctl reset-failed ns-shell 2>/dev/null || true
+systemd-run -q --wait --unit=ns-shell -p User=ceralive -p ReadOnlyPaths=/usr/local/bin \
+  -p StandardOutput=file:/run/power-test-out /usr/local/bin/power-test-pty ceralive-poweroff poweroff || true
+out="$(cat /run/power-test-out)"
+[ "$(readlink /proc/1/ns/mnt)" != "$(systemd-run -q --wait --pipe -p ReadOnlyPaths=/usr/local/bin readlink /proc/self/ns/mnt)" ] \
+  || fail "namespaced shell" "the unit shares PID 1's mount namespace"
+[[ "$out" == *"Shutting down"* && "$(active poweroff)" = active ]] || fail "namespaced shell" "$out"
+ok "a shell in another mount namespace on the system devpts (as Tailscale SSH) is prompted: $out"
 
 reset
 out="$(timeout 75 /usr/local/bin/power-test-operator guest ceralive-poweroff poweroff)"
