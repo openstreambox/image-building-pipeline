@@ -20,6 +20,10 @@
 #   2. DEFAULT TRIGGER: start the portal IFF there are NO stored (non-AP) NM WiFi
 #      profiles on /data AND no link-up connectivity appears within a boot grace
 #      window (60-90s). Either a stored profile OR connectivity suppresses it.
+#   3. UNVERIFIED JOIN: a network the portal saved but no join has verified yet
+#      (pending-join, see §CREDENTIAL HANDOFF) does not count as a stored profile. The
+#      grace window decides: connectivity with that profile active verifies it;
+#      otherwise it is deleted, last-error says so and the portal starts again.
 #
 #   EC4: a RAUC A/B update that PRESERVES /data keeps the stored WiFi profiles, so
 #        condition (2) is false and the portal correctly does NOT start after an OTA.
@@ -68,6 +72,15 @@
 #   runs the full teardown; on a wrong passphrase or timeout it deletes the bad
 #   profile, writes an error marker the portal shows, and re-arms the AP for a retry —
 #   the device never ends up headless-dead.
+#   PENDING JOIN: the portal writes pending-join BEFORE it saves the profile, and the
+#   worker removes it once the join is verified, or once the failure path has deleted
+#   the profile. A power loss, reboot or a worker that never ran in between leaves
+#   pending-join behind, and the next boot treats the saved profile as unverified
+#   (trigger 3) instead of as a configured network: with wrong credentials that box
+#   would otherwise stay off-line with no setup AP. Markers this image writes say so
+#   (pending_join=1); a setup marker without that line comes from an image that had no
+#   pending-join, and a saved user profile next to it is treated as pending too, since
+#   that image's failure path deleted the profile before every re-arm.
 #
 # TEARDOWN CONTRACT (MAC6 end-state — all four conditions):
 #   (a) AP mode disabled        — ceralive-ap profile brought down AND deleted.
@@ -147,6 +160,7 @@ STATE_DIR="${CERALIVE_PROVISION_STATE_DIR:-/data/ceralive/provision}"
 FORCE_FLAG="${CERALIVE_PROVISION_FORCE_FLAG:-${STATE_DIR}/force-portal}"          # factory-reset re-trigger
 ACTIVE_FLAG="${CERALIVE_PROVISION_ACTIVE_FLAG:-${STATE_DIR}/portal-active}"       # setup owns wlan0 (header §SETUP MARKER); read by the portal and CeraUI
 TEARDOWN_FLAG="${CERALIVE_PROVISION_TEARDOWN_FLAG:-${STATE_DIR}/teardown-requested}"
+PENDING_JOIN="${CERALIVE_PROVISION_PENDING_JOIN:-${STATE_DIR}/pending-join}"     # saved by the portal, join not verified yet (header §PENDING JOIN)
 SCAN_CACHE="${CERALIVE_PROVISION_SCAN_CACHE:-${STATE_DIR}/scan.txt}"              # SSID list (single-radio: scanned BEFORE AP up)
 ERROR_MARKER="${CERALIVE_PROVISION_ERROR_MARKER:-${STATE_DIR}/last-error}"        # written on a failed join; shown by the portal
 AP_UUID_FILE="${CERALIVE_PROVISION_AP_UUID_FILE:-${STATE_DIR}/ap-uuid}"           # UUIDs of setup AP profiles this script created, one per line
@@ -167,8 +181,8 @@ AP_PREFIX="${CERALIVE_AP_PREFIX:-24}"
 AP_PASSPHRASE="${CERALIVE_AP_PASSPHRASE:-ceralive-setup}"   # WPA2-PSK; documented default (>=8 chars)
 
 # Target (user) WiFi profile the portal writes. A FIXED name keeps retries idempotent;
-# it IS counted by stored_wifi_profile_count, so once written the portal stays down on
-# the next boot (EC4).
+# once a join has verified it, it IS counted by stored_wifi_profile_count, so the
+# portal stays down on the next boot (EC4). While the join is pending it is not.
 USER_CON_NAME="${CERALIVE_USER_CON_NAME:-ceralive-wifi}"
 
 # Boot grace window (60-90s) + connectivity poll cadence.
@@ -191,11 +205,14 @@ ap_ssid() {
 # --- stored WiFi profile count (EXCLUDING our own AP profile) ------------------
 # A real user WiFi profile means the device can rejoin an uplink, so the portal must
 # NOT start (EC4). Our own ${AP_CON_NAME} profile is excluded — it is created by THIS
-# script and must never suppress its own re-trigger.
+# script and must never suppress its own re-trigger. With $1 = 1 the portal's
+# ${USER_CON_NAME} is left out as well: its join is still pending (header §PENDING JOIN).
 stored_wifi_profile_count() {
+  local skip=""
+  [ "${1:-0}" = 1 ] && skip="${USER_CON_NAME}"
   "${NMCLI}" -t -f NAME,TYPE connection show 2>/dev/null \
-    | awk -F: -v ap="${AP_CON_NAME}" '
-        $2 == "802-11-wireless" && $1 != ap { n++ }
+    | awk -F: -v ap="${AP_CON_NAME}" -v skip="${skip}" '
+        $2 == "802-11-wireless" && $1 != ap && !(skip != "" && $1 == skip) { n++ }
         END { print n + 0 }'
 }
 
@@ -434,6 +451,82 @@ have_connectivity() {
   return 1
 }
 
+# --- unverified join (header §PENDING JOIN) -------------------------------------
+# UUIDs of saved Wi-Fi profiles called ${USER_CON_NAME}, one per line; non-zero when NM
+# cannot be read.
+user_con_uuids() {
+  local list
+  list="$("${NMCLI}" -t -f NAME,UUID,TYPE connection show 2>/dev/null)" || return 1
+  awk -F: -v n="${USER_CON_NAME}" 'NF == 3 && $1 == n && $3 == "802-11-wireless" { print $2 }' <<<"${list}"
+}
+
+# Write ${PENDING_JOIN} (temp file + rename) naming the SSID in $1.
+write_pending_join() {
+  local tmp="${PENDING_JOIN}.tmp.$$"
+  mkdir -p "${STATE_DIR}" 2>/dev/null
+  if printf 'ssid=%s\ncon=%s\n' "${1//$'\n'/ }" "${USER_CON_NAME}" >"${tmp}" 2>/dev/null \
+      && mv -fT "${tmp}" "${PENDING_JOIN}" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "${tmp}" 2>/dev/null
+  return 1
+}
+
+# 0 when ${USER_CON_NAME} is saved but no join has verified it: ${PENDING_JOIN} exists,
+# or a setup marker from an image without pending-join (no pending_join=1 line) sits
+# next to a saved ${USER_CON_NAME}. That image deleted the profile on every failed join
+# before re-arming, so the pair only exists when its handoff was cut short. The legacy
+# case is turned into a real ${PENDING_JOIN}, so it outlives the stale-marker teardown.
+join_pending() {
+  [ -e "${PENDING_JOIN}" ] && return 0
+  [ -e "${ACTIVE_FLAG}" ] || return 1
+  grep -qx 'pending_join=1' "${ACTIVE_FLAG}" 2>/dev/null && return 1
+  local uuids
+  uuids="$(user_con_uuids)" && [ -n "${uuids}" ] || return 1
+  log "setup marker from an earlier image next to a saved ${USER_CON_NAME}: its join was never verified"
+  write_pending_join "$("${NMCLI}" -g 802-11-wireless.ssid connection show uuid "${uuids%%$'\n'*}" 2>/dev/null)" \
+    || log "ERROR: could not write ${PENDING_JOIN}; deciding on this boot only"
+  return 0
+}
+
+# Whether a ${USER_CON_NAME} profile is fully activated right now.
+user_con_activated() {
+  local uuids rows
+  uuids="$(user_con_uuids)" && [ -n "${uuids}" ] || return 1
+  rows="$("${NMCLI}" -t -f UUID,STATE connection show --active 2>/dev/null)" || return 1
+  awk -F: 'NR == FNR { if (NF) u[$0] = 1; next } ($1 in u) && $2 == "activated" { f = 1 } END { exit !f }' \
+    <(printf '%s\n' "${uuids}") - <<<"${rows}"
+}
+
+# The grace window ran out without the pending join coming up: delete the unverified
+# profile (by UUID; by name only if NM cannot list it), tell the portal why, and clear
+# ${PENDING_JOIN} once the profile is gone. A failed delete keeps ${PENDING_JOIN}, so
+# the next boot still does not count the profile.
+abandon_pending_join() {
+  local ssid uuids u rc=0
+  ssid="$(sed -n 's/^ssid=//p' "${PENDING_JOIN}" 2>/dev/null | head -n1)"
+  if uuids="$(user_con_uuids)"; then
+    for u in ${uuids}; do
+      [ -n "${ssid}" ] || ssid="$("${NMCLI}" -g 802-11-wireless.ssid connection show uuid "${u}" 2>/dev/null)"
+      if "${NMCLI}" connection delete uuid "${u}" >/dev/null 2>&1; then
+        log "deleted unverified profile ${USER_CON_NAME} (${u})"
+      else
+        log "ERROR: could not delete unverified profile ${USER_CON_NAME} (${u})"
+        rc=1
+      fi
+    done
+  else
+    "${NMCLI}" connection delete "${USER_CON_NAME}" >/dev/null 2>&1 || rc=1
+  fi
+  mkdir -p "${STATE_DIR}"
+  printf 'ssid=%s\nreason=not_verified\n' "${ssid}" >"${ERROR_MARKER}"
+  if [ "${rc}" -eq 0 ]; then
+    rm -f "${PENDING_JOIN}"
+  else
+    log "ERROR: ${USER_CON_NAME} may still be saved; ${PENDING_JOIN} kept"
+  fi
+}
+
 # --- decision: should the provisioning portal start this boot? -----------------
 should_start_portal() {
   if [ -e "${FORCE_FLAG}" ]; then
@@ -441,7 +534,13 @@ should_start_portal() {
     return 0
   fi
 
-  local n; n="$(stored_wifi_profile_count)"
+  local pending=0
+  if join_pending; then
+    pending=1
+    log "${USER_CON_NAME} was saved by the portal but its join was never verified → not counted as a stored profile"
+  fi
+
+  local n; n="$(stored_wifi_profile_count "${pending}")"
   if [ "${n}" -gt 0 ]; then
     log "found ${n} stored WiFi profile(s) on /data → portal not needed (EC4: OTA-preserved profiles keep it down)"
     return 1
@@ -452,12 +551,25 @@ should_start_portal() {
   while [ "${waited}" -lt "${GRACE_SECONDS}" ]; do
     if have_connectivity; then
       log "connectivity detected after ${waited}s → portal not needed"
+      if [ "${pending}" = 1 ]; then
+        if user_con_activated; then
+          log "${USER_CON_NAME} is up → join verified"
+          rm -f "${PENDING_JOIN}"
+        else
+          log "connectivity is not through ${USER_CON_NAME}; it stays unverified (${PENDING_JOIN} kept)"
+        fi
+      fi
       return 1
     fi
     sleep "${POLL_INTERVAL}"
     waited=$(( waited + POLL_INTERVAL ))
   done
 
+  if [ "${pending}" = 1 ]; then
+    log "grace expired (${GRACE_SECONDS}s): ${USER_CON_NAME} never came up → deleting it and starting the portal"
+    abandon_pending_join
+    return 0
+  fi
   log "grace expired (${GRACE_SECONDS}s): no profiles + no connectivity → portal required"
   return 0
 }
@@ -587,7 +699,7 @@ bring_up_ap() {
   # CeraUI leaves wlan0 alone, whatever the AP's connection is called. No marker, no
   # AP: an unwritable marker aborts before anything touches the radio.
   mkdir -p "${STATE_DIR}"
-  printf 'ssid=%s\ngateway=%s\niface=%s\ncon=%s\nuser_con=%s\n' \
+  printf 'ssid=%s\ngateway=%s\niface=%s\ncon=%s\nuser_con=%s\npending_join=1\n' \
       "${ssid}" "${AP_GW}" "${AP_IFACE}" "${AP_CON_NAME}" "${USER_CON_NAME}" >"${ACTIVE_FLAG}" \
     || abort_before_ap "could not write the setup marker ${ACTIVE_FLAG}"
 
@@ -749,7 +861,7 @@ connect_target() {
 
   if bounded_connect "${con}" && verify_joined; then
     log "joined target network (${con}) — finalising provisioning teardown"
-    rm -f "${ERROR_MARKER}"
+    rm -f "${ERROR_MARKER}" "${PENDING_JOIN}"
     teardown_ap 1     # KEEP_LINK: wlan0 is carrying the new client connection
     exit $?
   fi
@@ -758,7 +870,11 @@ connect_target() {
   # profile (so it neither lingers nor suppresses a re-trigger), record the reason,
   # and re-arm the AP for a retry. Never leave the device headless-dead.
   log "join FAILED for '${attempt_ssid:-${con}}' — returning to AP mode for retry"
-  "${NMCLI}" connection delete "${con}" >/dev/null 2>&1 || true
+  if "${NMCLI}" connection delete "${con}" >/dev/null 2>&1; then
+    rm -f "${PENDING_JOIN}"
+  else
+    log "ERROR: could not delete profile ${con}; it stays unverified (${PENDING_JOIN} kept)"
+  fi
   mkdir -p "${STATE_DIR}"
   printf 'ssid=%s\nreason=auth_or_timeout\n' "${attempt_ssid}" >"${ERROR_MARKER}"
   bring_up_ap
