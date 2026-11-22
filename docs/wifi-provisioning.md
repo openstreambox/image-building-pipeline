@@ -49,7 +49,7 @@ Evaluated at runtime by `ceralive-provision start` (the unit cannot express it a
 static `Condition`):
 
 1. `force-portal` flag present → **start** (factory-reset hook).
-2. Else if there is **any** stored non-AP NM WiFi profile on `/data` → **do not start**
+2. Else if there is **any** stored NM WiFi station profile on `/data` → **do not start**
    (the device can rejoin an uplink). This is the **EC4 OTA-safe** property: a RAUC
    update that preserves `/data` keeps the profiles, so the portal stays down. A
    `ceralive-wifi` whose join is still pending does not count (see *Unverified join*).
@@ -57,6 +57,8 @@ static `Condition`):
    (`full`/`limited`/`portal`) or a default route appears, an uplink exists → **do not
    start**. Otherwise → **start**.
 
+Saved hotspots, ad-hoc and mesh profiles do not count. When a profile's mode
+cannot be read, it still counts to avoid starting setup over a saved station.
 The device's own setup AP is excluded from the stored-profile count. It is recognised
 the same way cleanup recognises it (the UUID recorded in `ap-uuid`, or the settings
 fingerprint below), not by its name, so a user's station profile that happens to be

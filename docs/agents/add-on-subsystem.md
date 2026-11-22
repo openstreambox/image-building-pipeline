@@ -686,7 +686,7 @@ credentials with no screen or keyboard. Standalone artifacts under
 The portal mark is vendored under `mkosi/runtime/brand/`, pinned by `brand-assets.lock.json` and covered by `BRAND-ASSETS-NOTICE.md`; missing, unreadable or oversized artwork is logged and omitted without interrupting setup.
 
 - **Trigger** (runtime decision, not a static unit Condition): the AP starts IFF
-  there are **no stored (non-AP) NM WiFi profiles** on `/data` **AND** no link-up
+  there are **no stored NM WiFi station profiles** on `/data` **AND** no link-up
   connectivity appears within a **60-90s boot grace window** (default 75s). Either
   a stored profile or any connectivity (NM `full`/`limited`/`portal`, or a default
   route) suppresses it. A `/data/ceralive/provision/force-portal` flag
