@@ -1,0 +1,3 @@
+# The S99 device tree has a dedicated full-speed trip. Keep the open-drain
+# line driven at zero duty, when a floating line would request full speed.
+ACTION=="add", SUBSYSTEM=="hwmon", KERNELS=="pwm-fan", ATTR{name}=="pwmfan", TEST=="/sys/firmware/devicetree/base/thermal-zones/package-thermal/trips/case-fan-full", ATTR{pwm1_enable}="2"

@@ -117,6 +117,11 @@ setup_fan_curve() {
   install -D -m 0755 "${src}/ceralive-fan-curve.sh" "${sbin_dir}/ceralive-fan-curve"
   install -D -m 0644 "${src}/ceralive-fan-curve.service" "${unit_dir}/ceralive-fan-curve.service"
 
+  if [[ "${BOARD_ID:-unknown}" == rock-5b-plus ]]; then
+    local rules_dir="${FAN_CURVE_RULES_DIR:-/etc/udev/rules.d}"
+    install -D -m 0644 "${src}/99-ceralive-rock-5b-plus-fan.rules" "${rules_dir}/99-ceralive-rock-5b-plus-fan.rules"
+  fi
+
   enable_service ceralive-fan-curve.service
 }
 

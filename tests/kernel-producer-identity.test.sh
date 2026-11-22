@@ -28,7 +28,8 @@ fingerprint() (
 assert_eq "unmodified producer matches the fixture version" "${expected}" "$(fingerprint)"
 
 # The reset-evidence producer inputs must invalidate cached kernel artifacts.
-for file in lib/kernel/ramoops.sh manifests/kernel/rk3588-ramoops.dtsi; do
+for file in lib/kernel/ramoops.sh manifests/kernel/rk3588-ramoops.dtsi \
+    lib/kernel/rock-5b-plus-fan.sh manifests/kernel/rock-5b-plus-fan.dtsi; do
   cp "${WORK}/repo/${file}" "${WORK}/original"
   printf '\n' >>"${WORK}/repo/${file}"
   actual="$(fingerprint)"

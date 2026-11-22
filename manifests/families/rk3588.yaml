@@ -341,7 +341,8 @@ variants:
       # Revision 11 combines revision 9's ramoops reservation with the explicit
       # rfkill configuration, without 0052; neither revision 9's nor the retired
       # revision 10's bytes are reissued under this version.
-      package_version: 7.2.0-ceralive11
+      # Revision 12 adds the Rock 5B+ case fan profiles to the board DTB.
+      package_version: 7.2.0-ceralive12
 
       # PLATFORM-LAYER INSTALL MAPPING. bindeb-pkg puts arm64 in-tree DTBs under
       # /usr/lib/linux-image-<KERNELRELEASE>/<soc-vendor>/; the U-Boot boot script
@@ -400,6 +401,6 @@ variants:
       # It carries the same `.0` for the same reason edge does.
       local_version: -ceralive-rk3588-test
       kernel_release: 7.2.0-ceralive-rk3588-test
-      package_version: 7.2.0-ceralive11+test1
+      package_version: 7.2.0-ceralive12+test1
 
       dtb_deb_dir: /usr/lib/linux-image-7.2.0-ceralive-rk3588-test/rockchip
