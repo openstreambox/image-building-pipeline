@@ -54,6 +54,7 @@ tests/variant-contract.bats	bats	unit	default-bats	family variants, kernel-sourc
 tests/bootloader-variant.bats	bats	unit	default-bats	per-variant U-Boot selection, committed blob-identity map, readback verification and unmapped-tuple refusal
 tests/rk3588-ab-contract.bats	bats	integration	default-bats	real RK3588 A/B disk geometry and preflash gate, no hardware
 tests/bench-partlabels.bats	bats	unit	default-bats	opt-in bench PARTLABEL overlay and its production no-op
+tests/migrate-data-recovery.bats	bats	unit	default-bats	persistent config and connection profiles across interrupted seeds and slot changes
 tests/release-preset.bats	bats	unit	default-bats	release root pin and update-channel preset: validation, forwarding, runtime writer
 tests/fixtures/release-preset-cases.py	tool	support	invoked-by-suite	differential update-preset cases with CeraUI reader verdicts, driven by release-preset.bats
 tests/remote-access.bats	bats	unit	default-bats	opt-in Tailscale BOOT-key enrollment, /data state, seeded SSH keys and key-only sshd
