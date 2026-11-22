@@ -52,6 +52,21 @@ if load ${devtype} ${devnum}:1 ${loadaddr} cera_board.env; then
   env import -t ${loadaddr} ${filesize}
 fi
 
+# The ZERO companion uses the Rockchip GPT layout and boots slot A directly.
+# This image has no OTA service to confirm or arm an A/B boot.
+if test "${board_id}" = "radxa-zero3"; then
+  if part uuid ${devtype} ${devnum}:2 cera_root_uuid; then
+    if ext4load ${devtype} ${devnum}:2 ${kernel_addr_r} /boot/Image; then
+      if ext4load ${devtype} ${devnum}:2 ${fdt_addr_r} /boot/dtb/rockchip/${fdtfile}; then
+        setenv bootargs "root=PARTUUID=${cera_root_uuid} rootwait rw console=${console} earlycon"
+        booti ${kernel_addr_r} - ${fdt_addr_r}
+      fi
+    fi
+  fi
+  echo "Radxa ZERO 3W: slot A boot failed"
+  exit 1
+fi
+
 # --- A/B boot state (defaults are safe if the file is missing/partial)
 setenv BOOT_ORDER "A B"
 setenv BOOT_A_LEFT 3

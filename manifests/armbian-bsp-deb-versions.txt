@@ -2,4 +2,5 @@ armbian-firmware-full=26.8.3
 linux-u-boot-rock-5b-plus-vendor=26.8.3
 linux-u-boot-orangepi5-plus-vendor=26.8.3
 linux-u-boot-rock-5b-plus-edge=26.8.3
+linux-u-boot-radxa-zero3-edge=26.8.3
 linux-u-boot-orangepi5-plus-edge=26.8.3

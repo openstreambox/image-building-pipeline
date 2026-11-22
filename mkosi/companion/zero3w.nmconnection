@@ -1,0 +1,12 @@
+[connection]
+id=usb-companion
+type=ethernet
+interface-name=zero3usb0
+
+[ipv4]
+method=manual
+address1=169.254.77.1/16
+never-default=true
+
+[ipv6]
+method=disabled

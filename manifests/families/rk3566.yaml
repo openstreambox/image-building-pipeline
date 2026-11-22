@@ -1,0 +1,38 @@
+# CeraLive Image Family Manifest — Rockchip RK3566
+#
+# Validates against ../schema/family.schema.json (draft 2020-12).
+# First consumer: the Radxa ZERO 3W (manifests/boards/radxa-zero-3w.yaml).
+#
+# The companion build stages its in-tree kernel and DTB directly. The only
+# Armbian package it needs is the board-specific U-Boot.
+#
+# The partition template name is the frozen Rockchip A/B layout already used
+# by RK3588 (16 MiB raw gap, idbloader at sector 64, FAT boot at sector 32768).
+# No script reads the name as a SoC id. Reusing it avoids a second GPT.
+
+arch: arm64
+
+armbian_branch: edge
+
+companion_kernel:
+  tag: v7.2
+  commit: 8d3ae59288f1e7d58d76558a6ee96d533bc5019f
+  builder_image: debian:trixie-20260623-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
+  fragment: manifests/kernel/rk3566-companion.fragment
+
+kernel_packages: []
+
+uboot_packages: []
+
+dtb_packages: []
+
+firmware_packages: []
+
+rauc_bootloader_adapter: custom
+
+# Shared frozen Rockchip A/B geometry. See the header. Not an RK3588 SoC claim.
+partition_template: rk3588-ab
+
+# Mainline chosen stdout is serial2 at 1.5 Mbaud (ttyS2). Same UART the
+# RK3588 boards use; the ZERO 3 debug header is UART2_M0.
+serial_console: ttyS2:1500000

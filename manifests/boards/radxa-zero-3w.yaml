@@ -1,0 +1,42 @@
+# CeraLive Image Board Manifest — Radxa ZERO 3W (RK3566)
+#
+# Validates against ../schema/board.schema.json (draft 2020-12).
+# Inherits arch, branch, kernel/dtb/firmware packages, the RAUC adapter,
+# the shared Rockchip A/B partition template and the serial console from
+# families/rk3566.yaml.
+#
+# board_id is the Armbian BOARD= value (one defconfig covers ZERO 3W and 3E).
+# The manifest stem stays the 3W, because the 3E is a different board: it has
+# Ethernet and no onboard Wi-Fi, and its DTB is rk3566-radxa-zero-3e.dtb.
+
+family: rk3566
+
+board_id: radxa-zero3
+
+# Mainline filename. U-Boot's own default is rockchip/rk3566-radxa-zero-3w.dtb;
+# cera_board.env sets fdtfile to this basename and the shared boot script
+# looks it up under /boot/dtb/rockchip/.
+dtb_name: rk3566-radxa-zero-3w.dtb
+
+# Mainline U-Boot from the Armbian edge archive.
+uboot_packages:
+  - linux-u-boot-radxa-zero3-edge
+
+single_slot_fallback: false
+
+modem_ports:
+  status: unverified
+
+app_backend: sysext
+
+description: >-
+  Radxa ZERO 3W (RK3566), the 1 GB units with no eMMC. Boot is microSD only.
+  USB-C 1 is USB 2.0 OTG and the only 5 V power inlet. The U-Boot defconfig
+  Armbian edge builds (v2025.10, radxa-zero-3-rk3566_defconfig) implies
+  standard boot, which searches /boot.scr, and it enables RockUSB only: no
+  CDC gadget and no video console. The bring-up image has to add a USB
+  gadget and must not request USB host on that port. USB-C 2 is a USB 3
+  host and is not a power inlet. Reported radio is Wi-Fi 6 / Bluetooth 5.4;
+  Armbian's board file enables AIC8800 SDIO, and mainline does not bind it.
+  The companion image starts a wired USB gadget and SSH. There is no onboard
+  Wi-Fi, Bluetooth or streaming stack in this image.

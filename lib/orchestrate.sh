@@ -242,6 +242,11 @@ main() {
 
   [[ -n "${board}" ]]    || { usage; die "--board is required"; }
   [[ -n "${manifest}" ]] || { usage; die "--manifest is required"; }
+  if [[ "${board}" == "radxa-zero-3w" ]]; then
+    [[ "${variant}" == default && "${MKOSI_NATIVE:-0}" == 0 ]] && (( !kernel_only && !release )) \
+      || die "radxa-zero-3w supports the default containerized companion image only"
+    exec bash "${HERE}/build-companion.sh" "${board}" "${manifest}"
+  fi
   require_cmd python3
   require_cmd ar
   require_cmd tar

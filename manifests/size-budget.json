@@ -31,5 +31,10 @@
   "x86-minipc": {
     "rootfs_bytes_max": 1500000000,
     "measured": null
+  },
+  "radxa-zero-3w": {
+    "rootfs_bytes_max": 3500000000,
+    "measured": null,
+    "note": "Same frozen Rockchip slot ceiling as the RK3588 boards. No ZERO 3W rootfs has been measured; this is not a wet size."
   }
 }

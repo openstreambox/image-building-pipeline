@@ -5,6 +5,20 @@
   "description": "Family-tier manifest. Captures the SoC/architecture-level build attributes shared by every board in a family (e.g. rk3588). A single family file is referenced by many board files via the board manifest's `family` field. Only fields actually consumed by the v2 builder are modelled; descriptive hardware metadata from the legacy configs/devices/*.conf lives in the board `description`/`quirks`, not here.\n\nVARIANT MODEL: the family's TOP-LEVEL fields are the base every variant starts from. An optional `variants:` map declares named overlays that are applied when a build asks for one (`build <board> --variant <name>`, `CERALIVE_KERNEL_VARIANT`). Resolver merge order is family -> variant -> board (board still wins).\n\nWHICH overlay a variant-less build resolves is the family's own declaration. With no `default_variant:` the answer is NO overlay — the top-level fields ARE the production path, and adding a variant provably cannot move it. With `default_variant: <name>` the named overlay IS the production path and a variant-less build resolves it byte-identically to `--variant <name>`, while the top-level fields remain the base other variants overlay.",
   "type": "object",
   "additionalProperties": false,
+  "if": { "required": ["companion_kernel"] },
+  "then": {
+    "properties": {
+      "kernel_packages": { "maxItems": 0 },
+      "dtb_packages": { "maxItems": 0 },
+      "firmware_packages": { "maxItems": 0 }
+    }
+  },
+  "else": {
+    "properties": {
+      "kernel_packages": { "minItems": 1 },
+      "firmware_packages": { "minItems": 1 }
+    }
+  },
   "required": [
     "arch",
     "armbian_branch",
@@ -17,6 +31,18 @@
     "serial_console"
   ],
   "properties": {
+    "companion_kernel": {
+      "description": "Pinned mainline kernel source for the trimmed USB companion image.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tag", "commit", "builder_image", "fragment"],
+      "properties": {
+        "tag": { "type": "string", "pattern": "^v[0-9]+[.][0-9]+([.][0-9]+)?$" },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "builder_image": { "$ref": "#/$defs/kernel_source/properties/builder_image" },
+        "fragment": { "type": "string", "pattern": "^manifests/kernel/[a-z0-9-]+[.]fragment$" }
+      }
+    },
     "arch": {
       "description": "Target CPU architecture in mkosi's identifier space (consumed by mkosi --architecture; see lib/orchestrate.sh). 'arm64' covers rk3588; 'x86-64' covers Intel N100/N200 + AMD mini-PCs. mkosi has NO 'amd64' — its x86 identifier is 'x86-64' (learnings task 13). 'amd64' is retained only as a legacy alias that orchestrate.sh maps to mkosi x86-64; NEW x86 families use 'x86-64' directly. NOTE: the Debian *package* arch is still 'amd64' (e.g. linux-image-amd64) — that lives in kernel_packages, never here.",
       "type": "string",
@@ -31,7 +57,6 @@
       "description": "Armbian kernel image package(s) for the family (e.g. linux-image-vendor-rockchip64). Maps to the linux-image-* entries of BOARD_PACKAGES.",
       "type": "array",
       "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
-      "minItems": 1,
       "uniqueItems": true
     },
     "uboot_packages": {
@@ -49,10 +74,9 @@
       "uniqueItems": true
     },
     "firmware_packages": {
-      "description": "SoC/GPU/Wi-Fi firmware package(s) (e.g. armbian-firmware, mali-g610-firmware, firmware-realtek). Maps to firmware entries of BOARD_PACKAGES / EXTRA_BSP_PACKAGES and FIRMWARE_FILES blobs. orchestrate.sh require_field's FIRMWARE_PACKAGES unconditionally, so this MUST be a non-empty set of valid Debian package names — an empty array would otherwise pass the schema and only fail at build time.",
+      "description": "SoC/GPU/Wi-Fi firmware package names. The wired companion profile stages no firmware packages.",
       "type": "array",
       "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
-      "minItems": 1,
       "uniqueItems": true
     },
     "rauc_bootloader_adapter": {

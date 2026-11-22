@@ -27,6 +27,9 @@ matching bench report and immutable publication authorization.
 
 ## Build Requirements (at a glance)
 
+The [Radxa ZERO 3W companion image](docs/radxa-zero-3w-companion.md) has a
+dedicated wired bring-up target.
+
 | Requirement | Version / detail | Verified |
 |---|---|---|
 | mkosi | ≥ 26 (native builds only; container build needs none of this host-side) | `mkosi --version` → `mkosi 26` on this host |

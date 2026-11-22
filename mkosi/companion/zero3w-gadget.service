@@ -1,0 +1,15 @@
+[Unit]
+Description=Radxa ZERO 3W USB NCM and ACM gadget
+Requires=sys-kernel-config.mount
+After=sys-kernel-config.mount
+Before=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecCondition=/usr/libexec/zero3w-gadget check
+ExecStart=/usr/libexec/zero3w-gadget start
+ExecStopPost=/usr/libexec/zero3w-gadget stop
+
+[Install]
+WantedBy=multi-user.target
