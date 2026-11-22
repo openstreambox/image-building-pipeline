@@ -305,10 +305,10 @@ variants:
       # off-on delay) was refuted on hardware and retired. The ROCK 5B+ slot
       # power order is set by the boot script instead:
       # docs/rock5bplus-internal-modem.md.
-      # The fork series adds three fan driver patches to that 32-member base.
-      # osb/review/rock-fan-kernel-pin keeps this exact commit fetchable.
+      # The fork series adds five fan-related patches to that 32-member base.
+      # osb/review/rock-fan-kernel-pin-r4 keeps this exact commit fetchable.
       patches_git_url: https://github.com/openstreambox/rk3588-kernel-patches.git
-      patches_commit: 208c82854a992b6b2666dd8c35dcbfcabcfdaac4
+      patches_commit: 3bab0311212a5cc6ec66974eea8f7fcd80e0ce1e
       patches_series: patches/series
 
       defconfig_base: defconfig

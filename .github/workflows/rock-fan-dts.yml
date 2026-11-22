@@ -6,12 +6,15 @@ on:
     paths:
       - .github/workflows/rock-fan-dts.yml
       - ci/check-rock-fan-dts.sh
+      - lib/build-kernel.sh
       - lib/resolve*
       - lib/kernel/ramoops.sh
       - lib/kernel/rock-5b-plus-fan.sh
       - manifests/boards/rock-5b-plus.yaml
       - manifests/families/rk3588.yaml
       - manifests/kernel/*.dtsi
+      - mkosi/runtime/ceralive-fan-curve.service
+      - mkosi/runtime/ceralive-fan-kickstart.service
       - tests/rock-5b-plus-fan.bats
       - tools/read-rock-5b-plus-fan.sh
   pull_request:
@@ -19,12 +22,15 @@ on:
     paths:
       - .github/workflows/rock-fan-dts.yml
       - ci/check-rock-fan-dts.sh
+      - lib/build-kernel.sh
       - lib/resolve*
       - lib/kernel/ramoops.sh
       - lib/kernel/rock-5b-plus-fan.sh
       - manifests/boards/rock-5b-plus.yaml
       - manifests/families/rk3588.yaml
       - manifests/kernel/*.dtsi
+      - mkosi/runtime/ceralive-fan-curve.service
+      - mkosi/runtime/ceralive-fan-kickstart.service
       - tests/rock-5b-plus-fan.bats
       - tools/read-rock-5b-plus-fan.sh
 
@@ -39,7 +45,7 @@ jobs:
   pinned-dts:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install device tree test tools
         run: |
           sudo apt-get update

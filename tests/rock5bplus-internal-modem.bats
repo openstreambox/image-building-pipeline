@@ -13,7 +13,7 @@ setup() {
   for variant in edge edge-test; do
     run bash "$PIPELINE_DIR/lib/resolve.sh" rock-5b-plus --variant "$variant"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='208c82854a992b6b2666dd8c35dcbfcabcfdaac4'"* ]]
+    [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='3bab0311212a5cc6ec66974eea8f7fcd80e0ce1e'"* ]]
     [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/openstreambox/rk3588-kernel-patches.git'"* ]]
     [[ "$output" == *"KERNEL_SOURCE_PACKAGE_VERSION='7.2.0-ceralive12"* ]]
     [[ "$output" == *"MODEM_PORTS_SLOTS_INTERNAL_4G='platform-fc800000.usb-usb-0:1.4'"* ]]
