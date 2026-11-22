@@ -460,6 +460,7 @@ main() {
       fi
       echo "== applied ${applied} patch(es)"
       bash /in/ramoops.sh /src/linux /in/ramoops.dtsi
+      bash /in/rock-5b-plus-fan.sh /src/linux /in/rock-5b-plus-fan.dtsi
 
       # Both config modes converge on ONE olddefconfig/syncconfig/verify sequence;
       # only the way the starting .config is obtained differs. `declared_config`
@@ -578,6 +579,8 @@ main() {
     -v "${KERNEL_CONFIG_VERIFIER_SH:-${HERE}/verify-kernel-config.sh}:/in/verify-kernel-config.sh:ro" \
     -v "${KERNEL_LIB_DIR}/ramoops.sh:/in/ramoops.sh:ro" \
     -v "${PIPELINE_DIR}/manifests/kernel/rk3588-ramoops.dtsi:/in/ramoops.dtsi:ro" \
+    -v "${KERNEL_LIB_DIR}/rock-5b-plus-fan.sh:/in/rock-5b-plus-fan.sh:ro" \
+    -v "${PIPELINE_DIR}/manifests/kernel/rock-5b-plus-fan.dtsi:/in/rock-5b-plus-fan.dtsi:ro" \
     -v "${work}/out:/out" \
     -v "${work}/src:/src" \
     -v "${ccache_dir}:/ccache" \

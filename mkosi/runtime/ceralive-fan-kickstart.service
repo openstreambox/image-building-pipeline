@@ -1,4 +1,7 @@
 [Unit]
+# These Rock 5B+ profiles set the fan policy in the device tree.
+ConditionPathExists=!/sys/firmware/devicetree/base/case-fan
+ConditionPathExists=!/sys/firmware/devicetree/base/thermal-zones/package-thermal/trips/case-fan-full
 Description=CeraLive fan kick-start — brief full-PWM nudge when the pwm-fan leaves a dead stop
 Documentation=file:///usr/local/sbin/ceralive-fan-kickstart
 # The board's pwm-fan enters its FIRST active state at 70/255 (~27.5% duty) —

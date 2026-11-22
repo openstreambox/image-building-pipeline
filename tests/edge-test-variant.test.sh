@@ -109,7 +109,7 @@ assert_param KERNEL_VARIANT 'edge-test'
 assert_param KERNEL_PACKAGES 'linux-image-7.2.0-ceralive-rk3588-test'
 assert_param KERNEL_SOURCE_LOCAL_VERSION '-ceralive-rk3588-test'
 assert_param KERNEL_SOURCE_KERNEL_RELEASE '7.2.0-ceralive-rk3588-test'
-assert_param KERNEL_SOURCE_PACKAGE_VERSION '7.2.0-ceralive11+test1'
+assert_param KERNEL_SOURCE_PACKAGE_VERSION '7.2.0-ceralive12+test1'
 assert_param KERNEL_SOURCE_DEFCONFIG_FRAGMENTS \
   'manifests/kernel/rk3588-edge.fragment manifests/kernel/rk3588-edge-test.fragment'
 

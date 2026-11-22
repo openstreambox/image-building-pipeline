@@ -274,6 +274,7 @@ tests/host-test-harness.test.sh	shell	unit	default-shell	checks scratch forwardi
 tests/ext4-population.test.sh	shell	unit	default-shell	x86 native and container formatter tool floor, explicit epoch and filesystem identity
 tests/real-rauc-fixture-lib.sh	helper	support	invoked-by-suite	Shared real RAUC slot geometry and isolated service device lookup
 tests/reset-evidence.bats	bats	unit	default-bats	Reset evidence persistence and RK3588 reserved memory
+tests/rock-5b-plus-fan.bats	bats	unit	default-bats	Rock 5B+ case fan device-tree profiles
 tests/fixtures/tmpfiles-clock.c	fixture	support	not-executed	Test-only realtime jump for tmpfiles retention regression; compiled with cc by reset-evidence.bats
 tests/checked-shutdown.bats	bats	unit	default-bats	planned power actions honor shutdown inhibitors
 tests/real-logind-contract.sh	shell	privileged	opt-in	CERALIVE_LOGIND_TEST_CONTAINER names an exclusive disposable systemd 257 container

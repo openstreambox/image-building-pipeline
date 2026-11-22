@@ -2741,11 +2741,14 @@ SH
 
   run env PATH="$bin:$PATH" FAN_CALLS="$calls" \
     CERALIVE_RUNTIME_SRC="$PIPELINE_DIR/mkosi/runtime" \
+    BOARD_ID=rock-5b-plus FAN_CURVE_RULES_DIR="$BATS_TEST_TMPDIR/rules" \
     FAN_CURVE_UNIT_DIR="$unit_dir" FAN_CURVE_SBIN_DIR="$sbin_dir" \
     bash -c "source '$POSTINST_ENTRY'; setup_fan_curve"
   [ "$status" -eq 0 ]
   [ -x "$sbin_dir/ceralive-fan-curve" ]
   [ -f "$unit_dir/ceralive-fan-curve.service" ]
+  cmp "$PIPELINE_DIR/mkosi/runtime/99-ceralive-rock-5b-plus-fan.rules" \
+    "$BATS_TEST_TMPDIR/rules/99-ceralive-rock-5b-plus-fan.rules"
 
   run cat "$calls"
   [ "$status" -eq 0 ]

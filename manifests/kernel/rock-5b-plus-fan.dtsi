@@ -1,0 +1,124 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+//
+// Select 1 only for a separately versioned image with a wired 4-pin S99.
+// The default 2-wire fan is supplied with steady DC or disconnected.
+#define ROCK_5B_PLUS_FAN_S99 0
+
+#if ROCK_5B_PLUS_FAN_S99
+#include <dt-bindings/pwm/pwm.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+&fan {
+	// The S99 takes 5 V directly from the 40-pin header's always-on rail.
+	/delete-property/ fan-supply;
+	status = "okay";
+	// The board's low-side MOSFET inverts the signal at the PWM wire.
+	pwms = <&pwm1 0 40000 PWM_POLARITY_INVERTED>;
+	// Header pin 37, with an external 10 kΩ pull-up to 3.3 V.
+	interrupt-parent = <&gpio0>;
+	interrupts = <RK_PA0 IRQ_TYPE_EDGE_FALLING>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&case_fan_tach>;
+	pulses-per-revolution = <2>;
+	fan-stop-to-start-percent = <30>;
+	fan-shutdown-percent = <100>;
+	cooling-levels = <0 150 153 255>;
+};
+
+&pinctrl {
+	case-fan {
+		case_fan_tach: case-fan-tach {
+			rockchip,pins = <0 RK_PA0 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+};
+
+&package_fan0 {
+	temperature = <45000>;
+	hysteresis = <2500>;
+};
+
+&package_fan1 {
+	temperature = <50000>;
+	hysteresis = <2500>;
+};
+
+&package_thermal {
+	trips {
+		case_fan_full: case-fan-full {
+			temperature = <70000>;
+			hysteresis = <2500>;
+			type = "active";
+		};
+	};
+
+	cooling-maps {
+		map0 {
+			cooling-device = <&fan 1 1>;
+		};
+
+		map1 {
+			cooling-device = <&fan 2 2>;
+		};
+
+		map2 {
+			trip = <&case_fan_full>;
+			cooling-device = <&fan 3 3>;
+		};
+	};
+};
+
+#else
+
+&fan {
+	status = "disabled";
+};
+
+&pwm1 {
+	status = "disabled";
+};
+
+&pinctrl {
+	// Drive the gate high even when the fan consumer never binds.
+	pinctrl-names = "default";
+	pinctrl-0 = <&case_fan_boot_on>;
+
+	case-fan {
+		case_fan_boot_on: case-fan-boot-on {
+			rockchip,pins = <0 RK_PC0 RK_FUNC_GPIO &pcfg_output_high>;
+		};
+	};
+};
+
+/ {
+	case-fan {
+		compatible = "gpio-fan";
+		status = "okay";
+		// GPIO0_C0 is PWM1 M0, the gate of the fan header's switch.
+		gpios = <&gpio0 RK_PC0 GPIO_ACTIVE_HIGH>;
+		gpio-fan,speed-map = <0 0>, <11000 1>;
+		fan-keep-running-on-detach;
+		#cooling-cells = <2>;
+	};
+};
+
+&package_fan0 {
+	temperature = <55000>;
+	hysteresis = <5000>;
+};
+
+&package_thermal {
+	trips {
+		/delete-node/ package-fan1;
+	};
+
+	cooling-maps {
+		map0 {
+			cooling-device = <&{/case-fan} 0 1>;
+		};
+
+		/delete-node/ map1;
+	};
+};
+
+#endif

@@ -637,8 +637,8 @@ YAML
   # SHA — a fresh clone cannot reach the latter.
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='bc7e44fa35d3eded23567dd48e65f6dc799f4b34'"* ]]
-  [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-kernel-patches.git'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='3bab0311212a5cc6ec66974eea8f7fcd80e0ce1e'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/openstreambox/rk3588-kernel-patches.git'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_TAG='v7.2'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_COMMIT='8d3ae59288f1e7d58d76558a6ee96d533bc5019f'"* ]]
 }
@@ -1032,7 +1032,7 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" == *"git clone --branch v7.2"* ]]
   [[ "$output" == *"git rev-parse HEAD == 8d3ae59288f1e7d58d76558a6ee96d533bc5019f"* ]]
-  [[ "$output" == *"bc7e44fa35d3eded23567dd48e65f6dc799f4b34"* ]]
+  [[ "$output" == *"3bab0311212a5cc6ec66974eea8f7fcd80e0ce1e"* ]]
   [[ "$output" == *"BASE_IMAGE=debian:trixie-20260623-slim@sha256:"* ]]
   [[ "$output" == *"bindeb-pkg"* ]]
   [[ "$output" == *"linux-headers-*/linux-libc-dev discarded"* ]]

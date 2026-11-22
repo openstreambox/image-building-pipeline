@@ -1,4 +1,7 @@
 [Unit]
+# These Rock 5B+ profiles set the fan policy in the device tree.
+ConditionPathExists=!/sys/firmware/devicetree/base/case-fan
+ConditionPathExists=!/sys/firmware/devicetree/base/thermal-zones/package-thermal/trips/case-fan-full
 Description=CeraLive fan curve — lower the pwm-fan zone's first active thermal trip
 Documentation=file:///usr/local/sbin/ceralive-fan-curve
 # The RK3588 package thermal zone ships from the device tree with its first
