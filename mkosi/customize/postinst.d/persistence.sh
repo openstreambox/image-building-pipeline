@@ -279,19 +279,24 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
     # absent and dangling entries are (re)linked: a regular file then belongs to
     # the upgraded package, which dpkg wrote through the bind, and stays (logged).
     #
-    # A replaced regular file whose bytes differ from the kept copy is kept, after
-    # the link is in place, as .<name>.pre-link.<its md5>: one file per distinct
-    # content, never overwritten (an existing name is left as it is). An older
-    # image without a kept copy that this box rolls back to finds a dangling link
-    # and nothing there relinks it; support then restores the kept file whose md5
-    # that slot's package records.
+    # Order of a replacement, each step safe to stop after:
+    #   1. a regular file whose bytes differ from the kept copy is hard-linked,
+    #      no-clobber, to its final name .<name>.pre-link.<its md5> (one per
+    #      distinct content; an existing name is never overwritten);
+    #   2. a symlink to the kept copy is created, no-clobber, at a fresh name
+    #      .<name>.link-XXXXXX next to the entry;
+    #   3. that symlink is renamed over the entry.
+    # The old bytes are never held only under a temporary name. A stop after 2
+    # leaves a symlink to the kept copy, which the next boot removes (only
+    # symlinks with that name pattern whose target is exactly the kept copy).
+    # An older image without a kept copy that this box rolls back to finds a
+    # dangling link and nothing there relinks it; support then restores the
+    # kept file whose md5 that slot's package records.
     #
     # The block acts only when $DATA and $DATA/ceralive are real directories (no
     # symlink anywhere in the path) owned by the user running it (root at boot)
-    # and writable by nobody else, so no other user can swap a path between the
-    # check and the writes. The new link is staged in a private mktemp directory
-    # there, marked as ours, and renamed into place; only marked staging
-    # directories are ever cleaned up.
+    # and writable by nobody else, so no other user can change the directory
+    # between the checks and the writes.
     # Optional: a failed check, unlink, link or rename is logged and the migration
     # goes on, so it can never hold back the binds that need this script to
     # succeed. A real directory in the way is never touched.
@@ -312,16 +317,6 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
     done
     [ -n "$helpers_anchored" ] \
         || log "WARNING: $helpers_dir or a parent is a symlink, not a directory, or writable by another user; CeraUI's working-dir helpers are not linked"
-    helper_stage_mark="ceralive-migrate-data helper staging"
-    # Leftovers of a staging step cut short by a power loss: only directories
-    # that carry our marker, and only our three names inside them.
-    for d in "$helpers_dir"/.helper-stage.*; do
-        [ -n "$helpers_anchored" ] && [ -d "$d" ] && [ ! -L "$d" ] || continue
-        [ -f "$d/mark" ] && [ ! -L "$d/mark" ] || continue
-        [ "$(head -c 64 -- "$d/mark" 2>/dev/null)" = "$helper_stage_mark" ] || continue
-        rm -f -- "$d/link" "$d/keep" "$d/mark" 2>/dev/null || true
-        rmdir -- "$d" 2>/dev/null || log "WARNING: cannot remove the staging leftover $d"
-    done
     helper_sums="$(dpkg-query --control-show ceralive-device md5sums 2>/dev/null)" || helper_sums=""
     for f in "$CERAUI_HELPERS"/*; do
         [ -n "$helpers_anchored" ] || break
@@ -330,8 +325,14 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
         dest="$helpers_dir/$name"
         # readlink's own newline keeps the comparison exact (a command
         # substitution would strip trailing newlines from the target).
-        target="$(readlink -- "$dest" 2>/dev/null; printf x)" || target=""
         want_target="$(printf '%s\nx' "$f")"
+        # A symlink to the kept copy left by a replacement stopped before step 3.
+        for l in "$helpers_dir/.$name.link-"*; do
+            [ -L "$l" ] || continue
+            [ "$(readlink -- "$l" 2>/dev/null; printf x)" = "$want_target" ] || continue
+            rm -f -- "$l" 2>/dev/null || log "WARNING: cannot remove the leftover link $l"
+        done
+        target="$(readlink -- "$dest" 2>/dev/null; printf x)" || target=""
         if [ -L "$dest" ] && [ -e "$dest" ] && [ "$target" = "$want_target" ]; then
             continue
         fi
@@ -351,48 +352,42 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
                     why="the image copy $f is not the installed ceralive-device's opt/ceralive/$name"
                 fi
             fi
-            stage=""
+            tmp=""
             if [ -z "$why" ]; then
-                stage="$(mktemp -d "$helpers_dir/.helper-stage.XXXXXX" 2>/dev/null)" || stage=""
-                if [ -n "$stage" ] && ! printf '%s' "$helper_stage_mark" >"$stage/mark" 2>/dev/null; then
-                    rm -f -- "$stage/mark" 2>/dev/null || true
-                    rmdir -- "$stage" 2>/dev/null || true
-                    stage=""
+                tmp="$(mktemp -u "$helpers_dir/.$name.link-XXXXXX" 2>/dev/null)" || tmp=""
+                case "$tmp" in "$helpers_dir/.$name.link-"??????) ;; *) tmp="" ;; esac
+                if [ -z "$tmp" ]; then
+                    why="no temporary name could be made in $helpers_dir"
+                    log "WARNING: cannot name a temporary link in $helpers_dir"
                 fi
-                [ -n "$stage" ] || why="no staging directory could be made in $helpers_dir"
-                [ -n "$stage" ] || log "WARNING: cannot stage a link in $helpers_dir"
             fi
-            if [ -n "$stage" ]; then
+            if [ -n "$tmp" ]; then
                 log "pointing $dest at the image copy $f, the installed ceralive-device's helper"
-                old=""
+                # 1. Keep the old bytes under their final name first.
                 if [ -f "$dest" ] && [ ! -L "$dest" ]; then
                     old="$(md5sum < "$dest" 2>/dev/null | awk '{ print $1 }')" || old=""
-                    # Same bytes as the image copy (a same-version reinstall):
-                    # nothing worth keeping.
-                    if [ "$old" = "$have" ] || [ "${#old}" -ne 32 ]; then
-                        old=""
-                    elif ! ln -T -- "$dest" "$stage/keep" 2>/dev/null; then
-                        old=""
-                        log "WARNING: cannot keep the replaced $dest"
-                    fi
-                fi
-                if { ln -sT -- "$f" "$stage/link" && mv -fT -- "$stage/link" "$dest"; }; then
-                    # Only now that the old file is really replaced: no
-                    # overwrite, an existing name keeps what it holds.
-                    if [ -n "$old" ] && ! ln -T -- "$stage/keep" "$helpers_dir/.$name.pre-link.$old" 2>/dev/null; then
+                    if [ "${#old}" -eq 32 ] && [ "$old" != "$have" ]; then
                         kept="$helpers_dir/.$name.pre-link.$old"
                         if [ -f "$kept" ] && [ ! -L "$kept" ] \
                            && [ "$(md5sum < "$kept" 2>/dev/null | awk '{ print $1 }')" = "$old" ]; then
                             log "the replaced $dest is already kept as $kept"
+                        elif ln -T -- "$dest" "$kept" 2>/dev/null; then
+                            log "keeping the replaced $dest as $kept"
                         else
-                            log "WARNING: cannot keep the replaced $dest as $helpers_dir/.$name.pre-link.$old"
+                            log "WARNING: cannot keep the replaced $dest as $kept"
                         fi
                     fi
-                else
-                    log "WARNING: cannot replace $dest with a link to $f; CeraUI may run another build's helper"
                 fi
-                rm -f -- "$stage/link" "$stage/keep" "$stage/mark" 2>/dev/null || true
-                rmdir -- "$stage" 2>/dev/null || log "WARNING: cannot remove the staging directory $stage"
+                # 2 and 3. A fresh symlink (ln without -f never overwrites),
+                # renamed over the entry.
+                if ! ln -sT -- "$f" "$tmp" 2>/dev/null; then
+                    log "WARNING: cannot create the temporary link $tmp; $dest stays as it is"
+                elif ! mv -fT -- "$tmp" "$dest"; then
+                    log "WARNING: cannot replace $dest with a link to $f; CeraUI may run another build's helper"
+                    if [ -L "$tmp" ] && [ "$(readlink -- "$tmp" 2>/dev/null; printf x)" = "$want_target" ]; then
+                        rm -f -- "$tmp" 2>/dev/null || true
+                    fi
+                fi
                 continue
             fi
             if [ -e "$dest" ] && [ ! -L "$dest" ]; then

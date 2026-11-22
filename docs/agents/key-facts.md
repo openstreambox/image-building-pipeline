@@ -4292,20 +4292,28 @@ is discarded, and a record counts only on an exact pathname match), any other en
 but a real directory is replaced by the link: a regular file an older image's
 CeraUI upgrade wrote through the bind (measured after an image update: the new
 CeraUI ran the old image's helper, whose `fib daddr type local` rule the CeraLive
-kernel cannot load), a copy of the same bytes, or a foreign link. The link is
-created in a private `mktemp -d` directory under `/data/ceralive`, marked with a
-`mark` file holding `ceralive-migrate-data helper staging`, and renamed into place.
-A later boot cleans up only marked staging directories, and only their `link`,
-`keep` and `mark` entries. If no staging directory can be made, a regular file
-stays (logged) and an absent or dangling entry still gets the plain link.
+kernel cannot load), a copy of the same bytes, or a foreign link. A replacement
+runs in three steps, each safe to stop after:
 
-A replaced regular file whose bytes differ from the kept copy is kept, after the
-link rename succeeded, as `/data/ceralive/.<name>.pre-link.<md5 of its bytes>` (a
-hard link). There is one file per distinct content, and an existing name is never
-overwritten. A same-bytes copy keeps nothing. Otherwise (an in-place package
-upgrade on this slot changed the helper, or no single valid record, or no md5sums)
-a regular file stays, and the boot logs why. Every failure is logged as a warning
-and is non-fatal.
+1. A regular file whose bytes differ from the kept copy is hard-linked, without
+   overwriting anything, to its final name
+   `/data/ceralive/.<name>.pre-link.<md5 of its bytes>`. There is one file per
+   distinct content, an existing name is never overwritten, and a same-bytes copy
+   keeps nothing.
+2. A symlink to the kept copy is created, again without overwriting, at a fresh
+   `mktemp -u` name `.<name>.link-XXXXXX`.
+3. That symlink is renamed over the entry.
+
+The old bytes never exist only under a temporary name. A stop after step 2 leaves
+a symlink to the kept copy, and the next boot removes only symlinks with that name
+pattern whose target is exactly the kept copy. A taken temporary name makes step 2
+fail, and the entry stays until the next boot. If the keep in step 1 fails, the
+replacement still goes ahead (logged): the stale helper breaks the box now, while
+the kept file only serves a manual rollback. If no temporary name can be made, a
+regular file stays (logged) and an absent or dangling entry still gets the plain
+link. Otherwise (an in-place package upgrade on this slot changed the helper, or no
+single valid record, or no md5sums) a regular file stays, and the boot logs why.
+Every failure is logged as a warning and is non-fatal.
 
 Boundary. The helper block acts only when `/data` and `/data/ceralive` are real
 directories, with no symlink anywhere in the path, owned by the user running it
@@ -4318,7 +4326,7 @@ it.
 Rollback limits. Only `osb/release/us-boxes-4` from `7aaa12f` on and all of
 `osb/release/us-boxes-5` keep a copy. No other tree does, whatever its build date,
 including CeraLive's `release/2026.11.1-ceralive4-20261104`. When the other slot
-holds such an image and it still accepts the new bundle's signing key, a rollback
+holds an image without a kept copy that still accepts the new bundle's signing key, a rollback
 there finds the link dangling, and nothing on that image relinks it. On those
 images the helper only ever worked when an in-place upgrade had left a regular
 file on `/data`. To restore it, read the md5 that slot's package records
