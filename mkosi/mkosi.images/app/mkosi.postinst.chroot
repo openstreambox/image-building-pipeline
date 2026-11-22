@@ -173,8 +173,8 @@ install_first_party_apps() {
 # is the one its current slot shipped. A regular file there (an in-place CeraUI
 # package upgrade writes one through the bind) stays only while it is not this
 # copy's package: once the installed ceralive-device's md5sums name this copy's
-# bytes, the link replaces it (keeping it as .<name>.pre-link), so an older
-# image's file cannot outlive an OTA.
+# bytes, the link replaces it (keeping other bytes as .<name>.pre-link.<md5>),
+# so an older image's file cannot outlive an OTA.
 # This helper serves CeraUI's captive Wi-Fi sign-in window; the pipeline's own
 # first-boot setup AP (ceralive-provision/ceralive-portal) does not use it.
 # ---------------------------------------------------------------------------

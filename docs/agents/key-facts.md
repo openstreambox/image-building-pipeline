@@ -4285,32 +4285,48 @@ copy in `/usr/libexec/ceralive/ceraui-workdir/`, and `ceralive-migrate-data` lin
 `/data/ceralive/<name>` to it on every boot: a link rather than a seeded copy, so
 after an OTA the box runs its new slot's helper, and boxes whose `/data` an older
 image seeded get the link on their first boot after the update. Absent and
-dangling entries are always (re)linked. When the kept copy's bytes match the
+dangling entries are always (re)linked while the boundary below holds. When the kept copy's bytes match the
 installed `ceralive-device`'s md5sums record for exactly `opt/ceralive/<name>`
 (`dpkg-query --control-show ceralive-device md5sums`; the output of a failed query
 is discarded, and a record counts only on an exact pathname match), any other entry
 but a real directory is replaced by the link: a regular file an older image's
 CeraUI upgrade wrote through the bind (measured after an image update: the new
 CeraUI ran the old image's helper, whose `fib daddr type local` rule the CeraLive
-kernel cannot load), a copy of the same bytes, or a foreign link. The
-link is created in a private `mktemp -d` directory under `/data/ceralive` and
-renamed into place; leftovers of a staging step cut short are cleared on the next
-boot. Nothing is linked, staged or kept when `/data/ceralive` or a parent is a
-symlink or not a directory. A replaced regular file is kept as
-`.<name>.pre-link` (a hard link). Otherwise (an in-place package upgrade on this
-slot changed the helper, or no single valid record, or no md5sums) a regular file
-stays, and the boot logs why. Every failure is logged as a warning and is
-non-fatal.
+kernel cannot load), a copy of the same bytes, or a foreign link. The link is
+created in a private `mktemp -d` directory under `/data/ceralive`, marked with a
+`mark` file holding `ceralive-migrate-data helper staging`, and renamed into place.
+A later boot cleans up only marked staging directories, and only their `link`,
+`keep` and `mark` entries. If no staging directory can be made, a regular file
+stays (logged) and an absent or dangling entry still gets the plain link.
 
-Rollback limits. Only images built since `d0011a8` (the kept copy) have one. When
-the other slot holds an older image that still accepts the new bundle's signing
-key, a rollback there finds the link dangling, and nothing on that image relinks
-it. On such an image the helper only ever worked when an in-place upgrade had left
-a regular file on `/data`; if this change replaced such a file, put it back with
-`mv -fT /data/ceralive/.captive-portal-window.py.pre-link
+A replaced regular file whose bytes differ from the kept copy is kept, after the
+link rename succeeded, as `/data/ceralive/.<name>.pre-link.<md5 of its bytes>` (a
+hard link). There is one file per distinct content, and an existing name is never
+overwritten. A same-bytes copy keeps nothing. Otherwise (an in-place package
+upgrade on this slot changed the helper, or no single valid record, or no md5sums)
+a regular file stays, and the boot logs why. Every failure is logged as a warning
+and is non-fatal.
+
+Boundary. The helper block acts only when `/data` and `/data/ceralive` are real
+directories, with no symlink anywhere in the path, owned by the user running it
+(root at boot) and not writable by group or others. Only that user could then swap
+a path between the check and the writes, and at that boot stage nothing else runs
+as root against `/data`. The rest of `ceralive-migrate-data` (the `mkdir`/`chmod`
+of `/data/ceralive` and the seeding) runs before this check and is not covered by
+it.
+
+Rollback limits. Only `osb/release/us-boxes-4` from `7aaa12f` on and all of
+`osb/release/us-boxes-5` keep a copy. No other tree does, whatever its build date,
+including CeraLive's `release/2026.11.1-ceralive4-20261104`. When the other slot
+holds such an image and it still accepts the new bundle's signing key, a rollback
+there finds the link dangling, and nothing on that image relinks it. On those
+images the helper only ever worked when an in-place upgrade had left a regular
+file on `/data`. To restore it, read the md5 that slot's package records
+(`dpkg-query --control-show ceralive-device md5sums | grep
+opt/ceralive/captive-portal-window.py`) and run `mv -fT
+/data/ceralive/.captive-portal-window.py.pre-link.<that md5>
 /data/ceralive/captive-portal-window.py`. A rollback to an image with a kept copy
-runs that slot's copy; after a rollback to a slot whose in-place upgrade changed
-the helper, the same `.pre-link` file is that upgrade's helper. New helpers go in
+runs that slot's copy. New helpers go in
 `CERAUI_WORKDIR_HELPERS`.
 Offline guard: `tests/ceraui-workdir-helpers.test.sh`.
 

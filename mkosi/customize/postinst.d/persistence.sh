@@ -274,33 +274,52 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
     # instance, as dpkg-query reports it), whatever else is there is replaced by
     # the link: a regular file left by another image's CeraUI (the previous
     # image's copy after an OTA), a copy of the same bytes, or a link elsewhere.
-    # A replaced regular file is kept as .<name>.pre-link (a hard link): an older
-    # image without a kept copy that this box rolls back to finds a dangling link
-    # and nothing there relinks it, so support restores that file by hand.
     # Otherwise (an in-place CeraUI package upgrade on this slot changed the
     # helper, or dpkg cannot name one installed instance or one valid record) only
     # absent and dangling entries are (re)linked: a regular file then belongs to
     # the upgraded package, which dpkg wrote through the bind, and stays (logged).
     #
-    # Root writes stay inside $DATA/ceralive: nothing happens when it or $DATA is
-    # not a real directory or any part of its path is a symlink, and the new link
-    # is staged in a private mktemp directory there, then renamed into place.
+    # A replaced regular file whose bytes differ from the kept copy is kept, after
+    # the link is in place, as .<name>.pre-link.<its md5>: one file per distinct
+    # content, never overwritten (an existing name is left as it is). An older
+    # image without a kept copy that this box rolls back to finds a dangling link
+    # and nothing there relinks it; support then restores the kept file whose md5
+    # that slot's package records.
+    #
+    # The block acts only when $DATA and $DATA/ceralive are real directories (no
+    # symlink anywhere in the path) owned by the user running it (root at boot)
+    # and writable by nobody else, so no other user can swap a path between the
+    # check and the writes. The new link is staged in a private mktemp directory
+    # there, marked as ours, and renamed into place; only marked staging
+    # directories are ever cleaned up.
     # Optional: a failed check, unlink, link or rename is logged and the migration
     # goes on, so it can never hold back the binds that need this script to
     # succeed. A real directory in the way is never touched.
     helpers_dir="$DATA/ceralive" helpers_anchored=1 p="$DATA/ceralive"
-    while [ -n "$p" ] && [ "$p" != / ]; do
+    helpers_uid="$(id -u)"
+    case "$DATA" in /*) ;; *) helpers_anchored="" ;; esac
+    while [ -n "$helpers_anchored" ] && [ -n "$p" ] && [ "$p" != / ]; do
         if [ -L "$p" ] || [ ! -d "$p" ]; then helpers_anchored=""; break; fi
+        if [ "$p" = "$DATA" ] || [ "$p" = "$helpers_dir" ]; then
+            owner_mode="$(stat -c '%u %a' -- "$p" 2>/dev/null)" || owner_mode=""
+            if [ "${owner_mode%% *}" != "$helpers_uid" ] \
+               || ! printf '%s' "${owner_mode#* }" | grep -Eqx '[0-7]{3,4}' \
+               || [ $(( 0${owner_mode#* } & 022 )) -ne 0 ]; then
+                helpers_anchored=""; break
+            fi
+        fi
         p="${p%/*}"
     done
-    case "$DATA" in /*) ;; *) helpers_anchored="" ;; esac
     [ -n "$helpers_anchored" ] \
-        || log "WARNING: $helpers_dir or a parent is not a real directory; CeraUI's working-dir helpers are not linked"
-    # Leftovers of a staging step cut short by a power loss: only our own names,
-    # only a staged link inside, never anything else.
+        || log "WARNING: $helpers_dir or a parent is a symlink, not a directory, or writable by another user; CeraUI's working-dir helpers are not linked"
+    helper_stage_mark="ceralive-migrate-data helper staging"
+    # Leftovers of a staging step cut short by a power loss: only directories
+    # that carry our marker, and only our three names inside them.
     for d in "$helpers_dir"/.helper-stage.*; do
         [ -n "$helpers_anchored" ] && [ -d "$d" ] && [ ! -L "$d" ] || continue
-        rm -f -- "$d/link" "$d/keep" 2>/dev/null || true
+        [ -f "$d/mark" ] && [ ! -L "$d/mark" ] || continue
+        [ "$(head -c 64 -- "$d/mark" 2>/dev/null)" = "$helper_stage_mark" ] || continue
+        rm -f -- "$d/link" "$d/keep" "$d/mark" 2>/dev/null || true
         rmdir -- "$d" 2>/dev/null || log "WARNING: cannot remove the staging leftover $d"
     done
     helper_sums="$(dpkg-query --control-show ceralive-device md5sums 2>/dev/null)" || helper_sums=""
@@ -332,21 +351,47 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
                     why="the image copy $f is not the installed ceralive-device's opt/ceralive/$name"
                 fi
             fi
+            stage=""
             if [ -z "$why" ]; then
-                log "pointing $dest at the image copy $f, the installed ceralive-device's helper"
                 stage="$(mktemp -d "$helpers_dir/.helper-stage.XXXXXX" 2>/dev/null)" || stage=""
-                if [ -z "$stage" ]; then
-                    log "WARNING: cannot stage a link in $helpers_dir; $dest stays as it is"
-                    continue
+                if [ -n "$stage" ] && ! printf '%s' "$helper_stage_mark" >"$stage/mark" 2>/dev/null; then
+                    rm -f -- "$stage/mark" 2>/dev/null || true
+                    rmdir -- "$stage" 2>/dev/null || true
+                    stage=""
                 fi
+                [ -n "$stage" ] || why="no staging directory could be made in $helpers_dir"
+                [ -n "$stage" ] || log "WARNING: cannot stage a link in $helpers_dir"
+            fi
+            if [ -n "$stage" ]; then
+                log "pointing $dest at the image copy $f, the installed ceralive-device's helper"
+                old=""
                 if [ -f "$dest" ] && [ ! -L "$dest" ]; then
-                    { ln -T -- "$dest" "$stage/keep" && mv -fT -- "$stage/keep" "$helpers_dir/.$name.pre-link"; } \
-                        || log "WARNING: cannot keep the replaced $dest as $helpers_dir/.$name.pre-link"
+                    old="$(md5sum < "$dest" 2>/dev/null | awk '{ print $1 }')" || old=""
+                    # Same bytes as the image copy (a same-version reinstall):
+                    # nothing worth keeping.
+                    if [ "$old" = "$have" ] || [ "${#old}" -ne 32 ]; then
+                        old=""
+                    elif ! ln -T -- "$dest" "$stage/keep" 2>/dev/null; then
+                        old=""
+                        log "WARNING: cannot keep the replaced $dest"
+                    fi
                 fi
-                if ! { ln -sT -- "$f" "$stage/link" && mv -fT -- "$stage/link" "$dest"; }; then
+                if { ln -sT -- "$f" "$stage/link" && mv -fT -- "$stage/link" "$dest"; }; then
+                    # Only now that the old file is really replaced: no
+                    # overwrite, an existing name keeps what it holds.
+                    if [ -n "$old" ] && ! ln -T -- "$stage/keep" "$helpers_dir/.$name.pre-link.$old" 2>/dev/null; then
+                        kept="$helpers_dir/.$name.pre-link.$old"
+                        if [ -f "$kept" ] && [ ! -L "$kept" ] \
+                           && [ "$(md5sum < "$kept" 2>/dev/null | awk '{ print $1 }')" = "$old" ]; then
+                            log "the replaced $dest is already kept as $kept"
+                        else
+                            log "WARNING: cannot keep the replaced $dest as $helpers_dir/.$name.pre-link.$old"
+                        fi
+                    fi
+                else
                     log "WARNING: cannot replace $dest with a link to $f; CeraUI may run another build's helper"
                 fi
-                rm -f -- "$stage/link" "$stage/keep" 2>/dev/null || true
+                rm -f -- "$stage/link" "$stage/keep" "$stage/mark" 2>/dev/null || true
                 rmdir -- "$stage" 2>/dev/null || log "WARNING: cannot remove the staging directory $stage"
                 continue
             fi
