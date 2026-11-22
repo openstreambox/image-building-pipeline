@@ -18,8 +18,7 @@ board_id: radxa-zero3
 # looks it up under /boot/dtb/rockchip/.
 dtb_name: rk3566-radxa-zero-3w.dtb
 
-# Armbian edge package, mainline U-Boot. Not in the blob map. The writer
-# refuses this tuple rather than falling through to an RK3588 idbloader.
+# Mainline U-Boot from the Armbian edge archive.
 uboot_packages:
   - linux-u-boot-radxa-zero3-edge
 
@@ -39,5 +38,5 @@ description: >-
   gadget and must not request USB host on that port. USB-C 2 is a USB 3
   host and is not a power inlet. Reported radio is Wi-Fi 6 / Bluetooth 5.4;
   Armbian's board file enables AIC8800 SDIO, and mainline does not bind it.
-  No M.2 modem slot. Not a streaming appliance until a pinned U-Boot blob
-  and a ZERO 3W kernel are reviewed.
+  The companion image starts a wired USB gadget and SSH. There is no onboard
+  Wi-Fi, Bluetooth or streaming stack in this image.

@@ -68,6 +68,9 @@
 #
 # board	variant	package	version	blob	sha256
 
+# Radxa ZERO 3W: U-Boot v2025.10, unified image from the signed archive.
+radxa-zero3	default	linux-u-boot-radxa-zero3-edge	26.8.3	u-boot-rockchip.bin	4766bb388d9cfede79c377e25a26d0830a46ee73b0d7c48078d5816b44b4bfa7
+
 # --- Orange Pi 5+ ----------------------------------------------------------
 # PRODUCTION (= edge): U-Boot 2026.01, TF-A compiled from ARM-software v2.13.0
 # (mainline). Both spellings, byte-identical — see the note above.

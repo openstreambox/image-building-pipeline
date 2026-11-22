@@ -3,14 +3,8 @@
 # Validates against ../schema/family.schema.json (draft 2020-12).
 # First consumer: the Radxa ZERO 3W (manifests/boards/radxa-zero-3w.yaml).
 #
-# This is not an RK3588 board with a different DTB. The SoC, the mainline
-# device tree (rk3566-radxa-zero-3w) and the U-Boot package are different, and
-# the RK3588 kernel fragment (HDMI-RX, VEPU, panthor) does not belong here.
-# The family therefore declares no kernel_source block and no RK3588 userspace
-# packages. A build still cannot fetch the named Armbian packages: they are
-# deliberately absent from armbian-bsp-deb-versions.txt until a signed-index
-# review, and lib/write-bootloader.sh refuses the board until
-# manifests/bootloader-blobs.tsv has a row for it. That refusal is the point.
+# The companion build stages its in-tree kernel and DTB directly. The only
+# Armbian package it needs is the board-specific U-Boot.
 #
 # The partition template name is the frozen Rockchip A/B layout already used
 # by RK3588 (16 MiB raw gap, idbloader at sector 64, FAT boot at sector 32768).
@@ -20,19 +14,19 @@ arch: arm64
 
 armbian_branch: edge
 
-# Prebuilt Armbian rockchip64 edge names. Not pinned, and not fetched, until
-# the signed archive review lands. Do not point these at the ceralive-rk3588
-# image package: that package is built from the RK3588 fragment.
-kernel_packages:
-  - linux-image-edge-rockchip64
+companion_kernel:
+  tag: v7.2
+  commit: 8d3ae59288f1e7d58d76558a6ee96d533bc5019f
+  builder_image: debian:trixie-20260623-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
+  fragment: manifests/kernel/rk3566-companion.fragment
+
+kernel_packages: []
 
 uboot_packages: []
 
-dtb_packages:
-  - linux-dtb-edge-rockchip64
+dtb_packages: []
 
-firmware_packages:
-  - armbian-firmware-full
+firmware_packages: []
 
 rauc_bootloader_adapter: custom
 

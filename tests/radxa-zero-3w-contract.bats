@@ -1,15 +1,7 @@
 #!/usr/bin/env bats
 bats_require_minimum_version 1.5.0
 #
-# radxa-zero-3w-contract.bats — the RK3566 ZERO 3W is a board record, not an
-# RK3588 image with the DTB renamed.
-#
-# The load-bearing assertions are negative:
-#   * the resolved board is family rk3566 and names its own DTB and U-Boot,
-#   * it does not inherit the RK3588 source kernel or the MPP userspace,
-#   * the shared boot script is still the one file, with this board's env,
-#   * the bootloader writer refuses the tuple, because no blob hash is pinned,
-#   * the existing ROCK 5B+ production resolve is byte-identical.
+# Pin the ZERO 3W's distinct boot and gadget inputs.
 #
 # Run:  bats tests/radxa-zero-3w-contract.bats
 
@@ -32,8 +24,10 @@ load manifest-helpers
   [[ "$output" == *"DTB_NAME='rk3566-radxa-zero-3w.dtb'"* ]]
   [[ "$output" == *"SERIAL_CONSOLE='ttyS2:1500000'"* ]]
   [[ "$output" == *"UBOOT_PACKAGES='linux-u-boot-radxa-zero3-edge'"* ]]
-  [[ "$output" == *"KERNEL_PACKAGES='linux-image-edge-rockchip64'"* ]]
-  [[ "$output" == *"DTB_PACKAGES='linux-dtb-edge-rockchip64'"* ]]
+  [[ "$output" == *"KERNEL_PACKAGES=''"* ]]
+  [[ "$output" == *"DTB_PACKAGES=''"* ]]
+  [[ "$output" == *"FIRMWARE_PACKAGES=''"* ]]
+  [[ "$output" == *"COMPANION_KERNEL_FRAGMENT='manifests/kernel/rk3566-companion.fragment'"* ]]
   [[ "$output" == *"PARTITION_TEMPLATE='rk3588-ab'"* ]]
   [[ "$output" == *"RAUC_BOOTLOADER_ADAPTER='custom'"* ]]
   [[ "$output" != *"ceralive-rk3588"* ]]
@@ -59,19 +53,32 @@ load manifest-helpers
   # value mainline calls scriptaddr on both RK3568 and RK3588.
   grep -q 'setenv loadaddr 0x00c00000' "$PIPELINE_DIR/mkosi/platform/boot/boot.scr.cmd"
   grep -a -q 'setenv loadaddr 0x00c00000' "$dest/boot.scr"
+  grep -a -Fq 'part uuid ${devtype} ${devnum}:2' "$dest/boot.scr"
 }
 
-@test "zero3w: U-Boot is unpinned and the writer refuses the tuple" {
-  # A missing pin must fail closed. Guessing a version would write somebody
-  # else's idbloader into the gap.
-  run bash -c "source '$PIPELINE_DIR/lib/fetch-debs.sh'; bsp_download_specs linux-u-boot-radxa-zero3-edge"
+@test "zero3w: normal build selects the trimmed companion image" {
+  run env DRY_RUN=1 "$PIPELINE_DIR/build" radxa-zero-3w
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"USB NCM+ACM"* ]]
+  run env DRY_RUN=1 "$PIPELINE_DIR/build" radxa-zero-3w --release
   [ "$status" -ne 0 ]
-  [[ "$output" == *"linux-u-boot-radxa-zero3-edge"* ]]
+  [[ "$output" == *"companion image only"* ]]
+}
+
+@test "zero3w: U-Boot plan resolves the signed archive pin and unified offset" {
+  run bash -c "source '$PIPELINE_DIR/lib/fetch-debs.sh'; bsp_download_specs linux-u-boot-radxa-zero3-edge"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "linux-u-boot-radxa-zero3-edge=26.8.3" ]]
 
   run bash "$LIB_DIR/write-bootloader.sh" plan --board radxa-zero3 --variant default
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"u-boot-rockchip.bin"* ]]
+  [[ "$output" == *"64"* ]]
+  [[ "$output" == *"4766bb388d9cfede79c377e25a26d0830a46ee73b0d7c48078d5816b44b4bfa7"* ]]
+
+  run bash "$LIB_DIR/write-bootloader.sh" plan --board radxa-zero3 --variant edge-test
   [ "$status" -ne 0 ]
   [[ "$output" == *"no RK3588 raw-gap bootloader plan"* ]]
-  [[ "$output" == *"board 'radxa-zero3' variant 'default'"* ]]
 }
 
 @test "zero3w: the ROCK 5B+ production resolve did not move" {
