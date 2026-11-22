@@ -664,7 +664,9 @@ cmd_confirm() {
   [[ "$(id -u)" == 0 ]] || die "confirmation requires root"
   locked_preflight
   gate_fallback_hold confirm || refuse_exit
-  log "fallback hold cleared for the current slot generation"
+  local message="fallback hold cleared for the current slot generation"
+  logger -t "${PROG}" -- "${message}" 2>/dev/null || true
+  log "${message}"
 }
 
 cmd_run() {
