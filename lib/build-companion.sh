@@ -44,15 +44,6 @@ DRY_RUN=
 DEST="$work"
 fetch_bsp "$PIPELINE_DIR/manifests/families/$FAMILY.yaml" "$work/bsp"
 
-KERNEL_BUILDER_DOCKERFILE="$PIPELINE_DIR/ci/Dockerfile.kernel"
-kernel_builder="$(resolve_kernel_builder_tag "$COMPANION_KERNEL_BUILDER_IMAGE")"
-ensure_kernel_builder_image docker "$COMPANION_KERNEL_BUILDER_IMAGE" "$kernel_builder"
-jobs="$(derive_kernel_build_jobs)"
-docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e CCACHE_DISABLE=1 \
-  -v "$PIPELINE_DIR:/pipeline:ro" -v "$work:/work" -w /work/kernel \
-  "$kernel_builder" bash /pipeline/lib/companion-kernel.sh \
-  "$COMPANION_KERNEL_TAG" "$COMPANION_KERNEL_COMMIT" "$COMPANION_KERNEL_FRAGMENT" "$DTB_NAME" "$jobs"
-
 MKOSI_VERSION_PIN="$(cat .mkosi-version)"
 MKOSI_BUILDER_DOCKERFILE="$PIPELINE_DIR/ci/Dockerfile"
 MKOSI_BUILDER_IMAGE_OVERRIDDEN=0
@@ -61,6 +52,15 @@ ensure_builder_image docker
 docker run --rm --privileged -v "$work:/work" -v "$PIPELINE_DIR/mkosi/companion:/config:ro" \
   "$MKOSI_BUILDER_IMAGE" mkosi --directory=/config --release="$RELEASE" \
   --output-directory=/work --workspace-directory=/work --with-network=yes build
+
+KERNEL_BUILDER_DOCKERFILE="$PIPELINE_DIR/ci/Dockerfile.kernel"
+kernel_builder="$(resolve_kernel_builder_tag "$COMPANION_KERNEL_BUILDER_IMAGE")"
+ensure_kernel_builder_image docker "$COMPANION_KERNEL_BUILDER_IMAGE" "$kernel_builder"
+jobs="$(derive_kernel_build_jobs)"
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e CCACHE_DISABLE=1 \
+  -v "$PIPELINE_DIR:/pipeline:ro" -v "$work:/work" -w /work/kernel \
+  "$kernel_builder" bash /pipeline/lib/companion-kernel.sh \
+  "$COMPANION_KERNEL_TAG" "$COMPANION_KERNEL_COMMIT" "$COMPANION_KERNEL_FRAGMENT" "$DTB_NAME" "$jobs"
 
 rootfs="$work/rootfs"
 sudo -n bash lib/companion-rootfs.sh "$rootfs" "$work" "$DTB_NAME" "$key"
