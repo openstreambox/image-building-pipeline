@@ -21,11 +21,16 @@ awk '{print $1, $2}' "$key" > "$root/root/.ssh/authorized_keys"
 chmod 0600 "$root/root/.ssh/authorized_keys"
 find "$root/etc/ssh" -maxdepth 1 -type f -name 'ssh_host_*' -delete
 printf 'zero3w-companion\n' > "$root/etc/hostname"
+printf 'LANG=C.UTF-8\n' > "$root/etc/locale.conf"
 printf 'tmpfs /tmp tmpfs mode=1777,nosuid,nodev,size=128M 0 0\n' >> "$root/etc/fstab"
+# This fixture must finish boot without a display or an operator at a console.
+systemctl --root="$root" set-default multi-user.target
 systemctl --root="$root" mask ceralive.service cerastream.service \
   pipewire.service pipewire.socket wireplumber.service ceralive-rtmp-gateway.service \
   kiosk.service kiosk-onfailure.service kiosk-osk.service \
   ceralive-fan-curve.service ceralive-fan-kickstart.service \
   ceralive-hdmirx-edid.service ceralive-typec-policy.service rauc.service \
-  ceralive-healthcheck.service ceralive-slot-sync.service ssh.socket
+  ceralive-healthcheck.service ceralive-slot-sync.service ssh.socket \
+  systemd-firstboot.service systemd-networkd.service systemd-networkd.socket \
+  systemd-networkd-wait-online.service
 systemctl --root="$root" enable zero3w-gadget.service NetworkManager.service ssh.service

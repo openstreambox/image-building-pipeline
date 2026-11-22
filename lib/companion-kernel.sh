@@ -2,10 +2,10 @@
 set -euo pipefail
 
 tag="$1" commit="$2" fragment="$3" dtb="$4" jobs="$5"
-git -c init.defaultBranch=build init -q
-git fetch --no-tags --depth 1 https://github.com/torvalds/linux.git "refs/tags/$tag"
-git checkout -q --detach FETCH_HEAD
-[[ "$(git rev-parse HEAD)" == "$commit" ]]
+# shellcheck source=lib/kernel/checkout.sh
+source /pipeline/lib/kernel/checkout.sh
+fetch_pinned_tree /work/kernel https://github.com/torvalds/linux.git "$tag" "$commit" "companion kernel" /kernel-mirror
+cd /work/kernel
 export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=-zero3w
 export KBUILD_BUILD_USER=builder KBUILD_BUILD_HOST=builder KBUILD_BUILD_VERSION=1
 KBUILD_BUILD_TIMESTAMP="@$(git show -s --format=%ct HEAD)"

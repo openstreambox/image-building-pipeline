@@ -38,7 +38,7 @@ sudo -n true
 
 mkdir -p mkosi/build "images/$board"
 work="$(mktemp -d "$PIPELINE_DIR/mkosi/build/zero3w.XXXXXX")"
-mkdir -p "$work"/{bsp,kernel,modules,output}
+mkdir -p "$work"/{bsp,modules,output}
 export UBOOT_PACKAGES
 DRY_RUN=
 DEST="$work"
@@ -57,8 +57,14 @@ KERNEL_BUILDER_DOCKERFILE="$PIPELINE_DIR/ci/Dockerfile.kernel"
 kernel_builder="$(resolve_kernel_builder_tag "$COMPANION_KERNEL_BUILDER_IMAGE")"
 ensure_kernel_builder_image docker "$COMPANION_KERNEL_BUILDER_IMAGE" "$kernel_builder"
 jobs="$(derive_kernel_build_jobs)"
+kernel_mirror=()
+if [[ -n "${CERALIVE_KERNEL_SRC_MIRROR_DIR:-}" ]]; then
+  [[ -d "$CERALIVE_KERNEL_SRC_MIRROR_DIR" ]] || die "kernel source mirror directory does not exist"
+  kernel_mirror=(-v "$(realpath "$CERALIVE_KERNEL_SRC_MIRROR_DIR"):/kernel-mirror:ro")
+fi
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e CCACHE_DISABLE=1 \
-  -v "$PIPELINE_DIR:/pipeline:ro" -v "$work:/work" -w /work/kernel \
+  -e CERALIVE_KERNEL_GIT_TIMEOUT -e CERALIVE_KERNEL_GIT_ATTEMPTS \
+  -v "$PIPELINE_DIR:/pipeline:ro" -v "$work:/work" "${kernel_mirror[@]}" -w /work \
   "$kernel_builder" bash /pipeline/lib/companion-kernel.sh \
   "$COMPANION_KERNEL_TAG" "$COMPANION_KERNEL_COMMIT" "$COMPANION_KERNEL_FRAGMENT" "$DTB_NAME" "$jobs"
 

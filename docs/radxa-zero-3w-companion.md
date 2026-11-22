@@ -6,6 +6,8 @@ Set `ARMBIAN_APT_KEYRING` to the pinned Armbian archive keyring and
 with Docker, arm64 binfmt support, passwordless sudo and the pipeline's
 normal disk assembly tools, plus `fdtget` from device-tree-compiler. The
 image and the SHA-256 files are written under `images/radxa-zero-3w/`.
+Set `CERALIVE_KERNEL_SRC_MIRROR_DIR` to reuse a local Git mirror that
+contains the pinned kernel commit.
 
 USB-C 1 is the power inlet and the peripheral port. It presents CDC NCM and
 CDC ACM at USB 2.0 speed. Configure the host's NCM link for IPv4 link-local
