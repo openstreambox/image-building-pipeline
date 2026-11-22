@@ -48,7 +48,12 @@ and `rauc status mark-active other` as selecting the other slot for the next boo
 [RAUC activation](https://rauc.readthedocs.io/en/latest/using.html#manually-switch-to-a-different-slot).
 The helper parses RAUC's `--detailed --output-format=shell` key/value output
 without sourcing it; per-slot installation and activation timestamps establish
-whether an inactive rootfs has a newer staged installation. A shared activation
+whether an inactive rootfs has a newer staged installation. For an OS update,
+arming also requires a successful rootfs write. It records the target slot,
+install timestamp and install count together. Both selection paths check that
+record again. A fresh install requires its own arm even if the clock repeats a
+timestamp. An empty OS marker from an older image requires an explicit re-arm
+after verifying the installation. A shared activation
 flock prevents two helper calls from racing. The marker directory is on `/data`
 so an armed installation survives an ordinary boot; the streaming sentinel and
 flock are on `/run` and do not.

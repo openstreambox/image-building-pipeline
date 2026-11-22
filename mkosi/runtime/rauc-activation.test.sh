@@ -49,24 +49,32 @@ pending_status() {
   cat >"$FIXTURE_STATUS" <<'EOF'
 RAUC_SYSTEM_BOOTED_BOOTNAME='A'
 RAUC_BOOT_PRIMARY='rootfs.0'
-RAUC_SYSTEM_SLOTS='rootfs.0 rootfs.1'
 RAUC_SLOTS='1 2'
 RAUC_SLOT_BOOTNAME_1='A'
 RAUC_SLOT_STATE_1='booted'
 RAUC_SLOT_BOOTNAME_2='B'
 RAUC_SLOT_STATE_2='inactive'
 RAUC_SLOT_BOOT_STATUS_2='bad'
-RAUC_SLOT_STATUS_STATUS_2='ok'
-RAUC_SLOT_STATUS_INSTALLED_TIMESTAMP_2='2026-09-23T12:00:00Z'
-RAUC_SLOT_STATUS_ACTIVATED_TIMESTAMP_2='2026-09-22T12:00:00Z'
 RAUC_SLOT_STATUS_BUNDLE_DESCRIPTION_2='A quoted '\''bundle'\'' label'
 EOF
+  {
+    printf "RAUC_SYSTEM_SLOTS='rootfs.0 %s'\n" "${target_slot:-rootfs.1}"
+    printf "RAUC_SLOT_STATUS_INSTALLED_TIMESTAMP_2='%s'\n" "${installed_at:-2026-09-23T12:00:00Z}"
+    printf "RAUC_SLOT_STATUS_ACTIVATED_TIMESTAMP_2='%s'\n" "${activated_at:-2026-09-22T12:00:00Z}"
+    if [[ ${install_count-4} != missing ]]; then
+      printf "RAUC_SLOT_STATUS_INSTALLED_COUNT_2='%s'\n" "${install_count-4}"
+    fi
+    if [[ ${install_result-ok} != missing ]]; then
+      printf "RAUC_SLOT_STATUS_STATUS_2='%s'\n" "${install_result-ok}"
+    fi
+  } >>"$FIXTURE_STATUS"
 }
 count_calls() { [[ "$(wc -l <"$RAUC_CALLS")" -eq "$1" ]] || fail "expected $1 mark-active calls"; }
 
 pending_status
 "$SCRIPT" --arm
 [[ -f "$TMP/state/activation-armed" ]] || fail 'arm did not persist'
+grep -Fxq 'rootfs.1 2026-09-23T12:00:00Z 4' "$TMP/state/activation-armed" || fail 'marker lost install identity'
 "$SCRIPT"
 count_calls 1
 [[ ! -e "$TMP/state/activation-armed" ]] || fail 'successful activation did not disarm'
@@ -87,8 +95,7 @@ rm "$TMP/run/streaming"
 "$SCRIPT" --disarm
 ok 'streaming: no activation, marker retained, explicit disarm'
 
-pending_status
-printf '%s\n' "RAUC_SLOT_STATUS_ACTIVATED_TIMESTAMP_2='2026-09-24T12:00:00Z'" >>"$FIXTURE_STATUS"
+activated_at=2026-09-24T12:00:00Z pending_status
 touch "$TMP/state/activation-armed"
 "$SCRIPT"
 count_calls 1
@@ -96,13 +103,14 @@ count_calls 1
 ok 'no pending installation: no-op'
 
 pending_status
+"$SCRIPT" --arm
 "$SCRIPT" --now
 count_calls 2
 [[ ! -e "$TMP/state/activation-armed" ]] || fail '--now left armed marker'
 ok '--now: immediate guarded activation without reboot'
 
 pending_status
-touch "$TMP/state/activation-armed"
+"$SCRIPT" --arm
 export RAUC_REFUSE_MARK=1
 if "$SCRIPT" --now; then fail 'RAUC failure reported as success'; fi
 count_calls 2
@@ -113,12 +121,7 @@ ok 'RAUC failure retains marker for a future clean shutdown'
 
 # An install timestamp also exists on failed and interrupted RAUC writes.
 for result in failed pending update unknown '' missing; do
-  pending_status
-  if [[ "$result" == missing ]]; then
-    sed -i '/^RAUC_SLOT_STATUS_STATUS_2=/d' "$FIXTURE_STATUS"
-  else
-    sed -i "s/^RAUC_SLOT_STATUS_STATUS_2=.*/RAUC_SLOT_STATUS_STATUS_2='$result'/" "$FIXTURE_STATUS"
-  fi
+  install_result="$result" pending_status
   if "$SCRIPT" --arm; then fail "--arm accepted install result '$result'"; fi
   [[ ! -e "$TMP/state/activation-armed" ]] || fail 'refused install created an armed marker'
 done
@@ -127,7 +130,7 @@ ok 'failed, incomplete, unknown and missing install results cannot arm'
 for action in --now --stop; do
   pending_status
   "$SCRIPT" --arm
-  sed -i "s/^RAUC_SLOT_STATUS_STATUS_2=.*/RAUC_SLOT_STATUS_STATUS_2='failed'/" "$FIXTURE_STATUS"
+  install_result=failed pending_status
   if [[ "$action" == --stop ]]; then
     if "$SCRIPT"; then fail 'shutdown accepted a failed install after arming'; fi
   elif "$SCRIPT" "$action"; then
@@ -138,6 +141,42 @@ for action in --now --stop; do
   "$SCRIPT" --disarm
 done
 ok 'immediate activation and shutdown recheck the installed result'
+
+pending_status
+"$SCRIPT" --arm
+install_result=failed pending_status
+if "$SCRIPT"; then fail 'shutdown accepted failed write'; fi
+for replacement in timestamp count target; do
+  case "$replacement" in
+    timestamp) installed_at=2026-09-24T12:00:00Z pending_status ;;
+    count) install_count=6 pending_status ;;
+    target) target_slot=rootfs.2 pending_status ;;
+  esac
+  for action in --stop --now; do
+    if "$SCRIPT" "$action"; then fail "$action reused an arm after the $replacement changed"; fi
+    count_calls 2
+  done
+done
+installed_at=2026-09-24T12:00:00Z install_count=6 pending_status
+"$SCRIPT" --arm
+"$SCRIPT"
+count_calls 3
+ok 'a replacement install requires its own arm, including with an identical timestamp'
+
+pending_status
+: >"$TMP/state/activation-armed"
+for action in --stop --now; do
+  if "$SCRIPT" "$action"; then fail "$action used an empty legacy marker for a rootfs"; fi
+  count_calls 3
+done
+"$SCRIPT" --arm
+"$SCRIPT" --now
+count_calls 4
+ok 'an empty legacy rootfs marker requires an explicit re-arm'
+
+install_count=missing pending_status
+if "$SCRIPT" --arm; then fail 'armed a rootfs with no install count'; fi
+[[ ! -e "$TMP/state/activation-armed" ]] || fail 'incomplete identity created an arm'
 
 [[ -f "$UNIT" && -f "$ARM_UNIT" && -f "$INSTALLER" ]] || fail 'missing unit or installer'
 ! grep -Eq '^DefaultDependencies=no$' "$UNIT" || fail 'shutdown service has no default dependencies'
