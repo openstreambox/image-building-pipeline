@@ -15,6 +15,10 @@ aplicación, los registros y los perfiles de NetworkManager. Si falla esa
 ampliación, esos servicios no escriben y el diagnóstico independiente muestra
 el error fatal de almacenamiento.
 
+Para preparar una actualización, `/data` debe tener al menos 1 GiB de espacio
+libre y 16 inodos libres. Si falta alguno de los dos, elimina los archivos que
+ya no necesites antes de volver a intentarlo.
+
 El LED de estado parpadea un segundo encendido y tres apagado. HDMI muestra
 el motivo y la solución en VT8; Alt+F1 abre la consola de acceso. La página
 HTTP local ofrece la misma información, sin acciones de escritura:

@@ -4,3 +4,4 @@
 # 15.48-15.93 GB; this floor stays about 3% below the smallest of them.
 CERALIVE_MIN_MEDIA_BYTES=15000000000
 CERALIVE_DATA_MIN_AVAILABLE_BYTES=1073741824 # 1 GiB available for update staging.
+CERALIVE_DATA_MIN_FREE_INODES=16 # Leave room for state, receipts and their temporary files.

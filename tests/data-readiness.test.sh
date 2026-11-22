@@ -97,9 +97,11 @@ done
 MEDIA_BYTES=15000000000 bash "$helper"
 if LOW_FREE=1 bash "$helper"; then exit 1; else [[ "$?" == 78 ]]; fi
 
-if FREE_INODES=0 bash "$helper"; then echo 'readiness accepted an inode-full filesystem'; exit 1; else [[ $? == 78 ]]; fi
-grep -q '^data-full ' "$CERALIVE_DATA_STATUS_FILE"
-FREE_INODES=1 bash "$helper"
+for inodes in 0 1 15; do
+  if FREE_INODES=$inodes bash "$helper"; then echo "readiness accepted $inodes free inodes"; exit 1; else [[ $? == 78 ]]; fi
+  grep -q '^data-full ' "$CERALIVE_DATA_STATUS_FILE"
+done
+FREE_INODES=16 bash "$helper"
 [[ ! -e "$CERALIVE_DATA_STATUS_FILE" ]]
 if FREE_INODES=unknown bash "$helper"; then exit 1; else [[ $? == 1 ]]; fi
 grep -q '^data-unusable ' "$CERALIVE_DATA_STATUS_FILE"

@@ -199,6 +199,8 @@ persistence migration. Migration also requires successful online filesystem
 growth before seeding data or enabling the writable application, log and
 NetworkManager profile binds. A growfs failure leaves those writers stopped;
 the independent readiness/attention path reports the terminal storage failure.
+Update staging requires at least 1 GiB and 16 free inodes on `/data`.
+If either runs low, remove unneeded files before retrying.
 The independent attention service still reaches multi-user boot. It never
 marks either slot good, rearms boot attempts or requests a reboot. A later
 operator reboot follows the existing finite A/B attempt policy; it is not an

@@ -73,6 +73,6 @@ filesystem_bytes=$((filesystem_blocks * filesystem_block_size))
 available_bytes=$((available * block_size))
 (( filesystem_blocks * filesystem_block_size >= partition_bytes - 1048576 )) || refuse 'filesystem has not filled the grown partition'
 reason='data-full'
-(( free_inodes > 0 )) || capacity_refuse 'no free inodes on /data'
+(( free_inodes >= CERALIVE_DATA_MIN_FREE_INODES )) || capacity_refuse "fewer than $CERALIVE_DATA_MIN_FREE_INODES free inodes on /data"
 (( available * block_size >= CERALIVE_DATA_MIN_AVAILABLE_BYTES )) || capacity_refuse 'less than 1 GiB available for update staging'
 echo 'data readiness: partition/filesystem growth complete; update staging available'
