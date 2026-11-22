@@ -108,7 +108,6 @@ cp "${ROOT}/ci/Dockerfile.kernel" "${WORK}/source/ci/"
 mkdir -p "${WORK}/source/manifests/kernel" "${WORK}/source/mkosi/runtime" "${WORK}/source/mkosi/customize"
 cp "${ROOT}/manifests/kernel/required-symbols.list" "${ROOT}/manifests/kernel/forbidden-symbols.list" \
   "${ROOT}/manifests/kernel/rk3588-ramoops.dtsi" "${ROOT}/manifests/kernel/rock-5b-plus-fan.dtsi" \
-  "${ROOT}/manifests/kernel/rk3588-fan-driver-support.patch" \
   "${WORK}/source/manifests/kernel/"
 cp "${ROOT}/manifests/rk3588-bluetooth-firmware-roots.txt" "${WORK}/source/manifests/"
 cp "${ROOT}/mkosi/runtime/ceralive-kernel-boot-staging.sh" "${WORK}/source/mkosi/runtime/"
@@ -125,7 +124,6 @@ for file in "${HERE}/build-kernel.sh" "${HERE}/verify-kernel-config.sh" "${HERE}
   "${KERNEL_LIB_DIR}/builder.sh" "${KERNEL_LIB_DIR}/package.sh" \
   "${KERNEL_LIB_DIR}/artifact-cache.sh" "${KERNEL_LIB_DIR}/cache-dir.sh" "${KERNEL_LIB_DIR}/only.sh" \
   "${KERNEL_LIB_DIR}/ramoops.sh" "${PIPELINE_DIR}/manifests/kernel/rk3588-ramoops.dtsi" \
-  "${PIPELINE_DIR}/manifests/kernel/rk3588-fan-driver-support.patch" \
   "${KERNEL_LIB_DIR}/rock-5b-plus-fan.sh" "${PIPELINE_DIR}/manifests/kernel/rock-5b-plus-fan.dtsi" \
   "${KEY_HERE}/shared/remote-cache.sh" "${KERNEL_BUILDER_DOCKERFILE}" \
   "${PIPELINE_DIR}/manifests/rk3588-bluetooth-firmware-roots.txt" \

@@ -2,12 +2,12 @@
 # artifact-cache.sh also freezes the input-selection code; release-only files stay outside it.
 # The Rock 5B+ case fan profile is also a kernel package input.
 10f866c20565340a36cfa14631380a96497c9e0df661a6c995bec27d7999826c  manifests/kernel/rk3588-edge.fragment
-a5cbac6b1a55067ec45854e018de5182ddbe2f43bdb1c7d439e12acae8527bb2  lib/build-kernel.sh
+f059e26fc816182c2aa163040498fa98855ee9bedd3d8af3651351e8a59d4f1f  lib/build-kernel.sh
 e1bcce8314d650df690eadd9dff677d6a4bc77c43dc1919a20417c234cd0ecd2  lib/kernel/config.sh
 598fc799a517088270d066e45b8f5e7bef4738b13a5d017f8d21d2a831c344ea  lib/kernel/checkout.sh
 f2a18a890a12de4c793ec07ba86aecba963160e4b5023e307622c592b9903609  lib/kernel/builder.sh
 7abe255c92911280642e7e50b99eb72166514decea8d3ba4a8f7decf5963e2a5  lib/kernel/package.sh
-dd8241bae4b33fecc4d8c5b6ad2ac115dccc7dd97bcd2e2edcf2676b4cac4d60  lib/kernel/artifact-cache.sh
+a4f99c3f6cfbab71f1adb464993af64580b164dc60109a67a5dce9ebddf6f1f1  lib/kernel/artifact-cache.sh
 a49a90b183f4d597fdedb0a8999ca10df52a4f76b6291ac011cf540779c256cd  lib/kernel/cache-dir.sh
 7708d50e8ef39f7baec3b0bbd2bc1d5bc8ce3532e79f164596b179eebeb1e0a7  lib/kernel/only.sh
 4870e1cfa126bcf3e3533b642528751d0a8438839344c81df34d250ad1ba1b6b  lib/shared/remote-cache.sh
@@ -22,5 +22,4 @@ f67a73fcb7612213fedf5e13e16bdb6e0c899989b1b6035ec2ebeb35ae48340f  manifests/rk35
 e372c7cc646a2ae08e7000890002c438aa72084296a4fe374cf8400f8a570835  lib/kernel/ramoops.sh
 902177e63f053c226e55fa81b9f1d0b1914878002540121b657d4370a45b157e  manifests/kernel/rk3588-ramoops.dtsi
 9c871c5675f6a2faec669727a6f263c2520d1f94f0f7bc9eecb91ef989592ddb  lib/kernel/rock-5b-plus-fan.sh
-af2a6ad645a39c668ce89cbd85909fb32c6f7b7eeba3eac7347a207f5a58ceac  manifests/kernel/rock-5b-plus-fan.dtsi
-269d0029402c57de7e5b9bcd57dbf4b8f0fa4db8730a5f40dcb755ec810b197a  manifests/kernel/rk3588-fan-driver-support.patch
+eb47a51e0be19604c71394c6ba813d3e9b2ae881049e2e9c193c5d4f1f8eb49f  manifests/kernel/rock-5b-plus-fan.dtsi

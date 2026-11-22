@@ -39,10 +39,12 @@ setup() {
   pwm1: pwm1 { #pwm-cells = <3>; status = "okay"; };
   fan: pwm-fan {
     compatible = "pwm-fan";
+    fan-supply = <&supply>;
     pwms = <&pwm1 0 50000 0>;
     cooling-levels = <0 120 150 180 210 240 255>;
     #cooling-cells = <2>;
   };
+  supply: regulator { compatible = "regulator-fixed"; };
   sensor: thermal-sensor { #thermal-sensor-cells = <1>; };
   thermal-zones {
     package_thermal: package-thermal {
@@ -95,6 +97,7 @@ symbol() {
   [ "$(prop u /pinctrl pinctrl-0)" = "$(prop u "$(symbol case_fan_boot_on)" phandle)" ]
   [ "$(prop u "$(symbol case_fan_boot_on)" rockchip,pins)" = "0 16 0 $(prop u "$(symbol pcfg_output_high)" phandle)" ]
   fdtget -t x "$dtb" "$(symbol pcfg_output_high)" output-high
+  fdtget -t x "$dtb" /case-fan fan-keep-running-on-detach
   [ "$(prop u /case-fan gpio-fan,speed-map)" = '0 0 11000 1' ]
   run fdtget "$dtb" /case-fan pwms
   [ "$status" -ne 0 ]
@@ -123,6 +126,8 @@ symbol() {
   [ "$(prop u /pwm-fan pulses-per-revolution)" = 2 ]
   [ "$(prop u /pwm-fan fan-stop-to-start-percent)" = 30 ]
   [ "$(prop u /pwm-fan fan-shutdown-percent)" = 100 ]
+  run fdtget "$dtb" /pwm-fan fan-supply
+  [ "$status" -ne 0 ]
   fan="$(prop u /pwm-fan phandle)"
   for spec in '0 package-fan0 45000 1' '1 package-fan1 50000 2' '2 case-fan-full 70000 3'; do
     read -r map trip temp state <<< "$spec"
@@ -135,7 +140,6 @@ symbol() {
 }
 
 @test "Rock 5B+ fan profiles are wired to the kernel build and legacy helpers defer to them" {
-  grep -Fq 'git -C /src/linux apply /in/rk3588-fan-driver-support.patch' "$repo/lib/build-kernel.sh"
   grep -Fq 'bash /in/rock-5b-plus-fan.sh /src/linux /in/rock-5b-plus-fan.dtsi' "$repo/lib/build-kernel.sh"
   for unit in ceralive-fan-curve.service ceralive-fan-kickstart.service; do
     grep -Fxq 'ConditionPathExists=!/sys/firmware/devicetree/base/case-fan' "$repo/mkosi/runtime/$unit"

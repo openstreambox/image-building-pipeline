@@ -9,6 +9,8 @@
 #include <dt-bindings/interrupt-controller/irq.h>
 
 &fan {
+	// The S99 takes 5 V directly from the 40-pin header's always-on rail.
+	/delete-property/ fan-supply;
 	status = "okay";
 	// The board's low-side MOSFET inverts the signal at the PWM wire.
 	pwms = <&pwm1 0 40000 PWM_POLARITY_INVERTED>;
@@ -95,6 +97,7 @@
 		// GPIO0_C0 is PWM1 M0, the gate of the fan header's switch.
 		gpios = <&gpio0 RK_PC0 GPIO_ACTIVE_HIGH>;
 		gpio-fan,speed-map = <0 0>, <11000 1>;
+		fan-keep-running-on-detach;
 		#cooling-cells = <2>;
 	};
 };

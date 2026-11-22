@@ -460,7 +460,6 @@ main() {
       fi
       echo "== applied ${applied} patch(es)"
       bash /in/ramoops.sh /src/linux /in/ramoops.dtsi
-      git -C /src/linux apply /in/rk3588-fan-driver-support.patch
       bash /in/rock-5b-plus-fan.sh /src/linux /in/rock-5b-plus-fan.dtsi
 
       # Both config modes converge on ONE olddefconfig/syncconfig/verify sequence;
@@ -581,7 +580,6 @@ main() {
     -v "${KERNEL_LIB_DIR}/ramoops.sh:/in/ramoops.sh:ro" \
     -v "${PIPELINE_DIR}/manifests/kernel/rk3588-ramoops.dtsi:/in/ramoops.dtsi:ro" \
     -v "${KERNEL_LIB_DIR}/rock-5b-plus-fan.sh:/in/rock-5b-plus-fan.sh:ro" \
-    -v "${PIPELINE_DIR}/manifests/kernel/rk3588-fan-driver-support.patch:/in/rk3588-fan-driver-support.patch:ro" \
     -v "${PIPELINE_DIR}/manifests/kernel/rock-5b-plus-fan.dtsi:/in/rock-5b-plus-fan.dtsi:ro" \
     -v "${work}/out:/out" \
     -v "${work}/src:/src" \

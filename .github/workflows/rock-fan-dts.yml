@@ -1,0 +1,48 @@
+name: ROCK fan device trees
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/rock-fan-dts.yml
+      - ci/check-rock-fan-dts.sh
+      - lib/resolve*
+      - lib/kernel/ramoops.sh
+      - lib/kernel/rock-5b-plus-fan.sh
+      - manifests/boards/rock-5b-plus.yaml
+      - manifests/families/rk3588.yaml
+      - manifests/kernel/*.dtsi
+      - tests/rock-5b-plus-fan.bats
+      - tools/read-rock-5b-plus-fan.sh
+  pull_request:
+    branches: [master, osb/review/next-image-base]
+    paths:
+      - .github/workflows/rock-fan-dts.yml
+      - ci/check-rock-fan-dts.sh
+      - lib/resolve*
+      - lib/kernel/ramoops.sh
+      - lib/kernel/rock-5b-plus-fan.sh
+      - manifests/boards/rock-5b-plus.yaml
+      - manifests/families/rk3588.yaml
+      - manifests/kernel/*.dtsi
+      - tests/rock-5b-plus-fan.bats
+      - tools/read-rock-5b-plus-fan.sh
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rock-fan-dts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pinned-dts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install device tree test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bats device-tree-compiler python3-yaml python3-jsonschema
+      - name: Compile and check both pinned ROCK fan profiles
+        run: ci/check-rock-fan-dts.sh

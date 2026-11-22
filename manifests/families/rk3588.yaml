@@ -305,8 +305,10 @@ variants:
       # off-on delay) was refuted on hardware and retired. The ROCK 5B+ slot
       # power order is set by the boot script instead:
       # docs/rock5bplus-internal-modem.md.
-      patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: bc7e44fa35d3eded23567dd48e65f6dc799f4b34
+      # The fork series adds three fan driver patches to that 32-member base.
+      # osb/review/rock-fan-kernel-pin keeps this exact commit fetchable.
+      patches_git_url: https://github.com/openstreambox/rk3588-kernel-patches.git
+      patches_commit: 208c82854a992b6b2666dd8c35dcbfcabcfdaac4
       patches_series: patches/series
 
       defconfig_base: defconfig
@@ -319,7 +321,7 @@ variants:
 
       # kernel_release is DERIVED, never guessed: `make -s kernelrelease
       # LOCALVERSION=-ceralive-rk3588` run against a fresh v7.2 clone at the
-      # pinned commit, with this exact 32-member series applied and the resolved
+      # pinned commit, with the pinned series applied and the resolved
       # defconfig+fragment synced, answers 7.2.0-ceralive-rk3588.
       #
       # NOTE THE `.0`, because it is the whole reason that probe is mandatory.
