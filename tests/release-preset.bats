@@ -316,20 +316,8 @@ bad_channel() { # json for update-image-channel.json -> expect refusal
   [ "$(printf '%s\n' "$output" | grep -c '^0 644$')" -eq 2 ]
 }
 
-# Run the real ceralive-migrate-data body from persistence.sh against a fake
-# rootfs: $1 = scenario dir with opt/ceralive (image) and data/ceralive (/data).
-migrate() {
-  local d="$1"
-  mkdir -p "$d/bin" "$d/etc/ceralive" "$d/data" "$d/varlog" "$d/nm"
-  printf '#!/bin/sh\nexit 1\n' >"$d/bin/mountpoint"; chmod +x "$d/bin/mountpoint"
-  printf '#!/bin/sh\nexit 0\n' >"$d/bin/logger"; chmod +x "$d/bin/logger"
-  { echo 'set -euo pipefail'; echo "DATA=$d/data"; echo "WORKDIR=$d/opt/ceralive"; echo "NM_CONN=$d/nm"; echo "CERAUI_HELPERS=$d/ceraui-workdir"
-    awk '/cat >>\/usr\/local\/sbin\/ceralive-migrate-data <<.EOF./{on=1; next} on && /^EOF$/{exit} on' \
-      "$PIPELINE_DIR/mkosi/customize/postinst.d/persistence.sh" \
-      | sed "s#/etc/ceralive#$d/etc/ceralive#g; s#/var/log#$d/varlog#g"; } >"$d/migrate.sh"
-  grep -q 'update preset pair' "$d/migrate.sh"
-  PATH="$d/bin:$PATH" bash "$d/migrate.sh" >"$d/migrate.log" 2>&1
-}
+load 'lib/migrate-data.sh'
+
 image() { mkdir -p "$1/opt/ceralive" "$1/data/ceralive"; cp "$T/preset/"*.json "$1/opt/ceralive/"; }
 
 @test "seeding A: a fresh card gets both preset files" {
