@@ -97,3 +97,52 @@ limited_migrate() { migrate "$box" "$shared" write_limited; }
   [ "$(cat "$src")" = 3 ]
   [ "$(readlink "$shared/ceralive/host_index")" = absent ]
 }
+
+@test "unavailable ACLs or xattrs do not block new files or overwrite saved profiles" {
+  mkdir -p "$shared/nm/system-connections"
+  rsync() {
+    if [[ "$1" == *A* || "$1" == *X* ]]; then
+      # rsync can report a metadata error before or after publishing the file.
+      if [[ "$*" == *host_index* ]]; then command rsync "$@" || return $?; fi
+      return 23
+    fi
+    command rsync "$@"
+  }
+  export -f rsync
+  printf 'legacy\n' >"$box/etc/ceralive/config.json"
+  printf '3\n' >"$box/etc/ceralive/host_index"
+  printf 'setup\n' >"$box/opt/ceralive/setup.json"
+  ln -s /missing-frontend "$box/opt/ceralive/public"
+  printf 'old\n' >"$box/nm/saved.nmconnection"
+  printf 'operator\n' >"$shared/nm/system-connections/saved.nmconnection"
+  printf 'new\n' >"$box/nm/new.nmconnection"
+  chmod 0600 "$box/etc/ceralive/config.json" "$box/nm/"*.nmconnection
+  migrate "$box" "$shared"
+  [ "$(cat "$shared/ceralive/config.json")" = legacy ]
+  [ "$(stat -c %a "$shared/ceralive/config.json")" = 600 ]
+  [ ! -e "$box/etc/ceralive/config.json" ]
+  [ -L "$box/etc/ceralive/host_index" ]
+  [ "$(cat "$box/etc/ceralive/host_index")" = 3 ]
+  cmp "$box/opt/ceralive/setup.json" "$shared/ceralive/setup.json"
+  [ "$(readlink "$shared/ceralive/public")" = /missing-frontend ]
+  [ "$(cat "$shared/nm/system-connections/saved.nmconnection")" = operator ]
+  cmp "$box/nm/new.nmconnection" "$shared/nm/system-connections/new.nmconnection"
+  [ "$(stat -c %a "$shared/nm/system-connections/new.nmconnection")" = 600 ]
+  [ "$(stat -c %a "$shared/nm/system-connections")" = 700 ]
+}
+
+@test "a partial-transfer error after publication cannot discard the only intact source" {
+  rsync() {
+    if [[ "$*" == *config.json* && "$1" == *X* ]]; then
+      printf 'other\n' >"${!#}/config.json"
+      return 23
+    fi
+    command rsync "$@"
+  }
+  export -f rsync
+  printf 'saved\n' >"$box/etc/ceralive/config.json"
+  run migrate "$box" "$shared"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$box/etc/ceralive/config.json")" = saved ]
+  [ "$(cat "$shared/ceralive/config.json")" = other ]
+}

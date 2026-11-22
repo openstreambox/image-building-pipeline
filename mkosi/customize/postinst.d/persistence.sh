@@ -179,6 +179,25 @@ EOF
 
 log() { logger -t ceralive-migrate -- "$*" 2>/dev/null || true; echo "ceralive-migrate: $*"; }
 
+seed_missing() {
+    local src=$1 dest=$2 rc=0 changes
+    shift 2
+    rsync -aAX --ignore-existing --fsync "$@" -- "$src" "$dest" || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        23) log 'WARN: partial migration transfer, retrying without ACLs and xattrs' ;;
+        *) return "$rc" ;;
+    esac
+    rsync -a --ignore-existing --fsync "$@" -- "$src" "$dest" || return 1
+    # A partial transfer can publish a file before reporting a metadata error.
+    # Verify its bytes and ordinary archive attributes before retiring a source.
+    # Directory imports intentionally keep differing, operator-owned profiles.
+    if [[ "$src" != */ ]]; then
+        changes=$(rsync -acni -- "$src" "$dest") || return 1
+        [[ -z "$changes" ]] || { log "ERROR: incomplete migration of ${src##*/}"; return 1; }
+    fi
+}
+
 [ -d "$DATA" ] || { log "ERROR: $DATA missing (data partition not mounted?)"; exit 1; }
 
 mkdir -p "$DATA/ceralive" "$DATA/log" "$DATA/nm/system-connections" "$DATA/srtla"
@@ -217,7 +236,7 @@ chmod 0755 "$DATA/ceralive/certs" "$DATA/ceralive/certs/incoming"
 # the other filesystem; after a reset either copy can finish the migration.
 if [ -f /etc/ceralive/config.json ] && [ ! -e "$DATA/ceralive/config.json" ] && [ ! -L "$DATA/ceralive/config.json" ]; then
     log "migrating legacy /etc/ceralive/config.json -> $DATA/ceralive/config.json"
-    rsync -aAX --ignore-existing --fsync -- /etc/ceralive/config.json "$DATA/ceralive/"
+    seed_missing /etc/ceralive/config.json "$DATA/ceralive/"
     sync "$DATA/ceralive"
     rm -f /etc/ceralive/config.json
 fi
@@ -236,7 +255,7 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
         # The update preset pair is seeded below as one unit, never one file alone.
         case "$base" in update-settings.json|update-image-channel.json) continue ;; esac
         [ -e "$DATA/ceralive/$base" ] || [ -L "$DATA/ceralive/$base" ] || \
-            rsync -aAX --ignore-existing --fsync -- "$f" "$DATA/ceralive/"
+            seed_missing "$f" "$DATA/ceralive/"
     done
     # Release update preset (postinst.d/update-preset.sh): CeraUI reads the two
     # files together, so seed them only when the image carries both and /data has
@@ -297,7 +316,7 @@ if [ -d "$NM_CONN" ] && ! mountpoint -q "$NM_CONN"; then
     # Only import missing keyfiles. The shared copy can contain newer operator
     # settings than either slot. Keep the bind directory private even when the
     # empty image directory is 0755.
-    rsync -aHAX --ignore-existing --fsync --chmod=D700 -- "$NM_CONN/" "$DATA/nm/system-connections/" \
+    seed_missing "$NM_CONN/" "$DATA/nm/system-connections/" -H --chmod=D700 \
         || log "WARN: could not seed all NetworkManager profiles; will retry missing files next boot"
 fi
 
@@ -375,7 +394,7 @@ for n in host_index hostname_consumers_pending; do
             continue
         fi
         [ -e "$DATA/ceralive/$n" ] || \
-            rsync -aAX --ignore-existing --fsync -- "/etc/ceralive/$n" "$DATA/ceralive/"
+            seed_missing "/etc/ceralive/$n" "$DATA/ceralive/"
         sync "$DATA/ceralive"
         rm -f "/etc/ceralive/$n"
     fi

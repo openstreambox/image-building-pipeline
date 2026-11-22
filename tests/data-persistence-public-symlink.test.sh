@@ -70,8 +70,10 @@ block="$(awk '
 # ---------------------------------------------------------------------------
 grep -Fq '"$WORKDIR/public"' <<<"${block}" \
   || fail 'seeding loop no longer lists "$WORKDIR/public" — the frontend static symlink would be dropped by the /data bind mount (404 on /)'
-grep -Fq 'rsync -aAX' <<<"${block}" \
-  || fail 'seeding loop must preserve source symlinks in archive mode'
+grep -Fq 'seed_missing "$f" "$DATA/ceralive/"' <<<"${block}" \
+  || fail 'seeding loop must use the archive copy helper'
+grep -Fq 'rsync -aAX --ignore-existing' "${POSTINST_D}/persistence.sh" \
+  || fail 'copy helper must preserve source symlinks in archive mode'
 grep -Fq '[ -L "$f" ]' <<<"${block}" \
   || fail 'seeding loop source guard is not symlink-aware ([ -L "$f" ]) — a symlink whose target is absent would be skipped'
 grep -Fq '[ -L "$DATA/ceralive/$base" ]' <<<"${block}" \
@@ -91,9 +93,11 @@ run_block() { # $1=DATA  $2=WORKDIR
   {
     echo 'set -euo pipefail'
     echo 'mountpoint() { return 1; }'
+    echo 'log() { :; }'
     printf 'DATA=%q\n' "$1"
     printf 'WORKDIR=%q\n' "$2"
     printf 'CERAUI_HELPERS=%q\n' "$2/../no-helpers"   # no kept helpers here; ceraui-workdir-helpers.test.sh covers them
+    sed -n '/^seed_missing() {/,/^}/p' "${POSTINST_D}/persistence.sh"
     printf '%s\n' "${block}"
   } >"${runner}"
   bash "${runner}"

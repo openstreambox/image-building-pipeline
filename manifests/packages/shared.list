@@ -309,7 +309,8 @@ linux-cpupower           # CPU governor control for sustained encode performance
                          # on the Armbian vendor 6.1 BSP kernel the image actually ships.
 
 # --- Net glue (runtime-critical) ----------------------------------------------
-rsync                    # file sync for dev-push/dev-sync live-reload loop (docs/dev-loop.md)
+rsync                    # Runtime-critical: boot-time /data migration and standby slot mirroring.
+                         # Also used by the dev-push/dev-sync live-reload loop (docs/dev-loop.md).
 curl                     # http client — CeraUI/update flows + on-device `curl localhost`
                          # health probe (backend observability.ts). Runtime-critical: KEPT.
 # wget                   # REMOVED (todo 19, audited). The old "http downloader (update/fetch
