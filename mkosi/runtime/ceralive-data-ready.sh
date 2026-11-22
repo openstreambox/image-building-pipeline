@@ -53,8 +53,9 @@ reason=card-read-only
 [[ ",$(findmnt -nro OPTIONS /data)," == *,rw,* ]] || refuse '/data is not writable'
 reason='data-unusable'
 partition_bytes=$(lsblk -bdnro SIZE "$data")
-read -r blocks block_size available < <(stat -f -c '%b %S %a' /data)
+read -r blocks block_size available free_inodes < <(stat -f -c '%b %S %a %d' /data)
 [[ "$partition_bytes" =~ ^[1-9][0-9]{0,14}$ && "$blocks" =~ ^[0-9]{1,15}$ && "$block_size" =~ ^[1-9][0-9]{0,5}$ && "$available" =~ ^[0-9]{1,15}$ ]] || refuse 'invalid capacity inventory'
+[[ "$free_inodes" =~ ^[0-9]{1,15}$ ]] || refuse 'invalid free inode count'
 # statfs excludes ext4 overhead from total blocks. Compare the superblock's
 # physical filesystem extent, not statfs payload capacity, to the partition.
 reason=card-io-failed
@@ -72,5 +73,6 @@ filesystem_bytes=$((filesystem_blocks * filesystem_block_size))
 available_bytes=$((available * block_size))
 (( filesystem_blocks * filesystem_block_size >= partition_bytes - 1048576 )) || refuse 'filesystem has not filled the grown partition'
 reason='data-full'
+(( free_inodes > 0 )) || capacity_refuse 'no free inodes on /data'
 (( available * block_size >= CERALIVE_DATA_MIN_AVAILABLE_BYTES )) || capacity_refuse 'less than 1 GiB available for update staging'
 echo 'data readiness: partition/filesystem growth complete; update staging available'

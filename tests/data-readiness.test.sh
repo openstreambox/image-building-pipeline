@@ -42,9 +42,14 @@ esac
 SH
 cat >"$work/bin/stat" <<'SH'
 #!/bin/bash
-if [[ ${SMALL_FS:-0} == 1 ]]; then echo '65536 4096 60000'
-elif [[ ${LOW_FREE:-0} == 1 ]]; then echo '440000 4096 60000'
-else echo '440000 4096 300000'; fi
+if [[ ${SMALL_FS:-0} == 1 ]]; then blocks='65536 4096 60000'
+elif [[ ${LOW_FREE:-0} == 1 ]]; then blocks='440000 4096 60000'
+else blocks='440000 4096 300000'; fi
+case "$3" in
+  '%b %S %a') echo "$blocks" ;;
+  '%b %S %a %d') echo "$blocks ${FREE_INODES:-24000}" ;;
+  *) exit 1 ;;
+esac
 SH
 cat >"$work/bin/dumpe2fs" <<'SH'
 #!/bin/bash
@@ -91,6 +96,13 @@ for media in 8000000000 14999999999; do
 done
 MEDIA_BYTES=15000000000 bash "$helper"
 if LOW_FREE=1 bash "$helper"; then exit 1; else [[ "$?" == 78 ]]; fi
+
+if FREE_INODES=0 bash "$helper"; then echo 'readiness accepted an inode-full filesystem'; exit 1; else [[ $? == 78 ]]; fi
+grep -q '^data-full ' "$CERALIVE_DATA_STATUS_FILE"
+FREE_INODES=1 bash "$helper"
+[[ ! -e "$CERALIVE_DATA_STATUS_FILE" ]]
+if FREE_INODES=unknown bash "$helper"; then exit 1; else [[ $? == 1 ]]; fi
+grep -q '^data-unusable ' "$CERALIVE_DATA_STATUS_FILE"
 
 # Repeated operator boots cannot refresh attempts or mark the undersized slot
 # healthy. The existing selector spends A x3, B x3, then stays on last-resort A;
