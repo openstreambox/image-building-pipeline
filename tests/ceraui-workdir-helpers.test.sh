@@ -21,9 +21,11 @@
 # update the file was image 4's CeraUI copy (written through the bind by an
 # earlier package upgrade), so image 5's CeraUI ran image 4's helper and the
 # captive-portal fix the update carried never took effect. Now, when the kept
-# copy matches the installed ceralive-device's md5sums entry, any entry but a
-# real directory is replaced by the link; otherwise a regular file still stays
-# (an in-place upgrade on this slot wrote it).
+# copy matches the installed ceralive-device's md5sums record, any entry but a
+# real directory is replaced by the link (a replaced regular file is kept as
+# .<name>.pre-link for a rollback to an image without a kept copy); otherwise a
+# regular file still stays (an in-place upgrade on this slot wrote it), logged.
+# All of it stays inside a real $DATA/ceralive and stages in a private mktemp dir.
 #
 # Part A — the app layer keeps the copy (sourced function, synthetic root).
 # Part B — the migrate-data block, extracted verbatim and run on synthetic trees.
@@ -40,22 +42,32 @@ PERSISTENCE="${PIPELINE_DIR}/mkosi/customize/postinst.d/persistence.sh"
 HELPER=captive-portal-window.py
 HELPERS_REL=usr/libexec/ceralive/ceraui-workdir
 
-fail() { printf 'ceraui-workdir-helpers regression: %s\n' "$1" >&2; exit 1; }
+# CERAUI_HELPERS_KEEP_GOING=1 reports every failing case instead of the first
+# (used to show which cases fail on an older persistence.sh).
+FAILED=0
+fail() {
+  printf 'ceraui-workdir-helpers regression: %s\n' "$1" >&2
+  [[ "${CERAUI_HELPERS_KEEP_GOING:-}" == 1 ]] || exit 1
+  FAILED=$((FAILED + 1))
+}
 
 [[ -f "${APP_POSTINST}" ]] || fail "missing app postinst: ${APP_POSTINST}"
 [[ -f "${PERSISTENCE}" ]] || fail "missing persistence module: ${PERSISTENCE}"
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/ceraui-workdir-helpers.XXXXXX")"
+# Canonical, so the symlinked-parent guard sees only the parents a case plants.
+TMP="$(realpath -e -- "$(mktemp -d "${TMPDIR:-/tmp}/ceraui-workdir-helpers.XXXXXX")")"
 trap 'rm -rf "${TMP}"' EXIT
 
 # dpkg-query stub: --control-show ceralive-device md5sums prints $STUB_MD5SUMS
 # (the installed instance's md5sums) and fails when it is unset or missing, as
 # for a package that is not installed or not one instance. Anything else fails.
+# STUB_DPKG_FAIL=1 prints the file and still exits 1 (output of a failed query).
 mkdir -p "${TMP}/bin"
 cat >"${TMP}/bin/dpkg-query" <<'STUB'
 #!/usr/bin/env bash
 [[ " $* " == *" --control-show ceralive-device md5sums "* && -f "${STUB_MD5SUMS:-}" ]] || exit 1
-exec cat "${STUB_MD5SUMS}"
+cat "${STUB_MD5SUMS}"
+[[ -z "${STUB_DPKG_FAIL:-}" ]] || exit 1
 STUB
 chmod +x "${TMP}/bin/dpkg-query"
 
@@ -104,7 +116,8 @@ run_block() { # $1=DATA $2=WORKDIR $3=CERAUI_HELPERS
   {
     echo 'set -euo pipefail'
     echo 'mountpoint() { return 1; }'
-    echo 'log() { :; }'
+    # Every log line of the block lands next to the box, for the log checks.
+    printf 'log() { printf "%%s\\n" "$*" >>%q; }\n' "$1/.migrate.log"
     printf 'DATA=%q\nWORKDIR=%q\nCERAUI_HELPERS=%q\n' "$1" "$2" "$3"
     printf '%s\n' "${RUN_PRELUDE:-}"
     printf '%s\n' "${block}"
@@ -112,6 +125,20 @@ run_block() { # $1=DATA $2=WORKDIR $3=CERAUI_HELPERS
     printf 'echo continued >%q\n' "$1/.migrate-continued"
   } >"${runner}"
   PATH="${TMP}/bin:${PATH}" bash "${runner}"
+}
+
+no_stage() { # $1=box $2=label
+  local left
+  left="$(find "$1/data/ceralive" -maxdepth 1 -name '.helper-stage.*' -print -quit)"
+  [[ -z "${left}" ]] || fail "$2: a staging directory was left behind: ${left}"
+}
+assert_kept_regular() { # $1=box $2=label $3=expected output
+  [[ -f "$1/data/ceralive/${HELPER}" && ! -L "$1/data/ceralive/${HELPER}" ]] \
+    || fail "$2: the regular file was replaced"
+  [[ "$(python3 -I "$1/data/ceralive/${HELPER}")" == "$3" ]] || fail "$2: the regular file was changed"
+}
+assert_logged() { # $1=box $2=label $3=fixed string
+  grep -Fq -- "$3" "$1/data/.migrate.log" 2>/dev/null || fail "$2: no log line containing: $3"
 }
 
 # A box tree: rootfs /opt/ceralive as the .deb leaves it, the app layer's copy,
@@ -175,6 +202,7 @@ run_block "${B5}/data" "${B5}/opt/ceralive" "${B5}/${HELPERS_REL}"
   || fail "B5: a package-written helper was replaced"
 [[ "$(python3 -I "${B5}/data/ceralive/${HELPER}")" == "package helper" ]] \
   || fail "B5: a package-written helper was changed"
+assert_logged "${B5}" B5 "keeping the regular file ${B5}/data/ceralive/${HELPER}: dpkg-query has no md5sums"
 echo "ceraui-workdir-helpers: B5 package file kept OK"
 
 # B6: an image without any kept helper (dev build without CeraUI) links nothing.
@@ -233,8 +261,7 @@ assert_linked() { # $1=box $2=label
     || fail "$2: the link points at $(readlink "$1/data/ceralive/${HELPER}")"
   [[ "$(python3 -I "$1/data/ceralive/${HELPER}")" == "image helper" ]] \
     || fail "$2: the bound path does not run this slot's helper"
-  [[ ! -e "$1/data/ceralive/${HELPER}.helper-link" && ! -L "$1/data/ceralive/${HELPER}.helper-link" ]] \
-    || fail "$2: a temporary link was left behind"
+  no_stage "$1" "$2"
 }
 # A box whose installed package is the one this slot's image was built with.
 slot_box() { # $1=dir
@@ -249,6 +276,11 @@ printf 'print("image 4 helper")\n' >"${M1}/data/ceralive/${HELPER}"
 STUB_MD5SUMS="${M1}/ceralive-device.md5sums" run_block "${M1}/data" "${M1}/opt/ceralive" "${M1}/${HELPERS_REL}"
 assert_linked "${M1}" M1
 [[ -f "${M1}/data/.migrate-continued" ]] || fail "M1: migration did not go on"
+# The replaced file is kept for a rollback to an image without a kept copy.
+[[ -f "${M1}/data/ceralive/.${HELPER}.pre-link" && ! -L "${M1}/data/ceralive/.${HELPER}.pre-link" ]] \
+  || fail "M1: the replaced regular file was not kept as .${HELPER}.pre-link"
+[[ "$(python3 -I "${M1}/data/ceralive/.${HELPER}.pre-link")" == "image 4 helper" ]] \
+  || fail "M1: .${HELPER}.pre-link does not hold the replaced file"
 # ...and every later boot is a no-op.
 STUB_MD5SUMS="${M1}/ceralive-device.md5sums" run_block "${M1}/data" "${M1}/opt/ceralive" "${M1}/${HELPERS_REL}"
 assert_linked "${M1}" M1-rerun
@@ -289,6 +321,7 @@ rm -f "${M4}/data/ceralive/${HELPER}"
 STUB_MD5SUMS="${M4}/ceralive-device.md5sums" run_block "${M4}/data" "${M4}/opt/ceralive" "${M4}/${HELPERS_REL}"
 [[ "$(readlink "${M4}/data/ceralive/${HELPER}")" == "${M4}/${HELPERS_REL}/${HELPER}" ]] \
   || fail "M4: an absent helper was not linked after an in-place upgrade"
+assert_logged "${M4}" M4 "keeping the regular file ${M4}/data/ceralive/${HELPER}: the image copy"
 echo "ceraui-workdir-helpers: M4 newer package's regular file kept OK"
 
 # M5: no single valid entry for the helper (absent, duplicated, or the package
@@ -304,6 +337,7 @@ for variant in none dup; do
   STUB_MD5SUMS="${M5}/ceralive-device.md5sums" run_block "${M5}/data" "${M5}/opt/ceralive" "${M5}/${HELPERS_REL}"
   [[ -f "${M5}/data/ceralive/${HELPER}" && ! -L "${M5}/data/ceralive/${HELPER}" ]] \
     || fail "M5-${variant}: a regular file was replaced without one valid md5sums entry"
+  assert_logged "${M5}" "M5-${variant}" "has no single md5sums record for opt/ceralive/${HELPER}"
 done
 echo "ceraui-workdir-helpers: M5 no single entry, regular file kept OK"
 
@@ -336,13 +370,122 @@ STUB_MD5SUMS="${M8}/ceralive-device.md5sums" RUN_PRELUDE='mv() { return 1; }' \
 [[ "$(python3 -I "${M8}/data/ceralive/${HELPER}")" == "image 4 helper" ]] \
   || fail "M8: the entry changed although the rename failed"
 [[ ! -e "${M8}/data/ceralive/${HELPER}.helper-link" && ! -L "${M8}/data/ceralive/${HELPER}.helper-link" ]] \
-  || fail "M8: the temporary link was left behind"
+  || fail "M8: the old fixed staging name appeared"
+no_stage "${M8}" M8
+assert_logged "${M8}" M8 "WARNING: cannot replace ${M8}/data/ceralive/${HELPER}"
 echo "ceraui-workdir-helpers: M8 a failed replacement is non-fatal OK"
 
-# M9: the replacement is a rename, so the entry is never absent in between.
-grep -Fq 'mv -fT -- "$dest.helper-link" "$dest"' <<<"${block}" \
-  || fail "M9: the stale helper is no longer replaced by an atomic rename"
-echo "ceraui-workdir-helpers: M9 atomic replacement OK"
+# M9: the link is renamed into place from a private staging directory, so the
+# entry is never absent in between (static check of the rename; the staging
+# behaviour is covered by S2 and S3).
+grep -Fq 'mv -fT -- "$stage/link" "$dest"' <<<"${block}" \
+  || fail "M9: the stale helper is no longer replaced by a rename from the staging directory"
+echo "ceraui-workdir-helpers: M9 rename into place OK"
+
+# M10: a same-bytes copy is also kept as .pre-link; a directory at that name
+# stops only the keeping, never the fix.
+M10="${TMP}/m10"; slot_box "${M10}"
+printf 'print("image 4 helper")\n' >"${M10}/data/ceralive/${HELPER}"
+mkdir -p "${M10}/data/ceralive/.${HELPER}.pre-link"
+STUB_MD5SUMS="${M10}/ceralive-device.md5sums" run_block "${M10}/data" "${M10}/opt/ceralive" "${M10}/${HELPERS_REL}"
+assert_linked "${M10}" M10
+[[ -d "${M10}/data/ceralive/.${HELPER}.pre-link" && -z "$(ls -A "${M10}/data/ceralive/.${HELPER}.pre-link")" ]] \
+  || fail "M10: the directory at the .pre-link name was changed"
+assert_logged "${M10}" M10 "WARNING: cannot keep the replaced"
+echo "ceraui-workdir-helpers: M10 keeping fails, the fix still applies OK"
+
+# C1: a failed query's output never counts, even when it looks like a record.
+C1="${TMP}/c1"; slot_box "${C1}"
+printf 'print("image 4 helper")\n' >"${C1}/data/ceralive/${HELPER}"
+STUB_DPKG_FAIL=1 STUB_MD5SUMS="${C1}/ceralive-device.md5sums" \
+  run_block "${C1}/data" "${C1}/opt/ceralive" "${C1}/${HELPERS_REL}"
+assert_kept_regular "${C1}" C1 "image 4 helper"
+assert_logged "${C1}" C1 "dpkg-query has no md5sums"
+echo "ceraui-workdir-helpers: C1 failed query output ignored OK"
+
+# C2: only the exact pathname counts: a longer name, a name with a space and
+# more after it, or a prefix are other files.
+for variant in suffix space prefix; do
+  C2="${TMP}/c2-${variant}"; slot_box "${C2}"
+  sum="$(md5_of "${C2}/${HELPERS_REL}/${HELPER}")"
+  case "${variant}" in
+    suffix) rec="opt/ceralive/${HELPER}.orig" ;;
+    space)  rec="opt/ceralive/${HELPER} other" ;;
+    prefix) rec="srv/opt/ceralive/${HELPER}" ;;
+  esac
+  printf '%s  %s\n' "${sum}" "${rec}" >"${C2}/ceralive-device.md5sums"
+  printf 'print("image 4 helper")\n' >"${C2}/data/ceralive/${HELPER}"
+  STUB_MD5SUMS="${C2}/ceralive-device.md5sums" run_block "${C2}/data" "${C2}/opt/ceralive" "${C2}/${HELPERS_REL}"
+  assert_kept_regular "${C2}" "C2-${variant}" "image 4 helper"
+done
+echo "ceraui-workdir-helpers: C2 exact pathname record only OK"
+
+# T1: a link whose target is the image copy plus a trailing newline dangles; it
+# is repaired, not mistaken for the right link.
+T1="${TMP}/t1"; slot_box "${T1}"
+ln -sT "${T1}/${HELPERS_REL}/${HELPER}"$'\n' "${T1}/data/ceralive/${HELPER}"
+run_block "${T1}/data" "${T1}/opt/ceralive" "${T1}/${HELPERS_REL}"
+[[ "$(readlink "${T1}/data/ceralive/${HELPER}"; printf x)" == "${T1}/${HELPERS_REL}/${HELPER}"$'\nx' ]] \
+  || fail "T1: a target with a trailing newline was kept"
+T1b="${TMP}/t1b"; slot_box "${T1b}"
+ln -sT "${T1b}/${HELPERS_REL}/${HELPER}"$'\n' "${T1b}/data/ceralive/${HELPER}"
+STUB_MD5SUMS="${T1b}/ceralive-device.md5sums" run_block "${T1b}/data" "${T1b}/opt/ceralive" "${T1b}/${HELPERS_REL}"
+assert_linked "${T1b}" T1b
+echo "ceraui-workdir-helpers: T1 trailing-newline target repaired OK"
+
+# S1: $DATA/ceralive or $DATA is a symlink: nothing is written through it, the
+# refusal is logged, and the migration goes on.
+for variant in workdir data; do
+  S1="${TMP}/s1-${variant}"; slot_box "${S1}"
+  printf 'print("image 4 helper")\n' >"${S1}/data/ceralive/${HELPER}"
+  mkdir -p "${S1}/elsewhere"
+  case "${variant}" in
+    workdir) mv "${S1}/data/ceralive" "${S1}/elsewhere/ceralive"
+             ln -s "${S1}/elsewhere/ceralive" "${S1}/data/ceralive"
+             data="${S1}/data" ;;
+    data)    mv "${S1}/data" "${S1}/elsewhere/data"
+             ln -s "${S1}/elsewhere/data" "${S1}/data-link"
+             data="${S1}/data-link" ;;
+  esac
+  STUB_MD5SUMS="${S1}/ceralive-device.md5sums" run_block "${data}" "${S1}/opt/ceralive" "${S1}/${HELPERS_REL}" \
+    || fail "S1-${variant}: a symlinked parent failed ceralive-migrate-data"
+  real="${S1}/elsewhere/${variant/workdir/ceralive}"; [[ "${variant}" == data ]] && real="${S1}/elsewhere/data/ceralive"
+  [[ -f "${real}/${HELPER}" && ! -L "${real}/${HELPER}" ]] || fail "S1-${variant}: a file was written through a symlinked parent"
+  [[ "$(python3 -I "${real}/${HELPER}")" == "image 4 helper" ]] || fail "S1-${variant}: the file behind the symlink changed"
+  [[ -z "$(find "${real}" -maxdepth 1 \( -name '.helper-stage.*' -o -name ".${HELPER}.pre-link" \) -print -quit)" ]] \
+    || fail "S1-${variant}: staging or keeping happened through a symlinked parent"
+  grep -Fq "or a parent is not a real directory" "${data}/.migrate.log" || fail "S1-${variant}: the refusal was not logged"
+  [[ -f "${data}/.migrate-continued" ]] || fail "S1-${variant}: migration stopped"
+done
+echo "ceraui-workdir-helpers: S1 symlinked parent refused OK"
+
+# S2: occupied staging paths. The old fixed name and a foreign .helper-stage.*
+# directory are never touched; a leftover staging directory holding only our
+# link is cleared; the fix still applies.
+S2="${TMP}/s2"; slot_box "${S2}"
+printf 'print("image 4 helper")\n' >"${S2}/data/ceralive/${HELPER}"
+printf 'not ours\n' >"${S2}/data/ceralive/${HELPER}.helper-link"
+mkdir -p "${S2}/data/ceralive/.helper-stage.foreign" "${S2}/data/ceralive/.helper-stage.leftover"
+printf 'keep me\n' >"${S2}/data/ceralive/.helper-stage.foreign/other"
+ln -s /nonexistent "${S2}/data/ceralive/.helper-stage.leftover/link"
+STUB_MD5SUMS="${S2}/ceralive-device.md5sums" run_block "${S2}/data" "${S2}/opt/ceralive" "${S2}/${HELPERS_REL}"
+[[ -L "${S2}/data/ceralive/${HELPER}" ]] || fail "S2: the fix did not apply with occupied staging names"
+[[ "$(<"${S2}/data/ceralive/${HELPER}.helper-link")" == "not ours" ]] || fail "S2: the old fixed name was touched"
+[[ "$(<"${S2}/data/ceralive/.helper-stage.foreign/other")" == "keep me" ]] || fail "S2: a foreign staging entry was touched"
+[[ ! -e "${S2}/data/ceralive/.helper-stage.leftover" ]] || fail "S2: our staging leftover was not cleared"
+[[ -z "$(find "${S2}/data/ceralive" -maxdepth 1 -name '.helper-stage.*' ! -name '.helper-stage.foreign' -print -quit)" ]] \
+  || fail "S2: this run left a staging directory behind"
+echo "ceraui-workdir-helpers: S2 occupied staging paths OK"
+
+# S3: no staging directory can be made: logged, the file stays, migration goes on.
+S3="${TMP}/s3"; slot_box "${S3}"
+printf 'print("image 4 helper")\n' >"${S3}/data/ceralive/${HELPER}"
+STUB_MD5SUMS="${S3}/ceralive-device.md5sums" RUN_PRELUDE='mktemp() { return 1; }' \
+  run_block "${S3}/data" "${S3}/opt/ceralive" "${S3}/${HELPERS_REL}" || fail "S3: a failed mktemp failed ceralive-migrate-data"
+assert_kept_regular "${S3}" S3 "image 4 helper"
+assert_logged "${S3}" S3 "WARNING: cannot stage a link"
+[[ -f "${S3}/data/.migrate-continued" ]] || fail "S3: migration stopped"
+echo "ceraui-workdir-helpers: S3 failed staging is non-fatal OK"
 
 # ---------------------------------------------------------------------------
 # Part C — both halves name the same directory
@@ -357,4 +500,5 @@ grep -Eq "^CERAUI_WORKDIR_HELPERS=\(.*\b${HELPER//./\\.}\b.*\)" "${APP_POSTINST}
   || fail "C: ${HELPER} is no longer in the app layer's helper list"
 echo "ceraui-workdir-helpers: C shared directory OK"
 
+(( FAILED == 0 )) || { echo "ceraui-workdir-helpers regression: ${FAILED} failure(s)" >&2; exit 1; }
 echo "ceraui-workdir-helpers regression: PASS"
