@@ -57,6 +57,7 @@ kernel_input_files() {
       "${KERNEL_LIB_DIR}/cache-dir.sh" \
       "${PIPELINE_DIR}/manifests/kernel/rk3588-ramoops.dtsi" \
       "${KERNEL_LIB_DIR}/rock-5b-plus-fan.sh" \
+      "${PIPELINE_DIR}/manifests/kernel/rk3588-fan-driver-support.patch" \
       "${PIPELINE_DIR}/manifests/kernel/rock-5b-plus-fan.dtsi" \
       "${HERE}/shared/remote-cache.sh" \
       "${KERNEL_CONFIG_VERIFIER_SH:-${HERE}/verify-kernel-config.sh}" \

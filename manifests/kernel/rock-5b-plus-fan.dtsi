@@ -9,6 +9,7 @@
 #include <dt-bindings/interrupt-controller/irq.h>
 
 &fan {
+	status = "okay";
 	// The board's low-side MOSFET inverts the signal at the PWM wire.
 	pwms = <&pwm1 0 40000 PWM_POLARITY_INVERTED>;
 	// Header pin 37, with an external 10 kΩ pull-up to 3.3 V.
@@ -18,6 +19,7 @@
 	pinctrl-0 = <&case_fan_tach>;
 	pulses-per-revolution = <2>;
 	fan-stop-to-start-percent = <30>;
+	fan-shutdown-percent = <100>;
 	cooling-levels = <0 150 153 255>;
 };
 
@@ -31,19 +33,19 @@
 
 &package_fan0 {
 	temperature = <45000>;
-	hysteresis = <0>;
+	hysteresis = <2500>;
 };
 
 &package_fan1 {
 	temperature = <50000>;
-	hysteresis = <0>;
+	hysteresis = <2500>;
 };
 
 &package_thermal {
 	trips {
 		case_fan_full: case-fan-full {
 			temperature = <70000>;
-			hysteresis = <0>;
+			hysteresis = <2500>;
 			type = "active";
 		};
 	};
@@ -74,9 +76,22 @@
 	status = "disabled";
 };
 
+&pinctrl {
+	// Drive the gate high even when the fan consumer never binds.
+	pinctrl-names = "default";
+	pinctrl-0 = <&case_fan_boot_on>;
+
+	case-fan {
+		case_fan_boot_on: case-fan-boot-on {
+			rockchip,pins = <0 RK_PC0 RK_FUNC_GPIO &pcfg_output_high>;
+		};
+	};
+};
+
 / {
 	case-fan {
 		compatible = "gpio-fan";
+		status = "okay";
 		// GPIO0_C0 is PWM1 M0, the gate of the fan header's switch.
 		gpios = <&gpio0 RK_PC0 GPIO_ACTIVE_HIGH>;
 		gpio-fan,speed-map = <0 0>, <11000 1>;

@@ -1,0 +1,81 @@
+diff --git a/drivers/hwmon/gpio-fan.c b/drivers/hwmon/gpio-fan.c
+index 084828e..c0b30da 100644
+--- a/drivers/hwmon/gpio-fan.c
++++ b/drivers/hwmon/gpio-fan.c
+@@ -43,6 +43,7 @@ struct gpio_fan_data {
+ 	int			speed_index;
+ 	int			resume_speed;
+ 	bool			pwm_enable;
++	bool			probe_complete;
+ 	struct gpio_desc	*alarm_gpio;
+ 	struct work_struct	alarm_work;
+ 	struct regulator	*supply;
+@@ -522,7 +523,9 @@ static void gpio_fan_stop(void *data)
+ 	struct gpio_fan_data *fan_data = data;
+ 
+ 	mutex_lock(&fan_data->lock);
+-	set_fan_speed(data, 0);
++	/* Preserve the board-selected starting level if probe failed. */
++	if (fan_data->probe_complete)
++		set_fan_speed(data, 0);
+ 	mutex_unlock(&fan_data->lock);
+ 
+ 	pm_runtime_disable(fan_data->dev);
+@@ -597,6 +600,7 @@ static int gpio_fan_probe(struct platform_device *pdev)
+ 								       fan_data,
+ 								       &gpio_fan_cool_ops);
+ 
++	fan_data->probe_complete = true;
+ 	dev_info(dev, "GPIO fan initialized\n");
+ 
+ 	return 0;
+diff --git a/drivers/hwmon/pwm-fan.c b/drivers/hwmon/pwm-fan.c
+index 37f3781..dd0fe37 100644
+--- a/drivers/hwmon/pwm-fan.c
++++ b/drivers/hwmon/pwm-fan.c
+@@ -555,6 +555,12 @@ static int pwm_fan_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
++	/* Cleanup can run on a probe error after PWM setup. */
++	ret = device_property_read_u32(dev, "fan-shutdown-percent",
++				       &pwm_shutdown_percent);
++	if (!ret && pwm_shutdown_percent)
++		ctx->pwm_shutdown = (clamp(pwm_shutdown_percent, 0, 100) * 255) / 100;
++
+ 	/* use maximum cooling level if provided */
+ 	if (ctx->pwm_fan_cooling_levels)
+ 		initial_pwm = ctx->pwm_fan_cooling_levels[ctx->pwm_fan_max_state];
+@@ -654,11 +660,6 @@ static int pwm_fan_probe(struct platform_device *pdev)
+ 		channels[1] = &ctx->fan_channel;
+ 	}
+ 
+-	ret = device_property_read_u32(dev, "fan-shutdown-percent",
+-				       &pwm_shutdown_percent);
+-	if (!ret && pwm_shutdown_percent)
+-		ctx->pwm_shutdown = (clamp(pwm_shutdown_percent, 0, 100) * 255) / 100;
+-
+ 	ret = device_property_read_u32(dev, "fan-stop-to-start-percent",
+ 				       &pwm_min_from_stopped);
+ 	if (!ret && pwm_min_from_stopped) {
+diff --git a/drivers/thermal/thermal_core.c b/drivers/thermal/thermal_core.c
+index 28a20d4..53a8391 100644
+--- a/drivers/thermal/thermal_core.c
++++ b/drivers/thermal/thermal_core.c
+@@ -958,6 +958,7 @@ static void thermal_cdev_release(struct device *dev)
+ 	struct thermal_cooling_device *cdev = to_cooling_device(dev);
+ 
+ 	thermal_cooling_device_destroy_sysfs(cdev);
++	of_node_put(dev->of_node);
+ 	kfree_const(cdev->type);
+ 	ida_free(&thermal_cdev_ida, cdev->id);
+ 	kfree(cdev);
+@@ -1013,6 +1014,8 @@ int thermal_cooling_device_add(struct thermal_cooling_device *cdev, void *devdat
+ 	cdev->device.class = thermal_class;
+ 	cdev->device.release = thermal_cdev_release;
+ 	device_initialize(&cdev->device);
++	/* Expose the DT identity alongside the cooling state in sysfs. */
++	cdev->device.of_node = of_node_get(cdev->np);
+ 	cdev->devdata = devdata;
+ 
+ 	ret = dev_set_name(&cdev->device, "cooling_device%d", cdev->id);
