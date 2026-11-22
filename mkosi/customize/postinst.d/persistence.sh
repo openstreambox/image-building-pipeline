@@ -267,14 +267,138 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
     # Programs CeraUI runs from its working dir (captive-portal-window.py). The
     # bind hides the .deb's copy, so link each one to the image-owned copy the app
     # layer keeps outside it. A link, not a copy, so that after an OTA the box runs
-    # the helper of its new slot. Absent and dangling entries are (re)linked on
-    # every boot; anything else is left alone: a regular file there was written by
-    # a later CeraUI package upgrade and belongs to the CeraUI that now runs.
-    # Optional: a failed unlink or link is logged and the migration goes on, so
-    # it can never hold back the binds that need this script to succeed.
+    # the helper of its new slot.
+    #
+    # When the kept copy is the installed ceralive-device's own file (its bytes
+    # match the md5sums record for exactly opt/ceralive/<name> of the installed
+    # instance, as dpkg-query reports it), whatever else is there is replaced by
+    # the link: a regular file left by another image's CeraUI (the previous
+    # image's copy after an OTA), a copy of the same bytes, or a link elsewhere.
+    # Otherwise (an in-place CeraUI package upgrade on this slot changed the
+    # helper, or dpkg cannot name one installed instance or one valid record) only
+    # absent and dangling entries are (re)linked: a regular file then belongs to
+    # the upgraded package, which dpkg wrote through the bind, and stays (logged).
+    #
+    # Order of a replacement, each step safe to stop after:
+    #   1. a regular file whose bytes differ from the kept copy is hard-linked,
+    #      no-clobber, to its final name .<name>.pre-link.<its md5> (one per
+    #      distinct content; an existing name is never overwritten);
+    #   2. a symlink to the kept copy is created, no-clobber, at a fresh name
+    #      .<name>.link-XXXXXX next to the entry;
+    #   3. that symlink is renamed over the entry.
+    # If step 1 fails (logged), steps 2 and 3 still run: the stale helper breaks
+    # the box now, while the kept file only serves a manual rollback, and the
+    # old bytes can be rebuilt from their package.
+    # The old bytes are never held only under a temporary name. A stop after 2
+    # leaves a symlink to the kept copy, which the next boot removes (only
+    # symlinks with that name pattern whose target is exactly the kept copy).
+    # An older image without a kept copy that this box rolls back to finds a
+    # dangling link and nothing there relinks it; support then restores the
+    # kept file whose md5 that slot's package records.
+    #
+    # The block acts only when $DATA and $DATA/ceralive are real directories (no
+    # symlink anywhere in the path) owned by the user running it (root at boot)
+    # and writable by nobody else, so no other user can change the directory
+    # between the checks and the writes.
+    # Optional: a failed check, unlink, link or rename is logged and the migration
+    # goes on, so it can never hold back the binds that need this script to
+    # succeed. A real directory in the way is never touched.
+    helpers_dir="$DATA/ceralive" helpers_anchored=1 p="$DATA/ceralive"
+    helpers_uid="$(id -u)"
+    case "$DATA" in /*) ;; *) helpers_anchored="" ;; esac
+    while [ -n "$helpers_anchored" ] && [ -n "$p" ] && [ "$p" != / ]; do
+        if [ -L "$p" ] || [ ! -d "$p" ]; then helpers_anchored=""; break; fi
+        if [ "$p" = "$DATA" ] || [ "$p" = "$helpers_dir" ]; then
+            owner_mode="$(stat -c '%u %a' -- "$p" 2>/dev/null)" || owner_mode=""
+            if [ "${owner_mode%% *}" != "$helpers_uid" ] \
+               || ! printf '%s' "${owner_mode#* }" | grep -Eqx '[0-7]{3,4}' \
+               || [ $(( 0${owner_mode#* } & 022 )) -ne 0 ]; then
+                helpers_anchored=""; break
+            fi
+        fi
+        p="${p%/*}"
+    done
+    [ -n "$helpers_anchored" ] \
+        || log "WARNING: $helpers_dir or a parent is a symlink, not a directory, or writable by another user; CeraUI's working-dir helpers are not linked"
+    helper_sums="$(dpkg-query --control-show ceralive-device md5sums 2>/dev/null)" || helper_sums=""
     for f in "$CERAUI_HELPERS"/*; do
+        [ -n "$helpers_anchored" ] || break
         [ -f "$f" ] || continue
-        dest="$DATA/ceralive/${f##*/}"
+        name="${f##*/}"
+        dest="$helpers_dir/$name"
+        # readlink's own newline keeps the comparison exact (a command
+        # substitution would strip trailing newlines from the target).
+        want_target="$(printf '%s\nx' "$f")"
+        # A symlink to the kept copy left by a replacement stopped before step 3.
+        for l in "$helpers_dir/.$name.link-"*; do
+            [ -L "$l" ] || continue
+            [ "$(readlink -- "$l" 2>/dev/null; printf x)" = "$want_target" ] || continue
+            rm -f -- "$l" 2>/dev/null || log "WARNING: cannot remove the leftover link $l"
+        done
+        target="$(readlink -- "$dest" 2>/dev/null; printf x)" || target=""
+        if [ -L "$dest" ] && [ -e "$dest" ] && [ "$target" = "$want_target" ]; then
+            continue
+        fi
+        if [ -L "$dest" ] || [ ! -d "$dest" ]; then
+            why=""
+            have="$(md5sum < "$f" 2>/dev/null | awk '{ print $1 }')" || have=""
+            if [ -z "$helper_sums" ]; then
+                why="dpkg-query has no md5sums for one installed ceralive-device"
+            else
+                want="$(printf '%s\n' "$helper_sums" | awk -v p="opt/ceralive/$name" '
+                    length($0) == length(p) + 34 && substr($0, 33, 2) == "  " && substr($0, 35) == p \
+                        && substr($0, 1, 32) ~ /^[0-9a-f]+$/ { n++; d = substr($0, 1, 32) }
+                    END { if (n == 1) print d }')" || want=""
+                if [ -z "$want" ]; then
+                    why="the installed ceralive-device has no single md5sums record for opt/ceralive/$name"
+                elif [ "${#have}" -ne 32 ] || [ "$have" != "$want" ]; then
+                    why="the image copy $f is not the installed ceralive-device's opt/ceralive/$name"
+                fi
+            fi
+            tmp=""
+            if [ -z "$why" ]; then
+                tmp="$(mktemp -u "$helpers_dir/.$name.link-XXXXXX" 2>/dev/null)" || tmp=""
+                case "$tmp" in "$helpers_dir/.$name.link-"??????) ;; *) tmp="" ;; esac
+                if [ -z "$tmp" ]; then
+                    why="no temporary name could be made in $helpers_dir"
+                    log "WARNING: cannot name a temporary link in $helpers_dir"
+                fi
+            fi
+            if [ -n "$tmp" ]; then
+                log "pointing $dest at the image copy $f, the installed ceralive-device's helper"
+                # 1. Keep the old bytes under their final name first.
+                if [ -f "$dest" ] && [ ! -L "$dest" ]; then
+                    old="$(md5sum < "$dest" 2>/dev/null | awk '{ print $1 }')" || old=""
+                    if [ "${#old}" -eq 32 ] && [ "$old" != "$have" ]; then
+                        kept="$helpers_dir/.$name.pre-link.$old"
+                        if [ -f "$kept" ] && [ ! -L "$kept" ] \
+                           && [ "$(md5sum < "$kept" 2>/dev/null | awk '{ print $1 }')" = "$old" ]; then
+                            log "the replaced $dest is already kept as $kept"
+                        elif ln -T -- "$dest" "$kept" 2>/dev/null; then
+                            log "keeping the replaced $dest as $kept"
+                        else
+                            log "WARNING: cannot keep the replaced $dest as $kept"
+                        fi
+                    elif [ "${#old}" -ne 32 ]; then
+                        log "WARNING: cannot read the replaced $dest to keep it"
+                    fi
+                fi
+                # 2 and 3. A fresh symlink (ln without -f never overwrites),
+                # renamed over the entry.
+                if ! ln -sT -- "$f" "$tmp" 2>/dev/null; then
+                    log "WARNING: cannot create the temporary link $tmp; $dest stays as it is"
+                elif ! mv -fT -- "$tmp" "$dest"; then
+                    log "WARNING: cannot replace $dest with a link to $f; CeraUI may run another build's helper"
+                    if [ -L "$tmp" ] && [ "$(readlink -- "$tmp" 2>/dev/null; printf x)" = "$want_target" ]; then
+                        rm -f -- "$tmp" 2>/dev/null || true
+                    fi
+                fi
+                continue
+            fi
+            if [ -e "$dest" ] && [ ! -L "$dest" ]; then
+                log "keeping the regular file $dest: $why"
+            fi
+        fi
         if [ -L "$dest" ] && [ ! -e "$dest" ]; then
             rm -f -- "$dest" \
                 || { log "WARNING: cannot remove the dangling $dest; CeraUI's helper stays unavailable"; continue; }
