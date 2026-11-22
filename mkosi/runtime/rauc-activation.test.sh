@@ -55,6 +55,8 @@ RAUC_SLOT_BOOTNAME_1='A'
 RAUC_SLOT_STATE_1='booted'
 RAUC_SLOT_BOOTNAME_2='B'
 RAUC_SLOT_STATE_2='inactive'
+RAUC_SLOT_BOOT_STATUS_2='bad'
+RAUC_SLOT_STATUS_STATUS_2='ok'
 RAUC_SLOT_STATUS_INSTALLED_TIMESTAMP_2='2026-09-23T12:00:00Z'
 RAUC_SLOT_STATUS_ACTIVATED_TIMESTAMP_2='2026-09-22T12:00:00Z'
 RAUC_SLOT_STATUS_BUNDLE_DESCRIPTION_2='A quoted '\''bundle'\'' label'
@@ -108,6 +110,34 @@ count_calls 2
 unset RAUC_REFUSE_MARK
 "$SCRIPT" --disarm
 ok 'RAUC failure retains marker for a future clean shutdown'
+
+# An install timestamp also exists on failed and interrupted RAUC writes.
+for result in failed pending update unknown '' missing; do
+  pending_status
+  if [[ "$result" == missing ]]; then
+    sed -i '/^RAUC_SLOT_STATUS_STATUS_2=/d' "$FIXTURE_STATUS"
+  else
+    sed -i "s/^RAUC_SLOT_STATUS_STATUS_2=.*/RAUC_SLOT_STATUS_STATUS_2='$result'/" "$FIXTURE_STATUS"
+  fi
+  if "$SCRIPT" --arm; then fail "--arm accepted install result '$result'"; fi
+  [[ ! -e "$TMP/state/activation-armed" ]] || fail 'refused install created an armed marker'
+done
+ok 'failed, incomplete, unknown and missing install results cannot arm'
+
+for action in --now --stop; do
+  pending_status
+  "$SCRIPT" --arm
+  sed -i "s/^RAUC_SLOT_STATUS_STATUS_2=.*/RAUC_SLOT_STATUS_STATUS_2='failed'/" "$FIXTURE_STATUS"
+  if [[ "$action" == --stop ]]; then
+    if "$SCRIPT"; then fail 'shutdown accepted a failed install after arming'; fi
+  elif "$SCRIPT" "$action"; then
+    fail 'immediate activation accepted a failed install after arming'
+  fi
+  count_calls 2
+  [[ -f "$TMP/state/activation-armed" ]] || fail 'failed activation discarded the armed marker'
+  "$SCRIPT" --disarm
+done
+ok 'immediate activation and shutdown recheck the installed result'
 
 [[ -f "$UNIT" && -f "$ARM_UNIT" && -f "$INSTALLER" ]] || fail 'missing unit or installer'
 ! grep -Eq '^DefaultDependencies=no$' "$UNIT" || fail 'shutdown service has no default dependencies'

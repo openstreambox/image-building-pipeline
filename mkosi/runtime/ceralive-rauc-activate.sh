@@ -45,14 +45,14 @@ fi
 # The pinned RAUC 1.15.2 reports per-slot install/activation timestamps in the detailed
 # shell status. Never source that output: slot metadata may contain bundle text.
 status="$(rauc status --detailed --output-format=shell)" || die 'RAUC status unavailable'
-declare -A bootnames=() states=() installed=() activated=()
+declare -A bootnames=() states=() installed=() activated=() install_results=()
 primary='' booted='' slot_names='' slot_indexes=''
 while IFS= read -r line; do
   key="${line%%=*}"
   value="${line#*=}"
   case "$key" in
     RAUC_BOOT_PRIMARY|RAUC_SYSTEM_BOOTED_BOOTNAME|RAUC_SYSTEM_SLOTS|RAUC_SLOTS|\
-    RAUC_SLOT_BOOTNAME_*|RAUC_SLOT_STATE_*|\
+    RAUC_SLOT_BOOTNAME_*|RAUC_SLOT_STATE_*|RAUC_SLOT_STATUS_STATUS_*|\
     RAUC_SLOT_STATUS_INSTALLED_TIMESTAMP_*|RAUC_SLOT_STATUS_ACTIVATED_TIMESTAMP_*) ;;
     *) continue ;;
   esac
@@ -66,6 +66,7 @@ while IFS= read -r line; do
     RAUC_SLOTS) slot_indexes="$value" ;;
     RAUC_SLOT_BOOTNAME_*) bootnames["${key##*_}"]="$value" ;;
     RAUC_SLOT_STATE_*) states["${key##*_}"]="$value" ;;
+    RAUC_SLOT_STATUS_STATUS_*) install_results["${key##*_}"]="$value" ;;
     RAUC_SLOT_STATUS_INSTALLED_TIMESTAMP_*) installed["${key##*_}"]="$value" ;;
     RAUC_SLOT_STATUS_ACTIVATED_TIMESTAMP_*) activated["${key##*_}"]="$value" ;;
   esac
@@ -125,6 +126,8 @@ if (( install_epoch <= activation_epoch )); then
   log 'other rootfs has no unactivated install'
   exit 0
 fi
+# RAUC also timestamps failed writes. Require a successful rootfs write.
+[[ "${install_results[$other_idx]:-}" == ok ]] || die 'other rootfs has no successful installation result'
 fi
 
 if [[ "$action" == --arm ]]; then
