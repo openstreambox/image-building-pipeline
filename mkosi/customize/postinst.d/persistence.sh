@@ -267,14 +267,39 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
     # Programs CeraUI runs from its working dir (captive-portal-window.py). The
     # bind hides the .deb's copy, so link each one to the image-owned copy the app
     # layer keeps outside it. A link, not a copy, so that after an OTA the box runs
-    # the helper of its new slot. Absent and dangling entries are (re)linked on
-    # every boot; anything else is left alone: a regular file there was written by
-    # a later CeraUI package upgrade and belongs to the CeraUI that now runs.
-    # Optional: a failed unlink or link is logged and the migration goes on, so
-    # it can never hold back the binds that need this script to succeed.
+    # the helper of its new slot.
+    #
+    # When the kept copy is the installed ceralive-device's own file (its bytes
+    # match that file's entry in the md5sums dpkg-query reports for the installed
+    # instance), whatever else is there is replaced by the link: a regular file
+    # left by another image's CeraUI (an image 4 copy after the 4 -> 5 OTA), a
+    # copy of the same bytes, or a link to somewhere else. Otherwise (an in-place
+    # CeraUI package upgrade on this slot changed the helper, or dpkg cannot name
+    # one installed instance or one valid entry) only absent and dangling entries
+    # are (re)linked: a regular file then belongs to the upgraded package, which
+    # dpkg wrote through the bind, and stays.
+    # Optional: a failed check, unlink or link is logged and the migration goes
+    # on, so it can never hold back the binds that need this script to succeed.
+    # A real directory in the way is never touched.
+    helper_sums="$(dpkg-query --control-show ceralive-device md5sums 2>/dev/null || true)"
     for f in "$CERAUI_HELPERS"/*; do
         [ -f "$f" ] || continue
         dest="$DATA/ceralive/${f##*/}"
+        [ "$(readlink "$dest" 2>/dev/null || true)" != "$f" ] || continue
+        if [ -n "$helper_sums" ] && { [ -L "$dest" ] || [ ! -d "$dest" ]; }; then
+            want="$(printf '%s\n' "$helper_sums" | awk -v p="opt/ceralive/${f##*/}" '$2 == p { n++; d = $1 } END { if (n == 1) print d }' 2>/dev/null || true)"
+            have="$(md5sum < "$f" 2>/dev/null | awk '{ print $1 }' || true)"
+            # md5sum prints 32 hex digits, so equality also validates the entry.
+            if [ "${#have}" -eq 32 ] && [ "$have" = "$want" ]; then
+                log "pointing $dest at the image copy $f, the installed ceralive-device's helper"
+                if ! { rm -f -- "$dest.helper-link" && ln -sT -- "$f" "$dest.helper-link" \
+                        && mv -fT -- "$dest.helper-link" "$dest"; }; then
+                    rm -f -- "$dest.helper-link" 2>/dev/null || true
+                    log "WARNING: cannot replace $dest with a link to $f; CeraUI may run another build's helper"
+                fi
+                continue
+            fi
+        fi
         if [ -L "$dest" ] && [ ! -e "$dest" ]; then
             rm -f -- "$dest" \
                 || { log "WARNING: cannot remove the dangling $dest; CeraUI's helper stays unavailable"; continue; }

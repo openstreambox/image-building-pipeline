@@ -14,8 +14,16 @@
 # THE FIX. The app layer keeps a copy outside the bind
 # (keep_ceraui_workdir_helpers -> /usr/libexec/ceralive/ceraui-workdir/), and
 # ceralive-migrate-data links /data/ceralive/<name> to it on every boot, so the
-# helper also follows OTAs. Absent and dangling entries are (re)linked; a regular
-# file (written by a later CeraUI package upgrade) is left alone.
+# helper also follows OTAs. Absent and dangling entries are (re)linked.
+#
+# THE SECOND BUG. A regular file there was always left alone, on the theory that
+# only a later CeraUI package upgrade writes one. After an image 4 -> 5 RAUC
+# update the file was image 4's CeraUI copy (written through the bind by an
+# earlier package upgrade), so image 5's CeraUI ran image 4's helper and the
+# captive-portal fix the update carried never took effect. Now, when the kept
+# copy matches the installed ceralive-device's md5sums entry, any entry but a
+# real directory is replaced by the link; otherwise a regular file still stays
+# (an in-place upgrade on this slot wrote it).
 #
 # Part A — the app layer keeps the copy (sourced function, synthetic root).
 # Part B — the migrate-data block, extracted verbatim and run on synthetic trees.
@@ -39,6 +47,17 @@ fail() { printf 'ceraui-workdir-helpers regression: %s\n' "$1" >&2; exit 1; }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/ceraui-workdir-helpers.XXXXXX")"
 trap 'rm -rf "${TMP}"' EXIT
+
+# dpkg-query stub: --control-show ceralive-device md5sums prints $STUB_MD5SUMS
+# (the installed instance's md5sums) and fails when it is unset or missing, as
+# for a package that is not installed or not one instance. Anything else fails.
+mkdir -p "${TMP}/bin"
+cat >"${TMP}/bin/dpkg-query" <<'STUB'
+#!/usr/bin/env bash
+[[ " $* " == *" --control-show ceralive-device md5sums "* && -f "${STUB_MD5SUMS:-}" ]] || exit 1
+exec cat "${STUB_MD5SUMS}"
+STUB
+chmod +x "${TMP}/bin/dpkg-query"
 
 # ---------------------------------------------------------------------------
 # Part A — app layer
@@ -92,7 +111,7 @@ run_block() { # $1=DATA $2=WORKDIR $3=CERAUI_HELPERS
     # The rest of ceralive-migrate-data (and the binds that need it) runs on.
     printf 'echo continued >%q\n' "$1/.migrate-continued"
   } >"${runner}"
-  bash "${runner}"
+  PATH="${TMP}/bin:${PATH}" bash "${runner}"
 }
 
 # A box tree: rootfs /opt/ceralive as the .deb leaves it, the app layer's copy,
@@ -147,7 +166,8 @@ run_block "${B4}/data" "${B4}/opt/ceralive" "${B4}/${HELPERS_REL}"
   || fail "B4: a dangling link was not replaced"
 echo "ceraui-workdir-helpers: B4 dangling link relinked OK"
 
-# B5: a regular file (a CeraUI package upgrade wrote it) is left alone.
+# B5: a regular file is left alone when dpkg has no md5sums for the package (it
+# cannot tell whose file it is).
 B5="${TMP}/b5"; new_box "${B5}"
 printf 'print("package helper")\n' >"${B5}/data/ceralive/${HELPER}"
 run_block "${B5}/data" "${B5}/opt/ceralive" "${B5}/${HELPERS_REL}"
@@ -195,6 +215,134 @@ run_block "${B9}/data" "${B9}/opt/ceralive" "${B9}/${HELPERS_REL}" \
 [[ -d "${B9}/data/ceralive/${HELPER}" && -z "$(ls -A "${B9}/data/ceralive/${HELPER}")" ]] \
   || fail "B9: something was written into a directory in the way"
 echo "ceraui-workdir-helpers: B9 a directory in the way is left alone OK"
+
+# ---------------------------------------------------------------------------
+# Part B, continued — the installed package's md5sums decide about the rest
+# ---------------------------------------------------------------------------
+md5_of() { md5sum <"$1" | awk '{print $1}'; }
+# The installed ceralive-device's md5sums, as dpkg keeps them: $2 is the file
+# whose bytes the package's helper entry has; more lines follow it.
+pkg_sums() { # $1=box $2=file-with-package-bytes
+  printf '%s  opt/ceralive/setup.json\n%s  opt/ceralive/%s\n%s  usr/local/bin/ceralive\n' \
+    "$(printf x | md5sum | awk '{print $1}')" "$(md5_of "$2")" "${HELPER}" \
+    "$(printf y | md5sum | awk '{print $1}')" >"$1/ceralive-device.md5sums"
+}
+assert_linked() { # $1=box $2=label
+  [[ -L "$1/data/ceralive/${HELPER}" ]] || fail "$2: /data/ceralive/${HELPER} is not a link"
+  [[ "$(readlink "$1/data/ceralive/${HELPER}")" == "$1/${HELPERS_REL}/${HELPER}" ]] \
+    || fail "$2: the link points at $(readlink "$1/data/ceralive/${HELPER}")"
+  [[ "$(python3 -I "$1/data/ceralive/${HELPER}")" == "image helper" ]] \
+    || fail "$2: the bound path does not run this slot's helper"
+  [[ ! -e "$1/data/ceralive/${HELPER}.helper-link" && ! -L "$1/data/ceralive/${HELPER}.helper-link" ]] \
+    || fail "$2: a temporary link was left behind"
+}
+# A box whose installed package is the one this slot's image was built with.
+slot_box() { # $1=dir
+  new_box "$1"
+  pkg_sums "$1" "$1/${HELPERS_REL}/${HELPER}"
+}
+
+# M1: the 4 -> 5 OTA case. /data holds an older CeraUI's helper as a regular
+# file; the installed package is this slot's, so the stale file gives way.
+M1="${TMP}/m1"; slot_box "${M1}"
+printf 'print("image 4 helper")\n' >"${M1}/data/ceralive/${HELPER}"
+STUB_MD5SUMS="${M1}/ceralive-device.md5sums" run_block "${M1}/data" "${M1}/opt/ceralive" "${M1}/${HELPERS_REL}"
+assert_linked "${M1}" M1
+[[ -f "${M1}/data/.migrate-continued" ]] || fail "M1: migration did not go on"
+# ...and every later boot is a no-op.
+STUB_MD5SUMS="${M1}/ceralive-device.md5sums" run_block "${M1}/data" "${M1}/opt/ceralive" "${M1}/${HELPERS_REL}"
+assert_linked "${M1}" M1-rerun
+echo "ceraui-workdir-helpers: M1 stale regular file after an OTA is replaced OK"
+
+# M2: a regular file with the package's own bytes becomes the link too, so the
+# next OTA cannot leave it behind.
+M2="${TMP}/m2"; slot_box "${M2}"
+cp "${M2}/${HELPERS_REL}/${HELPER}" "${M2}/data/ceralive/${HELPER}"
+STUB_MD5SUMS="${M2}/ceralive-device.md5sums" run_block "${M2}/data" "${M2}/opt/ceralive" "${M2}/${HELPERS_REL}"
+assert_linked "${M2}" M2
+echo "ceraui-workdir-helpers: M2 matching regular file becomes the link OK"
+
+# M3: absent and dangling entries are linked with md5sums present as well.
+M3="${TMP}/m3"; slot_box "${M3}"
+STUB_MD5SUMS="${M3}/ceralive-device.md5sums" run_block "${M3}/data" "${M3}/opt/ceralive" "${M3}/${HELPERS_REL}"
+assert_linked "${M3}" M3-absent
+M3b="${TMP}/m3b"; slot_box "${M3b}"
+ln -s /nonexistent/old-place/${HELPER} "${M3b}/data/ceralive/${HELPER}"
+STUB_MD5SUMS="${M3b}/ceralive-device.md5sums" run_block "${M3b}/data" "${M3b}/opt/ceralive" "${M3b}/${HELPERS_REL}"
+assert_linked "${M3b}" M3-dangling
+echo "ceraui-workdir-helpers: M3 absent and dangling entries linked OK"
+
+# M4: an in-place CeraUI upgrade on this slot wrote a newer helper through the
+# bind. The installed package's entry names that file, not the kept copy, so
+# the file stays.
+M4="${TMP}/m4"; new_box "${M4}"
+printf 'print("newer package helper")\n' >"${M4}/data/ceralive/${HELPER}"
+pkg_sums "${M4}" "${M4}/data/ceralive/${HELPER}"
+STUB_MD5SUMS="${M4}/ceralive-device.md5sums" run_block "${M4}/data" "${M4}/opt/ceralive" "${M4}/${HELPERS_REL}"
+[[ -f "${M4}/data/ceralive/${HELPER}" && ! -L "${M4}/data/ceralive/${HELPER}" ]] \
+  || fail "M4: the newer package's helper was replaced"
+[[ "$(python3 -I "${M4}/data/ceralive/${HELPER}")" == "newer package helper" ]] \
+  || fail "M4: the newer package's helper was changed"
+# Without a helper on /data at all, that slot still gets the kept copy rather
+# than nothing (the pre-existing absent rule).
+rm -f "${M4}/data/ceralive/${HELPER}"
+STUB_MD5SUMS="${M4}/ceralive-device.md5sums" run_block "${M4}/data" "${M4}/opt/ceralive" "${M4}/${HELPERS_REL}"
+[[ "$(readlink "${M4}/data/ceralive/${HELPER}")" == "${M4}/${HELPERS_REL}/${HELPER}" ]] \
+  || fail "M4: an absent helper was not linked after an in-place upgrade"
+echo "ceraui-workdir-helpers: M4 newer package's regular file kept OK"
+
+# M5: no single valid entry for the helper (absent, duplicated, or the package
+# ships none) keeps the old rule: a regular file stays.
+for variant in none dup; do
+  M5="${TMP}/m5-${variant}"; slot_box "${M5}"
+  case "${variant}" in
+    none) grep -Fv "opt/ceralive/${HELPER}" "${M5}/ceralive-device.md5sums" >"${M5}/s" ;;
+    dup)  { cat "${M5}/ceralive-device.md5sums"; grep -F "opt/ceralive/${HELPER}" "${M5}/ceralive-device.md5sums"; } >"${M5}/s" ;;
+  esac
+  mv "${M5}/s" "${M5}/ceralive-device.md5sums"
+  printf 'print("image 4 helper")\n' >"${M5}/data/ceralive/${HELPER}"
+  STUB_MD5SUMS="${M5}/ceralive-device.md5sums" run_block "${M5}/data" "${M5}/opt/ceralive" "${M5}/${HELPERS_REL}"
+  [[ -f "${M5}/data/ceralive/${HELPER}" && ! -L "${M5}/data/ceralive/${HELPER}" ]] \
+    || fail "M5-${variant}: a regular file was replaced without one valid md5sums entry"
+done
+echo "ceraui-workdir-helpers: M5 no single entry, regular file kept OK"
+
+# M6: a link to some other existing file gives way to this slot's copy.
+M6="${TMP}/m6"; slot_box "${M6}"
+printf 'print("elsewhere")\n' >"${M6}/elsewhere.py"
+ln -s "${M6}/elsewhere.py" "${M6}/data/ceralive/${HELPER}"
+STUB_MD5SUMS="${M6}/ceralive-device.md5sums" run_block "${M6}/data" "${M6}/opt/ceralive" "${M6}/${HELPERS_REL}"
+assert_linked "${M6}" M6
+[[ "$(<"${M6}/elsewhere.py")" == 'print("elsewhere")' ]] || fail "M6: the old link's target was written"
+echo "ceraui-workdir-helpers: M6 foreign link replaced OK"
+
+# M7: a real directory in the way is never touched.
+M7="${TMP}/m7"; slot_box "${M7}"
+mkdir -p "${M7}/data/ceralive/${HELPER}"
+STUB_MD5SUMS="${M7}/ceralive-device.md5sums" run_block "${M7}/data" "${M7}/opt/ceralive" "${M7}/${HELPERS_REL}" \
+  || fail "M7: a directory in the way failed ceralive-migrate-data"
+[[ -d "${M7}/data/ceralive/${HELPER}" && ! -L "${M7}/data/ceralive/${HELPER}" \
+   && -z "$(ls -A "${M7}/data/ceralive/${HELPER}")" ]] || fail "M7: a directory in the way was changed"
+echo "ceraui-workdir-helpers: M7 a directory in the way is left alone OK"
+
+# M8: the replacement fails (mv cannot rename). Logged, the stale file stays,
+# no temporary link is left, and the migration goes on.
+M8="${TMP}/m8"; slot_box "${M8}"
+printf 'print("image 4 helper")\n' >"${M8}/data/ceralive/${HELPER}"
+STUB_MD5SUMS="${M8}/ceralive-device.md5sums" RUN_PRELUDE='mv() { return 1; }' \
+  run_block "${M8}/data" "${M8}/opt/ceralive" "${M8}/${HELPERS_REL}" \
+  || fail "M8: a failed replacement failed ceralive-migrate-data (every bind would stop)"
+[[ -f "${M8}/data/.migrate-continued" ]] || fail "M8: migration stopped after a failed replacement"
+[[ "$(python3 -I "${M8}/data/ceralive/${HELPER}")" == "image 4 helper" ]] \
+  || fail "M8: the entry changed although the rename failed"
+[[ ! -e "${M8}/data/ceralive/${HELPER}.helper-link" && ! -L "${M8}/data/ceralive/${HELPER}.helper-link" ]] \
+  || fail "M8: the temporary link was left behind"
+echo "ceraui-workdir-helpers: M8 a failed replacement is non-fatal OK"
+
+# M9: the replacement is a rename, so the entry is never absent in between.
+grep -Fq 'mv -fT -- "$dest.helper-link" "$dest"' <<<"${block}" \
+  || fail "M9: the stale helper is no longer replaced by an atomic rename"
+echo "ceraui-workdir-helpers: M9 atomic replacement OK"
 
 # ---------------------------------------------------------------------------
 # Part C — both halves name the same directory

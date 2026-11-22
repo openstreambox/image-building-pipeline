@@ -4285,9 +4285,20 @@ copy in `/usr/libexec/ceralive/ceraui-workdir/`, and `ceralive-migrate-data` lin
 `/data/ceralive/<name>` to it on every boot: a link rather than a seeded copy, so
 after an OTA the box runs its new slot's helper, and boxes whose `/data` an older
 image seeded get the link on their first boot after the update. Absent and
-dangling entries are (re)linked; a regular file is left alone, because only a
-later CeraUI package upgrade writes one. New helpers go in
-`CERAUI_WORKDIR_HELPERS`. Offline guard: `tests/ceraui-workdir-helpers.test.sh`.
+dangling entries are always (re)linked. When the kept copy's bytes match the
+`opt/ceralive/<name>` entry in the installed `ceralive-device`'s md5sums
+(`dpkg-query --control-show ceralive-device md5sums`), any other entry but a real
+directory is replaced by the link with an atomic rename: a regular file an older
+image's CeraUI upgrade wrote through the bind (measured after the image 4 -> 5
+update: image 5's CeraUI ran image 4's helper, whose `fib daddr type local` rule
+the CeraLive kernel cannot load), a copy of the same bytes, or a foreign link.
+Otherwise (an in-place package upgrade on this slot changed the helper, or no
+single valid entry) a regular file stays, because that upgrade wrote it. Limit:
+a rollback to a slot whose in-place upgrade changed the helper, when `/data`
+holds the link, runs that slot's kept copy (the link path is the same on both
+slots); the package's newer file is gone and only a reinstall restores it. All
+failures are logged and non-fatal. New helpers go in `CERAUI_WORKDIR_HELPERS`.
+Offline guard: `tests/ceraui-workdir-helpers.test.sh`.
 
 **`/etc/resolv.conf` MUST be the systemd-resolved stub symlink — else DNS is
 totally dead** [EXISTS]
