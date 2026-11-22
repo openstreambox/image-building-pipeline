@@ -286,6 +286,9 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
     #   2. a symlink to the kept copy is created, no-clobber, at a fresh name
     #      .<name>.link-XXXXXX next to the entry;
     #   3. that symlink is renamed over the entry.
+    # If step 1 fails (logged), steps 2 and 3 still run: the stale helper breaks
+    # the box now, while the kept file only serves a manual rollback, and the
+    # old bytes can be rebuilt from their package.
     # The old bytes are never held only under a temporary name. A stop after 2
     # leaves a symlink to the kept copy, which the next boot removes (only
     # symlinks with that name pattern whose target is exactly the kept copy).
@@ -376,6 +379,8 @@ if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
                         else
                             log "WARNING: cannot keep the replaced $dest as $kept"
                         fi
+                    elif [ "${#old}" -ne 32 ]; then
+                        log "WARNING: cannot read the replaced $dest to keep it"
                     fi
                 fi
                 # 2 and 3. A fresh symlink (ln without -f never overwrites),

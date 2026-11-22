@@ -381,6 +381,18 @@ m8_kept="${M8}/data/ceralive/.${HELPER}.pre-link.$(md5_of "${M8}/data/ceralive/$
   || fail "M8: the kept file does not hold the bytes still at the entry"
 echo "ceraui-workdir-helpers: M8 a failed replacement is non-fatal OK"
 
+# M11: the old entry cannot be read (md5sum fails): the keep is skipped with a
+# warning and the swap still goes ahead.
+M11="${TMP}/m11"; slot_box "${M11}"
+printf 'print("image 4 helper")\n' >"${M11}/data/ceralive/${HELPER}"
+STUB_MD5SUMS="${M11}/ceralive-device.md5sums" \
+  RUN_PRELUDE="md5sum() { if [ \"\$(readlink /proc/self/fd/0)\" = '${M11}/data/ceralive/${HELPER}' ]; then return 1; fi; command md5sum \"\$@\"; }" \
+  run_block "${M11}/data" "${M11}/opt/ceralive" "${M11}/${HELPERS_REL}"
+assert_linked "${M11}" M11
+assert_logged "${M11}" M11 "WARNING: cannot read the replaced ${M11}/data/ceralive/${HELPER} to keep it"
+[[ -z "$(find "${M11}/data/ceralive" -maxdepth 1 -name ".${HELPER}.pre-link*" -print -quit)" ]] || fail "M11: a file was kept from an unreadable entry"
+echo "ceraui-workdir-helpers: M11 unreadable old entry warned, swap goes ahead OK"
+
 # I1: a stop after step 1 (kept, not yet swapped) is finished by the next boot:
 # the kept file is found, not duplicated, and the link goes in.
 I1="${TMP}/i1"; slot_box "${I1}"
