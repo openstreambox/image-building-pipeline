@@ -404,6 +404,100 @@ class Recovery(Isolated):
             self.assertEqual(link.undo, [undo])
             self.assertTrue((clat.RUN/'3.cleanup').exists())
 
+class NeverDefault(Isolated):
+    """A profile with ipv6.never-default: NetworkManager publishes no gateway
+    and no main-table default; the router is known only from the RA."""
+    def answers(self, default=(), neighbours=(), flags=('BROADCAST', 'MULTICAST', 'UP', 'LOWER_UP')):
+        calls = []
+        def command(*args, **kwargs):
+            calls.append(list(args))
+            if args[:5] == ('ip', '-j', '-6', 'route', 'show'):
+                return json.dumps(list(default))
+            if args[:5] == ('ip', '-j', '-6', 'neigh', 'show'):
+                return json.dumps(list(neighbours))
+            if args[:4] == ('ip', '-j', 'link', 'show'):
+                return json.dumps([{'ifname': 'wan1', 'flags': list(flags)}])
+            raise AssertionError(args)
+        return command, calls
+
+    def router(self, gateway='', **answers):
+        from unittest.mock import patch
+        command, calls = self.answers(**answers)
+        with patch.object(clat, 'command', side_effect=command):
+            return clat.link_router('wan1', gateway), calls
+
+    def test_router_sources_in_order(self):
+        router = lambda address, state='STALE': {'dst': address, 'lladdr': '02:00:00:00:00:01', 'router': None, 'state': [state]}
+        self.assertEqual(self.router('2001:DB8::1'), ('2001:db8::1', []))
+        self.assertEqual(self.router(default=[{'dst': 'default', 'gateway': 'fe80::1', 'dev': 'wan1'}])[0], 'fe80::1')
+        self.assertEqual(self.router(default=[{'dst': 'default', 'dev': 'wan1'}])[0], '')
+        # The measured never-default grant: only the neighbour table knows the router.
+        self.assertEqual(self.router(neighbours=[router('2001:db8::9', 'REACHABLE'), router('fe80::b46d:57ff:fe45:4545'),
+                                                 {'dst': 'fe80::1', 'state': ['REACHABLE']}])[0],
+                         'fe80::b46d:57ff:fe45:4545')
+        self.assertEqual(self.router(neighbours=[router('fe80::1', 'FAILED'), router('fe80::9')])[0], 'fe80::9')
+        self.assertEqual(self.router(neighbours=[router('fe80::1', 'FAILED')])[0], 'fe80::1')
+        self.assertEqual(self.router(neighbours=[router('fe80::9'), router('fe80::1')])[0],
+                         self.router(neighbours=[router('fe80::1'), router('fe80::9')])[0])
+        # Raw-IP links need no next hop; an Ethernet-like link without a router is not ready.
+        self.assertEqual(self.router(flags=('POINTOPOINT', 'NOARP', 'UP', 'LOWER_UP'))[0], '')
+        self.assertIsNone(self.router()[0])
+
+    def test_discovery_uses_the_links_own_table_and_is_withdrawn_on_failure(self):
+        from unittest.mock import patch
+        host = FakeHost()
+        route = ['ip', '-6', 'route', 'add', 'table', '46003', 'default', 'via', 'fe80::1', 'onlink', 'dev', 'wan1']
+        rule = ['ip', '-6', 'rule', 'add', 'priority', '46003', 'from', '2001:db8::1', 'oif', 'wan1', 'lookup', '46003']
+        seen = []
+        def discover(interface, source, resolvers):
+            seen.append(host.commands())
+            raise clat.DiscoveryError('no-nat64-prefix')
+        with host.patched(), patch.object(clat, 'discover', side_effect=discover):
+            link = clat.Link('wan1', '2001:db8::1', 'fe80::1', ('fd00:976a::9',))
+            self.assertEqual(link.start(), 'no-nat64-prefix')
+        self.assertLess(seen[0].index(route), seen[0].index(rule))
+        self.assertFalse(any(args[:3] == ['ip', '-6', 'route'] and 'table' not in args for args in host.commands()),
+                         'never the main table')
+        after = host.commands()[len(seen[0]):]
+        self.assertLess(after.index(['ip', '-6', 'rule', 'del'] + rule[4:]),
+                        after.index(['ip', '-6', 'route', 'flush', 'table', '46003']))
+        self.assertFalse(link.undo)
+        self.assertFalse((clat.RUN/'3.cleanup').exists())
+        self.assertFalse(host.processes)
+        self.assertNotIn(['sysctl', '-n', 'net.ipv6.conf.all.forwarding'], host.commands())
+        status = json.loads((clat.RUN/'3.json').read_text())
+        self.assertEqual((status['state'], status['last_error']), ('down', 'no-nat64-prefix'))
+
+    def test_translating_link_keeps_the_discovery_route_until_stop(self):
+        host = FakeHost()
+        with host.patched():
+            link = clat.Link('wan1', '2001:db8::1', '', ('fd00:976a::9',))
+            link.start()
+            journal = json.loads((clat.RUN/'3.cleanup').read_text())
+            self.assertEqual(journal[:2], [['ip', '-6', 'route', 'flush', 'table', '46003'],
+                                           ['ip', '-6', 'rule', 'del', 'priority', '46003', 'from', '2001:db8::1',
+                                            'oif', 'wan1', 'lookup', '46003']])
+            self.assertEqual(json.loads((clat.RUN/'3.json').read_text())['state'], 'up')
+            self.assertIn(['ip', '-6', 'route', 'add', 'table', '46003', 'default', 'dev', 'wan1'], host.commands())
+            self.assertTrue(link.stop())
+        self.assertEqual(host.commands()[-2:], [journal[1], journal[0]])
+
+    def test_foreign_discovery_priority_is_refused(self):
+        from unittest.mock import patch
+        host = FakeHost()
+        def command(*args, **kwargs):
+            if list(args) == ['ip', '-j', '-6', 'rule']:
+                return json.dumps([{'priority': 46003, 'src': 'all', 'table': 'main'}])
+            return host(*args, **kwargs)
+        with host.patched(), patch.object(clat, 'command', side_effect=command), \
+                patch.object(clat, 'discover') as discover:
+            link = clat.Link('wan1', '2001:db8::1', '', ('fd00:976a::9',))
+            link.start()
+        discover.assert_not_called()
+        self.assertFalse(link.undo)
+        self.assertEqual(json.loads((clat.RUN/'3.json').read_text())['state'], 'error')
+
+
 class MinimumMtu(Isolated):
     def start(self, mtu):
         host = FakeHost(mtu=mtu)
@@ -704,7 +798,9 @@ class LifecycleV2(Isolated):
                  (['ip','link','del','clat3'], '[]'),
                  (['ip','-4','rule','del','priority','10003','from','10.254.0.3','lookup','46003'], '[]'),
                  (['ip','-6','route','del','fd46:4:4::3/128','dev','clat3'], '[]'),
-                 (['ip','-4','route','flush','table','46003'], '[]')]
+                 (['ip','-4','route','flush','table','46003'], '[]'),
+                 (['ip','-6','rule','del','priority','46003','from','2001:db8::1','oif','wan1','lookup','46003'],
+                  '[{"priority":46003,"src":"2001:db8::1","oif":"wan2","table":"46003"}]')]
         for undo, absent in cases:
             for query in (absent, subprocess.CalledProcessError(1, 'query')):
                 with self.subTest(undo=undo, query=query):
@@ -721,7 +817,9 @@ class LifecycleV2(Isolated):
         cases = [(['ip','-6','route','del','fd46:4:4::3/128','dev','clat3'],
                   [{'dst':'default','dev':'wan1'}, {'dst':'fd46:4:4::3','dev':'clat3'}]),
                  (['ip','-4','route','del','default','dev','clat3','metric','46003'],
-                  [{'dst':'default','dev':'clat3','metric':46003}])]
+                  [{'dst':'default','dev':'clat3','metric':46003}]),
+                 (['ip','-6','rule','del','priority','46003','from','2001:db8::1','oif','wan1','lookup','46003'],
+                  [{'priority':46003,'src':'2001:db8::1','oif':'wan1','table':'46003'}])]
         for undo, routes in cases:
             with self.subTest(undo=undo):
                 journal = clat.RUN/'3.cleanup'; journal.write_text(json.dumps([undo]))

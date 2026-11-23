@@ -60,10 +60,11 @@ def undo_absent(args):
         family = args[1]
         if args[2:4] == ['rule', 'del']:
             rules = json.loads(command('ip', '-j', family, 'rule', 'show'))
-            priority, source, table = args[5], args[7], args[9]
-            return not any(str(r.get('priority')) == priority and
-                           r.get('src', '').split('/')[0] == source and
-                           str(r.get('table')) == table for r in rules)
+            spec = dict(zip(args[4::2], args[5::2]))
+            return not any(str(r.get('priority')) == spec['priority'] and
+                           r.get('src', '').split('/')[0] == spec['from'] and
+                           r.get('oif') == spec.get('oif') and
+                           str(r.get('table')) == spec['lookup'] for r in rules)
         if args[2:4] == ['route', 'flush']:
             routes = json.loads(command('ip', '-j', family, 'route', 'show', 'table', 'all'))
             return not any(str(r.get('table')) == args[5] for r in routes)
@@ -209,6 +210,31 @@ def eligible(addresses):
         return []
     return sorted(a['local'] for a in addresses if a['family'] == 'inet6' and a['scope'] == 'global'
             and not any(a.get(flag) for flag in ('tentative', 'deprecated', 'dadfailed', 'temporary')))
+
+
+def link_router(interface, gateway=''):
+    """The IPv6 next hop for the link's own table: an address, '' for a
+    device route, or None while no router is known.
+
+    A profile with ipv6.never-default makes NetworkManager publish no gateway
+    and add no main-table default, yet the kernel still records the RA's
+    sender as a router in the link's neighbour table (accept_ra=0 included)."""
+    if gateway:
+        return str(ip.IPv6Address(gateway))
+    for route in json.loads(command('ip', '-j', '-6', 'route', 'show', 'default', 'dev', interface) or '[]'):
+        return str(ip.IPv6Address(route['gateway'])) if route.get('gateway') else ''
+    routers = [n for n in json.loads(command('ip', '-j', '-6', 'neigh', 'show', 'dev', interface) or '[]')
+               if 'router' in n and n.get('dst')]
+    if routers:
+        # Stable while the router stays: a reachability flap of the only
+        # router must not change the grant signature and restart the link.
+        usable = [n for n in routers if 'FAILED' not in n.get('state', [])] or routers
+        return str(min((ip.IPv6Address(n['dst']) for n in usable),
+                       key=lambda a: (not a.is_link_local, a)))
+    # Raw-IP and other ARP-less links (qmi_wwan, cdc_mbim, mhi_net) have no
+    # neighbour entries and need no next hop.
+    link = json.loads(command('ip', '-j', 'link', 'show', 'dev', interface))[0]
+    return '' if 'NOARP' in link.get('flags', []) else None
 
 
 def ip6_dns(config):
@@ -453,6 +479,10 @@ class Link:
         self.tun = f'clat{self.index}'
         self.table = str(46000 + self.index)
         self.priority = str(10000 + self.index)
+        # Discovery from the link's own source and device falls back to the
+        # link's table only after main (32766) and default (32767) found no
+        # route: never-default links have none there.
+        self.discovery_priority = str(46000 + self.index)
         self.v6 = service_ipv6(self.index, source)
         self.nft = f'clat_{self.index}'
         self.process = None
@@ -499,10 +529,17 @@ class Link:
     def save_cleanup(self):
         atomic_json(RUN / f'{self.index}.cleanup', self.undo, durable=True)
 
+    def ipv6_default(self):
+        return ['default'] + (['via', self.gateway, 'onlink'] if self.gateway else []) + ['dev', self.interface]
+
+    def discovery_rule(self, action):
+        return ['ip', '-6', 'rule', action, 'priority', self.discovery_priority, 'from', self.source,
+                'oif', self.interface, 'lookup', self.table]
+
     def repair_routes(self):
         # Device down/up removes these routes without changing NM's grant.
         for family, route in [('-4', ['default', 'dev', self.tun, 'mtu', str(self.ipv4_mtu)]),
-                              ('-6', ['default'] + (['via', self.gateway, 'onlink'] if self.gateway else []) + ['dev', self.interface])]:
+                              ('-6', self.ipv6_default())]:
             command('ip', family, 'route', 'replace', 'table', self.table, *route)
         command('ip', '-6', 'route', 'replace', self.v6 + '/128', 'dev', self.tun)
         command('ip', '-4', 'route', 'replace', 'default', 'dev', self.tun, 'metric', self.table, 'mtu', str(self.ipv4_mtu))
@@ -524,8 +561,6 @@ class Link:
         self.generation = uuid.uuid4().hex
         self.stopping = False
         try:
-            self.prefix = discover(self.interface, self.source, self.resolvers)
-            self.refreshed = time.monotonic()
             # Refuse overlap with any existing local IPv4 subnet.
             for device in json.loads(command('ip', '-j', 'addr')):
                 for address in device['addr_info']:
@@ -538,14 +573,22 @@ class Link:
                 if json.loads(routes or '[]'):
                     raise ValueError('CLAT routing table already owned')
                 rules = json.loads(command('ip', '-j', family, 'rule'))
-                if any(str(rule.get('priority')) == self.priority for rule in rules):
+                if any(str(rule.get('priority')) in (self.priority, self.discovery_priority) for rule in rules):
                     raise ValueError('CLAT rule priority already owned')
             tables = json.loads(command('nft', '-j', 'list', 'tables')).get('nftables', [])
             if any(t.get('table', {}).get('family') == 'inet' and
                    t['table'].get('name') == self.nft for t in tables):
                 raise ValueError('CLAT firewall table already owned')
+            # RFC 7050 discovery leaves through the link's own table, never
+            # the main table. Both stay for revalidation while translating
+            # and are withdrawn with the link when discovery fails.
+            self.add(['ip', '-6', 'route', 'add', 'table', self.table] + self.ipv6_default(),
+                     ['ip', '-6', 'route', 'flush', 'table', self.table])
+            self.add(self.discovery_rule('add'), self.discovery_rule('del'))
+            self.prefix = discover(self.interface, self.source, self.resolvers)
+            self.refreshed = time.monotonic()
             if not self.status('starting'):
-                return
+                raise OSError('CLAT status write failed')
             acquire_forwarding()
             cfg = RUN / f'{self.index}.conf'
             cfg.write_text(f'tun-device {self.tun}\nipv4-addr 192.0.0.2\nipv6-addr fd46:4:ffff::{self.index:x}\nprefix {self.prefix}\nmap {self.v4} {self.v6}\n')
@@ -561,10 +604,8 @@ class Link:
             command('ip', 'addr', 'add', self.v4 + '/32', 'dev', self.tun)
             # Loose checks are needed only on our synthetic link; do not change WAN settings.
             command('sysctl', '-qw', f'net.ipv4.conf.{self.tun}.rp_filter=2')
-            for family, route in [('-4', ['default', 'dev', self.tun, 'mtu', str(self.ipv4_mtu)]),
-                                  ('-6', ['default'] + (['via', self.gateway, 'onlink'] if self.gateway else []) + ['dev', self.interface])]:
-                self.add(['ip', family, 'route', 'add', 'table', self.table] + route,
-                         ['ip', family, 'route', 'flush', 'table', self.table])
+            self.add(['ip', '-4', 'route', 'add', 'table', self.table, 'default', 'dev', self.tun, 'mtu', str(self.ipv4_mtu)],
+                     ['ip', '-4', 'route', 'flush', 'table', self.table])
             for family, src in [('-4', self.v4), ('-6', self.v6)]:
                 self.add(['ip', family, 'rule', 'add', 'priority', self.priority, 'from', src, 'lookup', self.table],
                          ['ip', family, 'rule', 'del', 'priority', self.priority, 'from', src, 'lookup', self.table])
@@ -597,7 +638,9 @@ add rule inet {self.nft} forward meta nfproto ipv6 oifname "{self.tun}" drop
             self.tun_index = socket.if_nametoindex(self.tun)
             self.status('up')
         except DiscoveryError as error:
-            self.status('down', str(error))
+            # Withdraw the discovery route and rule; an unsettled inverse
+            # keeps the link stopping, so the controller retries it.
+            self.stop('down', str(error))
             return str(error)
         except Exception as error:
             self.stop('error', str(error))
@@ -658,10 +701,9 @@ def main():
                     if not sources:
                         continue
                     config = props(dev['Ip6Config'], name + '.IP6Config')
-                    gateway = str(config['Gateway'])
+                    gateway = link_router(interface, str(config['Gateway']))
                     dns = ip6_dns(config)
-                    has_default = gateway or json.loads(command('ip', '-j', '-6', 'route', 'show', 'default', 'dev', interface))
-                    if sources and has_default:
+                    if gateway is not None:
                         wanted[interface] = (sources[0], gateway, dns, (str(path), str(dev['ActiveConnection'])))
                 except Exception:
                     # A disappearing/incomplete device must not withdraw its neighbours.

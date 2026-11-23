@@ -7,8 +7,17 @@ change modem profiles, reconnect a modem, or use NetworkManager dispatchers.
 
 The image service reads NetworkManager D-Bus device state (activated modem
 interfaces only). A native global IPv4 address excludes the link. A stable,
-non-temporary IPv6 source, default route (with or without a gateway), and per-link DNS
-servers are required. IPv6 DNS comes from `IP6Config.Nameservers` (`aay`),
+non-temporary IPv6 source, a known IPv6 router and per-link DNS servers are
+required. The router is, in order: the `IP6Config.Gateway` NetworkManager
+publishes; the link's default route in the main table (its gateway, or none);
+the RA sender the kernel recorded with the router flag in the link's neighbour
+table (an entry whose reachability has not failed wins, then link-local, then
+the lowest address); or no next hop on an ARP-less (raw-IP) link. A profile
+with `ipv6.never-default` gets neither a gateway on D-Bus nor a main-table
+default, but its RAs still reach the neighbour table, also with `accept_ra=0`
+as NetworkManager sets it. An Ethernet-like link with no router known yet is
+not used. The service never adds an IPv6 route to the main table.
+IPv6 DNS comes from `IP6Config.Nameservers` (`aay`),
 as specified by the [NM 1.52 introspection XML](https://github.com/NetworkManager/NetworkManager/blob/1.52.0/introspection/org.freedesktop.NetworkManager.IP6Config.xml)
 and [NM 1.58 XML](https://github.com/NetworkManager/NetworkManager/blob/1.58.0/introspection/org.freedesktop.NetworkManager.IP6Config.xml).
 Link-local resolver scope stays bound to that interface. D-Bus changes
@@ -16,7 +25,15 @@ trigger reconciliation, with a ten-second retry for failed discovery or a dead
 translator. Manager disappearance withdraws all grants.
 
 The service sends an interface/source-bound AAAA query for `ipv4only.arpa` to
-that link's IPv6 DNS servers. Both RFC 7050 sentinel addresses must confirm one
+that link's IPv6 DNS servers. Before the first query it installs the link's
+IPv6 default (via that router) in the link's own table `46000 + ifindex`, and
+the rule `from <source> oif <link> lookup <table>` at priority
+`46000 + ifindex`. That rule comes after the main and default tables, so it
+only applies when the main table has no route for the query through that link,
+as on a never-default link with an off-link resolver. Both are journalled like
+every other owned resource, stay for the 60-second revalidation while
+translating and are withdrawn when discovery fails, so a link without DNS64
+keeps only the snapshot. Both RFC 7050 sentinel addresses must confirm one
 RFC 6052 prefix (/32, /40, /48, /56, /64 or /96). Missing, truncated, ambiguous
 or inconsistent responses fail closed. `64:ff9b::/96` is used only when that
 same discovery confirms it; there is no guessed fallback. DNS64 is evidence
@@ -238,7 +255,9 @@ to run if a `ceralive-clat` unit or `/run/ceralive/clat` already exists and
 removes everything afterwards. Do not run two contracts at once. Set `CLAT_TEST_TAYGA`,
 `CLAT_TEST_SENDER` and `CLAT_TEST_RECEIVER` to installed test binary paths.
 It uses synthetic veths and a local DNS64/NAT64 peer with no external uplink.
-It checks two simultaneously active translators, source-bound IPv4 transport,
+It checks two simultaneously active translators, a never-default link (no
+gateway, no main-table default, router known only from its RA, DNS64 resolver
+off the link's prefix), source-bound IPv4 transport,
 a real sender/IPv4 receiver, hotspot forwarding, native-IPv4 exclusion,
 link withdrawal with a surviving second link, teardown, and absent/bad prefixes.
 A private D-Bus fixture also runs the actual service through dual-stack, two

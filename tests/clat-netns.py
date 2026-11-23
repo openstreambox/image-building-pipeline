@@ -82,13 +82,16 @@ while True:
  b,a=s.recvfrom(65535);s.sendto(b,a)
 """
     spawn(ns(peer,'python3','-c',sink))
+    # Replies leave from the address each query was sent to, as a resolver
+    # bound to its service address does (the never-default case is off-link).
     dns="""import socket,struct,pathlib
 s=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM);s.bind(('::',53))
+s.setsockopt(socket.IPPROTO_IPV6,socket.IPV6_RECVPKTINFO,1)
 while True:
- b,a=s.recvfrom(999);q=b[12:];ans=b''
+ b,anc,_,a=s.recvmsg(999,socket.CMSG_SPACE(20));q=b[12:];ans=b''
  for v in (['fd64:51::1','fd64:51::2'] if pathlib.Path(%r).exists() else ['fd64:51::c000:aa','fd64:51::c000:ab']):
   ans+=bytes.fromhex('c00c001c00010000001e0010')+socket.inet_pton(socket.AF_INET6,v)
- s.sendto(b[:2]+bytes.fromhex('81800001000200000000')+q+ans,a)
+ s.sendmsg([b[:2]+bytes.fromhex('81800001000200000000')+q+ans],[x for x in anc if x[1]==socket.IPV6_PKTINFO],0,a)
 """
     dns = dns % str(c.RUN/'bad-dns')
     spawn(ns(peer,'python3','-c',dns))
@@ -116,6 +119,45 @@ while True:
         assert json.loads((c.RUN/f'{link.index}.json').read_text())['state']=='up', (c.RUN/f'{link.index}.json').read_text()
         probe(link.v4)
     print('PASS two IPv6-only links: source-bound IPv4 echo over real tayga/NAT64',flush=True)
+    # ipv6.never-default, as CeraUI writes it for IPv4v6 modem profiles:
+    # NetworkManager publishes no gateway and adds no main-table default, and
+    # the carrier's DNS64 resolver is off the link's prefix. The router is
+    # known only from its RA (accept_ra=0, as under NetworkManager).
+    run('ip','link','add','cell.3','type','veth','peer','name','srv3')
+    run('ip','link','set','srv3','netns',str(peer.pid))
+    run('sysctl','-qw','net/ipv6/conf/cell.3/accept_ra=0')
+    run('sysctl','-qw','net/ipv6/conf/cell.3/accept_dad=0')
+    run(*ns(peer,'sysctl','-qw','net/ipv6/conf/srv3/accept_dad=0'))
+    run('ip','addr','add','fd51:3::1/64','dev','cell.3','nodad');run('ip','link','set','cell.3','up')
+    run(*ns(peer,'ip','addr','add','fd51:3::2/64','dev','srv3','nodad'));run(*ns(peer,'ip','link','set','srv3','up'))
+    run(*ns(peer,'ip','addr','add','fd53::53/128','dev','lo'))
+    assert c.link_router('cell.3') is None
+    assert sp.run(['ip','-6','route','get','fd53::53','oif','cell.3'],stdout=sp.DEVNULL,stderr=sp.DEVNULL).returncode != 0
+    mac = json.loads(run(*ns(peer,'ip','-j','link','show','dev','srv3')))[0]['address']
+    advertise = """import socket,struct
+s=socket.socket(socket.AF_INET6,socket.SOCK_RAW,socket.IPPROTO_ICMPV6)
+s.setsockopt(socket.SOL_SOCKET,socket.SO_BINDTODEVICE,b'srv3')
+s.setsockopt(socket.IPPROTO_IPV6,socket.IPV6_MULTICAST_HOPS,255)
+ra=struct.pack('!BBHBBHII',134,0,0,64,0,1800,0,0)+bytes([1,1])+bytes.fromhex(%r)
+s.sendto(ra,('ff02::1',0,0,socket.if_nametoindex('srv3')))
+""" % mac.replace(':','')
+    for attempt in range(20):
+        run(*ns(peer,'python3','-c',advertise))
+        router = c.link_router('cell.3')
+        if router is not None:
+            break
+        time.sleep(.1)
+    assert router and router.startswith('fe80:'), router
+    never_default = c.Link('cell.3','fd51:3::1',router,['fd53::53'])
+    never_default.start()
+    assert json.loads((c.RUN/f'{never_default.index}.json').read_text())['state']=='up', (c.RUN/f'{never_default.index}.json').read_text()
+    probe(never_default.v4)
+    assert not json.loads(run('ip','-j','-6','route','show','default','dev','cell.3'))
+    assert never_default.stop()
+    assert not [r for r in json.loads(run('ip','-j','-6','rule')) if r.get('priority') in (10000+never_default.index,46000+never_default.index)]
+    assert not json.loads(c.command('ip','-j','-6','route','show','table',never_default.table,check=False) or '[]')
+    run('ip','link','del','cell.3')
+    print('PASS never-default link: router from the RA, DNS64 and translation through the link table only',flush=True)
     run('ip','link','add','lan0','type','veth','peer','name','cli0');run('ip','link','set','cli0','netns',str(client.pid))
     run('ip','addr','add','10.42.0.1/24','dev','lan0');run('ip','link','set','lan0','up')
     run(*ns(client,'ip','addr','add','10.42.0.2/24','dev','cli0'));run(*ns(client,'ip','link','set','cli0','up'));run(*ns(client,'ip','route','add','default','via','10.42.0.1'))
@@ -442,7 +484,8 @@ s.sendto(b,('192.0.2.2',9010));assert s.recv(65535)==b
     run('ip','link','set','cell.1','up')
     run('ip','addr','replace','fd51:1::1/64','dev','cell.1','nodad')
     bad=c.Link('cell.1','fd51:1::1','fd51:1::2',[]);bad.start()
-    assert json.loads((c.RUN/f'{bad.index}.json').read_text())['state']=='error' and not bad.undo
+    snap=json.loads((c.RUN/f'{bad.index}.json').read_text())
+    assert (snap['state'],snap['last_error'])==('down','no-dns64-resolvers') and not bad.undo, snap
     assert not any('lookup 4600' in run('ip',family,'rule') for family in ['-4','-6'])
     print('PASS link teardown, survivor, absent prefix fails closed',flush=True)
     # Exercise the actual service entrypoint against NetworkManager D-Bus state.
@@ -499,7 +542,8 @@ s.sendto(b,('192.0.2.2',9010));assert s.recv(65535)==b
     assert not any('clat' in a['ifname'] for a in json.loads(run('ip','-j','link')))
     (c.RUN/'bad-dns').touch()
     bad=c.Link('cell.1','fd51:1::1','fd51:1::2',['fd51:1::2']);bad.start()
-    assert not bad.undo and json.loads((c.RUN/f'{bad.index}.json').read_text())['state']=='error'
+    snap=json.loads((c.RUN/f'{bad.index}.json').read_text())
+    assert not bad.undo and (snap['state'],snap['last_error'])==('down','no-nat64-prefix'), snap
     (c.RUN/'bad-dns').unlink()
     # Simulate death after creation returns, before add() can do further work.
     early=c.Link('cell.1','fd51:1::1','fd51:1::2',['fd51:1::2'])
