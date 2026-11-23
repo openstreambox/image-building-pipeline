@@ -54,6 +54,7 @@ JOIN_UUID_SOURCE="${CERALIVE_JOIN_UUID_SOURCE:-/proc/sys/kernel/random/uuid}"  #
 UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 HOSTNAME_FILE="${CERALIVE_HOSTNAME_FILE:-/etc/hostname}"
 HOST_INDEX_FILE="${CERALIVE_HOSTNAME_INDEX_FILE:-/etc/ceralive/host_index}"
+HOST_BASE_FILE="${CERALIVE_HOSTNAME_BASE_FILE:-/etc/ceralive/hostname_base}"
 HOSTNAME_BIN="${CERALIVE_HOSTNAME_BIN:-hostname}"
 BUSCTL="${CERALIVE_BUSCTL:-busctl}"
 TIMEOUT="${CERALIVE_TIMEOUT:-timeout}"
@@ -137,17 +138,18 @@ avahi_publishes() {
 # hostname agree. During an in-flight first-boot claim the portal must not
 # advertise the factory seed as though it were the final reachable address.
 committed_mdns_name() {
-  local index static_name runtime_name expected
+  local base=ceralive index static_name runtime_name expected
   [ -r "${HOST_INDEX_FILE}" ] && [ -r "${HOSTNAME_FILE}" ] || return 1
   index="$(cat -- "${HOST_INDEX_FILE}")" || return 1
   static_name="$(cat -- "${HOSTNAME_FILE}")" || return 1
   runtime_name="$("${HOSTNAME_BIN}" 2>/dev/null)" || return 1
   [[ "${index}" =~ ^[1-9][0-9]*$ ]] && (( index <= 9999 )) || return 1
-  if [ "${index}" = 1 ]; then
-    expected="ceralive"
-  else
-    expected="ceralive${index}"
+  if [ -e "${HOST_BASE_FILE}" ]; then
+    base="$(cat -- "${HOST_BASE_FILE}")" || return 1
+    [[ "${base}" =~ ^ceralive-[0-9a-f]{12}$ ]] || return 1
   fi
+  expected="${base}"
+  [ "${index}" = 1 ] || expected+="${index}"
   [ "${static_name}" = "${expected}" ] && [ "${runtime_name}" = "${expected}" ] || return 1
   avahi_publishes "${expected}" || return 1
   printf '%s.local' "${expected}"
@@ -260,7 +262,7 @@ render_connecting() {
   if [ -n "${mdns_name}" ]; then
     destination="at <b>$(html_escape "${mdns_name}")</b>"
   else
-    destination='using its selected deterministic address: <b>ceralive.local</b>, then <b>ceralive2.local</b>, <b>ceralive3.local</b>, and so on'
+    destination='using the CeraLive hostname shown on the device or the address assigned by your router'
   fi
   { page_head "Connecting…"
     printf '  <h1>Connecting to %s…</h1>\n' "${ssid}"

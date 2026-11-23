@@ -672,14 +672,11 @@ Expected first-boot sequence:
    At the console, `recovery.scr` can explicitly load slot A from p2 or slot B
    from p3 without relying on extlinux path resolution.
 2. Kernel boots from `rootfs_a`. One-shot first-boot services run in order:
-   - `ceralive-hostname.service` — asks Avahi to establish `ceralive.local`, then
-     `ceralive2.local`, `ceralive3.local`, ... under collision. It never accepts
-     Avahi's hyphenated alternative or a random suffix. Runtime hostname,
-     `/etc/hostname`, persistent index, and published name are committed only
-     after exact ownership is stable. Each claim attempt is bounded to 120 s;
-     malformed/unavailable state fails closed and systemd retries after 5 s. A
-     separate 30-second timer repairs explicit publication divergence after
-     isolated networks are joined without rerunning allocation when aligned.
+   - `ceralive-hostname.service` claims the pre-seeded `.local` hostname with
+     Avahi. Fresh devices have their own base name. A collision advances the
+     persisted index after Avahi confirms ownership of the replacement. Each
+     claim is bounded to 120 seconds. A 30-second timer repairs publication
+     divergence during use and keeps CeraUI running.
    - `ceralive-ssh-firstboot.service` — regenerates per-device SSH host keys,
      writes `PermitRootLogin prohibit-password`, and arms a forced password
      change for the `ceralive` user (`chage -d 0`). Runs `Before=ssh.service`
@@ -718,9 +715,8 @@ ssh ceralive@<selected-hostname>.local \
 ```
 
 The default user is `ceralive` (password-locked; see `docs/FIRST-BOOT.md` §5
-for first-login instructions). If another device already owns `ceralive.local`,
-replace it with the selected fallback hostname shown on the HDMI/serial console,
-for example `ceralive2.local`.
+for first-login instructions). Use the selected hostname shown on the
+HDMI/serial console.
 
 ### First-time credential bootstrap (board-verified)
 

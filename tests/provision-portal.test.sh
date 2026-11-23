@@ -42,6 +42,7 @@ BIN="${SANDBOX}/bin"; STATE="${SANDBOX}/state"; DNSDIR="${SANDBOX}/dnsmasq-share
 CALL_LOG="${SANDBOX}/calls.log"; SCAN_SRC="${SANDBOX}/scan-src.txt"
 MACHINE_ID="${SANDBOX}/machine-id"
 HOSTNAME_FILE="${SANDBOX}/hostname"; HOST_INDEX_FILE="${SANDBOX}/host-index"
+HOST_BASE_FILE="${SANDBOX}/hostname-base"
 mkdir -p "${BIN}" "${STATE}"
 printf 'HomeNet\nCafe Wifi\nNeighbour\n' >"${SCAN_SRC}"
 printf 'deadbeefcafef00d\n' >"${MACHINE_ID}"
@@ -197,6 +198,7 @@ export CERALIVE_DNSMASQ_SHARED_DIR="${DNSDIR}"
 export CERALIVE_PROVISION_BIN="${PROVISION}"
 export CERALIVE_HOSTNAME_FILE="${HOSTNAME_FILE}"
 export CERALIVE_HOSTNAME_INDEX_FILE="${HOST_INDEX_FILE}"
+export CERALIVE_HOSTNAME_BASE_FILE="${HOST_BASE_FILE}"
 export CERALIVE_HOSTNAME_BIN="${BIN}/hostname"
 export CERALIVE_CONNECT_FLUSH_DELAY=0
 MARKER_LOG="${SANDBOX}/marker-calls.log"
@@ -282,20 +284,28 @@ called "systemd-run"                             && pass "detached worker launch
 called "ceralive-provision.sh connect ceralive-wifi" && pass "handoff = provision connect <con>" || fail "handoff = provision connect <con>"
 grep -qiF 'Connecting' <<<"${POST_OUT}"          && pass "browser gets a connecting page" || fail "browser gets a connecting page"
 grep -qF '<b>ceralive2.local</b>' <<<"${POST_OUT}" && pass "connecting page uses the committed collision name" || fail "connecting page uses the committed collision name"
-! grep -qF 'selected deterministic address' <<<"${POST_OUT}" && pass "committed collision name does not fall back to deterministic guidance" || fail "committed collision name does not fall back to deterministic guidance"
+! grep -qF 'address assigned by your router' <<<"${POST_OUT}" && pass "committed collision name does not fall back to router guidance" || fail "committed collision name does not fall back to router guidance"
+printf 'ceralive-012345abcdef\n' >"${HOST_BASE_FILE}"
+printf 'ceralive-012345abcdef2\n' >"${HOSTNAME_FILE}"
+export STUB_RUNTIME_HOSTNAME=ceralive-012345abcdef2
+export STUB_AVAHI_HOSTNAME=ceralive-012345abcdef2
+FRESH_OUT="$(printf 'POST / HTTP/1.1\r\nContent-Length: 28\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nssid=HomeNet&psk=hunter2pass' | bash "${PORTAL}" serve 2>/dev/null)"
+grep -qF '<b>ceralive-012345abcdef2.local</b>' <<<"${FRESH_OUT}" && pass "connecting page uses the committed per-device name" || fail "connecting page uses the committed per-device name"
+rm -f -- "${HOST_BASE_FILE}"
+printf 'ceralive2\n' >"${HOSTNAME_FILE}"
 export STUB_RUNTIME_HOSTNAME=ceralive2
 export STUB_AVAHI_HOSTNAME=ceralive-2
 STALE_AVAHI_OUT="$(printf 'POST / HTTP/1.1\r\nContent-Length: 28\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nssid=HomeNet&psk=hunter2pass' | bash "${PORTAL}" serve 2>/dev/null)"
-grep -qF 'selected deterministic address' <<<"${STALE_AVAHI_OUT}" && pass "stale Avahi publication gets deterministic fallback guidance" || fail "stale Avahi publication gets deterministic fallback guidance"
+grep -qF 'address assigned by your router' <<<"${STALE_AVAHI_OUT}" && pass "stale Avahi publication gets router guidance" || fail "stale Avahi publication gets router guidance"
 export STUB_AVAHI_HOSTNAME=ceralive2
 export STUB_AVAHI_STATE=1
 REGISTERING_AVAHI_OUT="$(printf 'POST / HTTP/1.1\r\nContent-Length: 28\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nssid=HomeNet&psk=hunter2pass' | bash "${PORTAL}" serve 2>/dev/null)"
-grep -qF 'selected deterministic address' <<<"${REGISTERING_AVAHI_OUT}" && pass "registering Avahi publication gets deterministic fallback guidance" || fail "registering Avahi publication gets deterministic fallback guidance"
+grep -qF 'address assigned by your router' <<<"${REGISTERING_AVAHI_OUT}" && pass "registering Avahi publication gets router guidance" || fail "registering Avahi publication gets router guidance"
 export STUB_AVAHI_STATE=2
 export STUB_RUNTIME_HOSTNAME=factory-seed
 export STUB_AVAHI_HOSTNAME=ceralive2
 UNCOMMITTED_OUT="$(printf 'POST / HTTP/1.1\r\nContent-Length: 28\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nssid=HomeNet&psk=hunter2pass' | bash "${PORTAL}" serve 2>/dev/null)"
-grep -qF 'selected deterministic address' <<<"${UNCOMMITTED_OUT}" && pass "in-flight identity gets deterministic fallback guidance" || fail "in-flight identity gets deterministic fallback guidance"
+grep -qF 'address assigned by your router' <<<"${UNCOMMITTED_OUT}" && pass "in-flight identity gets router guidance" || fail "in-flight identity gets router guidance"
 # credentials must NOT be persisted anywhere but NM (no temp/state file holds the psk)
 ! grep -rqF 'hunter2pass' "${STATE}" 2>/dev/null && pass "no credential written to /data state" || fail "no credential written to /data state"
 

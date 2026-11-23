@@ -5,8 +5,8 @@
 # Sourced by customize/postinst-lib.sh (never executed). Concern: the ONE thing
 # an operator needs before anything else works — a predictable name to reach the
 # board at. It generates ceralive-set-hostname (the bounded, Avahi-arbitrated
-# ceralive / ceralive2 / ceralive3 … claim), its oneshot unit, the reconcile
-# service + timer, and the ceralive.service identity drop-in.
+# per-device name claim), its boot and reconcile units, and the identity
+# drop-ins for Avahi and ceralive.service.
 #
 # This is the ONE module that still embeds its payload as heredocs rather than
 # installing a committed artifact from "${CERALIVE_RUNTIME_SRC}". That is
@@ -39,9 +39,10 @@ setup_hostname_service() {
 #!/bin/bash
 set -euo pipefail
 MODE="${1:-allocate}"
-BASE_NAME="${CERALIVE_BASE_HOSTNAME:-ceralive}"
+BASE_NAME="${CERALIVE_BASE_HOSTNAME:-}"
 STATE_DIR="${CERALIVE_HOSTNAME_STATE_DIR:-/etc/ceralive}"
 INDEX_FILE="${STATE_DIR}/host_index"
+BASE_FILE="${STATE_DIR}/hostname_base"
 RESTART_PENDING_FILE="${STATE_DIR}/hostname_consumers_pending"
 LOCK_FILE="${CERALIVE_HOSTNAME_LOCK_FILE:-/run/ceralive-hostname/hostname.lock}"
 HOSTS_FILE="${CERALIVE_HOSTS_FILE:-/etc/hosts}"
@@ -70,7 +71,6 @@ CONTENTION_BACKOFF_MAX="${CERALIVE_HOSTNAME_CONTENTION_BACKOFF_MAX:-4}"
 CLAIM_CONFLICT=10
 CONSUMER_UNITS=(
     ceralive-tls-firstboot.service
-    ceralive.service
     ceralive-hawkbit-provision.service
 )
 
@@ -79,15 +79,12 @@ die() {
     exit 1
 }
 
-(( $# <= 1 )) || die "usage: ceralive-set-hostname [allocate|reconcile]"
+(( $# <= 1 )) || die "usage: ceralive-set-hostname [seed|allocate|reconcile]"
 case "$MODE" in
-    allocate | reconcile) ;;
-    *) die "usage: ceralive-set-hostname [allocate|reconcile]" ;;
+    seed | allocate | reconcile) ;;
+    *) die "usage: ceralive-set-hostname [seed|allocate|reconcile]" ;;
 esac
 
-[[ "$BASE_NAME" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] \
-    || die "invalid base hostname: $BASE_NAME"
-(( ${#BASE_NAME} <= 59 )) || die "base hostname leaves no room for deterministic numbering"
 for value in "$MAX_INDEX" "$MAX_WAIT" "$MAX_PROBES" "$POLL_INTERVAL" \
              "$STABLE_CHECKS" "$CALL_TIMEOUT" "$LOCK_WAIT" \
              "$CONTENTION_RETRIES" "$CONTENTION_BACKOFF_MAX"; do
@@ -106,7 +103,7 @@ done
 
 for command in "$HOSTNAMECTL_BIN" "$HOSTNAME_BIN" "$IP_BIN" "$TIMEOUT_BIN" \
                "$SYNC_BIN" "$AVAHI_SET_HOSTNAME_BIN" "$BUSCTL_BIN" \
-               "$AVAHI_RESOLVE_BIN" "$SYSTEMCTL_BIN" cksum flock; do
+               "$AVAHI_RESOLVE_BIN" "$SYSTEMCTL_BIN" sha256sum flock; do
     command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
 done
 
@@ -225,9 +222,8 @@ claim_candidate() {
         if ! "$TIMEOUT_BIN" --foreground "$CALL_TIMEOUT" \
             "$AVAHI_SET_HOSTNAME_BIN" "$candidate" >/dev/null 2>&1; then
             # avahi returns non-zero (AVAHI_ERR_NO_CHANGE) when it already
-            # publishes this EXACT name — the baked /etc/hostname=ceralive makes
-            # the first candidate a no-op set. That means we already own it:
-            # confirm RUNNING + published==candidate and accept. Any other failure
+            # publishes this exact name, for example after the pre-Avahi seed.
+            # Confirm RUNNING and the exact name before accepting. Any other failure
             # (daemon not query-ready, transient D-Bus) retries the SAME candidate
             # within the deadline instead of aborting or advancing the index.
             if state="$(read_avahi_state)" \
@@ -374,10 +370,12 @@ local_identity_matches() {
 }
 
 restart_identity_consumers() {
+    # CeraUI and its sender stay up. Its cached hostname is only a fallback
+    # pairing identity and can wait for the next normal CeraUI start.
     "$SYSTEMCTL_BIN" --no-block restart "${CONSUMER_UNITS[@]}" || return 1
     # nginx follows TLS through its Requires=/After= drop-in when running.
     # Never explicitly start a masked, absent or deliberately stopped front end.
-    # Re-assess an in-flight boot check after the app restart; starting it would
+    # Re-assess an in-flight boot check after the name change; starting it would
     # merge into the old job and retain its nearly exhausted assessment deadline.
     local health_action=start
     if [[ "$("$SYSTEMCTL_BIN" show --property=ActiveState --value ceralive-healthcheck.service)" = activating ]]; then
@@ -416,7 +414,35 @@ if [[ "$MODE" = reconcile ]]; then
     [ -e "$INDEX_FILE" ] || die "persisted hostname index is missing during reconciliation"
 fi
 
+if [ -z "$BASE_NAME" ]; then
+    if [ -e "$BASE_FILE" ]; then
+        BASE_NAME="$(cat -- "$BASE_FILE")" || die "cannot read persisted hostname base"
+        [[ "$BASE_NAME" =~ ^ceralive-[0-9a-f]{12}$ ]] || die "invalid persisted hostname base"
+    elif [ -e "$INDEX_FILE" ]; then
+        # Installed systems retain their address and certificate across an OTA.
+        BASE_NAME=ceralive
+    else
+        # Keep the raw machine ID off the LAN. Persist the derived base before
+        # the index so an interrupted first boot cannot select the legacy scheme.
+        digest="$(printf 'ceralive-mdns:%s' "$MACHINE_ID" | sha256sum)" \
+            || die "cannot derive per-device hostname"
+        BASE_NAME="ceralive-${digest:0:12}"
+        atomic_write "$BASE_FILE" 0644 "$BASE_NAME" || die "failed to persist hostname base"
+    fi
+fi
+[[ "$BASE_NAME" =~ ^[a-z0-9]([a-z0-9-]{0,57}[a-z0-9])?$ ]] \
+    || die "invalid base hostname: $BASE_NAME"
+
 candidate="$(candidate_for_index "$index")"
+if [[ "$MODE" = seed ]]; then
+    # Avahi reads the kernel hostname when it starts. Seed the committed
+    # candidate before that, without waiting for networking or calling Avahi.
+    if ! { [ -e "$INDEX_FILE" ] && local_identity_matches "$candidate"; }; then
+        commit_identity "$index" "$candidate" || die "failed to seed hostname identity"
+    fi
+    exit 0
+fi
+
 if ! publishable_address_present; then
     if ! { [ -e "$INDEX_FILE" ] && local_identity_matches "$candidate"; }; then
         if [[ "$MODE" = reconcile ]]; then
@@ -504,6 +530,27 @@ done
 die "no deterministic hostname available through index $MAX_INDEX"
 EOF
   chmod +x /usr/local/sbin/ceralive-set-hostname
+
+  cat >/etc/systemd/system/ceralive-hostname-seed.service <<'EOF'
+[Unit]
+Description=Seed CeraLive hostname before mDNS starts
+Requires=ceralive-migrate-data.service
+RequiresMountsFor=/data
+After=ceralive-migrate-data.service ceralive-machine-id.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ceralive-set-hostname seed
+TimeoutStartSec=30
+EOF
+
+  mkdir -p /etc/systemd/system/avahi-daemon.service.d
+  cat >/etc/systemd/system/avahi-daemon.service.d/05-hostname-seed.conf <<'EOF'
+[Unit]
+Wants=ceralive-hostname-seed.service
+After=ceralive-hostname-seed.service
+EOF
 
   cat >/etc/systemd/system/ceralive-hostname.service <<'EOF'
 [Unit]

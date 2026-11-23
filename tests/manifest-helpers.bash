@@ -344,6 +344,7 @@ run_hostname_script() {
       AVAHI_CLIENT_ID="$client" \
       AVAHI_DEVICE_STATE="$root/avahi" \
       AVAHI_SHARED_DIR="$shared" \
+      CERALIVE_BASE_HOSTNAME="${HOSTNAME_BASE_OVERRIDE-ceralive}" \
       CERALIVE_HOSTNAME_STATE_DIR="$root/state" \
       CERALIVE_HOSTNAME_LOCK_FILE="$root/run/hostname.lock" \
       CERALIVE_HOSTS_FILE="$root/hosts" \

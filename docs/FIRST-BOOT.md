@@ -105,7 +105,7 @@ is reachable:
 
 | Service | What it does | Source |
 |---------|-------------|--------|
-| `ceralive-hostname.service` | Establishes one exact Avahi-owned identity: `ceralive.local`, then `ceralive2.local`, `ceralive3.local`, ... | `mkosi/customize/postinst-lib.sh` |
+| `ceralive-hostname.service` | Claims the device's selected `.local` name with Avahi | `mkosi/customize/postinst.d/hostname.sh` |
 | `ceralive-ssh-firstboot.service` | Regenerates per-device SSH host keys, disables root password login, arms forced password change | `mkosi/runtime/ceralive-ssh-firstboot.sh` |
 | `ceralive-tls-firstboot.service` | Keeps a per-device self-signed TLS cert aligned with the committed hostname | `mkosi/runtime/ceralive-tls-firstboot.sh` |
 | `ceralive-provision.service` | Evaluates whether to start the WiFi provisioning portal | `mkosi/runtime/ceralive-provision.sh` |
@@ -194,27 +194,22 @@ setup hotspot comes back with an error banner.
 
 ## 4. Finding the device on your network
 
-The device first tries to register itself as `ceralive.local` via mDNS
-(Avahi). If another CeraLive device already owns that name on the LAN, it tries
-the next predictable name: `ceralive2.local`, then `ceralive3.local`, and so on.
-There is no `ceralive-2`, random-number, or random-suffix fallback. Avahi is the
-claim authority, so devices powered on together are resolved by the same mDNS
-probing that controls the name actually published on the LAN.
+Fresh installs use a per-device hostname such as `ceralive-012345abcdef.local`.
+Look for the selected hostname on the device console or in your router's
+device list. The image derives the suffix from the persistent machine ID and
+sets the hostname before Avahi starts. Updates preserve existing names such as
+`ceralive.local` and `ceralive2.local`.
 
-If no publishable LAN address exists yet, the service first commits `ceralive`
-(or the already-selected deterministic index) as a **provisional local identity**
-to the runtime hostname, `/etc/hostname`, `/etc/hosts`, and `/data`, then exits
-successfully. It does not ask Avahi to claim a name across a collision domain that
-does not exist. This lets CeraUI and the rest of the appliance start normally on
-an offline board.
+The boot seed commits a provisional local identity to the runtime hostname,
+`/etc/hostname`, `/etc/hosts`, and `/data`. If there is no publishable LAN
+address yet, CeraUI starts normally and the reconciliation timer checks
+publication once the interface has an address.
 
 Once a publishable address exists, the service accepts a final claim only after
-Avahi repeatedly reports that exact name in the running state. The 30-second
-reconciliation timer reuses the provisional index rather than allocating a new
-one. If another live device already owns it, the ordinary deterministic sequence
-advances to `ceralive2`, `ceralive3`, and so on; consumers restart only after every
-identity surface commits the replacement name. Only the selected index is
-persistent identity state; the local allocation lock stays under `/run`.
+Avahi confirms ownership. If another live device already owns the name, the
+reconciler appends an index to the base, starting at 2. The per-device base and
+selected index are kept under `/data/ceralive/`. The local allocation lock stays
+under `/run`.
 
 A claim attempt waits for at most 120 seconds, with each Avahi command bounded to
 3 seconds; systemd caps the full attempt at 150 seconds. Once a shared collision
@@ -222,12 +217,12 @@ domain exists, unavailable or malformed Avahi responses fail closed rather than
 guessing ownership. The local allocation lock is bounded to 10 seconds. The
 private setup-hotspot address is deliberately excluded because separate devices
 cannot arbitrate ownership across isolated APs; Ethernet IPv4 link-local is still
-accepted as a real shared collision domain. After reconciliation changes the
-local identity, systemd requeues CeraUI, TLS/nginx, hawkBit enrollment, and the boot healthcheck.
-If only Avahi's publication drifted, reclaiming the same name leaves consumers
-running when the runtime hostname, `/etc/hostname`, and `/etc/hosts` already
-agree. A pending consumer restart from an earlier interrupted attempt is still
-retried, even when those names match.
+accepted as a real shared collision domain. After a local name change, the
+reconciler refreshes TLS/nginx and hawkBit enrollment and requeues boot
+assessment. CeraUI and its stream keep running. An HTTPS client may need to
+reconnect using the new name. If only Avahi's publication drifted, reclaiming
+the same name leaves consumers running. A pending refresh from an interrupted
+attempt is still retried.
 
 The periodic check detects a conflict within 30 seconds after Avahi exposes it.
 Any resulting re-claim uses the same 120-second global budget and 3-second call
@@ -241,10 +236,10 @@ avahi-resolve-host-name <selected-hostname>.local
 # Or ping it
 ping <selected-hostname>.local
 
-# On the device, all four values should agree (index 1 maps to ceralive,
-# index 2 maps to ceralive2, and so on)
+# Compare the selected runtime, static, and published names on the device.
 hostname
 cat /etc/hostname
+cat /data/ceralive/hostname_base  # per-device installs
 cat /data/ceralive/host_index
 busctl --system call org.freedesktop.Avahi / \
   org.freedesktop.Avahi.Server GetHostName
@@ -435,9 +430,8 @@ Source: `ceralive-provision.sh` `should_start_portal()`.
 ### Device does not appear on the network after provisioning
 
 After the hotspot disappears, wait 10-15 seconds for the device to join your
-network and for CeraUI to restart. Then try the selected hostname shown by the
-device, starting with `ping ceralive.local`; if another device already had that
-name, try `ceralive2.local`, `ceralive3.local`, and so on.
+network and start CeraUI. Try the selected `.local` hostname shown on the device
+or look up its address in your router's device list.
 
 If it still does not appear, check the journal on the device console:
 
@@ -492,7 +486,7 @@ Identity refresh restarts TLS-firstboot. The nginx Requires/After drop-in refres
 an already-running nginx and orders its initial start after certificate setup;
 identity refresh never explicitly starts a masked, missing or stopped nginx.
 
-Reconciliation restarts an activating boot healthcheck after refreshing the app,
+Reconciliation restarts an activating boot healthcheck after a name change,
 giving it a fresh assessment deadline. Completed checks are only started, so
 completed boot confirmation is not restarted. Slot-sync wants and follows
 mark-good and checks that it is active before starting; a later stop/restart

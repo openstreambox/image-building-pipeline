@@ -484,7 +484,7 @@ fi
 
 # Relocate first-boot hostname state onto /data (contract §6). The local
 # allocation lock stays under /run because it is process coordination only.
-for n in host_index hostname_consumers_pending; do
+for n in host_index hostname_base hostname_consumers_pending; do
     if [ -e "/etc/ceralive/$n" ] && [ ! -L "/etc/ceralive/$n" ]; then
         [ -e "$DATA/ceralive/$n" ] || cp -a "/etc/ceralive/$n" "$DATA/ceralive/$n"
         rm -f "/etc/ceralive/$n"

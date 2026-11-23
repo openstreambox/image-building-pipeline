@@ -300,6 +300,22 @@ EOF
 printf '#!/bin/sh\nexit 0\n' >"${S}/usr/local/sbin/ceralive-set-hostname"
 chmod 0755 "${S}/usr/local/sbin/ceralive-set-hostname"
 printf '%s\n' "${hostname_unit}" >"${ETC}/ceralive-hostname.service"
+# Include the real seed and Avahi dependency in the boot transaction.
+awk '
+  /cat >\/etc\/systemd\/system\/ceralive-hostname-seed\.service <<'\''EOF'\''/ { f=1; next }
+  f && /^EOF$/ { exit }
+  f { print }
+' <<<"${POSTINST_SRC}" >"${ETC}/ceralive-hostname-seed.service"
+[[ -s "${ETC}/ceralive-hostname-seed.service" ]] || fail "could not extract hostname seed unit"
+printf '[Service]\nExecStart=/bin/true\n' >"${ETC}/avahi-daemon.service"
+mkdir -p "${ETC}/avahi-daemon.service.d"
+awk '
+  /cat >\/etc\/systemd\/system\/avahi-daemon\.service\.d\/05-hostname-seed\.conf <<'\''EOF'\''/ { f=1; next }
+  f && /^EOF$/ { exit }
+  f { print }
+' <<<"${POSTINST_SRC}" >"${ETC}/avahi-daemon.service.d/05-hostname-seed.conf"
+grep -Fxq 'Wants=ceralive-hostname-seed.service' "${ETC}/avahi-daemon.service.d/05-hostname-seed.conf" \
+  || fail "Avahi does not pull in the hostname seed"
 
 # The persistent machine-id unit is the newest member of the local-fs phase, and
 # it is the one whose ordering is load-bearing rather than incidental: it must
@@ -415,6 +431,10 @@ probe_orders_after ceralive-machine-id.service var-log.mount \
   || fail "ceralive-machine-id.service is NOT ordered after var-log.mount — a journald restart would reopen the journal on the rootfs slot"
 probe_orders_after ceralive-hostname.service ceralive-machine-id.service \
   || fail "ceralive-hostname.service is NOT ordered after ceralive-machine-id.service — it would read whatever id PID 1 invented"
+probe_orders_after ceralive-hostname-seed.service ceralive-machine-id.service \
+  || fail "hostname seed would read machine-id before reconciliation"
+probe_orders_after avahi-daemon.service ceralive-hostname-seed.service \
+  || fail "Avahi could publish the factory hostname before the seed"
 probe_orders_after systemd-journal-flush.service ceralive-machine-id.service \
   || fail "systemd-journal-flush.service is NOT ordered after ceralive-machine-id.service — journalctl --flush can race its journald restart"
 probe_orders_after systemd-journal-flush.service var-log.mount \

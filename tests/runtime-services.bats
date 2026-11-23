@@ -371,7 +371,7 @@ load manifest-helpers
     : >"$root/calls"
     run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
     [ "$status" -eq 0 ]
-    [ "$(grep -Fc 'systemctl --no-block restart ceralive-tls-firstboot.service ceralive.service ceralive-hawkbit-provision.service' "$root/calls")" -eq 1 ]
+    [ "$(grep -Fc 'systemctl --no-block restart ceralive-tls-firstboot.service ceralive-hawkbit-provision.service' "$root/calls")" -eq 1 ]
     [[ "$output" == *"system-hostname=ceralive"* ]]
     [[ "$output" == *"hostname-file=ceralive"* ]]
     [[ "$output" == *"hosts=ceralive"* ]]
@@ -398,7 +398,7 @@ load manifest-helpers
   : >"$root/calls"
   run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
   [ "$status" -eq 0 ]
-  [ "$(grep -Fc 'systemctl --no-block restart ceralive-tls-firstboot.service ceralive.service ceralive-hawkbit-provision.service' "$root/calls")" -eq 1 ]
+  [ "$(grep -Fc 'systemctl --no-block restart ceralive-tls-firstboot.service ceralive-hawkbit-provision.service' "$root/calls")" -eq 1 ]
   [ ! -e "$root/state/hostname_consumers_pending" ]
   : >"$root/calls"
   run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
@@ -406,7 +406,7 @@ load manifest-helpers
   [[ "$output" != *"systemctl --no-block restart"* ]]
 }
 
-@test "hostname: late Avahi rename advances identity and restarts every consumer" {
+@test "hostname: late Avahi rename advances identity without restarting CeraUI" {
   local root="$BATS_TEST_TMPDIR/reconcile-conflict"
   make_hostname_fixture "$root"
   run run_hostname_script "$root"
@@ -423,9 +423,10 @@ load manifest-helpers
   [[ "$output" == *"hostname-file=ceralive2"* ]]
   [[ "$output" == *"hosts=ceralive2"* ]]
   [[ "$output" == *"published=ceralive2"* ]]
-  [[ "$output" == *"systemctl --no-block restart ceralive-tls-firstboot.service ceralive.service ceralive-hawkbit-provision.service"* ]]
+  [[ "$output" == *"systemctl --no-block restart ceralive-tls-firstboot.service ceralive-hawkbit-provision.service"* ]]
+  [[ "$output" != *"ceralive.service"* ]]
   [[ "$output" != *"system-hostname=ceralive-2"* ]]
-  [ "$(grep -Fc 'systemctl --no-block restart ceralive-tls-firstboot.service ceralive.service ceralive-hawkbit-provision.service' "$root/calls")" -eq 1 ]
+  [ "$(grep -Fc 'systemctl --no-block restart ceralive-tls-firstboot.service ceralive-hawkbit-provision.service' "$root/calls")" -eq 1 ]
   [ ! -e "$root/state/hostname_consumers_pending" ]
   : >"$root/calls"
   run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
@@ -500,7 +501,8 @@ load manifest-helpers
   [[ "$output" == *"completed pending consumer restart for ceralive2.local"* ]]
   [[ "$output" == *"identity already aligned at ceralive2.local"* ]]
   [[ "$output" != *"avahi-set-host-name"* ]]
-  [[ "$output" == *"systemctl --no-block restart ceralive-tls-firstboot.service ceralive.service ceralive-hawkbit-provision.service"* ]]
+  [[ "$output" == *"systemctl --no-block restart ceralive-tls-firstboot.service ceralive-hawkbit-provision.service"* ]]
+  [[ "$output" != *"ceralive.service"* ]]
   printf '%s\n' "$output"
 }
 
@@ -626,6 +628,56 @@ SH
   [[ "$output" == *"published=ceralive"* ]]
   [[ "$output" != *"avahi-set-host-name ceralive2"* ]]
   printf '%s\n' "$output"
+}
+
+@test "hostname: two fresh offline devices seed distinct names before Avahi starts" {
+  local root_a="$BATS_TEST_TMPDIR/fresh-a" root_b="$BATS_TEST_TMPDIR/fresh-b"
+  local name_a name_b
+  make_hostname_fixture "$root_a"
+  make_hostname_fixture "$root_b"
+  printf 'fedcba9876543210fedcba9876543210\n' >"$root_b/machine-id"
+  mkdir -p "$root_a/data"
+  ln -s "$root_a/data/hostname_base" "$root_a/state/hostname_base"
+
+  HOSTNAME_BASE_OVERRIDE= run run_hostname_script "$root_a" "" normal device "$root_a/shared" normal seed
+  [ "$status" -eq 0 ]
+  name_a="$(cat "$root_a/data/hostname_base")"
+  [[ "$name_a" =~ ^ceralive-[0-9a-f]{12}$ ]]
+  [[ "$output" == *"hostname-file=$name_a"* ]]
+  [[ "$output" == *"published=<missing>"* ]]
+  [[ "$output" != *"avahi-set-host-name"* ]]
+  [ -L "$root_a/state/hostname_base" ]
+
+  HOSTNAME_BASE_OVERRIDE= run run_hostname_script "$root_b" "" normal device "$root_b/shared" normal seed
+  [ "$status" -eq 0 ]
+  name_b="$(cat "$root_b/state/hostname_base")"
+  [[ "$name_b" =~ ^ceralive-[0-9a-f]{12}$ ]]
+  [ "$name_a" != "$name_b" ]
+
+  # A different slot has a factory hostname but the same shared state.
+  printf 'ceralive\n' >"$root_a/hostname"
+  printf 'ceralive\n' >"$root_a/system-hostname"
+  : >"$root_a/calls"
+  HOSTNAME_BASE_OVERRIDE= run run_hostname_script "$root_a" "" normal device "$root_a/shared" normal seed
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostname-file=$name_a"* ]]
+  HOSTNAME_BASE_OVERRIDE= run run_hostname_script "$root_a"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"published=$name_a"* ]]
+  [[ "$output" != *"systemctl"* ]]
+}
+
+@test "hostname: upgrade preserves an existing numeric hostname without a base file" {
+  local root="$BATS_TEST_TMPDIR/legacy-upgrade"
+  make_hostname_fixture "$root"
+  printf '2\n' >"$root/state/host_index"
+  HOSTNAME_BASE_OVERRIDE= run run_hostname_script "$root" "" normal device "$root/shared" normal seed
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostname-file=ceralive2"* ]]
+  HOSTNAME_BASE_OVERRIDE= run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"published=ceralive2"* ]]
+  [ ! -e "$root/state/hostname_base" ]
 }
 
 @test "hostname: same-subnet non-AP LAN address remains publishable" {
@@ -4142,7 +4194,7 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
       bash -c 'SYSTEMCTL_BIN="$1"; eval "$3"; eval "$2"; restart_identity_consumers' \
       bash "$root/bin/systemctl" "$(sed -n '/^restart_identity_consumers() {/,/^}/p' "$root/ceralive-set-hostname")" "$(sed -n '/^CONSUMER_UNITS=(/,/^)/p' "$root/ceralive-set-hostname")"
     [ "$status" -eq 0 ]
-    [ "$(head -n 1 "$root/calls")" = 'systemctl --no-block restart ceralive-tls-firstboot.service ceralive.service ceralive-hawkbit-provision.service' ]
+    [ "$(head -n 1 "$root/calls")" = 'systemctl --no-block restart ceralive-tls-firstboot.service ceralive-hawkbit-provision.service' ]
     if [[ "$state" = activating ]]; then
       grep -Fxq 'systemctl --no-block restart ceralive-healthcheck.service' "$root/calls"
     else
