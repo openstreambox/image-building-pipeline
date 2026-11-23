@@ -197,8 +197,8 @@ setup hotspot comes back with an error banner.
 Fresh installs use a per-device hostname such as `ceralive-012345abcdef.local`.
 Look for the selected hostname on the device console or in your router's
 device list. The image derives the suffix from the persistent machine ID and
-sets the hostname before Avahi starts. Updates preserve existing names such as
-`ceralive.local` and `ceralive2.local`.
+sets the hostname before NetworkManager starts DHCP and Avahi publishes mDNS.
+Updates preserve existing names such as `ceralive.local` and `ceralive2.local`.
 
 The boot seed commits a provisional local identity to the runtime hostname,
 `/etc/hostname`, `/etc/hosts`, and `/data`. If there is no publishable LAN

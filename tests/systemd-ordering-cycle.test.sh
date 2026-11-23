@@ -316,6 +316,14 @@ awk '
 ' <<<"${POSTINST_SRC}" >"${ETC}/avahi-daemon.service.d/05-hostname-seed.conf"
 grep -Fxq 'Wants=ceralive-hostname-seed.service' "${ETC}/avahi-daemon.service.d/05-hostname-seed.conf" \
   || fail "Avahi does not pull in the hostname seed"
+mkdir -p "${ETC}/NetworkManager.service.d"
+awk '
+  /cat >\/etc\/systemd\/system\/NetworkManager\.service\.d\/05-hostname-seed\.conf <<'\''EOF'\''/ { f=1; next }
+  f && /^EOF$/ { exit }
+  f { print }
+' <<<"${POSTINST_SRC}" >"${ETC}/NetworkManager.service.d/05-hostname-seed.conf"
+grep -Fxq 'Wants=ceralive-hostname-seed.service' "${ETC}/NetworkManager.service.d/05-hostname-seed.conf" \
+  || fail "NetworkManager does not pull in the hostname seed"
 
 # The persistent machine-id unit is the newest member of the local-fs phase, and
 # it is the one whose ordering is load-bearing rather than incidental: it must
@@ -435,6 +443,8 @@ probe_orders_after ceralive-hostname-seed.service ceralive-machine-id.service \
   || fail "hostname seed would read machine-id before reconciliation"
 probe_orders_after avahi-daemon.service ceralive-hostname-seed.service \
   || fail "Avahi could publish the factory hostname before the seed"
+probe_orders_after NetworkManager.service ceralive-hostname-seed.service \
+  || fail "NetworkManager could start DHCP before the hostname seed"
 probe_orders_after systemd-journal-flush.service ceralive-machine-id.service \
   || fail "systemd-journal-flush.service is NOT ordered after ceralive-machine-id.service — journalctl --flush can race its journald restart"
 probe_orders_after systemd-journal-flush.service var-log.mount \

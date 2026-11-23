@@ -319,6 +319,22 @@ load manifest-helpers
     "$PIPELINE_DIR/mkosi/runtime/hawkbit-updater/rauc-hawkbit-updater.service"
 }
 
+@test "hostname: NetworkManager pulls in the seed and starts after it" {
+  local seed_unit nm_dropin
+  seed_unit="$(awk '
+    /cat >\/etc\/systemd\/system\/ceralive-hostname-seed\.service <<.EOF./ { found=1; next }
+    found && /^EOF$/ { exit }
+    found { print }
+  ' "$POSTINST_LIB")"
+  nm_dropin="$(awk '
+    /cat >\/etc\/systemd\/system\/NetworkManager\.service\.d\/05-hostname-seed\.conf <<.EOF./ { found=1; next }
+    found && /^EOF$/ { exit }
+    found { print }
+  ' "$POSTINST_LIB")"
+  grep -Fxq 'Before=NetworkManager.service' <<<"$seed_unit"
+  grep -Fxq 'Wants=ceralive-hostname-seed.service' <<<"$nm_dropin"
+}
+
 @test "hostname: aligned reconciliation is a no-op" {
   local root="$BATS_TEST_TMPDIR/reconcile-aligned"
   make_hostname_fixture "$root"
@@ -639,7 +655,7 @@ SH
   mkdir -p "$root_a/data"
   ln -s "$root_a/data/hostname_base" "$root_a/state/hostname_base"
 
-  HOSTNAME_BASE_OVERRIDE= run run_hostname_script "$root_a" "" normal device "$root_a/shared" normal seed
+  HOSTNAME_BASE_OVERRIDE='' run run_hostname_script "$root_a" "" normal device "$root_a/shared" normal seed
   [ "$status" -eq 0 ]
   name_a="$(cat "$root_a/data/hostname_base")"
   [[ "$name_a" =~ ^ceralive-[0-9a-f]{12}$ ]]
@@ -648,7 +664,7 @@ SH
   [[ "$output" != *"avahi-set-host-name"* ]]
   [ -L "$root_a/state/hostname_base" ]
 
-  HOSTNAME_BASE_OVERRIDE= run run_hostname_script "$root_b" "" normal device "$root_b/shared" normal seed
+  HOSTNAME_BASE_OVERRIDE='' run run_hostname_script "$root_b" "" normal device "$root_b/shared" normal seed
   [ "$status" -eq 0 ]
   name_b="$(cat "$root_b/state/hostname_base")"
   [[ "$name_b" =~ ^ceralive-[0-9a-f]{12}$ ]]
@@ -658,10 +674,10 @@ SH
   printf 'ceralive\n' >"$root_a/hostname"
   printf 'ceralive\n' >"$root_a/system-hostname"
   : >"$root_a/calls"
-  HOSTNAME_BASE_OVERRIDE= run run_hostname_script "$root_a" "" normal device "$root_a/shared" normal seed
+  HOSTNAME_BASE_OVERRIDE='' run run_hostname_script "$root_a" "" normal device "$root_a/shared" normal seed
   [ "$status" -eq 0 ]
   [[ "$output" == *"hostname-file=$name_a"* ]]
-  HOSTNAME_BASE_OVERRIDE= run run_hostname_script "$root_a"
+  HOSTNAME_BASE_OVERRIDE='' run run_hostname_script "$root_a"
   [ "$status" -eq 0 ]
   [[ "$output" == *"published=$name_a"* ]]
   [[ "$output" != *"systemctl"* ]]
@@ -671,10 +687,10 @@ SH
   local root="$BATS_TEST_TMPDIR/legacy-upgrade"
   make_hostname_fixture "$root"
   printf '2\n' >"$root/state/host_index"
-  HOSTNAME_BASE_OVERRIDE= run run_hostname_script "$root" "" normal device "$root/shared" normal seed
+  HOSTNAME_BASE_OVERRIDE='' run run_hostname_script "$root" "" normal device "$root/shared" normal seed
   [ "$status" -eq 0 ]
   [[ "$output" == *"hostname-file=ceralive2"* ]]
-  HOSTNAME_BASE_OVERRIDE= run run_hostname_script "$root"
+  HOSTNAME_BASE_OVERRIDE='' run run_hostname_script "$root"
   [ "$status" -eq 0 ]
   [[ "$output" == *"published=ceralive2"* ]]
   [ ! -e "$root/state/hostname_base" ]

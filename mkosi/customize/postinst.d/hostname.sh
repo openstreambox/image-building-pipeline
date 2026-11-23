@@ -533,10 +533,11 @@ EOF
 
   cat >/etc/systemd/system/ceralive-hostname-seed.service <<'EOF'
 [Unit]
-Description=Seed CeraLive hostname before mDNS starts
+Description=Seed CeraLive hostname before DHCP and mDNS
 Requires=ceralive-migrate-data.service
 RequiresMountsFor=/data
 After=ceralive-migrate-data.service ceralive-machine-id.service
+Before=NetworkManager.service
 
 [Service]
 Type=oneshot
@@ -550,6 +551,13 @@ EOF
 [Unit]
 Wants=ceralive-hostname-seed.service
 After=ceralive-hostname-seed.service
+EOF
+
+  mkdir -p /etc/systemd/system/NetworkManager.service.d
+  cat >/etc/systemd/system/NetworkManager.service.d/05-hostname-seed.conf <<'EOF'
+[Unit]
+# NetworkManager advertises the hostname in its initial DHCP request.
+Wants=ceralive-hostname-seed.service
 EOF
 
   cat >/etc/systemd/system/ceralive-hostname.service <<'EOF'
