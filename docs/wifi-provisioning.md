@@ -49,7 +49,7 @@ Evaluated at runtime by `ceralive-provision start` (the unit cannot express it a
 static `Condition`):
 
 1. `force-portal` flag present → **start** (factory-reset hook).
-2. Else if there is **any** stored non-AP NM WiFi profile on `/data` → **do not start**
+2. Else if there is **any** stored NM WiFi station profile on `/data` → **do not start**
    (the device can rejoin an uplink). This is the **EC4 OTA-safe** property: a RAUC
    update that preserves `/data` keeps the profiles, so the portal stays down. A
    `ceralive-wifi` whose join is still pending does not count (see *Unverified join*).
@@ -57,12 +57,14 @@ static `Condition`):
    (`full`/`limited`/`portal`) or a default route appears, an uplink exists → **do not
    start**. Otherwise → **start**.
 
-The device's own setup AP is excluded from the stored-profile count. It is recognised
-the same way cleanup recognises it (the UUID recorded in `ap-uuid`, or the settings
-fingerprint below), not by its name, so a user's station profile that happens to be
-called `ceralive-ap` counts as a saved network. If the setup AP's identity cannot be
-read (NetworkManager or `ap-uuid` unreadable), every profile called `ceralive-ap` is
-left out, as older images did.
+Provisioning first excludes its own setup AP by recorded UUID or settings
+fingerprint, using the same identification as cleanup. A station profile
+named `ceralive-ap` can still count. If setup AP identification fails,
+provisioning falls back to excluding every profile named `ceralive-ap`.
+
+Among the remaining profiles, saved hotspots, ad-hoc and mesh profiles do
+not count. If provisioning cannot read a remaining profile's mode, it
+counts that profile to avoid starting setup over a saved station.
 
 Every profile listing is `nmcli -t -f UUID,TYPE,NAME connection show`: UUID and type
 never contain `:`, so they are always the first two fields, and the name is the rest

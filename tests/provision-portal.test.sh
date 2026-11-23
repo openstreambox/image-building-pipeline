@@ -833,6 +833,14 @@ env SYSTEMCTL="${BIN}/systemctl-stateful" UNITS="${UNITS}" STUB_CONNECTIVITY=ful
 called "nmcli connection delete uuid ${AP_UUID}" && ! grep -q ":${AP_UUID}:" "${NMSTATE}/profiles" \
   && { grep -q ":${AP_UUID}:" "${NMSTATE}/profiles" || [ ! -s "$(state_file ap-uuid)" ]; } \
                                                  && pass "renamed setup AP with ':' deleted by UUID, record kept until it is gone" || fail "renamed setup AP with ':' deleted by UUID, record kept until it is gone"
+# A saved user hotspot cannot rejoin an uplink. Keep the profile but offer setup.
+reset_state; boot_units
+echo "User hotspot:${FOREIGN_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"
+printf '%s 802-11-wireless.mode ap\n' "${FOREIGN_UUID}" >>"${NMSTATE}/details"
+offline_boot; rc=$?
+[ "${rc}" -eq 0 ] && called "${AP_UP_CALL}" && grep -q ":${FOREIGN_UUID}:" "${NMSTATE}/profiles" \
+                                                 && pass "saved user hotspot alone does not suppress setup" || fail "saved user hotspot alone does not suppress setup (rc=${rc})"
+
 # A station called a:b is one saved network, also when the count falls back to names.
 reset_state; boot_units
 echo "a:b:${STATION_UUID}:802-11-wireless" >>"${NMSTATE}/profiles"

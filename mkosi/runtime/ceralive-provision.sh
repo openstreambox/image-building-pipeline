@@ -221,9 +221,10 @@ NM_AWK='function nm_name(  s, o, i, c) { s = substr($0, length($1) + length($2) 
 # shellcheck disable=SC2001  # a backreference, which ${var//} cannot do
 nm_unescape() { sed 's/\\\(.\)/\1/g' <<<"$1"; }
 
-# --- stored WiFi profile count (EXCLUDING our own AP profile) ------------------
+# --- stored WiFi station profile count -----------------------------------------
 # A real user WiFi profile means the device can rejoin an uplink, so the portal must
-# NOT start (EC4). Our own setup AP is excluded — it is created by THIS script and must
+# NOT start (EC4). Profiles in AP, ad-hoc or mesh mode cannot join an uplink.
+# Our own setup AP is also excluded by identity. The script creates it, and it must
 # never suppress its own re-trigger. It is recognised the way cleanup recognises it
 # (setup_ap_uuids: recorded UUID or settings fingerprint), so a user's station profile
 # that happens to be called ${AP_CON_NAME} still counts. If that identity cannot be
@@ -231,20 +232,27 @@ nm_unescape() { sed 's/\\\(.\)/\1/g' <<<"$1"; }
 # UUIDs in $1 (newline-separated) are left out as well: their join is still pending
 # (header §PENDING JOIN).
 stored_wifi_profile_count() {
-  local skip="${1:-}" list ap n
+  local skip="${1:-}" list ap candidates uuid mode n=0
   if list="$(nm_profiles)" && ap="$(setup_ap_uuids 2>/dev/null)"; then
-    awk -F: '
+    candidates="$(awk -F: '
         NR == FNR { if (NF) s[$0] = 1; next }
-        $2 == "802-11-wireless" && !($1 in s) { n++ }
-        END { print n + 0 }' <(printf '%s\n%s\n' "${ap}" "${skip}") - <<<"${list}"
-    return
+        $2 == "802-11-wireless" && !($1 in s) { print $1 }' <(printf '%s\n%s\n' "${ap}" "${skip}") - <<<"${list}")"
+  else
+    log "could not identify the setup AP profile; leaving out every profile called ${AP_CON_NAME}" >&2
+    candidates="$(nm_profiles | awk -F: -v ap="${AP_CON_NAME}" "${NM_AWK}"'
+        NR == FNR { if (NF) s[$0] = 1; next }
+        $2 == "802-11-wireless" && nm_name() != ap && !($1 in s) { print $1 }' <(printf '%s\n' "${skip}") -)"
   fi
-  log "could not identify the setup AP profile; leaving out every profile called ${AP_CON_NAME}" >&2
-  "${NMCLI}" -t -f UUID,TYPE,NAME connection show 2>/dev/null \
-    | awk -F: -v ap="${AP_CON_NAME}" "${NM_AWK}"'
-        NR == FNR { if (NF) s[$0] = 1; next }
-        $2 == "802-11-wireless" && nm_name() != ap && !($1 in s) { n++ }
-        END { print n + 0 }' <(printf '%s\n' "${skip}") -
+  while IFS= read -r uuid; do
+    [ -n "${uuid}" ] || continue
+    # On an unreadable mode, keep the existing boot protection for a saved profile.
+    mode="$("${NMCLI}" -g 802-11-wireless.mode connection show uuid "${uuid}" 2>/dev/null)" || mode=
+    case "${mode}" in
+      ap|adhoc|mesh) ;;
+      *) n=$((n + 1)) ;;
+    esac
+  done <<<"${candidates}"
+  printf '%s\n' "${n}"
 }
 
 # --- the image's own setup AP profiles -----------------------------------------
