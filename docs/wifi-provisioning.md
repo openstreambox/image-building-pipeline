@@ -282,8 +282,8 @@ stops the backend for the AP window and restarts it on teardown — `Restart=alw
 nginx on 443 is unaffected; while there is no uplink there is no 443 client, and its
 `127.0.0.1:80` upstream simply returns 502 until the backend restarts. After teardown the
 backend re-binds 80, nginx's upstream recovers, and the device is reachable at
-its selected mDNS hostname on the new network (`https://ceralive.local`,
-`https://ceralive2.local`, and so on).
+its selected mDNS hostname on the new network. The portal shows the hostname
+when it can verify publication.
 
 ## Hardware qualification (`[PARTIAL]` overall)
 
@@ -323,7 +323,7 @@ non-vacuity probes.
 On hardware, after submitting credentials, confirm: the `CeraLive-Setup-*` hotspot
 disappears, `journalctl -t ceralive-provision -t ceralive-portal` shows the join +
 teardown, and CeraUI answers on the device's new IP or selected `.local`
-hostname (`ceralive.local`, `ceralive2.local`, and so on).
+hostname.
 
 ### Shutdown cleanup
 

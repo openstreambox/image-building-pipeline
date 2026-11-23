@@ -5,11 +5,12 @@
 # sockets in isolated network namespaces. The production allocator is extracted
 # verbatim from postinst-lib.sh; only hostname/systemctl/file paths are test seams.
 #
-# The contract proves both races that mocks cannot model:
+# The contract exercises real multicast contention:
 #   1. simultaneous first boots on one multicast domain settle as ceralive and
 #      ceralive2 even though Avahi's native conflict name is ceralive-2;
-#   2. two isolated ceralive devices later joined to one LAN are reconciled, and
-#      every identity consumer is restarted only on the device whose name moved.
+#   2. two isolated legacy devices later joined to one LAN reconcile, with TLS
+#      and enrollment refreshed only on the renamed device and CeraUI left up;
+#   3. two fresh devices seed distinct default names before Avahi starts.
 
 set -euo pipefail
 
@@ -235,15 +236,22 @@ SH
 }
 
 start_device() {
-  local root="$1" ns="$2" seed="$3"
+  local root="$1" ns="$2" seed="$3" machine_id="${4:-0123456789abcdef0123456789abcdef}"
   mkdir -p "$root/run" "$root/state"
   printf '127.0.0.1\tlocalhost\n' >"$root/hosts"
   printf 'factory-seed\n' >"$root/hostname"
   printf 'factory-seed\n' >"$root/system-hostname"
+  printf '%s\n' "$machine_id" >"$root/machine-id"
   : >"$root/calls"
   extract_hostname_script >"$root/ceralive-set-hostname"
   chmod +x "$root/ceralive-set-hostname"
   write_device_wrappers "$root"
+
+  if [[ -z "$seed" ]]; then
+    run_allocator "$root" "$ns" fresh seed
+    seed="$(cat "$root/system-hostname")"
+    [[ "$seed" =~ ^ceralive-[0-9a-f]{12}$ ]] || fail "invalid first-boot seed: $seed"
+  fi
 
   cat >"$root/avahi.conf" <<EOF
 [server]
@@ -323,6 +331,10 @@ stop_device() {
 
 run_allocator() {
   local root="$1" ns="$2" device_id="$3" mode="${4:-}" barrier="${5:-}"
+  local base=ceralive
+  if [[ "$device_id" = fresh || "$mode" = reconcile ]]; then
+    base=
+  fi
   local -a args=()
   [[ -z "$mode" ]] || args+=("$mode")
   # MAX_WAIT is the production default (120), not a tighter test cap: the allocator
@@ -336,10 +348,12 @@ run_allocator() {
     REAL_AVAHI_BUS="$root/bus" \
     REAL_DEVICE_ID="$device_id" \
     REAL_START_BARRIER="$barrier" \
+    CERALIVE_BASE_HOSTNAME="$base" \
     CERALIVE_HOSTNAME_STATE_DIR="$root/state" \
     CERALIVE_HOSTNAME_LOCK_FILE="$root/run/hostname.lock" \
     CERALIVE_HOSTS_FILE="$root/hosts" \
     CERALIVE_HOSTNAME_FILE="$root/hostname" \
+    CERALIVE_MACHINE_ID_FILE="$root/machine-id" \
     HOSTNAMECTL_BIN="$root/bin/hostnamectl" \
     HOSTNAME_BIN="$root/bin/hostname" \
     IP_BIN="$root/bin/ip" \
@@ -377,19 +391,22 @@ avahi_name() {
 }
 
 expected_for_index() {
-  local index="$1"
+  local index="$1" base="$2"
   if [[ "$index" = 1 ]]; then
-    printf 'ceralive\n'
+    printf '%s\n' "$base"
   else
-    printf 'ceralive%s\n' "$index"
+    printf '%s%s\n' "$base" "$index"
   fi
 }
 
 assert_device_aligned() {
-  local root="$1" index expected runtime static hosts published
+  local root="$1" index expected runtime static hosts published base=ceralive
   index="$(cat "$root/state/host_index")"
   [[ "$index" =~ ^[1-9][0-9]*$ ]] || fail "invalid persisted index for $root: $index"
-  expected="$(expected_for_index "$index")"
+  if [[ -f "$root/state/hostname_base" ]]; then
+    base="$(cat "$root/state/hostname_base")"
+  fi
+  expected="$(expected_for_index "$index" "$base")"
   runtime="$(cat "$root/system-hostname")"
   static="$(cat "$root/hostname")"
   hosts="$(awk '$1 == "127.0.1.1" {print $2}' "$root/hosts")"
@@ -398,7 +415,6 @@ assert_device_aligned() {
   [[ "$static" = "$expected" ]] || fail "$root hostname-file=$static expected=$expected"
   [[ "$hosts" = "$expected" ]] || fail "$root hosts=$hosts expected=$expected"
   [[ "$published" = "$expected" ]] || fail "$root published=$published expected=$expected"
-  [[ "$published" != *-* ]] || fail "$root retained forbidden Avahi suffix: $published"
   [[ "$(avahi_state "$root")" = 'i 2' ]] || fail "$root Avahi is not RUNNING"
   printf 'ALIGN device=%s index=%s runtime=%s hostname_file=%s hosts=%s published=%s\n' \
     "$(basename "$root")" "$index" "$runtime" "$static" "$hosts" "$published"
@@ -526,10 +542,29 @@ sed 's/^/RECONCILE_B: /' "$TMP/late-merge/device-b.reconcile.out"
 (( WAIT_PAIR_OK == 1 )) || fail "RECONCILE allocator failed"
 assert_pair_names "$MERGE_A" "$MERGE_B"
 
-restart_line='systemctl --no-block restart ceralive-tls-firstboot.service nginx.service ceralive.service ceralive-hawkbit-provision.service ceralive-healthcheck.service'
+if grep -F 'ceralive.service' "$MERGE_A/calls" "$MERGE_B/calls"; then
+  fail 'late reconciliation queued a CeraUI job'
+fi
+restart_line='systemctl --no-block restart ceralive-tls-firstboot.service ceralive-hawkbit-provision.service'
 restart_count="$(awk -v expected="$restart_line" '$0 == expected { count++ } END { print count + 0 }' \
   "$MERGE_A/calls" "$MERGE_B/calls")"
 [[ "$restart_count" = "$expected_restarts" ]] \
   || fail "expected $expected_restarts identity-consumer restarts, observed $restart_count"
 printf 'RECONCILE=PASS exact=ceralive,ceralive2 consumer_restarts=%s\n' "$restart_count"
+stop_device "$MERGE_A"
+stop_device "$MERGE_B"
+
+create_pair f 4 yes
+FRESH_A="$TMP/fresh/device-a"
+FRESH_B="$TMP/fresh/device-b"
+start_device "$FRESH_A" "${PAIR_A_NS[f]}" "" 0123456789abcdef0123456789abcdef
+start_device "$FRESH_B" "${PAIR_B_NS[f]}" "" fedcba9876543210fedcba9876543210
+run_allocator "$FRESH_A" "${PAIR_A_NS[f]}" fresh
+run_allocator "$FRESH_B" "${PAIR_B_NS[f]}" fresh
+assert_device_aligned "$FRESH_A"
+assert_device_aligned "$FRESH_B"
+[[ "$(avahi_name "$FRESH_A")" != "$(avahi_name "$FRESH_B")" ]] || fail "fresh devices share a name"
+[[ "$(cat "$FRESH_A/state/host_index")" = 1 && "$(cat "$FRESH_B/state/host_index")" = 1 ]] \
+  || fail "fresh devices needed collision fallback"
+printf 'FRESH_SHARED_LAN=PASS distinct seeded defaults\n'
 printf 'RESULT=PASS real-avahi arbitration-and-late-merge\n'
