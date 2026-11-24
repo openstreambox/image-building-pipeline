@@ -1472,6 +1472,32 @@ EOF
   [[ "$output" == *"INFO: Rock back power present: cycling port_type=source then dual"* ]]
 }
 
+@test "typec policy: a blind try writes a receipt only for a partner the settle wait saw fail" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  # The partner registers on the cycle, but the settle wait never reads its
+  # role (it registered after the wait's last look): a new attach, no receipt.
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  : >"$root/iio/attach-on-cycle"
+  export CERALIVE_TYPEC_MODE=recheck CERALIVE_TYPEC_SETTLED_POWER_ROLE="$root/not-yet"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+  [ ! -e "$root/run/failed" ]
+
+  # A partner the settle wait saw stay sink until the deadline did fail.
+  rm -rf "$root"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  : >"$root/iio/attach-on-cycle"
+  printf 'source [sink]\n' >"$root/settled"
+  export CERALIVE_TYPEC_SETTLED_POWER_ROLE="$root/settled"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+  [ "$(cat "$root/run/failed")" = unknown ]
+}
+
 @test "typec policy: a partner registered as the sink preference is written gets no sink-first reset" {
   local root="$BATS_TEST_TMPDIR/rock"
   typec_rock_fixture "$root"
@@ -1526,6 +1552,17 @@ EOF
   [ "$status" -eq 0 ]
   [ ! -e "$root/iio/writes" ]
   printf '1 %s\n' "$(( $(date +%s) - 40 ))" >"$root/run/nopartner"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual\nsource\ndual' ]
+
+  # A stamp from the future (the clock stepped back) holds nothing off.
+  rm -rf "$root"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  mkdir -p "$root/run"
+  printf '1 %s\n' "$(( $(date +%s) - 40 ))" >"$root/run/nopartner"
+  printf '%s\n' "$(( $(date +%s) + 600 ))" >"$root/run/last-reset"
   run run_typec_rock
   [ "$status" -eq 0 ]
   [ "$(cat "$root/iio/writes")" = $'source\ndual\nsource\ndual' ]

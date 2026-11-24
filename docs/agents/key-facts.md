@@ -5979,15 +5979,18 @@ So when a cycle's settle wait ends with no partner, the policy writes
 `preferred_role=sink`, cycles `port_type=source` then `dual` once more, waits
 `CERALIVE_TYPEC_SINK_RESET_SETTLE` (2 s; tcpm picks the state about 100 ms after the
 write, up to about 1 s more when VBUS was on) and writes `source` back. That write only
-sets the try role and does not reset the port. Every cycle, and the sink-first reset,
-writes its time to `/run/ceralive-typec/last-reset`, and cycle spacing and the early, late
-and re-arm settle times count from whichever of it and `nopartner` is later. A partner
-that registers after the settle wait (just before or on the sink-first reset) is judged as a
-new attach: as source it is settled, and any other is left to its own partner-add run after
+sets the try role and does not reset the port. Every cycle that completes, and the
+sink-first reset, writes its time to `/run/ceralive-typec/last-reset` (a cycle whose
+`dual` write is rejected twice restores the recorded `port_type` and stops before that, as
+before, with no sink-first reset). Cycle spacing and the early, late and re-arm settle
+times count from whichever of it and `nopartner` is later; a stamp from the future (the
+clock stepped back) is ignored. A partner that the settle wait did not see fail (it
+registered after the wait's last look, or just before or on the sink-first reset) is judged
+as a new attach: as source it is settled, and any other is left to its own partner-add run after
 a blind cycle (whose tries cap it), while a partner-keyed correction keeps its failure
-receipt, so a flapping charger still stops. A blind try that still finds nothing writes no
-receipt and spends only its `nopartner` count, so a camera that registers right after it is
-still corrected. A refused or
+receipt, so a flapping charger still stops. A blind try writes a receipt only for a partner
+the settle wait saw stay sink; one that finds nothing spends only its `nopartner` count, so
+a camera that registers right after it is still corrected. A refused or
 ignored sink preference skips the second cycle with an error line. A `dual` write rejected
 twice inside it restores the recorded `port_type` and the run still returns 0. The
 source-preferred cycle itself is unchanged, so a camera stuck in `SNK_DEBOUNCED` still gets

@@ -455,7 +455,7 @@ rock_reprobe_rearm() {
 rock_back_power_correction() {
   local adc first second decision=unknown previous="" retry deadline stamp=0
   local settled_power identity=unknown original_port_type rstate
-  local blind=0 tries=0 last=0 now reset=""
+  local blind=0 tries=0 last=0 now reset="" settle_failed=0
   retry="${CERALIVE_TYPEC_ADC_RETRY:-15}"
   [[ "${MODE}" != recheck ]] || retry=0
   [[ "${retry}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_ADC_RETRY must be an unsigned integer"
@@ -551,12 +551,13 @@ rock_back_power_correction() {
     [[ "${MODE}" == recheck ]] || return 0
     [[ ! -r "${RUN_DIR}/nopartner" ]] || read -r tries last <"${RUN_DIR}/nopartner"
     [[ "${tries}" =~ ^[0-9]+$ && "${last}" =~ ^[0-9]+$ ]] || { tries=0; last=0; }
+    now="$(date +%s)"
     # A sink-first reset (below) runs up to CERALIVE_TYPEC_WAIT plus its settle
     # after the cycle that nopartner dates; spacing and every rebind settle
-    # time count from whichever reset came last.
+    # time count from whichever reset came last. A stamp from the future (the
+    # clock stepped back) is ignored rather than holding everything off.
     [[ ! -r "${RUN_DIR}/last-reset" ]] || read -r reset <"${RUN_DIR}/last-reset"
-    [[ ! "${reset}" =~ ^[0-9]+$ ]] || (( reset <= last )) || last="${reset}"
-    now="$(date +%s)"
+    [[ ! "${reset}" =~ ^[0-9]+$ ]] || (( reset <= last || reset > now )) || last="${reset}"
     ! rock_reprobe_rearm "${last}" "${now}" || return 0
     if (( tries >= NOPARTNER_MAX )); then
       rock_fusb302_reprobe "${last}" "${now}"
@@ -646,6 +647,7 @@ rock_back_power_correction() {
             if [[ -r "${PARTNER_DIR}/identity/id_header" ]]; then
               identity="$(cat "${PARTNER_DIR}/identity/id_header")"
             fi
+            settle_failed=1
             break
           fi
           ;;
@@ -664,7 +666,7 @@ rock_back_power_correction() {
   # SINK_RESET_SETTLE seconds (tcpm picks the state about 100 ms after the
   # write, up to about 1 s when VBUS was on); a preference write by itself does
   # not reset the port. A camera this cycle made attach has a partner by now.
-  if [[ ! -e "${PARTNER_DIR}" ]]; then
+  if (( ! settle_failed )) && [[ ! -e "${PARTNER_DIR}" ]]; then
     if ! printf '%s\n' sink >"${PORT_DIR}/preferred_role" ||
         [[ "$(active_role "${PORT_DIR}/preferred_role")" != sink ]]; then
       log "ERROR: cannot set Rock sink preference — ${PORT} may miss a later plug until it is rebound"
@@ -688,26 +690,26 @@ rock_back_power_correction() {
       printf '%s\n' "$(date +%s)" >"${RUN_DIR}/last-reset" \
         || log "ERROR: cannot record the Rock sink-first reset time"
     fi
-    # A device that attached after the settle wait is a new attach, not this
-    # cycle's failure. As source it is done. Any other is left to its own
-    # partner-add run (waiting for this lock) after a blind cycle, whose tries
-    # cap it; a partner-keyed correction keeps the receipt, so a flapping
-    # charger stops.
-    if [[ -e "${PARTNER_DIR}" ]]; then
-      note_partner_since_early
-      if [[ -r "${settled_power}" && "$(active_role "${settled_power}")" == source ]]; then
-        rock_settled_source=1
-        return 0
-      fi
-      (( blind == 0 )) || return 0
-      [[ ! -r "${PARTNER_DIR}/identity/id_header" ]] \
-        || identity="$(cat "${PARTNER_DIR}/identity/id_header")"
-    fi
   fi
-  # A blind try that still finds nothing spends only its nopartner count: a
-  # receipt here would make a partner that registers right after it skip its
-  # correction.
-  (( blind == 0 )) || [[ -e "${PARTNER_DIR}" ]] || return 0
+  # A partner the settle wait did not see fail (it registered after the wait's
+  # last look, or on the sink-first reset) is a new attach, not this cycle's
+  # failure. As source it is done. Any other is left to its own partner-add
+  # run (waiting for this lock) after a blind cycle, whose tries cap it; a
+  # partner-keyed correction keeps the receipt, so a flapping charger stops.
+  if (( ! settle_failed )) && [[ -e "${PARTNER_DIR}" ]]; then
+    note_partner_since_early
+    if [[ -r "${settled_power}" && "$(active_role "${settled_power}")" == source ]]; then
+      rock_settled_source=1
+      return 0
+    fi
+    (( blind == 0 )) || return 0
+    [[ ! -r "${PARTNER_DIR}/identity/id_header" ]] \
+      || identity="$(cat "${PARTNER_DIR}/identity/id_header")"
+  fi
+  # A blind try writes a receipt only for a partner the settle wait saw fail.
+  # One that still finds nothing spends only its nopartner count, so a partner
+  # that registers right after it still gets its correction.
+  (( blind == 0 || settle_failed )) || return 0
   printf '%s\n' "${identity}" >"${RUN_DIR}/failed" \
     || log "ERROR: cannot record failed Rock attachment"
 }
