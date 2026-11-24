@@ -437,6 +437,19 @@ setup_modem_usbspeed() {
   install -D -m 0644 "${src}/99-ceralive-modem-usbspeed.rules" "${rules_dir}/99-ceralive-modem-usbspeed.rules"
 }
 
+# FM350-GL carrier unlock (ceralive-modem-carrierlock), udev-started per
+# 0e8d:7127 device. Same tier and layout as setup_modem_usbspeed; basenames the
+# modem-support companion never ships (manifests/modem-support-ownership.txt).
+setup_modem_carrierlock() {
+  local src="${CERALIVE_RUNTIME_SRC:?}"
+  local sbin_dir="${MODEM_CARRIERLOCK_SBIN_DIR:-/usr/local/sbin}"
+  local unit_dir="${MODEM_CARRIERLOCK_UNIT_DIR:-/etc/systemd/system}"
+  local rules_dir="${MODEM_CARRIERLOCK_RULES_DIR:-/etc/udev/rules.d}"
+  install -D -m 0755 "${src}/ceralive-modem-carrierlock.py" "${sbin_dir}/ceralive-modem-carrierlock"
+  install -D -m 0644 "${src}/ceralive-modem-carrierlock@.service" "${unit_dir}/ceralive-modem-carrierlock@.service"
+  install -D -m 0644 "${src}/99-ceralive-modem-carrierlock.rules" "${rules_dir}/99-ceralive-modem-carrierlock.rules"
+}
+
 # ModemManager port hints: ID_MM_PORT_IGNORE on the RM520N's secondary AT port
 # (see the rules file for why). Admin tier,
 # basename never shipped by the modem-support companion

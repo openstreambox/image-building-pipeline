@@ -1,0 +1,26 @@
+[Unit]
+Description=CeraLive FM350-GL carrier unlock for USB device %i
+Documentation=file:///usr/local/sbin/ceralive-modem-carrierlock
+# Started by 99-ceralive-modem-carrierlock.rules. It asks ModemManager to hold
+# the modem, so it runs after ModemManager has started; neither is required.
+After=ModemManager.service systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ceralive-modem-carrierlock %i
+# The script keeps its own 270 s budget (ModemManager and SIM wait, hold, AT,
+# up to 15 s watching a restarting module leave); every mmcli call is bounded
+# by what is left of it. This is the backstop.
+TimeoutStartSec=300
+# The per-unit markers must outlive each oneshot instance for the whole boot.
+RuntimeDirectory=ceralive/modem-carrierlock
+RuntimeDirectoryPreserve=yes
+ReadWritePaths=-/data/ceralive
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
