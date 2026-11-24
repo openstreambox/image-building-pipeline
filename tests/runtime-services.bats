@@ -1029,6 +1029,8 @@ EOF
   [ "$(cat "$root/typec/port0/data_role")" = 'host [device]' ]
   [ ! -e "$root/run/failed" ]
   [[ "$output" != *DR_SWAP* ]]
+  # A settled cycle is still the last reset for later spacing and rebinds.
+  [[ "$(cat "$root/run/last-reset")" =~ ^[0-9]+$ ]]
 }
 
 @test "typec policy: Rock absent or unknown back power performs zero connector writes" {
@@ -1281,10 +1283,10 @@ EOF
       [ ! -e "$root/iio/writes" ]
     else
       # The recheck now probes once for a camera stuck in SNK_DEBOUNCED; no
-      # partner returns after the cycle, so the attach is recorded as unknown
-      # and the port is reset once more with sink preferred.
+      # partner returns after the cycle, so the port is reset once more with
+      # sink preferred, and the empty try spends only its nopartner count.
       [ "$(cat "$root/iio/writes")" = $'source\ndual\nsource\ndual' ]
-      [ "$(cat "$root/run/failed")" = unknown ]
+      [ ! -e "$root/run/failed" ]
     fi
   done
 }
@@ -1323,7 +1325,7 @@ EOF
   [ "$(cat "$root/iio/rest-states")" = $'SRC_UNATTACHED\nSNK_UNATTACHED' ]
   [ "$(typec_fake_rest_state "$root")" = SNK_UNATTACHED ]
   [ "$(cat "$root/typec/port0/preferred_role")" = source ]
-  [ "$(cat "$root/run/failed")" = unknown ]
+  [ ! -e "$root/run/failed" ]
   [[ "$output" != *"ERROR"* ]]
 }
 
@@ -1385,7 +1387,7 @@ EOF
   # The main cycle, then source, two rejected duals and the rejected restoration.
   [ "$(cat "$root/iio/writes")" = $'source\ndual\nsource\ndual\ndual\ndual' ]
   [ "$(cat "$root/typec/port0/preferred_role")" = source ]
-  [ "$(cat "$root/run/failed")" = unknown ]
+  [ ! -e "$root/run/failed" ]
 }
 
 @test "typec policy: a modem that attaches on the sink-first reset is a settled source attach, not a failure" {
@@ -1393,6 +1395,10 @@ EOF
   typec_rock_fixture "$root"
   rm -rf "$root/typec/port0-partner"
   printf '[source] sink\n' >"$root/iio/attach-on-sink-reset"
+  # This boot's early rebind already ran and found nothing.
+  mkdir -p "$root/run"
+  printf 'no-partner 1\n' >"$root/run/reprobe"
+  : >"$root/run/reprobe-early"
   export CERALIVE_TYPEC_MODE=recheck
 
   run run_typec_rock
@@ -1401,6 +1407,8 @@ EOF
   [ -e "$root/typec/port0-partner" ]
   [ ! -e "$root/run/failed" ]
   [ "$(cat "$root/typec/port0/preferred_role")" = source ]
+  # The partner rules out the late rebind for the rest of the boot.
+  [ -e "$root/run/partner-since-early" ]
 
   # Same after a partner-keyed correction whose partner left: no receipt and
   # no DR_SWAP on the settled source attach.
@@ -1413,7 +1421,8 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(cat "$root/iio/writes")" = $'source\ndual\nsource\ndual' ]
   [ ! -e "$root/run/failed" ]
-  [[ "$output" != *"DR_SWAP"* ]]
+  # Settled here: the role-attribute wait and DR_SWAP never run.
+  [[ "$output" != *"settled as power_role"* && "$output" != *"DR_SWAP"* ]]
 }
 
 @test "typec policy: a sink partner on the sink-first reset is left to its own run after a blind cycle, but stays failed after a correction" {
@@ -1442,7 +1451,43 @@ EOF
   [ "$(cat "$root/run/failed")" = 0x5ec0ffee ]
 }
 
-@test "typec policy: spacing and rebind settle times count from the last sink-first reset" {
+@test "typec policy: a sink partner that registers right after an empty blind try still gets its correction" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  export CERALIVE_TYPEC_MODE=recheck
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -e "$root/run/failed" ]
+
+  # tcpm publishes a sink partner (a camera) before the next tick; its own
+  # partner-add run corrects it once the 10 s correction spacing has passed.
+  mkdir -p "$root/typec/port0-partner"
+  printf 'source [sink]\n' >"$root/typec/port0/power_role"
+  touch -d '-11 seconds' "$root/run/corrected"
+  export CERALIVE_TYPEC_MODE=normal
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual\nsource\ndual\nsource\ndual' ]
+  [[ "$output" == *"INFO: Rock back power present: cycling port_type=source then dual"* ]]
+}
+
+@test "typec policy: a partner registered as the sink preference is written gets no sink-first reset" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  : >"$root/iio/attach-on-sink-pref"
+  export CERALIVE_TYPEC_MODE=recheck
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+  [[ "$output" != *"sink preferred"* ]]
+  [ "$(cat "$root/typec/port0/preferred_role")" = source ]
+  [ ! -e "$root/run/failed" ]
+}
+
+@test "typec policy: the late rebind settle and the cycle spacing count from whichever reset came last" {
   local root="$BATS_TEST_TMPDIR/rock"
   typec_rock_fixture "$root"
   rm -rf "$root/typec/port0-partner"
@@ -1462,6 +1507,28 @@ EOF
   CERALIVE_TYPEC_REPROBE_SETTLE=20 run run_typec_rock
   [ "$status" -eq 0 ]
   [ "$(cat "$root/iio/i2c-writes")" = $'unbind 4-0022\nbind 4-0022' ]
+
+  # Cycle spacing: a reset 5 s ago holds the next cycle, whichever file dates it.
+  rm -rf "$root"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  mkdir -p "$root/run"
+  printf '1 %s\n' "$(( $(date +%s) - 100 ))" >"$root/run/nopartner"
+  printf '%s\n' "$(( $(date +%s) - 5 ))" >"$root/run/last-reset"
+  export CERALIVE_TYPEC_MODE=recheck CERALIVE_TYPEC_NOPARTNER_SPACING=30
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -e "$root/iio/writes" ]
+  # An older last-reset (a cycle whose partner returned) does not shorten it.
+  printf '1 %s\n' "$(( $(date +%s) - 5 ))" >"$root/run/nopartner"
+  printf '%s\n' "$(( $(date +%s) - 100 ))" >"$root/run/last-reset"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -e "$root/iio/writes" ]
+  printf '1 %s\n' "$(( $(date +%s) - 40 ))" >"$root/run/nopartner"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual\nsource\ndual' ]
 }
 
 @test "typec policy: the sink-first reset waits 2 s by default before the source preference returns" {

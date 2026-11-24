@@ -624,6 +624,10 @@ rock_back_power_correction() {
     fi
   fi
 
+  # Spacing and the rebind settle times count from the last reset of any kind.
+  printf '%s\n' "$(date +%s)" >"${RUN_DIR}/last-reset" \
+    || log "ERROR: cannot record the Rock port_type cycle time"
+
   # The cycle removes and re-adds the partner asynchronously. This wait and its
   # failure receipt also run under the periodic recheck, without any DR_SWAP.
   mono_now
@@ -664,6 +668,10 @@ rock_back_power_correction() {
     if ! printf '%s\n' sink >"${PORT_DIR}/preferred_role" ||
         [[ "$(active_role "${PORT_DIR}/preferred_role")" != sink ]]; then
       log "ERROR: cannot set Rock sink preference — ${PORT} may miss a later plug until it is rebound"
+    elif [[ -e "${PARTNER_DIR}" ]]; then
+      # Registered since the settle wait ended: judged below, no second reset.
+      printf '%s\n' source >"${PORT_DIR}/preferred_role" \
+        || log "ERROR: cannot restore Rock source preference"
     else
       log "INFO: Rock ${PORT} has no partner after the cycle: cycling port_type=source then dual with sink preferred, so a later plug is seen"
       if ! printf '%s\n' source >"${PORT_DIR}/port_type"; then
@@ -679,22 +687,27 @@ rock_back_power_correction() {
         || log "ERROR: cannot restore Rock source preference after the sink-first reset"
       printf '%s\n' "$(date +%s)" >"${RUN_DIR}/last-reset" \
         || log "ERROR: cannot record the Rock sink-first reset time"
-      # A device that attached on this reset is a new attach, not this cycle's
-      # failure. As source it is done. Any other is left to its own partner-add
-      # run (waiting for this lock) after a blind cycle, whose tries cap it; a
-      # partner-keyed correction keeps the receipt, so a flapping charger stops.
-      if [[ -e "${PARTNER_DIR}" ]]; then
-        note_partner_since_early
-        if [[ -r "${settled_power}" && "$(active_role "${settled_power}")" == source ]]; then
-          rock_settled_source=1
-          return 0
-        fi
-        (( blind == 0 )) || return 0
-        [[ ! -r "${PARTNER_DIR}/identity/id_header" ]] \
-          || identity="$(cat "${PARTNER_DIR}/identity/id_header")"
+    fi
+    # A device that attached after the settle wait is a new attach, not this
+    # cycle's failure. As source it is done. Any other is left to its own
+    # partner-add run (waiting for this lock) after a blind cycle, whose tries
+    # cap it; a partner-keyed correction keeps the receipt, so a flapping
+    # charger stops.
+    if [[ -e "${PARTNER_DIR}" ]]; then
+      note_partner_since_early
+      if [[ -r "${settled_power}" && "$(active_role "${settled_power}")" == source ]]; then
+        rock_settled_source=1
+        return 0
       fi
+      (( blind == 0 )) || return 0
+      [[ ! -r "${PARTNER_DIR}/identity/id_header" ]] \
+        || identity="$(cat "${PARTNER_DIR}/identity/id_header")"
     fi
   fi
+  # A blind try that still finds nothing spends only its nopartner count: a
+  # receipt here would make a partner that registers right after it skip its
+  # correction.
+  (( blind == 0 )) || [[ -e "${PARTNER_DIR}" ]] || return 0
   printf '%s\n' "${identity}" >"${RUN_DIR}/failed" \
     || log "ERROR: cannot record failed Rock attachment"
 }

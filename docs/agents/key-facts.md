@@ -5979,12 +5979,15 @@ So when a cycle's settle wait ends with no partner, the policy writes
 `preferred_role=sink`, cycles `port_type=source` then `dual` once more, waits
 `CERALIVE_TYPEC_SINK_RESET_SETTLE` (2 s; tcpm picks the state about 100 ms after the
 write, up to about 1 s more when VBUS was on) and writes `source` back. That write only
-sets the try role and does not reset the port. The reset's time goes to
-`/run/ceralive-typec/last-reset`, and cycle spacing and the early, late and re-arm settle
-times count from whichever of it and `nopartner` is later. A device that attaches on the
-sink-first reset is judged as a new attach: as source it is settled, and any other is left
-to its own partner-add run after a blind cycle (whose tries cap it), while a partner-keyed
-correction keeps its failure receipt, so a flapping charger still stops. A refused or
+sets the try role and does not reset the port. Every cycle, and the sink-first reset,
+writes its time to `/run/ceralive-typec/last-reset`, and cycle spacing and the early, late
+and re-arm settle times count from whichever of it and `nopartner` is later. A partner
+that registers after the settle wait (just before or on the sink-first reset) is judged as a
+new attach: as source it is settled, and any other is left to its own partner-add run after
+a blind cycle (whose tries cap it), while a partner-keyed correction keeps its failure
+receipt, so a flapping charger still stops. A blind try that still finds nothing writes no
+receipt and spends only its `nopartner` count, so a camera that registers right after it is
+still corrected. A refused or
 ignored sink preference skips the second cycle with an error line. A `dual` write rejected
 twice inside it restores the recorded `port_type` and the run still returns 0. The
 source-preferred cycle itself is unchanged, so a camera stuck in `SNK_DEBOUNCED` still gets
@@ -5993,13 +5996,13 @@ it; one that attaches on it has a partner and gets no second reset.
 On the same board with this policy: a cold boot with J11 empty ran the three cycles, each
 followed by `SRC_UNATTACHED -> SNK_UNATTACHED` about 120 ms after the sink-first write, and
 a late plug at 134.6 s attached on its own. A hot unplug and a replug 3.6 min later
-attached on its own too, and a modem attached at power-on still came up 2 of 2 times
-(early rebind). Known limit: tcpm sources VBUS and reads `power_role=source` for about
+attached on its own too, and a modem attached at power-on still came up 3 of 3 times
+through the early rebind. Known limit: tcpm sources VBUS and reads `power_role=source` for about
 5-7 s before it registers the partner (`SRC_SEND_CAPABILITIES` until `SRC_READY` for a
 modem without PD). A rebind that lands in that window cuts a working attach and redoes it.
 Seen once on the late plug (the late rebind 3 s after `SRC_ATTACHED`; partner 10 s later
-than without it), and on all three cold boots with the modem attached at power-on, where
-the early rebind at 8.6-9.9 s cut an attach that had started at about 6.3 s. Why the
+than without it), and in each of those three power-on boots, where the early rebind at
+8.4-9.9 s cut an attach tcpm had started at 6.3-6.4 s; all of them recovered. Why the
 FUSB302 misses the attach from `SRC_UNATTACHED` is not established, and no camera was
 tested. Guards: the "typec policy: … sink-first …" cases in `runtime-services.bats`,
 whose fake kernel records the state each reset rests in from the preference active when it

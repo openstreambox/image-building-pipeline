@@ -1249,6 +1249,11 @@ run_typec_rock() {
         "$CERALIVE_TYPEC_CLASS_DIR/port0/preferred_role")
           # A kernel that accepts the write but keeps reporting its own value.
           [[ ! -e "$CERALIVE_TYPEC_IIO_DIR/ignore-preferred" ]] || return 0
+          # A partner that tcpm registers just as the sink preference is written.
+          if [[ "$2" == sink && -e "$CERALIVE_TYPEC_IIO_DIR/attach-on-sink-pref" ]]; then
+            mkdir -p "$CERALIVE_TYPEC_CLASS_DIR/port0-partner"
+            builtin printf "[source] sink\n" >"$CERALIVE_TYPEC_CLASS_DIR/port0/power_role"
+          fi
           [[ "$2" != sink || ! -e "$CERALIVE_TYPEC_IIO_DIR/reject-preferred-sink" ]] || return 1
           ;;
         "$CERALIVE_TYPEC_RUN_DIR/reprobe")
