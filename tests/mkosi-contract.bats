@@ -316,6 +316,16 @@ PY
   [[ "$output" == *"shared /boot requires fsck.fat from dosfstools"* ]]
 }
 
+@test "mkosi-contract: RK3588 resolves dosfstools from the family boot list when bootable" {
+  run env DRY_RUN=1 INSTALL_BOOT_BSP=1 "$PIPELINE_DIR/build" rock-5b-plus
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"boot tools from rk3588.boot.list: dosfstools"* ]]
+
+  run env DRY_RUN=1 INSTALL_BOOT_BSP=0 "$PIPELINE_DIR/build" rock-5b-plus
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"boot tools from"* ]]
+}
+
 @test "mkosi-contract: RK3588 finalize rejects a dosfstools version outside the tested series" {
   local platform="$MKOSI_DIR/mkosi.images/platform" root="$BATS_TEST_TMPDIR"
   mkdir -p "$root/usr/sbin" "$root/var/lib/dpkg"

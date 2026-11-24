@@ -182,7 +182,13 @@ stage_resolve() {
 
   local pkg_dir="${PIPELINE_DIR}/manifests/packages"
   # Keep boot-only tools in the platform layer, outside runtime package parity.
-  BOOT_TOOLS_PACKAGES="$(read_pkg_list "${pkg_dir}/${FAMILY}.boot.list")"
+  BOOT_TOOLS_PACKAGES=""
+  if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
+    BOOT_TOOLS_PACKAGES="$(read_pkg_list "${pkg_dir}/${FAMILY}.boot.list")"
+    if [[ -n "${BOOT_TOOLS_PACKAGES}" ]]; then
+      log_info "boot tools from ${FAMILY}.boot.list: ${BOOT_TOOLS_PACKAGES}"
+    fi
+  fi
   export BOOT_TOOLS_PACKAGES
 
   # shared.list (+ resolved family delta, + the debug-only development delta when
