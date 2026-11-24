@@ -295,3 +295,4 @@ tests/clat-nm-fixture.py	helper	privileged	invoked-by-suite	private NetworkManag
 tests/modem-usbspeed.bats	bats	unit	default-bats	RM520N USB 2 quirk: udev rule, oneshot template, install wiring
 tests/modem-port-hints.bats	bats	unit	default-bats	ModemManager port hints: rule content, install wiring, udevadm match against recorded modem compositions
 tests/modem-usbspeed-test.py	helper	unit	invoked-by-suite	RM520N USB 2 quirk decisions against fake sysfs, mmcli and a pty modem
+tests/image-sbom.test.sh	shell	integration	default-shell	Opt-in Debian snapshot, verified APT scope and final CycloneDX inventory

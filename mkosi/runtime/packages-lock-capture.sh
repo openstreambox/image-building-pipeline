@@ -42,9 +42,27 @@ if [[ -n "${CERALIVE_MKOSI_CACHE_DIR:-}" ]]; then
   apt_lists_dirs+=("${source_dir}/${CERALIVE_MKOSI_CACHE_DIR}"/*.metadata.cache/lib/apt/lists)
 fi
 
+# Accept only indices belonging to the selected dated archives in snapshot
+# mode. Match both mkosi's metadata cache and runtime's chroot index names.
+archive='deb.debian.org'
+snapshot="${CERALIVE_DEBIAN_SNAPSHOT:-}"
+if [[ -n "${snapshot}" ]]; then
+  archive="_${snapshot}_dists_"
+fi
+
+if [[ -n "${snapshot}" ]]; then
+  # shellcheck source=mkosi/runtime/build-apt-cache.sh
+  source "${source_dir}/runtime/build-apt-cache.sh"
+  snapshot_require_pockets "$snapshot" "$APT_SUITE" "$APT_SUITE_SECURITY" "${ARCH:?}" "${apt_lists_dirs[@]}" || exit 1
+fi
+
 lists=()
 for apt_lists_dir in "${apt_lists_dirs[@]}"; do
-  lists+=("${apt_lists_dir}"/*deb.debian.org*_Packages*)
+  if [[ -n "$snapshot" ]]; then
+    lists+=("${apt_lists_dir}"/snapshot.debian.org_archive_debian*"$archive"*_Packages*)
+  else
+    lists+=("${apt_lists_dir}"/*"$archive"*_Packages*)
+  fi
 done
 (( ${#lists[@]} > 0 )) || { log_error "$layer: no apt-verified Debian Packages lists"; exit 1; }
 for list in "${lists[@]}"; do
@@ -195,8 +213,11 @@ while IFS=$'\t' read -r name version arch status; do
 done < "$work/status"
 
 for apt_lists_dir in "${apt_lists_dirs[@]}"; do
-  for release in "${apt_lists_dir}"/*deb.debian.org*_InRelease; do
+  for release in "${apt_lists_dir}"/*"$archive"*_InRelease; do
     [[ -f "$release" ]] || continue
+    if [[ -n "$snapshot" && "${release##*/}" != snapshot.debian.org_archive_debian* ]]; then
+      continue
+    fi
     suite="${release##*_dists_}"
     suite="${suite%_InRelease}"
     case "$suite" in

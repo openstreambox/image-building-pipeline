@@ -35,7 +35,7 @@ bundle_done_log() {
 }
 
 stage_assemble() {
-  local raw_artifact=""
+  local raw_artifact="" boot_payload_dir=""
   # -------------------------------------------------------------------------
   # 9. Stage-4 disk assembly. Lay the rootfs onto the FROZEN A/B GPT geometry and
   #    (RK3588) write the U-Boot blob into the 16 MB raw gap, emitting a flashable
@@ -56,7 +56,6 @@ stage_assemble() {
       # Compile boot.scr once (mkimage is host-side only) and hand the same files to the
       # disk and the bundle: ceralive-boot-script-sync ships them to /boot after a
       # health-confirmed boot, so devices that only take RAUC bundles get selector fixes.
-      local boot_payload_dir
       boot_payload_dir="$(mktemp -d)"
       SINGLE_SLOT_FALLBACK="${SINGLE_SLOT_FALLBACK:-false}" BOARD_ID="${BOARD_ID}" \
         DTB_NAME="${DTB_NAME:-}" SERIAL_CONSOLE="${SERIAL_CONSOLE:-}" \
@@ -134,15 +133,21 @@ stage_assemble() {
     die "[8/9] unsupported bootloader_adapter '${RAUC_BOOTLOADER_ADAPTER:-unset}' for board '${board}' — no Stage-4 disk-assembly path is wired (expected 'custom' for RK3588 or 'efi'/'grub' for x86); refusing to emit a partial image"
   fi
 
-  [[ -z "${boot_payload_dir:-}" ]] || rm -rf "${boot_payload_dir}"
-
   if [[ -n "${raw_artifact}" ]]; then
     log_info "[8/9] sealing local flash image → ${raw_artifact}.xz"
     "${SEAL_RAW_CANDIDATE_SH}" \
       --raw "${raw_artifact}" \
       --candidate-dir "${out_dir}" \
       --raw-sha256 "${raw_artifact}.sha256" \
-      || die "local raw compression failed for board '${board}'"
+      || {
+        [[ -z "${boot_payload_dir}" ]] || rm -rf "${boot_payload_dir}"
+        die "local raw compression failed for board '${board}'"
+      }
     log_success "compressed flash image: ${raw_artifact}.xz ($(du -h "${raw_artifact}.xz" | cut -f1)), sha256 in ${raw_artifact}.xz.sha256"
   fi
+  if [[ -n "${CERALIVE_DEBIAN_SNAPSHOT:-}" ]] && ! stage_image_sbom "${boot_payload_dir}"; then
+    [[ -z "${boot_payload_dir}" ]] || rm -rf "${boot_payload_dir}"
+    die "cannot emit image SBOM"
+  fi
+  [[ -z "${boot_payload_dir}" ]] || rm -rf "${boot_payload_dir}"
 }

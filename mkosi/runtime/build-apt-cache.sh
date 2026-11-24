@@ -110,6 +110,75 @@ runtime_build_apt_scope() {
   log "runtime Debian downloads use build-only HTTPS/// cache remap (${proxy}); shipped debian.sources unchanged"
 }
 
+# Match mkosi 26's base and security pockets in snapshot mode. Keep these
+# sources out of /etc and keep the Debian signature checks enabled.
+runtime_snapshot_apt_scope() {
+  local snapshot="${CERALIVE_DEBIAN_SNAPSHOT:-}"
+  [[ -n "${snapshot}" ]] || return 0
+  [[ "${snapshot}" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || return 1
+  CERALIVE_BUILD_APT_DIR="$(mktemp -d /tmp/ceralive-build-apt.XXXXXX)" || return 1
+  trap runtime_build_apt_cleanup EXIT
+  mkdir -p "${CERALIVE_BUILD_APT_DIR}/sources" || return 1
+  cat >"${CERALIVE_BUILD_APT_DIR}/sources/debian.sources" <<EOF || return 1
+Types: deb
+URIs: https://snapshot.debian.org/archive/debian/${snapshot}/
+Suites: ${APT_SUITE:?}
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+Check-Valid-Until: no
+
+Types: deb
+URIs: https://snapshot.debian.org/archive/debian-security/${snapshot}/
+Suites: ${APT_SUITE_SECURITY:?}
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+Check-Valid-Until: no
+EOF
+  cat >"${CERALIVE_BUILD_APT_DIR}/apt.conf" <<EOF || return 1
+Dir::Etc::sourcelist "/dev/null";
+Dir::Etc::sourceparts "${CERALIVE_BUILD_APT_DIR}/sources";
+APT::Update::Error-Mode "any";
+Acquire::https::Timeout "30";
+EOF
+  # mktemp creates mode 0700. Only public APT sources live here, and _apt
+  # needs traversal for sandboxed downloads.
+  chmod 0755 "${CERALIVE_BUILD_APT_DIR}" || return 1
+  export APT_CONFIG="${CERALIVE_BUILD_APT_DIR}/apt.conf"
+}
+
+write_build_snapshot_record() {
+  local snapshot="$1" template="$2" output="$3"
+  [[ "$snapshot" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || return 1
+  sed "s/@TIMESTAMP@/$snapshot/" "$template" >"$output"
+}
+
+# Require each dated Release and its target-architecture binary index in the
+# same APT lists directory, even when mkosi skips a warm-cache network sync.
+snapshot_require_pockets() (
+  local snapshot="$1" suite="$2" security="$3" arch="$4"
+  shift 4
+  local archive pocket dir stem found index
+  for archive in debian debian-security; do
+    pocket="$suite"
+    [[ "$archive" != debian-security ]] || pocket="$security"
+    stem="snapshot.debian.org_archive_${archive}_${snapshot}_dists_${pocket}"
+    found=0
+    for dir in "$@"; do
+      [[ -s "$dir/${stem}_InRelease" ]] || continue
+      for index in "$dir/${stem}_main_binary-${arch}_Packages"{,.lz4,.gz,.xz,.zst,.bz2,.lzma}; do
+        if [[ -s "$index" ]]; then
+          found=1
+          break 2
+        fi
+      done
+    done
+    if (( ! found )); then
+      printf 'packages lock: missing authenticated snapshot Release or Packages for %s (%s)\n' "$pocket" "$arch" >&2
+      return 1
+    fi
+  done
+)
+
 runtime_debian_apt_install() {
   runtime_build_apt_scope || return 1
   retry_apt "runtime apt-get update" apt-get update || return 1

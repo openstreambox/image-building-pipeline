@@ -7,6 +7,11 @@ name: Reusable release candidate build
 
 on:
   workflow_call:
+    inputs:
+      debian_snapshot:
+        description: UTC Debian archive timestamp in YYYYMMDDTHHMMSSZ format
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -32,6 +37,7 @@ jobs:
       CERALIVE_RESOURCE_MEMINFO_FILE: /proc/meminfo
       # Cache directories use the manifest's board_id, not necessarily this stem.
       CERALIVE_RELEASE_BOARD: ${{ matrix.board }}
+      CERALIVE_DEBIAN_SNAPSHOT: ${{ inputs.debian_snapshot }}
       CERALIVE_MKOSI_CACHE_MAX_BYTES: '2147483648'
       # The ONLY declaration of the generated paths this persistent runner may
       # delete. It is an explicit allowlist, never a glob, and the post-checkout
@@ -293,20 +299,34 @@ jobs:
           mapfile -t locks < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.packages.lock.json')
           (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 && ${#dev_debs[@]} == 1 && ${#locks[@]} == 1 ))
           mkdir -p candidate/dev-debs
-          ./ci/seal-raw-candidate.sh --raw "${raws[0]}" --candidate-dir candidate
+          if [[ -z "${CERALIVE_DEBIAN_SNAPSHOT}" ]]; then
+            ./ci/seal-raw-candidate.sh --raw "${raws[0]}" --candidate-dir candidate
+          else
+            cp --reflink=auto "${raws[0]}.xz" candidate/
+          fi
           cp "${RUNNER_TEMP}/release-pki/root-ca.pem" candidate/
           cp "${bundles[0]}" candidate/good.raucb
           cp "${RUNNER_TEMP}/rollback-bundle/bad.raucb" candidate/bad.raucb
           cp "${RUNNER_TEMP}/rk3588_spl_loader_v1.15.113.bin" candidate/
           cp "${dev_debs[0]}" candidate/dev-debs/
           cp "${locks[0]}" candidate/packages.lock.json
+          if [[ -n "${CERALIVE_DEBIAN_SNAPSHOT}" ]]; then
+            sbom="${raws[0]%.raw}.sbom.cdx.json"
+            cp "${sbom}" "${sbom}.sha256" candidate/
+            (cd candidate && sha256sum --strict -c "$(basename "${sbom}").sha256")
+            python3 lib/image-sbom.py verify-candidate \
+              --sbom "candidate/$(basename "${sbom}")" --compressed "candidate/$(basename "${raws[0]}").xz" \
+              --bundle candidate/good.raucb --snapshot "${CERALIVE_DEBIAN_SNAPSHOT}"
+          fi
           cp "mkosi/.staging/${CERALIVE_RELEASE_BOARD}/kernel-build/kernel-artifact.json" candidate/
           printf '%s\n' "${CERALIVE_OS_RELEASE_VERSION}" > candidate/os-release-version
           raw_name="$(basename "${raws[0]}").xz"; bundle_name=good.raucb
           loader_name=rk3588_spl_loader_v1.15.113.bin
           bundle_release_name="$(basename "${bundles[0]}")"
           [[ "${bundle_release_name}" =~ ^[0-9]{8}T[0-9]{6}Z\.raucb$ ]]
-          ( cd candidate && sha256sum good.raucb > good.raucb.sha256 )
+          if [[ -z "${CERALIVE_DEBIAN_SNAPSHOT}" ]]; then
+            ( cd candidate && sha256sum good.raucb > good.raucb.sha256 )
+          fi
           printf '%s\n' "${bundle_release_name}" > candidate/release-bundle-name.txt
           {
             echo "artifact_name=${CERALIVE_RELEASE_BOARD}-${GITHUB_SHA}"
