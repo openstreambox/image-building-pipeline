@@ -187,8 +187,8 @@ validate_first_party_staged_debs() {
   log_success "first-party: staged ${staged_total} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/"
 }
 
-# first_party_reviewed_rebuild_sha <package_version_arch.deb> — the reviewed sha256 of a
-# downstream rebuild that apt.ceralive.tv does not carry, or nothing when the file is not one.
+# first_party_reviewed_rebuild_sha <package_version_arch.deb> — the reviewed sha256 rows for a
+# downstream rebuild that apt.ceralive.tv does not carry (nothing when the manifest is missing).
 first_party_reviewed_rebuild_sha() {
   [[ -f "${FIRST_PARTY_LOCAL_SHA256_FILE:-}" ]] || return 0
   awk -v f="$1" '$1 !~ /^#/ && NF == 2 && $2 == f {print $1}' "${FIRST_PARTY_LOCAL_SHA256_FILE}"
@@ -223,10 +223,13 @@ first_party_local_overrides() {
       || die "first-party local override architecture/identity mismatch for ${pkg}: ${deb_arch} (expected ${ARCH})"
     overridden["${pkg}"]="${version}"
     sha="$(sha256sum "${file}" | cut -d' ' -f1)"
-    # A package pinned to a reviewed downstream rebuild accepts only that version and those bytes.
+    # A package pinned to a downstream rebuild (+osbN) accepts only that version and the one
+    # reviewed sha256 listed for it; a missing manifest, row or malformed digest refuses it.
     pinned="$(first_party_pinned_version "${pkg}")"
-    reviewed="$(first_party_reviewed_rebuild_sha "${pkg}_${pinned}_${deb_arch}.deb")"
-    if [[ -n "${reviewed}" ]]; then
+    if [[ "${pinned}" == *+osb* ]]; then
+      reviewed="$(first_party_reviewed_rebuild_sha "${pkg}_${pinned}_${deb_arch}.deb")"
+      [[ "${reviewed}" =~ ^[0-9a-f]{64}$ ]] \
+        || die "no single reviewed sha256 for ${pkg}_${pinned}_${deb_arch}.deb in ${FIRST_PARTY_LOCAL_SHA256_FILE:-<unset>}"
       [[ "${version}" == "${pinned}" ]] \
         || die "first-party local override ${pkg}=${version} is not the reviewed rebuild ${pkg}=${pinned}"
       [[ "${sha}" == "${reviewed}" ]] \

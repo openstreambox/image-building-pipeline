@@ -296,5 +296,23 @@ else
   bad "other-bytes override not refused: $(<"${WORK}/rebuild-other-bytes.log")"
 fi
 
+for broken in missing duplicate malformed; do
+  case "${broken}" in
+    missing) export TEST_REBUILD_SHA="${WORK}/no-such-sha256.txt" ;;
+    duplicate) cat "${WORK}/rebuild-sha" "${WORK}/rebuild-sha" >"${WORK}/sha-${broken}.txt"
+               export TEST_REBUILD_SHA="${WORK}/sha-${broken}.txt" ;;
+    malformed) printf 'abc  modemmanager_1.0+osb1_arm64.deb\n' >"${WORK}/sha-${broken}.txt"
+               export TEST_REBUILD_SHA="${WORK}/sha-${broken}.txt" ;;
+  esac
+  if ! rebuild_case "sha-${broken}" "${WORK}/rebuild/released.deb" \
+     && ! rebuild_case "sha-${broken}-reviewed" "${WORK}/rebuild/reviewed.deb" \
+     && grep -Fq 'no single reviewed sha256' "${WORK}/rebuild-sha-${broken}-reviewed.log"; then
+    ok "${broken} reviewed sha256 row refuses every override of a +osb pin"
+  else
+    bad "${broken} reviewed sha256 row did not fail closed: $(<"${WORK}/rebuild-sha-${broken}.log")"
+  fi
+done
+export TEST_REBUILD_SHA="${WORK}/rebuild-sha"
+
 printf '\n== %d passed, %d failed\n' "${PASS}" "${FAIL}"
 [[ "${FAIL}" -eq 0 ]]

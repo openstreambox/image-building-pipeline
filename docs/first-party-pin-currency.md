@@ -382,8 +382,10 @@ and every retry gets `+CME ERROR: 5847`. amd64 keeps the released build.
 - **Not on apt.ceralive.tv.** Supply exactly these two debs with
   `--first-party-local-debs`. That flag works in development builds only;
   production mode and GitHub Actions refuse it. Their sha256 values are in
-  `manifests/first-party-local-sha256.txt`. For a package pinned to a version
-  listed there, the fetch accepts only the listed bytes. A different version
+  `manifests/first-party-local-sha256.txt`. For a package pinned to a `+osbN`
+  version, the fetch accepts only an override with that version and the one
+  sha256 listed for it. A missing manifest, a missing or duplicate row, or a
+  malformed digest refuses it. A different version
   (for example the released `ceralive.3`) or different bytes is refused.
   Without the override the fetch fails, because the signed index has no such
   version. Other overrides keep their existing behaviour. The build's
@@ -398,9 +400,10 @@ and every retry gets `+CME ERROR: 5847`. amd64 keeps the released build.
   pins, because the override is refused there and the signed index doesn't carry
   them. That needs the pair in a signed first-party index. This line builds
   development-mode release candidates, like its other local packages.
-- **Content check:** a control rebuild of plain v1.4.0 in the same container
-  matched the published `ceralive.3` packages. The rebuild compared with
-  `ceralive.3`:
+- **Content check:** a control rebuild of plain v1.4.0 in the same container,
+  under the development version string, matched the published `ceralive.3`
+  packages file for file, leaving aside version metadata, the changelog and the
+  masked debug-link bytes below. The rebuild compared with `ceralive.3`:
   - Installed paths, modes, ownership and maintainer scripts are identical.
   - The changelog entry and version metadata differ, including libmm-glib0's
     `Recommends` version.
