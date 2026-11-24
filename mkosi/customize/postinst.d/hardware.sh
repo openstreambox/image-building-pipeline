@@ -441,12 +441,17 @@ QUIRK_M2_SIM
 # The UID goes on the usb_device AND on every port under it (tty, usbmisc, net,
 # wwan). ModemManager reads the physdev's udev record first and falls back to the
 # port's own property, then to the physdev sysfs path; ports whose UIDs differ
-# become separate modems. A port added while the usb_device's record lacks the
-# UID (after an unbind, or before its event is processed during a boot-time
-# re-enumeration) would otherwise get the sysfs-path UID and split off from the
-# ports that saw "internal 4G". With the UID on each port's own event the
-# fallback is the same name, so grouping no longer depends on event order.
-# Ports match `<ID_PATH>:*`: the interface suffix, never a deeper hub port.
+# become separate modems. A port read while the usb_device's record lacks the
+# UID gets the sysfs-path UID and splits off from the ports that saw
+# "internal 4G". At boot systemd-udev-trigger replays the prioritized
+# subsystems (net and tty among them) before the usb_device add that sets the
+# UID, and usbmisc after it, so the AT ports and the net port can split from
+# the MBIM port: an AT-only modem next to "internal 4G". An unbind leaves the
+# same gap. Keeping the device rule on every non-remove event closes only the
+# unbind case; the port rule is what makes the boot order irrelevant, because
+# each port carries the UID from its own event. Do not drop it for a
+# device-only rule. Ports match `<ID_PATH>:*`: the interface suffix, never a
+# deeper hub port.
 #
 # FAIL-CLOSED (no permissive fallback): any status other than an explicit
 # `verified` — `unverified` (the shipped default), unset, or anything else —
@@ -485,8 +490,8 @@ generate_modem_slot_uid_rules() {
       [[ -n "${name}" && -n "${id_path}" && "${name}" != "${id_path}" ]] \
         || die "malformed modem slot definition '${pair}' (expected <name>=<ID_PATH>)"
       [[ "$name" != internal_4g ]] || name="internal 4G"
-      [[ "${id_path}" != *[][*?\|\"]* ]] \
-        || die "modem slot '${name}' ID_PATH '${id_path}' contains a udev pattern character"
+      [[ "${id_path}" =~ ^[A-Za-z0-9._:-]+$ ]] \
+        || die "modem slot '${name}' ID_PATH '${id_path}' has a character outside [A-Za-z0-9._:-]"
       printf 'ACTION!="remove", SUBSYSTEM=="usb", ENV{ID_PATH}=="%s", ENV{ID_MM_PHYSDEV_UID}="%s"\n' \
         "${id_path}" "${name}"
       printf 'ACTION!="remove", SUBSYSTEM=="tty|usbmisc|net|wwan", ENV{ID_PATH}=="%s:*", ENV{ID_MM_PHYSDEV_UID}="%s"\n' \

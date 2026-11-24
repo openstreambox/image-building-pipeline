@@ -783,7 +783,7 @@ YAML
   [ ! -f "$rules_dir/78-mm-ceralive-slot-uid.rules" ]
 }
 
-@test "modem generator MATRIX: a verified fixture EMITS one ID_MM_PHYSDEV_UID rule per slot" {
+@test "modem generator MATRIX: a verified fixture EMITS a device and a port ID_MM_PHYSDEV_UID rule per slot" {
   run_modem_generator verified "modem0=platform-fc000000.usb-usb-0:1:1.0 modem1=platform-fc400000.usb-usb-0:1:1.0"
   [ "$MODEM_GEN_STATUS" -eq 0 ]
   [ -f "$MODEM_GEN_RULES" ]

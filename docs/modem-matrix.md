@@ -420,11 +420,15 @@ ttyUSB enumeration order. ModemManager reads it from the USB device's udev recor
 first, then from the port's own record, and otherwise falls back to the sysfs
 path; ports with different UIDs become separate modems. udev rebuilds a record on
 every event, so a UID set only on the USB device is missing while that device's
-record is the one from an unbind, or before its add event is processed. Ports
-read in that window used to get the sysfs path: after a rebind the slot modem
-lost its name, and during a boot-time re-enumeration a DW5821e split into an
-MBIM modem named "internal 4G" and a second, AT-only modem. With the UID on each
-port's own record every fallback gives the same name. `<id_path>:*` matches the
+record is the one from an unbind, or before its add event is processed. At boot
+`systemd-udev-trigger` replays its prioritized subsystems (net and tty among
+them) before the USB device's add and usbmisc after it. Ports read in that
+window used to get the sysfs path: a DW5821e split into an AT-only modem (ttys
+and net) and an MBIM modem named "internal 4G", and after a rebind the slot
+modem lost its name. Keeping the device rule on every non-remove event closes
+only the rebind case. The port rule is what makes the boot order irrelevant:
+each port carries the UID from its own event, so every fallback gives the same
+name. Don't reduce it to a device-only rule. `<id_path>:*` matches the
 slot's interfaces only (`…:1.4:2.0`), never a port behind a hub on it (`…:1.4.1:…`).
 The ROCK 5B+ map names its fixed B-key port "internal 4G"; other maps
 require the same physical discovery before enabling them.

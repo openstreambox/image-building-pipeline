@@ -138,16 +138,22 @@ PYTEST
   run python3 "$PIPELINE_DIR/tests/modem-slot-uid-grouping.py" "$BATS_TEST_TMPDIR/device-only.rules" --expect-split
   [ "$status" -eq 0 ]
   [[ "$output" == *'split as expected'* ]]
+  # Keeping the device rule on every non-remove event fixes only the rebind;
+  # the boot orderings still split without the port rule.
+  sed -i 's/ACTION=="add|bind"/ACTION!="remove"/' "$BATS_TEST_TMPDIR/device-only.rules"
+  run python3 "$PIPELINE_DIR/tests/modem-slot-uid-grouping.py" "$BATS_TEST_TMPDIR/device-only.rules" --expect-split
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'split as expected'* && "$output" == *'boot-'* ]]
 }
 
-@test "internal modem: slot UID generator refuses an ID_PATH with udev pattern characters" {
-  # The port rule appends ':*' to the slot path; a pattern character in the
-  # manifest path would widen the match beyond the slot.
+@test "internal modem: slot UID generator refuses an ID_PATH outside the path character allowlist" {
+  # The port rule appends ':*' to the slot path; a pattern or escape character
+  # in the manifest path would change what the match covers.
   local bad
-  for bad in 'platform-x:1.*' 'platform-x:1.[4]' 'platform-x:1.4|platform-y' 'platform-x:1.?'; do
+  for bad in 'platform-x:1.*' 'platform-x:1.[4]' 'platform-x:1.4|platform-y' 'platform-x:1.?' 'platform-x\:1.4' 'platform-x:1.4"' 'platform-x:1.4/'; do
     run env CERALIVE_MODEM_PORTS_STATUS=verified CERALIVE_MODEM_PORTS_SLOTS="internal_4g=$bad" bash -c 'source "$1/mkosi/customize/postinst-lib.sh"; generate_modem_slot_uid_rules' _ "$PIPELINE_DIR"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"contains a udev pattern character"* ]]
+    [[ "$output" == *"has a character outside [A-Za-z0-9._:-]"* ]]
   done
 }
 

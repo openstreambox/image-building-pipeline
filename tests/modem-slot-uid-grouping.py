@@ -112,8 +112,10 @@ def scenarios(rules):
     # Manual or driver rebind: unbind record, ports added, then the bind event.
     unbound = usb('unbind')
     yield 'rebind', {p: mm_uid(unbound, ports[p], SLOT) for p in names}
-    # Boot-time re-enumeration: some ports are read before the device's
-    # add record exists (empty), the rest after it.
+    # Boot coldplug: systemd-udev-trigger replays prioritized subsystems (net,
+    # tty) before the usb_device add and usbmisc after it, so some ports are
+    # read before the device's add record exists (empty), the rest after it.
+    # Every subset is tried.
     for k in range(len(names) + 1):
         for early in itertools.combinations(names, k):
             seen = {p: mm_uid({} if p in early else usb('add'), ports[p], SLOT) for p in names}

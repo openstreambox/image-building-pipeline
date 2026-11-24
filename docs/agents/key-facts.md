@@ -5629,7 +5629,8 @@ fallback**. The **permanent generic modem rules** in `setup_hardware_access` (th
 touched. Only when a board is `status: verified` with `slots:` (`modemN` → `ID_PATH`)
 does the generator emit `ENV{ID_MM_PHYSDEV_UID}` rules per slot, on the USB device and on
 its tty/usbmisc/net/wwan ports (`<ID_PATH>:*`), so ModemManager's port fallback gives the
-same UID whatever the event order. The status/slots
+same UID whatever the event order (boot coldplug replays net and tty before the USB device's
+add; a device-only rule splits the slot modem there). The status/slots
 reach the runtime subimage chroot via `CERALIVE_MODEM_PORTS_STATUS`/`_SLOTS`
 (orchestrate.sh `env_names` ↔ `mkosi.conf` `PassEnvironment=`, same lockstep the
 interface-naming vars use). Flipping to `verified` is a separate, hardware-gated
