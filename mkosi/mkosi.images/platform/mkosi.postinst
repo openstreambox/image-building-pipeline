@@ -3,9 +3,8 @@
 # platform/mkosi.postinst — install the board BSP into the image.
 #
 # Runs in mkosi's package-manager-aware postinstall sandbox after the base
-# packages are present. Every package NAME comes from the environment (manifest-resolved by
-# lib/resolve.sh, forwarded by Environment= in mkosi.conf) — there is NO board
-# name, package name or device path hardcoded here.
+# packages are present. Board-specific package names come from the environment
+# (manifest-resolved by lib/resolve.sh and forwarded through mkosi).
 #
 # Two classes of BSP:
 #   * HW-accel GStreamer (always installed; part of the ceraui-base.conf parity
@@ -167,6 +166,8 @@ if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
   read -r -a _u <<<"${UBOOT_PACKAGES:-}"
   read -r -a _f <<<"${FIRMWARE_PACKAGES:-}"
   boot_bsp+=("${_k[@]}" "${_d[@]}" "${_u[@]}" "${_f[@]}")
+  # The RK3588 boot integration uses Debian's fsck.fat before mounting /boot.
+  boot_bsp+=(dosfstools)
 fi
 
 bsp_pkgs=("${compat_pkgs[@]}" "${hw_gst[@]}" "${gst_runtime[@]}" "${boot_bsp[@]}")

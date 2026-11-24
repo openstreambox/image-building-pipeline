@@ -308,6 +308,29 @@ PY
   grep -Eq '^zstd\b' "$PIPELINE_DIR/manifests/packages/shared.list"
 }
 
+@test "mkosi-contract: the bootable RK3588 platform installs and requires dosfstools" {
+  local platform="$MKOSI_DIR/mkosi.images/platform" bin="$BATS_TEST_TMPDIR/bin"
+  mkdir "$bin"
+  printf '#!/bin/sh\nprintf "install: %%s\\n" "$*"\n' >"$bin/mkosi-install"
+  printf '#!/bin/sh\nexit 0\n' >"$bin/mkosi-chroot"
+  chmod +x "$bin/mkosi-install" "$bin/mkosi-chroot"
+
+  run env PATH="$bin:$PATH" ARCH=arm64 INSTALL_BOOT_BSP=1 BUILDROOT="$BATS_TEST_TMPDIR" \
+    SRCDIR="$MKOSI_DIR" CHROOT_SRCDIR=/source KERNEL_PACKAGES=linux-image-fixture \
+    KERNEL_SOURCE_KERNEL_RELEASE= FIRMWARE_PACKAGES= bash "$platform/mkosi.postinst"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"install: -y --no-install-recommends linux-image-fixture dosfstools"* ]]
+
+  run env PATH="$bin:$PATH" ARCH=amd64 INSTALL_BOOT_BSP=1 bash "$platform/mkosi.postinst"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"install:"* ]]
+
+  run env ARCH=arm64 INSTALL_BOOT_BSP=1 BUILDROOT="$BATS_TEST_TMPDIR" CHROOT_SRCDIR=/source \
+    bash "$platform/mkosi.finalize"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"shared /boot requires fsck.fat from dosfstools"* ]]
+}
+
 @test "mkosi-contract: the shipped doc prune keeps copyright and drops the rest" {
   local app_postinst="$MKOSI_DIR/mkosi.images/app/mkosi.postinst.chroot"
   local root="$BATS_TEST_TMPDIR/doc"

@@ -33,6 +33,15 @@ automatic XBOOTLDR mount. `install-boot.sh rootfs` writes an explicit writable
 `nodev,nosuid,noexec` limit the shared FAT surface. Linux mounts it only after U-Boot
 has already loaded the selected slot's kernel.
 
+The bootable RK3588 platform layer installs `dosfstools`. The fstab entry uses
+pass 2 and its generated `systemd-fsck@.service` checks the partition before
+`boot.mount`. An override for that device runs `fsck.fat -n` and logs its
+output to the journal. If the only issue is the Linux dirty byte in the primary
+FAT32 boot sector, the helper clears that byte on the unmounted device. A stale
+or unknown FSINFO free-cluster count is informational. Other diagnostics or
+I/O errors fail the required mount for offline recovery. `fsck.mode=skip` is
+available from the kernel command line for recovery.
+
 ## State file format (`boot_state.txt`)
 
 Newline `KEY=VALUE`, importable by U-Boot `env import -t` **and** trivially parsed by

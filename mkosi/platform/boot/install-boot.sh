@@ -21,6 +21,7 @@
 #                          - /usr/lib/rauc/ceralive-rauc-boot-adapter   (RAUC backend)
 #                          - /etc/rauc/system.conf                      (bootloader=custom)
 #                          - /etc/fstab                                 (shared p1 at /boot)
+#                          - systemd-fsck@ instance override            (shared FAT policy)
 #                          Invoked from platform/mkosi.finalize via mkosi-chroot.
 #
 #   boot-partition <dir>   FAT BOOT PARTITION bits into <dir> (the mounted p1 boot).
@@ -198,8 +199,9 @@ EOF
   chmod 0644 "${root}/etc/rauc/system.conf"
 
   local fstab="${root}/etc/fstab"
-  local boot_mount
-  boot_mount="PARTLABEL=$(resolve_partlabel boot) /boot vfat rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro 0 2"
+  local boot_label boot_mount boot_fsck
+  boot_label="$(resolve_partlabel boot)"
+  boot_mount="PARTLABEL=${boot_label} /boot vfat rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro 0 2"
   mkdir -p "${root}/etc" "${root}/boot"
   touch "${fstab}"
   if grep -qE '^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+/boot[[:space:]]+' "${fstab}"; then
@@ -208,6 +210,20 @@ EOF
   else
     printf '%s\n' "${boot_mount}" >>"${fstab}"
   fi
+
+  # Retain the fstab generator's device and mount ordering. Override only the
+  # checker for the shared boot partition, using the same label as fstab.
+  boot_fsck="$(systemd-escape --path --template=systemd-fsck@.service "/dev/disk/by-partlabel/${boot_label}")"
+  install -D -m 0755 "${SCRIPT_DIR}/check-boot-fat.py" "${root}/usr/libexec/ceralive/check-boot-fat"
+  mkdir -p "${root}/etc/systemd/system/${boot_fsck}.d"
+  cat >"${root}/etc/systemd/system/${boot_fsck}.d/boot-fat.conf" <<'UNIT'
+[Unit]
+ConditionKernelCommandLine=!fsck.mode=skip
+
+[Service]
+ExecStart=
+ExecStart=/usr/libexec/ceralive/check-boot-fat %f
+UNIT
 
   log "rootfs bootloader integration installed"
 }

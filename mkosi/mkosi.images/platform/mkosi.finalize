@@ -70,6 +70,7 @@ if [[ "${INSTALL_BOOT_BSP}" != "1" ]]; then
 fi
 
 : "${CHROOT_SRCDIR:?CHROOT_SRCDIR must be set by mkosi (in-chroot path of \$SRCDIR)}"
+[[ -x "${BUILDROOT:?}/usr/sbin/fsck.fat" ]] || die "shared /boot requires fsck.fat from dosfstools"
 
 # install-boot.sh as it appears INSIDE the chroot (mkosi mounts $SRCDIR there).
 # The script self-resolves its template dir from its own location, so running it

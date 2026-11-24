@@ -307,6 +307,118 @@ build_missing_artifact_image() {
   [[ "$output" == *"already has a conflicting /boot mount"* ]]
 }
 
+@test "RK3588 boot mount requires the scoped FAT check for production and bench labels" {
+  local label bench root fsck dropin
+  for bench in 0 1; do
+    label=boot
+    if [ "$bench" -eq 1 ]; then label=xboot; fi
+    root="$BATS_TEST_TMPDIR/$label"
+    run env ROOT="$root" CERALIVE_BENCH_LABELS="$bench" COMPATIBLE_STRING=ceralive-test \
+      bash "$BOOT_DIR/install-boot.sh" rootfs
+    [ "$status" -eq 0 ]
+
+    mkdir "$root/generated"
+    run env SYSTEMD_FSTAB="$root/etc/fstab" SYSTEMD_IN_INITRD=no \
+      /usr/lib/systemd/system-generators/systemd-fstab-generator \
+      "$root/generated" "$root/generated" "$root/generated"
+    [ "$status" -eq 0 ]
+
+    fsck="$(systemd-escape --path --template=systemd-fsck@.service "/dev/disk/by-partlabel/$label")"
+    grep -Fxq "Requires=$fsck" "$root/generated/boot.mount"
+    grep -Fxq "After=$fsck" "$root/generated/boot.mount"
+    dropin="$root/etc/systemd/system/$fsck.d/boot-fat.conf"
+    grep -Fxq 'ExecStart=' "$dropin"
+    grep -Fxq 'ExecStart=/usr/libexec/ceralive/check-boot-fat %f' "$dropin"
+    [ -x "$root/usr/libexec/ceralive/check-boot-fat" ]
+  done
+}
+
+make_fat_fixture() {
+  local disk="$1"
+  truncate -s 256M "$disk"
+  mkfs.fat -F 32 -n BOOT "$disk"
+  printf 'BOOT_ORDER=A B\n' >"$BATS_TEST_TMPDIR/boot_state.txt"
+  printf 'synthetic boot selector\n' >"$BATS_TEST_TMPDIR/boot.scr"
+  mcopy -i "$disk" "$BATS_TEST_TMPDIR/boot_state.txt" "$BATS_TEST_TMPDIR/boot.scr" ::
+}
+
+@test "RK3588 FAT check clears only the Linux dirty byte, and clean checks write nothing" {
+  local disk="$BATS_TEST_TMPDIR/boot.fat" clean="$BATS_TEST_TMPDIR/clean.fat"
+  make_fat_fixture "$disk"
+  cp --sparse=always "$disk" "$clean"
+  printf '\001' | dd of="$disk" bs=1 seek=65 conv=notrunc status=none
+  ! cmp -s "$clean" "$disk"
+
+  run python3 "$BOOT_DIR/check-boot-fat.py" "$disk"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cleared the dirty byte"* ]]
+  cmp "$clean" "$disk"
+  fsck.fat -n "$disk"
+
+  run python3 "$BOOT_DIR/check-boot-fat.py" "$disk"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"passed without writes"* ]]
+  cmp "$clean" "$disk"
+}
+
+@test "RK3588 FAT check ignores a stale free-cluster count and leaves it on disk" {
+  local disk="$BATS_TEST_TMPDIR/boot.fat" before="$BATS_TEST_TMPDIR/before.fat"
+  make_fat_fixture "$disk"
+  # mkfs.fat places FSINFO in sector 1 and the cached free count at offset 488.
+  printf '\000\000\000\000' | dd of="$disk" bs=1 seek=$((512 + 488)) conv=notrunc status=none
+  cp --sparse=always "$disk" "$before"
+  printf '\001' | dd of="$disk" bs=1 seek=65 conv=notrunc status=none
+
+  run python3 "$BOOT_DIR/check-boot-fat.py" "$disk"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Free cluster summary wrong"* ]]
+  [[ "$output" == *"cleared the dirty byte"* ]]
+  cmp "$before" "$disk"
+}
+
+@test "RK3588 FAT check refuses damaged metadata on clean and dirty filesystems" {
+  local disk="$BATS_TEST_TMPDIR/boot.fat" before="$BATS_TEST_TMPDIR/before.fat" dirty
+  make_fat_fixture "$disk"
+  # Invalidate the FSINFO signature while leaving the files readable.
+  printf '\000' | dd of="$disk" bs=1 seek=512 conv=notrunc status=none
+  for dirty in 0 1; do
+    if [ "$dirty" -eq 1 ]; then
+      printf '\001' | dd of="$disk" bs=1 seek=65 conv=notrunc status=none
+    fi
+    cp --sparse=always "$disk" "$before"
+    run python3 "$BOOT_DIR/check-boot-fat.py" "$disk"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"FSINFO sector has bad magic"* ]]
+    cmp "$before" "$disk"
+  done
+}
+
+@test "RK3588 FAT check leaves the dirty byte in place when a FAT table also reports an error" {
+  local disk="$BATS_TEST_TMPDIR/boot.fat" before="$BATS_TEST_TMPDIR/before.fat"
+  make_fat_fixture "$disk"
+  printf '\001' | dd of="$disk" bs=1 seek=65 conv=notrunc status=none
+  python3 -c '
+import struct
+import sys
+
+with open(sys.argv[1], "r+b") as disk:
+    boot = disk.read(512)
+    sector_size, _, reserved, tables = struct.unpack_from("<HBHB", boot, 11)
+    fat_sectors, = struct.unpack_from("<I", boot, 36)
+    for table in range(tables):
+        offset = (reserved + table * fat_sectors) * sector_size + 7
+        disk.seek(offset)
+        flags = disk.read(1)[0]
+        disk.seek(offset)
+        disk.write(bytes([flags & ~0x04]))  # Clear the FAT32 no-hard-error bit.
+' "$disk"
+  cp --sparse=always "$disk" "$before"
+  run python3 "$BOOT_DIR/check-boot-fat.py" "$disk"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FAT table reports a dirty shutdown or an I/O error"* ]]
+  cmp "$before" "$disk"
+}
+
 @test "Rock preflash gate requires A/B, both factory slots, and sufficient target media" {
   require_disk_tools
   build_preflash_fixture
