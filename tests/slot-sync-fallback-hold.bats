@@ -15,6 +15,11 @@ case "$*" in
 esac
 SH
   chmod +x "${WORK}/mirror-rauc"
+  cat >"${FIXTURE}/bin/logger" <<'SH'
+#!/bin/bash
+printf '%s\n' "$@" >>"${FIXTURE}/journal"
+SH
+  chmod +x "${FIXTURE}/bin/logger"
   healthy_boot 1
 }
 
@@ -64,8 +69,11 @@ held() {
   run env UID_FIXTURE=1000 RAUC_BIN="${WORK}/mirror-rauc" "${CERALIVE_SLOT_SYNC_LIB}" confirm
   [ "$status" -ne 0 ]
   held 1
+  [ ! -e "${FIXTURE}/journal" ]
   run mirror confirm
   [ "$status" -eq 0 ]
+  [[ "$output" == *"fallback hold cleared for the current slot generation"* ]]
+  [ "$(cat "${FIXTURE}/journal")" = $'-t\nceralive-slot-sync\n--\nfallback hold cleared for the current slot generation' ]
   [ ! -e "${FIXTURE}/mirror-writes" ]
   printf 'stale\n' >"${CERALIVE_HEALTHCHECK_BOOT_ID_FILE}"
   run mirror run
