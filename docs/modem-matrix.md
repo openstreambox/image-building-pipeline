@@ -232,19 +232,21 @@ path. When on, it:
   otherwise take answers on the same port), talks to ModemManager's `(at)` port
   on USB interface 6, checks `AT+CIMI` against ModemManager's IMSI and reads
   `AT+GTLOCKCAR?` and `AT+GTCURCAR?` (unsolicited `+CIEV`/`+EDSBP` lines and the
-  HTML-escaped `"AT&amp;T"` are expected; an answer without its final `OK`
+  HTML-escaped `"AT&amp;T"` are expected; an answer without its final `OK`,
+  a carrier id outside Fibocom's list (1, 101, 201, 203) or a hold that ended
   stops the run);
 - for a locked unit only: `AT+CFUN?` (1 or 4, anything else stops), `AT+CFUN=4`
   if the radio was on, `AT+GTLOCKCAR=0`, both reads again (the lock must read
   `0,65535`), then `AT+CFUN=1` if the radio was on, confirmed by `AT+CFUN?`
   reading 1. It never writes a lock and never sends `AT+GTACT`. The attempt is
   counted in the record before anything is sent (no record, no unlock), and
-  an answer that stops a run counts as a misread; after 3 in a row the unit
-  is left alone. The unit has `KillMode=mixed`, so a stop signals the script
-  first and the ModemManager hold lasts while it switches the radio back on. A radio it switched off and cannot switch on again
-  is logged as an error and the unit is left alone from then on. A SIGTERM
-  during the unlock switches the radio back on before exit, and the unlock
-  does not start unless the run budget can finish it;
+  an answer that stops a run counts as a misread; after 3 misreads since the
+  last full read the unit is left alone. A radio it switched off and cannot
+  switch on again is logged as an error and the unit is left alone from then
+  on. A SIGTERM during the unlock switches the radio back on before exit
+  (the unit has `KillMode=mixed`, so a stop signals the script first and the
+  ModemManager hold lasts meanwhile), and the unlock does not start unless
+  the run budget can finish it;
 - if the module restarts on the unlock, records `restarted` with the radio
   state it found and exits at once (the module takes seconds to come back, so
   its return starts a new instance; the module also switches its own radio on

@@ -53,7 +53,7 @@ then, for that one device:
      radio this run switched off and could not switch on again is an error,
      and the unit is left alone after. The attempt is counted in /data before
      anything is sent; an answer that stops a run is counted too, and after
-     MAX_MISREADS in a row the unit is left alone.
+     MAX_MISREADS since the last full read the unit is left alone.
   6. If the module restarts on the unlock (the port goes silent and the USB
      device leaves), the run records `restarted` with the radio state it found
      and exits at once, before the module is back (it takes seconds to boot),
@@ -135,6 +135,9 @@ QUALIFIED = {
 }
 VERIZON = {'310590', '310890', '311270', '311480', '312770'}
 UNLOCKED = ('0', '65535')
+# Fibocom's carrier ids (AT manual V2.10 §22) that a lock or profile read may
+# name; any other id is an answer this service does not act on.
+KNOWN_IDS = {'1', '101', '201', '203'}
 MAX_UNLOCKS = 3
 MAX_MISREADS = 3
 # Outcomes that leave a unit alone on later boots until the retry file is used.
@@ -207,6 +210,12 @@ def atomic_json(path, data):
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temp, path)
+    # The rename itself must survive a power cut too.
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def lock_text(lock):
@@ -694,7 +703,7 @@ def run(port):
 
     candidates = at_ports(device, modem['ports'])
     if not candidates:
-        save_marker(key, 'no-at-port', **base)
+        settle(key, restart, 'no-at-port', **base)
         log(4, f'{port}: ModemManager lists no AT port on interface {AT_INTERFACE} of this device '
                f'({", ".join(modem["ports"]) or "none"}); leaving it alone')
         return 0
@@ -733,13 +742,14 @@ def settle(key, restart, phase, **fields):
 
 def misread(unit, port, key, base, restart, phase, message):
     """An answer that stops the run before any change. Counted: after
-    MAX_MISREADS in a row the unit is left alone until the retry file."""
+    MAX_MISREADS since the last full read the unit is left alone until the
+    retry file."""
     count = load_record(unit).get('misreads', 0)
     count = (count if isinstance(count, int) else 0) + 1
     status = {'status': 'unreadable'} if count >= MAX_MISREADS else {}
     settle(key, restart, phase, **base)
     save_record(unit, port, dict(outcome=phase), misreads=count, **status)
-    log(4, f'{port}: {message}' + (f'; {count} in a row, left alone from now on (touch {RETRY} to try '
+    log(4, f'{port}: {message}' + (f'; {count} since the last full read, left alone from now on (touch {RETRY} to try '
                                    'once more)' if status else ''))
 
 
@@ -804,6 +814,10 @@ def exchange(port, device_dir, key, candidates, base, imsi, hold, restart):
         log(4, f'{port}: cannot open {node.name} ({error}); leaving it alone this boot')
         return
     try:
+        if not hold.held:
+            settle(key, restart, 'hold-lost', **base)
+            log(4, f'{port}: the ModemManager hold ended before the first command; nothing sent')
+            return
         if parse_imsi(*at.command('AT+CIMI')) != imsi:
             misread(unit, port, key, base, restart, 'sim-mismatch',
                     'AT+CIMI does not match the SIM ModemManager reported; nothing written')
@@ -835,6 +849,14 @@ def exchange(port, device_dir, key, candidates, base, imsi, hold, restart):
             else:
                 note = ''
             log(6, f'{port}: unlocked (profile {profile[0]} "{profile[1]}" picked from the SIM){note}; left alone')
+            return
+        if not hold.held:
+            settle(key, restart, 'hold-lost', **base)
+            log(4, f'{port}: the ModemManager hold ended during the reads; nothing written')
+            return
+        if lock != UNLOCKED and (lock[1] not in KNOWN_IDS or profile[0] not in KNOWN_IDS):
+            misread(unit, port, key, base, restart, 'unexpected-lock',
+                    f'lock {lock_text(lock)}, profile {profile[0]}: an id outside Fibocom\'s list; nothing written')
             return
         if lock[0] != '1':
             misread(unit, port, key, base, None, 'unexpected-lock',

@@ -674,6 +674,77 @@ class CarrierLock(unittest.TestCase):
         self.assertEqual(self.modem.commands, READS + ['AT+CFUN?'])
         self.assertEqual(self.marker()['phase'], 'unlocked-by-service')
 
+    def test_a_pending_check_survives_every_early_exit_of_the_return(self):
+        cases = {
+            'port-busy': lambda: self.process('picocom', holds=self.modem.path, pid=45000),
+            'sim-mismatch': lambda: setattr(self.modem, 'imsi', ATT_IMSI),
+            'read-failed': lambda: setattr(self.modem, 'read_error', 'AT+GTLOCKCAR?'),
+        }
+        for phase, break_it in cases.items():
+            with self.subTest(phase=phase):
+                self.new_boot()
+                shutil.rmtree(self.data / 'modem-carrierlock', ignore_errors=True)
+                shutil.rmtree(self.proc / '45000', ignore_errors=True)
+                self.modem.lock, self.modem.read_error = ('1', '203'), None
+                self.mm()
+                self.restart_on('AT+GTLOCKCAR=0')
+                self.invoke()
+                self.modem.silent.clear()
+                self.modem.hooks.clear()
+                break_it()      # ModemManager still reports the first SIM
+                self.invoke()
+                self.assertEqual((self.marker()['phase'], self.marker()['last']), ('restarted', phase))
+                self.modem.imsi = TMO_IMSI
+
+    def test_unknown_carrier_ids_are_not_acted_on(self):
+        for lock, profile in ((('1', '999'), '203'), (('1', '203'), '777')):
+            with self.subTest(lock=lock, profile=profile):
+                self.new_boot()
+                shutil.rmtree(self.data / 'modem-carrierlock', ignore_errors=True)
+                self.modem.lock, self.modem.profile = lock, profile
+                self.invoke()
+                self.assertEqual(self.modem.commands, READS)
+                self.assertEqual(self.marker()['phase'], 'unexpected-lock')
+
+    def test_a_hold_lost_during_the_reads_stops_the_run(self):
+        drop = self.tmp / 'drop-hold'
+        self.mm(extra={'drop_hold': str(drop)})
+
+        def lose_hold():
+            drop.touch()
+            time.sleep(0.3)
+        self.modem.before['AT+GTCURCAR?'] = lose_hold
+        self.invoke()
+        self.assertEqual(self.modem.commands, READS)
+        self.assertEqual(self.marker()['phase'], 'hold-lost')
+
+    def test_a_return_without_an_at_port_stays_pending(self):
+        self.restart_on('AT+GTLOCKCAR=0')
+        self.invoke()
+        self.modem.silent.clear()
+        self.modem.hooks.clear()
+        self.mm(ports=['enx000011121314 (net)'])
+        self.invoke()
+        self.assertEqual((self.marker()['phase'], self.marker()['last']), ('restarted', 'no-at-port'))
+
+    def test_every_misread_is_counted(self):
+        cases = {
+            'sim-mismatch': lambda: setattr(self.modem, 'imsi', ATT_IMSI),
+            'unexpected-lock': lambda: setattr(self.modem, 'lock', ('2', '5')),
+            'radio-unexpected': lambda: setattr(self.modem, 'radio', '0'),
+        }
+        for phase, break_it in cases.items():
+            with self.subTest(phase=phase):
+                self.new_boot()
+                shutil.rmtree(self.data / 'modem-carrierlock', ignore_errors=True)
+                self.modem.lock, self.modem.radio, self.modem.imsi = ('1', '203'), '1', TMO_IMSI
+                self.mm()
+                break_it()
+                self.invoke()
+                self.assertEqual(self.marker()['phase'], phase)
+                self.assertEqual(self.record()['misreads'], 1)
+                self.assertEqual(self.record()['history'][-1]['outcome'], phase)
+
     def test_an_attempt_that_cannot_be_recorded_sends_nothing(self):
         records = self.data / 'modem-carrierlock'
 
@@ -695,10 +766,13 @@ class CarrierLock(unittest.TestCase):
             self.assertEqual(self.record()['misreads'], count)
             self.new_boot()
         self.assertEqual(self.record()['status'], 'unreadable')
-        self.modem.read_error = None
         self.assertUntouched(self.invoke())
         self.new_boot()
         (self.data / 'modem-carrierlock.retry').touch()
+        self.invoke()                       # the retry starts the count again
+        self.assertEqual(self.record()['misreads'], 1)
+        self.new_boot()
+        self.modem.read_error = None
         self.invoke()
         self.assertEqual(self.modem.lock, ('0', '65535'))
         self.assertEqual(self.record()['misreads'], 0)
