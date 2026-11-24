@@ -187,10 +187,17 @@ validate_first_party_staged_debs() {
   log_success "first-party: staged ${staged_total} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/"
 }
 
+# first_party_reviewed_rebuild_sha <package_version_arch.deb> — the reviewed sha256 of a
+# downstream rebuild that apt.ceralive.tv does not carry, or nothing when the file is not one.
+first_party_reviewed_rebuild_sha() {
+  [[ -f "${FIRST_PARTY_LOCAL_SHA256_FILE:-}" ]] || return 0
+  awk -v f="$1" '$1 !~ /^#/ && NF == 2 && $2 == f {print $1}' "${FIRST_PARTY_LOCAL_SHA256_FILE}"
+}
+
 # Local inputs are intentionally NOT passed through publish_staged_deb: that
 # helper stores every result in the signed-index-verified content cache.
 first_party_local_overrides() {
-  local debs="$1" directory="$2" file pkg version deb_arch sha filename tmp spec index
+  local debs="$1" directory="$2" file pkg version deb_arch sha filename tmp spec index pinned reviewed
   local -a files=() records=() selected=() identity_opts=()
   local -A overridden=()
   [[ -d "${directory}" ]] || die "first-party local override directory missing: ${directory}"
@@ -216,6 +223,15 @@ first_party_local_overrides() {
       || die "first-party local override architecture/identity mismatch for ${pkg}: ${deb_arch} (expected ${ARCH})"
     overridden["${pkg}"]="${version}"
     sha="$(sha256sum "${file}" | cut -d' ' -f1)"
+    # A package pinned to a reviewed downstream rebuild accepts only that version and those bytes.
+    pinned="$(first_party_pinned_version "${pkg}")"
+    reviewed="$(first_party_reviewed_rebuild_sha "${pkg}_${pinned}_${deb_arch}.deb")"
+    if [[ -n "${reviewed}" ]]; then
+      [[ "${version}" == "${pinned}" ]] \
+        || die "first-party local override ${pkg}=${version} is not the reviewed rebuild ${pkg}=${pinned}"
+      [[ "${sha}" == "${reviewed}" ]] \
+        || die "first-party local override ${pkg}=${version} has sha256 ${sha}, not the reviewed ${reviewed}"
+    fi
     filename="${pkg}_${version}_${deb_arch}.deb"
     tmp="$(mktemp "${debs}/.tmp-firstparty-local-XXXXXX")"
     if ! cp -- "${file}" "${tmp}" || ! chmod 0644 "${tmp}" || ! mv -f "${tmp}" "${debs}/${filename}"; then

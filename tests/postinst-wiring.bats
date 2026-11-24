@@ -617,6 +617,12 @@ NM_MM_DROPIN_SRC="mkosi/runtime/ceralive-nm-after-modemmanager.dropin.conf"
   [ "$(awk -F= '$1=="modemmanager[arm64]"{print $2}' "$pins")" = "1.24.2-2~ceralive.3+osb1" ]
   [ "$(awk -F= '$1=="libmm-glib0[arm64]"{print $2}' "$pins")" = "1.24.2-2~ceralive.3+osb1" ]
   [ "$(grep -c '+osb' "$pins")" -eq 2 ]
+  # Each downstream pin has exactly one reviewed sha256 row, and the manifest lists nothing else.
+  local shas="$PIPELINE_DIR/manifests/first-party-local-sha256.txt" row
+  [ "$(awk '$1 !~ /^#/ && NF' "$shas" | wc -l)" -eq 2 ]
+  for row in modemmanager libmm-glib0; do
+    [ "$(awk -v f="${row}_1.24.2-2~ceralive.3+osb1_arm64.deb" '$1 !~ /^#/ && $2 == f && $1 ~ /^[0-9a-f]{64}$/' "$shas" | wc -l)" -eq 1 ]
+  done
   local pkg
   for pkg in $MODEM_CLOSURE_PKGS; do
     case "$pkg" in modemmanager|libmm-glib0) continue ;; esac

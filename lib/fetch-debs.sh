@@ -115,6 +115,7 @@ ARMBIAN_APT_KEY_FINGERPRINTS=(
 )
 BSP_DEB_VERSIONS_FILE="${BSP_DEB_VERSIONS_FILE:-${HERE}/../manifests/armbian-bsp-deb-versions.txt}"
 FIRST_PARTY_DEB_VERSIONS_FILE="${FIRST_PARTY_DEB_VERSIONS_FILE:-${HERE}/../manifests/first-party-deb-versions.txt}"
+FIRST_PARTY_LOCAL_SHA256_FILE="${FIRST_PARTY_LOCAL_SHA256_FILE:-${HERE}/../manifests/first-party-local-sha256.txt}"
 # RK3588 HW-accel userspace (Mali blob, MPP, RGA, gst-rockchip, multimedia-config)
 # is NOT in the Armbian pool; it is pinned to exact upstream release-asset URLs and
 # verified by SHA-256. package<TAB-or-space>filename<...>sha256<...>url per line.
