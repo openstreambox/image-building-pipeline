@@ -28,6 +28,8 @@ RUNTIME="${ROOT}/mkosi/runtime"
   grep -qx 'RuntimeDirectory=ceralive/modem-carrierlock' "$unit"
   grep -qx 'RuntimeDirectoryPreserve=yes' "$unit"
   grep -qx 'NoNewPrivileges=yes' "$unit"
+  # The script, not systemd, ends the ModemManager hold after a stop.
+  grep -qx 'KillMode=mixed' "$unit"
   ! grep -q '^\[Install\]' "$unit"
 }
 

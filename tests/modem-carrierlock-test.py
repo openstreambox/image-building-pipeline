@@ -35,7 +35,7 @@ ALLOWED = {'AT+CIMI', 'AT+GTLOCKCAR?', 'AT+GTCURCAR?', 'AT+CFUN?', 'AT+CFUN=4', 
            'AT+GTLOCKCAR=0'}
 READS = ['AT+CIMI', 'AT+GTLOCKCAR?', 'AT+GTCURCAR?']
 UNLOCK = READS + ['AT+CFUN?', 'AT+CFUN=4', 'AT+CFUN?', 'AT+GTLOCKCAR=0', 'AT+GTLOCKCAR?',
-                  'AT+GTCURCAR?', 'AT+CFUN=1']
+                  'AT+GTCURCAR?', 'AT+CFUN=1', 'AT+CFUN?']
 PROFILES = {'1': 'Generic', '101': 'Verizon', '201': 'AT&amp;T', '203': 'T-Mobile'}
 SIM_PROFILE = {'310240': '203', '310260': '203', '310410': '201', '310280': '201', '311480': '101'}
 
@@ -113,6 +113,7 @@ class FakeFm350(threading.Thread):
         self.unlock_reply = None    # forced final answer to AT+GTLOCKCAR=0
         self.radio_off_reply = None
         self.radio_on_reply = None
+        self.radio_on_ignored = False  # AT+CFUN=1 answers OK, the radio stays off
         self.read_error = None      # command whose answer is ERROR
         self.silent = set()         # commands that get no answer at all
         self.no_final = set()       # commands answered without the final OK (as recorded once)
@@ -147,7 +148,8 @@ class FakeFm350(threading.Thread):
         if command == 'AT+CFUN=1':
             if self.radio_on_reply:
                 return f'\r\n{self.radio_on_reply}\r\n'
-            self.radio = '1'
+            if not self.radio_on_ignored:
+                self.radio = '1'
             return '\r\nOK\r\n'
         if command == 'AT+GTLOCKCAR=0':
             if self.unlock_reply:
@@ -503,6 +505,24 @@ class CarrierLock(unittest.TestCase):
         self.assertIn('after 3 unlocks', done.stdout)
         self.new_boot()
         self.assertUntouched(self.invoke())
+        self.new_boot()
+        (self.data / 'modem-carrierlock.retry').touch()
+        self.invoke()
+        self.assertEqual(self.modem.lock, ('0', '65535'))
+        self.assertEqual(self.record()['unlocks'], 1)
+
+    def test_the_unlock_cap_holds_whatever_the_last_outcome(self):
+        unit = self.data / 'modem-carrierlock' / f'{self.unit()}.json'
+        for status in ('restarted', 'unlocking', 'interrupted'):
+            with self.subTest(status=status):
+                self.new_boot()
+                unit.parent.mkdir(parents=True, exist_ok=True)
+                unit.write_text(json.dumps({'status': status, 'unlocks': 3}))
+                self.invoke()
+                self.assertEqual(self.modem.commands, READS)
+                self.assertEqual(self.record()['status'], 'lock-keeps-returning')
+        self.new_boot()
+        self.assertUntouched(self.invoke())
 
     def test_once_per_unit_and_sim_per_boot(self):
         self.invoke()
@@ -558,7 +578,7 @@ class CarrierLock(unittest.TestCase):
         self.modem.hooks['AT+GTLOCKCAR=0'] = lambda: self.modem.silent.add('AT+GTLOCKCAR?')
         self.invoke()
         self.assertEqual(self.marker()['phase'], 'failed')
-        self.assertEqual(self.modem.commands[-1], 'AT+CFUN=1')
+        self.assertEqual(self.modem.commands[-2:], ['AT+CFUN=1', 'AT+CFUN?'])
         self.assertEqual(self.modem.radio, '1')
 
     def test_restart_on_radio_on_after_a_verified_unlock_counts_as_unlocked(self):
@@ -574,7 +594,7 @@ class CarrierLock(unittest.TestCase):
         self.modem.silent.clear()
         self.modem.hooks.clear()
         done = self.invoke()
-        self.assertEqual(self.modem.commands, READS + ['AT+CFUN?', 'AT+CFUN=1'])
+        self.assertEqual(self.modem.commands, READS + ['AT+CFUN?', 'AT+CFUN=1', 'AT+CFUN?'])
         self.assertEqual(self.modem.radio, '1')
         self.assertEqual(self.marker()['phase'], 'unlocked-by-service')
         self.assertIn('switching it on', done.stdout)
@@ -587,6 +607,17 @@ class CarrierLock(unittest.TestCase):
         self.modem.hooks.clear()
         self.modem.radio_on_reply = 'ERROR'
         done = self.invoke()
+        self.assertEqual(self.record()['status'], 'radio-not-back')
+        self.assertIn('<3>', done.stdout)
+
+    def test_return_reading_another_radio_state_is_an_error(self):
+        self.restart_on('AT+GTLOCKCAR=0', radio_after='0')
+        self.invoke()
+        self.modem.commands.clear()
+        self.modem.silent.clear()
+        self.modem.hooks.clear()
+        done = self.invoke()
+        self.assertEqual(self.modem.commands, READS + ['AT+CFUN?'])
         self.assertEqual(self.record()['status'], 'radio-not-back')
         self.assertIn('<3>', done.stdout)
 
@@ -606,7 +637,7 @@ class CarrierLock(unittest.TestCase):
     def test_refused_unlock_puts_the_radio_back_and_gives_up_until_retry(self):
         self.modem.unlock_reply = '+CME ERROR: phone failure'
         done = self.invoke()
-        self.assertEqual(self.modem.commands[-1], 'AT+CFUN=1')
+        self.assertEqual(self.modem.commands[-2:], ['AT+CFUN=1', 'AT+CFUN?'])
         self.assertEqual((self.modem.lock, self.modem.radio), (('1', '203'), '1'))
         self.assertEqual(self.record()['status'], 'unlock-refused')
         self.assertIn('answered +CME ERROR: phone failure', done.stdout)
@@ -620,6 +651,71 @@ class CarrierLock(unittest.TestCase):
         self.assertFalse((self.data / 'modem-carrierlock.retry').exists())
         self.assertEqual(self.modem.lock, ('0', '65535'))
         self.assertEqual(self.record()['original_lock'], '1,203')
+
+    def test_radio_on_answered_ok_but_still_off_is_an_error(self):
+        self.modem.radio_on_ignored = True
+        done = self.invoke()
+        self.assertEqual(self.modem.commands[-2:], ['AT+CFUN=1', 'AT+CFUN?'])
+        self.assertEqual(self.record()['status'], 'radio-not-back')
+        self.assertIn('answered OK, but AT+CFUN? reads 4', done.stdout)
+
+    def test_return_whose_inhibit_fails_stays_pending(self):
+        self.restart_on('AT+GTLOCKCAR=0')
+        self.invoke()
+        self.modem.commands.clear()
+        self.modem.silent.clear()
+        self.modem.hooks.clear()
+        self.mm(inhibit='fail')
+        self.invoke()
+        self.assertEqual(self.marker()['phase'], 'restarted')
+        self.assertEqual(self.marker()['last'], 'inhibit-failed')
+        self.mm()
+        self.invoke()
+        self.assertEqual(self.modem.commands, READS + ['AT+CFUN?'])
+        self.assertEqual(self.marker()['phase'], 'unlocked-by-service')
+
+    def test_an_attempt_that_cannot_be_recorded_sends_nothing(self):
+        records = self.data / 'modem-carrierlock'
+
+        def read_only():
+            records.chmod(0o555)
+        self.addCleanup(records.chmod, 0o755)
+        self.modem.before['AT+CFUN?'] = read_only
+        done = self.invoke()
+        if os.access(records, os.W_OK):
+            self.skipTest('running as root')
+        self.assertEqual(self.modem.commands, READS + ['AT+CFUN?'])
+        self.assertEqual(self.marker()['phase'], 'no-record')
+        self.assertIn('could not be recorded', done.stdout)
+
+    def test_repeated_misreads_are_given_up(self):
+        self.modem.read_error = 'AT+GTLOCKCAR?'
+        for count in (1, 2, 3):
+            self.invoke()
+            self.assertEqual(self.record()['misreads'], count)
+            self.new_boot()
+        self.assertEqual(self.record()['status'], 'unreadable')
+        self.modem.read_error = None
+        self.assertUntouched(self.invoke())
+        self.new_boot()
+        (self.data / 'modem-carrierlock.retry').touch()
+        self.invoke()
+        self.assertEqual(self.modem.lock, ('0', '65535'))
+        self.assertEqual(self.record()['misreads'], 0)
+
+    def test_other_firmware_is_left_alone(self):
+        self.mm(revision='81600.0000.00.29.21.01')
+        done = self.invoke()
+        self.assertUntouched(done)
+        self.assertIn('is not one the unlock was measured on', done.stdout)
+
+    def test_a_verizon_profile_after_the_unlock_is_reported(self):
+        self.modem.lock, self.modem.profile = ('1', '101'), '101'
+        self.modem.ignore_unlock = False
+        self.modem.hooks['AT+GTLOCKCAR=0'] = lambda: setattr(self.modem, 'profile', '101')
+        done = self.invoke()
+        self.assertEqual(self.modem.lock, ('0', '65535'))
+        self.assertIn('profile still reads 101', done.stdout)
 
     def test_refused_unlock_whose_radio_will_not_come_back_is_an_error(self):
         self.modem.unlock_reply = 'ERROR'
@@ -647,12 +743,17 @@ class CarrierLock(unittest.TestCase):
         self.assertEqual(self.modem.commands, READS + ['AT+CFUN?'])
         self.assertEqual(self.marker()['phase'], 'radio-unexpected')
 
-    def test_radio_that_will_not_come_back_is_an_error(self):
+    def test_radio_that_will_not_come_back_is_an_error_and_left_alone_after(self):
         self.modem.radio_on_reply = 'ERROR'
         done = self.invoke()
         self.assertEqual(self.modem.lock, ('0', '65535'))
         self.assertEqual(self.record()['status'], 'radio-not-back')
         self.assertIn('<3>', done.stdout)
+        self.new_boot()
+        self.modem.lock = ('1', '203')
+        done = self.invoke()
+        self.assertUntouched(done)
+        self.assertEqual(self.marker()['phase'], 'gave-up')
 
     def test_answer_without_its_final_ok_writes_nothing(self):
         self.modem.unsolicited = True
@@ -775,7 +876,7 @@ class CarrierLock(unittest.TestCase):
         self.modem.before['AT+CFUN=4'] = lambda: (self.data / 'modem-carrierlock.disabled').touch()
         done = self.invoke()
         self.assertNoWrite()
-        self.assertEqual(self.modem.commands[-1], 'AT+CFUN=1')
+        self.assertEqual(self.modem.commands[-2:], ['AT+CFUN=1', 'AT+CFUN?'])
         self.assertEqual((self.modem.radio, self.modem.lock), ('1', ('1', '203')))
         self.assertEqual(self.marker()['phase'], 'interrupted')
         self.assertIn('nothing written, radio put back', done.stdout)
@@ -872,7 +973,7 @@ class CarrierLock(unittest.TestCase):
         self.modem.silent.add('AT+GTLOCKCAR=0')
         done = self.invoke()
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
-        self.assertEqual(self.modem.commands[-2:], ['AT+GTLOCKCAR=0', 'AT+CFUN=1'])
+        self.assertEqual(self.modem.commands[-3:], ['AT+GTLOCKCAR=0', 'AT+CFUN=1', 'AT+CFUN?'])
         self.assertEqual(self.modem.radio, '1')
         self.assertEqual(self.marker()['phase'], 'stopped')
         self.assertEqual(self.mm_calls()[-1], 'released')

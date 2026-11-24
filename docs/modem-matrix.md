@@ -217,7 +217,8 @@ path. When on, it:
   and its ModemManager hold again before asking for the modem, before
   switching the radio off and before the unlock;
 - waits for ModemManager to list the modem with a SIM and accepts only model
-  `FM350-GL`;
+  `FM350-GL` on firmware `81600.0000.00.29.18.01`, the one the answers were
+  recorded on;
 - unlocks only for a SIM whose home network is AT&T (310280, 310410) or
   T-Mobile (310240, 310260), the carriers an unlocked FM350-GL was measured
   selecting (201, 203) and connecting on. The rows are CeraUI's carrier table
@@ -235,16 +236,22 @@ path. When on, it:
   stops the run);
 - for a locked unit only: `AT+CFUN?` (1 or 4, anything else stops), `AT+CFUN=4`
   if the radio was on, `AT+GTLOCKCAR=0`, both reads again (the lock must read
-  `0,65535`), then `AT+CFUN=1` if the radio was on. It never writes a lock and
-  never sends `AT+GTACT`. A radio it switched off and cannot switch on again
+  `0,65535`), then `AT+CFUN=1` if the radio was on, confirmed by `AT+CFUN?`
+  reading 1. It never writes a lock and never sends `AT+GTACT`. The attempt is
+  counted in the record before anything is sent (no record, no unlock), and
+  an answer that stops a run counts as a misread; after 3 in a row the unit
+  is left alone. The unit has `KillMode=mixed`, so a stop signals the script
+  first and the ModemManager hold lasts while it switches the radio back on. A radio it switched off and cannot switch on again
   is logged as an error and the unit is left alone from then on. A SIGTERM
   during the unlock switches the radio back on before exit, and the unlock
   does not start unless the run budget can finish it;
 - if the module restarts on the unlock, records `restarted` with the radio
   state it found and exits at once (the module takes seconds to come back, so
-  its return starts a new instance). That instance reads the lock back,
-  writes nothing, and switches the radio on if it was on before and the
-  module left it off.
+  its return starts a new instance; the module also switches its own radio on
+  a few seconds into every boot). That instance reads the lock back, writes
+  nothing, and switches the radio on if it was on before and the module left
+  it off. If it cannot read the unit (a refused hold, a busy port), the check
+  stays pending for a later appearance.
 
 The per-unit record is `/data/ceralive/modem-carrierlock/<unit>.json`
 (HMAC-SHA256 of `/etc/machine-id` and the IMEI, cut to 16 hex digits). It keeps
@@ -260,7 +267,11 @@ the `.disabled` file, then with ModemManager held send `AT+CFUN=4`,
 `AT+GTLOCKCAR=1,<original id>`, `AT+CFUN=1`.
 
 Notes: holding the modem makes ModemManager drop it and probe it again, so a
-unit is held only while its state is unknown, stale or locked. Mode 40
+unit is held only while its state is unknown, stale or locked. A later host
+boot is taken as evidence that an unlock survived a module restart; whether a
+warm reboot power-cycles the module is not measured, so the 7-day expiry
+bounds how long a relock that only a power cycle brings back would go
+unnoticed. Mode 40
 (`0e8d:7126`) has its AT port on interface 4 and is not handled. An unlocked
 unit that later gets a Verizon SIM selects the Verizon profile by itself; that
 is the firmware's behaviour, not this service's. No hardware run of this

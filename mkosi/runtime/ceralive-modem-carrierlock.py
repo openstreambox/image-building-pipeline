@@ -28,7 +28,8 @@ then, for that one device:
      checked again before ModemManager is asked to hold the modem, before the
      radio is switched off and before the unlock; so is the hold itself.
   2. Waits for ModemManager to list the modem (matched by its physical device)
-     with a SIM, and accepts only the models in MODELS. It unlocks only for a
+     with a SIM, and accepts only the models in MODELS on the firmware in
+     FIRMWARE. It unlocks only for a
      SIM whose home network is in QUALIFIED, the carriers whose profile an
      unlocked FM350-GL has been measured to select and connect on (AT&T 201,
      T-Mobile 203). A Verizon SIM is left alone: an unlocked unit selects the
@@ -48,12 +49,16 @@ then, for that one device:
      AT+GTCURCAR?. Unlocked: recorded, left alone. Locked (`1,<id>`):
      AT+CFUN? (1 or 4 only), AT+CFUN=4 if the radio was on, AT+GTLOCKCAR=0,
      read both back (the lock must read `0,65535`), then AT+CFUN=1 if the
-     radio was on. No lock is ever written. A radio this run switched off and
-     could not switch on again is an error, and the unit is left alone after.
+     radio was on, confirmed by AT+CFUN? reading 1. No lock is ever written. A
+     radio this run switched off and could not switch on again is an error,
+     and the unit is left alone after. The attempt is counted in /data before
+     anything is sent; an answer that stops a run is counted too, and after
+     MAX_MISREADS in a row the unit is left alone.
   6. If the module restarts on the unlock (the port goes silent and the USB
      device leaves), the run records `restarted` with the radio state it found
      and exits at once, before the module is back (it takes seconds to boot),
-     so the instance started by its return is a new run. That run reads the
+     so the instance started by its return is a new run (the module also
+     switches its own radio on a few seconds into every boot). That run reads the
      lock back, writes nothing, switches the radio on if it was on before and
      the module left it off, and records the outcome. A unit whose unlock was
      refused or did not take is left alone on later boots until the retry
@@ -110,6 +115,9 @@ TAG = 'ceralive-modem-carrierlock'
 # another interface and has not been read on a bench.
 USB_IDS = {('0e8d', '7127')}
 MODELS = {'FM350-GL'}
+# Firmware the lock and unlock answers were recorded on (ModemManager's
+# revision string). Any other firmware is left alone.
+FIRMWARE = {'81600.0000.00.29.18.01'}
 # ModemManager's 77-mm-fm350gl.rules types interface 06 as the primary AT port
 # of 0e8d:7127 and ignores every other tty; the lock answers were recorded there.
 AT_INTERFACE = '06'
@@ -128,8 +136,10 @@ QUALIFIED = {
 VERIZON = {'310590', '310890', '311270', '311480', '312770'}
 UNLOCKED = ('0', '65535')
 MAX_UNLOCKS = 3
+MAX_MISREADS = 3
 # Outcomes that leave a unit alone on later boots until the retry file is used.
-GIVE_UP = {'unlock-refused', 'failed', 'radio-off-failed', 'radio-not-back', 'lock-keeps-returning'}
+GIVE_UP = {'unlock-refused', 'failed', 'radio-off-failed', 'radio-not-back', 'lock-keeps-returning',
+           'unreadable'}
 STREAM_PROCESSES = {'srtla_send'}
 KERNEL_NAME = re.compile(r'\d+-\d+(\.\d+)*')
 DEFAULT_ENABLED = False
@@ -251,6 +261,8 @@ def save_record(unit, port, event=None, **fields):
         atomic_json(DATA / f'{unit}.json', record)
     except OSError as error:
         log(4, f'{port}: could not write the record ({error}); see this journal')
+        return False
+    return True
 
 
 def honour_retry():
@@ -264,7 +276,8 @@ def honour_retry():
     for path in sorted(DATA.glob('*.json')) if DATA.is_dir() else []:
         try:
             record = json.loads(path.read_text())
-            changed = [record.pop(name, None) for name in ('status', 'lock', 'profile', 'plmn', 'checked', 'unlocks')]
+            changed = [record.pop(name, None) for name in ('status', 'lock', 'profile', 'plmn', 'checked', 'unlocks',
+                                                          'misreads')]
             if any(value is not None for value in changed):
                 atomic_json(path, record)
                 cleared += 1
@@ -289,8 +302,9 @@ def streaming():
     for entry in entries:
         if not entry.name.isdigit():
             continue
-        if read(entry / 'comm') in STREAM_PROCESSES:
-            return read(entry / 'comm')
+        name = read(entry / 'comm')
+        if name in STREAM_PROCESSES:
+            return name
     return None
 
 
@@ -633,6 +647,10 @@ def run(port):
     if modem['model'] not in MODELS:
         log(6, f'{port}: model "{modem["model"]}" is not on the list ({", ".join(sorted(MODELS))}); leaving it alone')
         return 0
+    if modem['revision'] not in FIRMWARE:
+        log(6, f'{port}: firmware "{modem["revision"]}" is not one the unlock was measured on '
+               f'({", ".join(sorted(FIRMWARE))}); leaving it alone')
+        return 0
     if modem['imsi'] is None:
         log(6, f'{port}: ModemManager reports no readable SIM; leaving the lock as it is')
         return 0
@@ -694,7 +712,7 @@ def run(port):
         return 0
     hold = Hold(modem['uid'])
     if not hold.held:
-        save_marker(key, 'inhibit-failed', **base, reason=hold.reason)
+        settle(key, restart, 'inhibit-failed', **base, reason=hold.reason)
         log(4, f'{port}: ModemManager would not release the modem ({hold.reason}); leaving it alone this boot')
         return 0
     try:
@@ -702,6 +720,27 @@ def run(port):
     finally:
         hold.release()
     return 0
+
+
+def settle(key, restart, phase, **fields):
+    """Mark the end of a run that did not get to read the unit. A pending
+    check after a restart stays pending, so a later appearance still makes it."""
+    if restart:
+        atomic_json(marker_path(key), dict(restart, last=phase))
+    else:
+        save_marker(key, phase, **fields)
+
+
+def misread(unit, port, key, base, restart, phase, message):
+    """An answer that stops the run before any change. Counted: after
+    MAX_MISREADS in a row the unit is left alone until the retry file."""
+    count = load_record(unit).get('misreads', 0)
+    count = (count if isinstance(count, int) else 0) + 1
+    status = {'status': 'unreadable'} if count >= MAX_MISREADS else {}
+    settle(key, restart, phase, **base)
+    save_record(unit, port, dict(outcome=phase), misreads=count, **status)
+    log(4, f'{port}: {message}' + (f'; {count} in a row, left alone from now on (touch {RETRY} to try '
+                                   'once more)' if status else ''))
 
 
 def open_port(candidates):
@@ -729,7 +768,7 @@ class Run:
     def record(self, outcome, status=None, **fields):
         event = dict(self.seen, plmn=self.base['plmn'], outcome=outcome)
         event.update({k: v for k, v in fields.items() if k in ('lock', 'profile', 'reply', 'write')})
-        save_record(self.unit, self.port, event, **({'status': status} if status else {}), **fields)
+        return save_record(self.unit, self.port, event, **({'status': status} if status else {}), **fields)
 
     def interrupted(self):
         """Why the unlock must not go on, or None: the switches, a stream, the hold."""
@@ -755,29 +794,29 @@ def exchange(port, device_dir, key, candidates, base, imsi, hold, restart):
     unit = base['unit']
     node = open_port(candidates)
     if node is None:
-        save_marker(key, 'port-busy', **base)
+        settle(key, restart, 'port-busy', **base)
         log(4, f'{port}: no free AT port among {", ".join(candidates)} while held; leaving it alone this boot')
         return
     try:
         at = AtPort(node)
     except OSError as error:
-        save_marker(key, 'port-failed', **base, reason=str(error))
+        settle(key, restart, 'port-failed', **base, reason=str(error))
         log(4, f'{port}: cannot open {node.name} ({error}); leaving it alone this boot')
         return
     try:
         if parse_imsi(*at.command('AT+CIMI')) != imsi:
-            save_marker(key, 'sim-mismatch', **base)
-            log(4, f'{port}: AT+CIMI does not match the SIM ModemManager reported; nothing written')
+            misread(unit, port, key, base, restart, 'sim-mismatch',
+                    'AT+CIMI does not match the SIM ModemManager reported; nothing written')
             return
         lock = parse_lock(*at.command('AT+GTLOCKCAR?'))
         profile = parse_profile(*at.command('AT+GTCURCAR?'))
         if lock is None or profile is None:
-            save_marker(key, 'read-failed', **base)
-            log(4, f'{port}: no clear answer to AT+GTLOCKCAR? / AT+GTCURCAR?; nothing written')
+            misread(unit, port, key, base, restart, 'read-failed',
+                    'no clear answer to AT+GTLOCKCAR? / AT+GTCURCAR?; nothing written')
             return
         job = Run(port, device_dir, key, base, at, hold)
         job.seen = dict(lock=lock_text(lock), profile=profile[0])
-        seen = dict(job.seen, plmn=base['plmn'], checked=int(time.time()))
+        seen = dict(job.seen, plmn=base['plmn'], checked=int(time.time()), misreads=0)
         record = load_record(unit)
         boot = read(BOOT_ID)
         if restart:
@@ -798,16 +837,15 @@ def exchange(port, device_dir, key, candidates, base, imsi, hold, restart):
             log(6, f'{port}: unlocked (profile {profile[0]} "{profile[1]}" picked from the SIM){note}; left alone')
             return
         if lock[0] != '1':
-            job.marker('unexpected-lock', **job.seen)
-            job.record('unexpected-lock', original_lock=job.seen['lock'], original_profile=profile[0])
-            log(4, f'{port}: lock reads {job.seen["lock"]}, which is neither unlocked nor a lock; nothing written')
+            misread(unit, port, key, base, None, 'unexpected-lock',
+                    f'lock reads {job.seen["lock"]}, which is neither unlocked nor a lock; nothing written')
             return
         returned = record.get('status') in ('unlocked', 'unlocked-by-service') or bool(record.get('lock_returned'))
         unlocks = record.get('unlocks', 0) if isinstance(record.get('unlocks'), int) else 0
-        if returned and unlocks >= MAX_UNLOCKS:
+        if unlocks >= MAX_UNLOCKS:
             job.marker('lock-keeps-returning', **job.seen)
             job.record('lock-keeps-returning', status='lock-keeps-returning', lock_returned=True, **seen)
-            log(4, f'{port}: locked to {job.seen["lock"]} again after {unlocks} unlocks; leaving it alone '
+            log(4, f'{port}: locked to {job.seen["lock"]} after {unlocks} unlocks; leaving it alone '
                    f'(touch {RETRY} to try once more)')
             return
         unlock(job, lock, profile, seen, returned, unlocks, boot)
@@ -860,8 +898,8 @@ def unlock(job, lock, profile, seen, returned, unlocks, boot):
         return
     job.radio = parse_radio(*at.command('AT+CFUN?'))
     if job.radio not in ('1', '4'):
-        job.marker('radio-unexpected', radio=job.radio)
-        log(4, f'{port}: AT+CFUN? read {job.radio or "nothing clear"}, not 1 or 4; nothing written')
+        misread(job.unit, port, job.key, job.base, None, 'radio-unexpected',
+                f'AT+CFUN? read {job.radio or "nothing clear"}, not 1 or 4; nothing written')
         return
     reason = job.interrupted()
     if reason:
@@ -874,9 +912,14 @@ def unlock(job, lock, profile, seen, returned, unlocks, boot):
     log(6, f'{port}: locked to {job.old["old_lock"]} (profile {profile[0]} "{profile[1]}") with a '
            f'{job.base["carrier"]} SIM ({job.base["plmn"]}); unlocking, old value recorded')
     job.marker('unlocking', radio=job.radio)
-    job.record('unlocking', status='unlocking', original_lock=job.old['old_lock'],
-               original_profile=profile[0], unlocks=unlocks + 1,
-               **({'lock_returned': True} if returned else {}), **seen)
+    # The attempt is counted on disk before anything is sent; without that
+    # record the unlock cap could not hold, so no record means no unlock.
+    if not job.record('unlocking', status='unlocking', original_lock=job.old['old_lock'],
+                      original_profile=profile[0], unlocks=unlocks + 1,
+                      **({'lock_returned': True} if returned else {}), **seen):
+        job.marker('no-record')
+        log(4, f'{port}: the attempt could not be recorded; nothing written')
+        return
     try:
         unlock_steps(job, boot)
     except Stopped as signal_name:
@@ -928,6 +971,9 @@ def unlock_steps(job, boot):
         job.fail('failed', f'after AT+GTLOCKCAR=0 the lock reads {new["lock"]}; recorded as failed, '
                  'not tried again', **new)
         return
+    if new_profile[0] == '101':
+        log(4, f'{port}: right after the unlock the profile still reads 101 (Verizon); a '
+               f'{job.base["carrier"]} SIM should select {job.base["expected"]} once the radio is on')
     if job.radio_back():
         job.marker('unlocked-by-service', **new)
         job.record('unlocked-by-service', status='unlocked-by-service', unlocked_boot=boot, **new)
@@ -953,6 +999,10 @@ def put_radio_back(port, at, radio):
     final, _ = at.command('AT+CFUN=1', timeout=LOCK_TIMEOUT)
     if final != 'OK':
         log(4, f'{port}: AT+CFUN=1 answered {final or "nothing"}')
+        return False
+    now = parse_radio(*at.command('AT+CFUN?'))
+    if now != '1':
+        log(4, f'{port}: AT+CFUN=1 answered OK, but AT+CFUN? reads {now or "nothing clear"}')
         return False
     return True
 
