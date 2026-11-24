@@ -70,6 +70,14 @@ if [[ "${INSTALL_BOOT_BSP}" != "1" ]]; then
 fi
 
 : "${CHROOT_SRCDIR:?CHROOT_SRCDIR must be set by mkosi (in-chroot path of \$SRCDIR)}"
+[[ -x "${BUILDROOT:?}/usr/sbin/fsck.fat" ]] || die "shared /boot requires fsck.fat from dosfstools"
+# Gate new checker releases at build time. The runtime checks diagnostics by content.
+fat_checker_version="$(dpkg-query --admindir="${BUILDROOT}/var/lib/dpkg" -W -f='${Version}' dosfstools)" \
+  || die "could not determine the installed dosfstools version"
+case "${fat_checker_version}" in
+  4.2|4.2-*) ;;
+  *) die "dosfstools ${fat_checker_version} is outside the tested fsck.fat 4.2 series" ;;
+esac
 
 # install-boot.sh as it appears INSIDE the chroot (mkosi mounts $SRCDIR there).
 # The script self-resolves its template dir from its own location, so running it
