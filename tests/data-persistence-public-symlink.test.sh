@@ -14,7 +14,7 @@
 # symlink was shadowed and /data had no replacement. CeraUI then served the frontend
 # from a missing dir and 404'd, even though the backend API was healthy.
 #
-# THE FIX. The seeding loop also seeds "public". cp -a copies the symlink ITSELF (not
+# THE FIX. The seeding loop also seeds "public". Archive mode copies the symlink ITSELF (not
 # the /var/www asset tree — those stay on the rootfs so image/OTA updates keep
 # tracking), and both existence checks are symlink-aware (`[ -L ]`) so a symlink is
 # neither skipped as a source nor clobbered as an existing /data entry. Because the
@@ -70,8 +70,10 @@ block="$(awk '
 # ---------------------------------------------------------------------------
 grep -Fq '"$WORKDIR/public"' <<<"${block}" \
   || fail 'seeding loop no longer lists "$WORKDIR/public" — the frontend static symlink would be dropped by the /data bind mount (404 on /)'
-grep -Eq '\bcp -a\b' <<<"${block}" \
-  || fail 'seeding loop no longer uses `cp -a` — a symlink source would be dereferenced (copies the whole /var/www tree) instead of preserved as a link'
+grep -Fq 'seed_missing "$f" "$DATA/ceralive/"' <<<"${block}" \
+  || fail 'seeding loop must use the archive copy helper'
+grep -Fq 'rsync -aAX --ignore-existing' "${POSTINST_D}/persistence.sh" \
+  || fail 'copy helper must preserve source symlinks in archive mode'
 grep -Fq '[ -L "$f" ]' <<<"${block}" \
   || fail 'seeding loop source guard is not symlink-aware ([ -L "$f" ]) — a symlink whose target is absent would be skipped'
 grep -Fq '[ -L "$DATA/ceralive/$base" ]' <<<"${block}" \
@@ -95,6 +97,7 @@ run_block() { # $1=DATA  $2=WORKDIR
     printf 'DATA=%q\n' "$1"
     printf 'WORKDIR=%q\n' "$2"
     printf 'CERAUI_HELPERS=%q\n' "$2/../no-helpers"   # no kept helpers here; ceraui-workdir-helpers.test.sh covers them
+    sed -n '/^seed_missing() {/,/^}/p' "${POSTINST_D}/persistence.sh"
     printf '%s\n' "${block}"
   } >"${runner}"
   bash "${runner}"
@@ -114,7 +117,7 @@ run_block "${S1}/data" "${S1}/opt/ceralive"
   || fail "B1: /data/ceralive/public is not a symlink after seeding (frontend serving would 404)"
 [[ "$(readlink "${S1}/data/ceralive/public")" == "/var/www/ceralive" ]] \
   || fail "B1: seeded public points at '$(readlink "${S1}/data/ceralive/public")', expected /var/www/ceralive (link value not preserved verbatim)"
-# cp -a must NOT have dereferenced the link into a copied asset directory.
+# Seeding must NOT have dereferenced the link into a copied asset directory.
 [[ ! -e "${S1}/data/ceralive/public/index.html" || -L "${S1}/data/ceralive/public" ]] || true
 # the pre-existing seed behavior (json + revision) must still work.
 [[ -f "${S1}/data/ceralive/setup.json" && -f "${S1}/data/ceralive/revision" ]] \

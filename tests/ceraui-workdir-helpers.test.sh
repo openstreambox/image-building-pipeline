@@ -122,6 +122,7 @@ run_block() { # $1=DATA $2=WORKDIR $3=CERAUI_HELPERS
     printf 'log() { printf "%%s\\n" "$*" >>%q; }\n' "$1/.migrate.log"
     printf 'DATA=%q\nWORKDIR=%q\nCERAUI_HELPERS=%q\n' "$1" "$2" "$3"
     printf '%s\n' "${RUN_PRELUDE:-}"
+    sed -n '/^seed_missing() {/,/^}/p' "${PERSISTENCE}"
     printf '%s\n' "${block}"
     # The rest of ceralive-migrate-data (and the binds that need it) runs on.
     printf 'echo continued >%q\n' "$1/.migrate-continued"
