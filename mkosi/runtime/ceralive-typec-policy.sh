@@ -666,7 +666,9 @@ rock_back_power_correction() {
   # SINK_RESET_SETTLE seconds (tcpm picks the state about 100 ms after the
   # write, up to about 1 s when VBUS was on); a preference write by itself does
   # not reset the port. A camera this cycle made attach has a partner by now.
-  if (( ! settle_failed )) && [[ ! -e "${PARTNER_DIR}" ]]; then
+  if [[ ! -e "${PARTNER_DIR}" ]]; then
+    # A partner the wait saw fail has left: whatever registers next is new.
+    settle_failed=0
     if ! printf '%s\n' sink >"${PORT_DIR}/preferred_role" ||
         [[ "$(active_role "${PORT_DIR}/preferred_role")" != sink ]]; then
       log "ERROR: cannot set Rock sink preference — ${PORT} may miss a later plug until it is rebound"
@@ -706,9 +708,9 @@ rock_back_power_correction() {
     [[ ! -r "${PARTNER_DIR}/identity/id_header" ]] \
       || identity="$(cat "${PARTNER_DIR}/identity/id_header")"
   fi
-  # A blind try writes a receipt only for a partner the settle wait saw fail.
-  # One that still finds nothing spends only its nopartner count, so a partner
-  # that registers right after it still gets its correction.
+  # A blind try writes a receipt only for a partner the settle wait saw fail
+  # and that is still there. One that finds nothing spends only its nopartner
+  # count, so a partner that registers right after it still gets its correction.
   (( blind == 0 || settle_failed )) || return 0
   printf '%s\n' "${identity}" >"${RUN_DIR}/failed" \
     || log "ERROR: cannot record failed Rock attachment"

@@ -1282,6 +1282,13 @@ run_typec_rock() {
       command sleep "$@"
     }
     cat() {
+      # A partner that leaves right after the settle wait reads its role.
+      if [[ -n "${CERALIVE_TYPEC_SETTLED_POWER_ROLE:-}" && "${*: -1}" == "$CERALIVE_TYPEC_SETTLED_POWER_ROLE" &&
+            -e "$CERALIVE_TYPEC_IIO_DIR/detach-after-role-read" ]]; then
+        command cat "$@"
+        rm -rf "$CERALIVE_TYPEC_CLASS_DIR/port0-partner"
+        return 0
+      fi
       if [[ "${*: -1}" == "$CERALIVE_TYPEC_CLASS_DIR/port0/port_type" &&
             -f "$CERALIVE_TYPEC_IIO_DIR/accepted-port-type" ]]; then
         command cat "$CERALIVE_TYPEC_IIO_DIR/accepted-port-type"

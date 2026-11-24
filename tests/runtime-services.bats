@@ -1496,6 +1496,20 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
   [ "$(cat "$root/run/failed")" = unknown ]
+
+  # The failing partner leaves right after the wait reads its role: the port is
+  # empty again, so it gets the sink-first reset and no stale receipt.
+  rm -rf "$root"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  : >"$root/iio/attach-on-cycle"
+  : >"$root/iio/detach-after-role-read"
+  printf 'source [sink]\n' >"$root/settled"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual\nsource\ndual' ]
+  [ "$(typec_fake_rest_state "$root")" = SNK_UNATTACHED ]
+  [ ! -e "$root/run/failed" ]
 }
 
 @test "typec policy: a partner registered as the sink preference is written gets no sink-first reset" {
