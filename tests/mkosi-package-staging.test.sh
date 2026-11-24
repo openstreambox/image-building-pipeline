@@ -238,10 +238,16 @@ MKOSI_INSTALL_CALLS="${RUN_DIR}/mkosi-install.calls" \
 		exit 1
 	}
 
-[[ "$(<"${RUN_DIR}/mkosi-chroot.calls")" == *'runtime/packages-lock-capture.sh platform gstreamer-bsp gstreamer-runtime linux-image-demo linux-dtb-demo linux-u-boot-demo firmware-demo dosfstools'* ]] || {
+[[ "$(<"${RUN_DIR}/mkosi-chroot.calls")" == *'runtime/packages-lock-capture.sh platform gstreamer-bsp gstreamer-runtime linux-image-demo linux-dtb-demo linux-u-boot-demo firmware-demo'* ]] || {
 	printf 'FAIL platform package-lock capture was not called after installing the BSP\n' >&2
 	exit 1
 }
+# dosfstools comes from the Debian archive, not the fetch stage: the capture must
+# verify it against the index, so it is installed but never named as excluded.
+if grep -q 'packages-lock-capture.sh platform .*dosfstools' "${RUN_DIR}/mkosi-chroot.calls"; then
+	printf 'FAIL platform package-lock capture excludes the Debian boot tool dosfstools\n' >&2
+	exit 1
+fi
 
 # The ORDER is the assertion, not just the membership: zstd must be a configured
 # package before the kernel .deb's postinst generates the initramfs, or
