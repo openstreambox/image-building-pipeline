@@ -213,16 +213,17 @@ def eligible(addresses):
 
 
 def link_router(interface, gateway=''):
-    """The IPv6 next hop for the link's own table: an address, '' for a
-    device route, or None while no router is known.
+    """The IPv6 next hop for the link's own table and where it came from:
+    (address, source), ('', source) for a device route, or (None, 'none')
+    while no router is known.
 
     A profile with ipv6.never-default makes NetworkManager publish no gateway
     and add no main-table default, yet the kernel still records the RA's
     sender as a router in the link's neighbour table (accept_ra=0 included)."""
     if gateway:
-        return str(ip.IPv6Address(gateway))
+        return str(ip.IPv6Address(gateway)), 'NetworkManager gateway'
     for route in json.loads(command('ip', '-j', '-6', 'route', 'show', 'default', 'dev', interface) or '[]'):
-        return str(ip.IPv6Address(route['gateway'])) if route.get('gateway') else ''
+        return (str(ip.IPv6Address(route['gateway'])) if route.get('gateway') else ''), 'main-table default'
     routers = [n for n in json.loads(command('ip', '-j', '-6', 'neigh', 'show', 'dev', interface) or '[]')
                if 'router' in n and n.get('dst')]
     if routers:
@@ -230,11 +231,39 @@ def link_router(interface, gateway=''):
         # router must not change the grant signature and restart the link.
         usable = [n for n in routers if 'FAILED' not in n.get('state', [])] or routers
         return str(min((ip.IPv6Address(n['dst']) for n in usable),
-                       key=lambda a: (not a.is_link_local, a)))
+                       key=lambda a: (not a.is_link_local, a))), 'router advertisement'
     # Raw-IP and other ARP-less links (qmi_wwan, cdc_mbim, mhi_net) have no
     # neighbour entries and need no next hop.
     link = json.loads(command('ip', '-j', 'link', 'show', 'dev', interface))[0]
-    return '' if 'NOARP' in link.get('flags', []) else None
+    if 'NOARP' in link.get('flags', []):
+        return '', 'ARP-less link'
+    return None, 'none'
+
+
+ROUTER_NOTES = {}
+
+
+def grant(interface, addresses, config):
+    """Admission of one activated modem link: (source, router, dns) or None.
+
+    Logs once per change which router source a link uses, or that an
+    IPv6-only link is skipped because no router is known yet."""
+    sources = eligible(addresses)
+    if not sources:
+        ROUTER_NOTES.pop(interface, None)
+        return None
+    router, origin = link_router(interface, str(config.get('Gateway', '')))
+    if ROUTER_NOTES.get(interface) != (router, origin):
+        if router is None:
+            print(f'<4>CLAT {interface} has no known IPv6 router yet; not translated',
+                  file=sys.stderr, flush=True)
+        else:
+            print(f'<6>CLAT {interface} IPv6 router {router or "(device route)"} from {origin}',
+                  file=sys.stderr, flush=True)
+        ROUTER_NOTES[interface] = (router, origin)
+    if router is None:
+        return None
+    return sources[0], router, ip6_dns(config)
 
 
 def ip6_dns(config):
@@ -697,14 +726,11 @@ def main():
                         continue
                     interface = str(dev['IpInterface'])
                     addr = json.loads(command('ip', '-j', 'addr', 'show', 'dev', interface))[0]['addr_info']
-                    sources = eligible(addr)
-                    if not sources:
+                    if not eligible(addr):
                         continue
-                    config = props(dev['Ip6Config'], name + '.IP6Config')
-                    gateway = link_router(interface, str(config['Gateway']))
-                    dns = ip6_dns(config)
-                    if gateway is not None:
-                        wanted[interface] = (sources[0], gateway, dns, (str(path), str(dev['ActiveConnection'])))
+                    admitted = grant(interface, addr, props(dev['Ip6Config'], name + '.IP6Config'))
+                    if admitted:
+                        wanted[interface] = admitted + ((str(path), str(dev['ActiveConnection'])),)
                 except Exception:
                     # A disappearing/incomplete device must not withdraw its neighbours.
                     continue

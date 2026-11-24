@@ -424,11 +424,12 @@ class NeverDefault(Isolated):
         from unittest.mock import patch
         command, calls = self.answers(**answers)
         with patch.object(clat, 'command', side_effect=command):
-            return clat.link_router('wan1', gateway), calls
+            router, origin = clat.link_router('wan1', gateway)
+        return router, calls, origin
 
     def test_router_sources_in_order(self):
         router = lambda address, state='STALE': {'dst': address, 'lladdr': '02:00:00:00:00:01', 'router': None, 'state': [state]}
-        self.assertEqual(self.router('2001:DB8::1'), ('2001:db8::1', []))
+        self.assertEqual(self.router('2001:DB8::1'), ('2001:db8::1', [], 'NetworkManager gateway'))
         self.assertEqual(self.router(default=[{'dst': 'default', 'gateway': 'fe80::1', 'dev': 'wan1'}])[0], 'fe80::1')
         self.assertEqual(self.router(default=[{'dst': 'default', 'dev': 'wan1'}])[0], '')
         # The measured never-default grant: only the neighbour table knows the router.
@@ -442,6 +443,60 @@ class NeverDefault(Isolated):
         # Raw-IP links need no next hop; an Ethernet-like link without a router is not ready.
         self.assertEqual(self.router(flags=('POINTOPOINT', 'NOARP', 'UP', 'LOWER_UP'))[0], '')
         self.assertIsNone(self.router()[0])
+        origins = [self.router(default=[{'dst': 'default', 'dev': 'wan1'}])[2],
+                   self.router(neighbours=[router('fe80::1')])[2],
+                   self.router(flags=('NOARP',))[2], self.router()[2]]
+        self.assertEqual(origins, ['main-table default', 'router advertisement', 'ARP-less link', 'none'])
+
+    def test_admission_of_a_never_default_grant(self):
+        """The service admits an IPv6-only link without a published gateway
+        once the RA named its router, and logs each router change once."""
+        from contextlib import redirect_stderr
+        from io import StringIO
+        from unittest.mock import patch
+        import socket
+        v6 = [dict(family='inet6', scope='global', local='2001:db8::1')]
+        config = {'Gateway': '', 'Nameservers': [list(socket.inet_pton(socket.AF_INET6, 'fd00:976a::9'))]}
+        router = {'dst': 'fe80::b46d:57ff:fe45:4545', 'router': None, 'state': ['STALE']}
+        neighbours = []
+        command, _ = self.answers()
+        def answers(*args, **kwargs):
+            if args[:5] == ('ip', '-j', '-6', 'neigh', 'show'):
+                return json.dumps(neighbours)
+            return command(*args, **kwargs)
+        log = StringIO()
+        with patch.object(clat, 'command', side_effect=answers), patch.dict(clat.ROUTER_NOTES, clear=True), \
+                redirect_stderr(log):
+            self.assertIsNone(clat.grant('wan1', v6, config))
+            self.assertIsNone(clat.grant('wan1', v6, config))
+            neighbours.append(router)
+            self.assertEqual(clat.grant('wan1', v6, config),
+                             ('2001:db8::1', 'fe80::b46d:57ff:fe45:4545', ('fd00:976a::9',)))
+            self.assertEqual(clat.grant('wan1', v6, config)[1], 'fe80::b46d:57ff:fe45:4545')
+            # Native IPv4 excludes the link before any router lookup.
+            self.assertIsNone(clat.grant('wan1', v6 + [dict(family='inet', scope='global', local='192.0.2.1')], config))
+        self.assertEqual(log.getvalue().splitlines(), [
+            '<4>CLAT wan1 has no known IPv6 router yet; not translated',
+            '<6>CLAT wan1 IPv6 router fe80::b46d:57ff:fe45:4545 from router advertisement',
+        ])
+
+    def test_failed_starting_write_withdraws_the_discovery_route(self):
+        from unittest.mock import patch
+        host = FakeHost()
+        real = clat.Link.status
+        def status(link, state, error=None):
+            return False if state == 'starting' else real(link, state, error)
+        with host.patched(), patch.object(clat.Link, 'status', status):
+            link = clat.Link('wan1', '2001:db8::1', 'fe80::1', ('fd00:976a::9',))
+            link.start()
+        commands = host.commands()
+        self.assertIn(['ip', '-6', 'rule', 'del', 'priority', '46003', 'from', '2001:db8::1', 'oif', 'wan1',
+                       'lookup', '46003'], commands)
+        self.assertIn(['ip', '-6', 'route', 'flush', 'table', '46003'], commands)
+        self.assertNotIn(['sysctl', '-n', 'net.ipv6.conf.all.forwarding'], commands)
+        self.assertFalse(link.undo)
+        self.assertFalse((clat.RUN/'3.cleanup').exists())
+        self.assertEqual(json.loads((clat.RUN/'3.json').read_text())['state'], 'error')
 
     def test_discovery_uses_the_links_own_table_and_is_withdrawn_on_failure(self):
         from unittest.mock import patch

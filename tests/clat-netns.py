@@ -131,7 +131,7 @@ while True:
     run('ip','addr','add','fd51:3::1/64','dev','cell.3','nodad');run('ip','link','set','cell.3','up')
     run(*ns(peer,'ip','addr','add','fd51:3::2/64','dev','srv3','nodad'));run(*ns(peer,'ip','link','set','srv3','up'))
     run(*ns(peer,'ip','addr','add','fd53::53/128','dev','lo'))
-    assert c.link_router('cell.3') is None
+    assert c.link_router('cell.3') == (None, 'none')
     assert sp.run(['ip','-6','route','get','fd53::53','oif','cell.3'],stdout=sp.DEVNULL,stderr=sp.DEVNULL).returncode != 0
     mac = json.loads(run(*ns(peer,'ip','-j','link','show','dev','srv3')))[0]['address']
     advertise = """import socket,struct
@@ -143,11 +143,11 @@ s.sendto(ra,('ff02::1',0,0,socket.if_nametoindex('srv3')))
 """ % mac.replace(':','')
     for attempt in range(20):
         run(*ns(peer,'python3','-c',advertise))
-        router = c.link_router('cell.3')
+        router, origin = c.link_router('cell.3')
         if router is not None:
             break
         time.sleep(.1)
-    assert router and router.startswith('fe80:'), router
+    assert router and router.startswith('fe80:') and origin == 'router advertisement', (router, origin)
     never_default = c.Link('cell.3','fd51:3::1',router,['fd53::53'])
     never_default.start()
     assert json.loads((c.RUN/f'{never_default.index}.json').read_text())['state']=='up', (c.RUN/f'{never_default.index}.json').read_text()

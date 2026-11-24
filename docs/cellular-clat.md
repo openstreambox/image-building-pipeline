@@ -16,7 +16,9 @@ the lowest address); or no next hop on an ARP-less (raw-IP) link. A profile
 with `ipv6.never-default` gets neither a gateway on D-Bus nor a main-table
 default, but its RAs still reach the neighbour table, also with `accept_ra=0`
 as NetworkManager sets it. An Ethernet-like link with no router known yet is
-not used. The service never adds an IPv6 route to the main table.
+not used. The journal gets one line per change: the router and its source, or a
+warning that an IPv6-only link has no known router yet. The service never adds
+an IPv6 route to the main table.
 IPv6 DNS comes from `IP6Config.Nameservers` (`aay`),
 as specified by the [NM 1.52 introspection XML](https://github.com/NetworkManager/NetworkManager/blob/1.52.0/introspection/org.freedesktop.NetworkManager.IP6Config.xml)
 and [NM 1.58 XML](https://github.com/NetworkManager/NetworkManager/blob/1.58.0/introspection/org.freedesktop.NetworkManager.IP6Config.xml).
