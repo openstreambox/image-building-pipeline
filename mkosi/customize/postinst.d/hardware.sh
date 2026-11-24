@@ -483,8 +483,10 @@ generate_modem_slot_uid_rules() {
     # net gets it only in 80-net-setup-link; import it before matching.
     printf 'ACTION!="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", IMPORT{builtin}="path_id"\n'
     printf 'ACTION!="remove", SUBSYSTEM=="tty|usbmisc|net|wwan", SUBSYSTEMS=="usb", ENV{ID_PATH}=="", IMPORT{builtin}="path_id"\n'
-    local pair name id_path
-    for pair in ${slots}; do
+    # Split without globbing: a pattern in a slot path must reach the check below.
+    local pair name id_path slot_list=()
+    read -r -a slot_list <<<"${slots}"
+    for pair in "${slot_list[@]}"; do
       name="${pair%%=*}"
       id_path="${pair#*=}"
       [[ -n "${name}" && -n "${id_path}" && "${name}" != "${id_path}" ]] \
@@ -492,6 +494,10 @@ generate_modem_slot_uid_rules() {
       [[ "$name" != internal_4g ]] || name="internal 4G"
       [[ "${id_path}" =~ ^[A-Za-z0-9._:-]+$ ]] \
         || die "modem slot '${name}' ID_PATH '${id_path}' has a character outside [A-Za-z0-9._:-]"
+      # The slot is the parent usb_device (…-usb-0:1.4), never an interface or
+      # port path (…:1.4:2.0): that form matches neither the device nor its ports.
+      [[ "${id_path}" =~ -usb-[0-9]+:[0-9]+(\.[0-9]+)*$ ]] \
+        || die "modem slot '${name}' ID_PATH '${id_path}' is not a USB device path (…-usb-N:P[.P]…, no interface suffix)"
       printf 'ACTION!="remove", SUBSYSTEM=="usb", ENV{ID_PATH}=="%s", ENV{ID_MM_PHYSDEV_UID}="%s"\n' \
         "${id_path}" "${name}"
       printf 'ACTION!="remove", SUBSYSTEM=="tty|usbmisc|net|wwan", ENV{ID_PATH}=="%s:*", ENV{ID_MM_PHYSDEV_UID}="%s"\n' \

@@ -726,12 +726,31 @@ description: verified modem slots fixture
 modem_ports:
   status: verified
   slots:
-    modem0: platform-fc000000.usb-usb-0:1:1.0
-    modem1: platform-fc400000.usb-usb-0:1:1.0
+    modem0: platform-fc000000.usb-usb-0:1
+    modem1: platform-fc400000.usb-usb-0:1
 YAML
   run validate_manifest "$brd" "$BOARD_SCHEMA"
   [ "$status" -eq 0 ]
   [[ "$output" == *"VALID"* ]]
+}
+
+@test "modem_ports schema: a slot given as an interface or port ID_PATH is REJECTED" {
+  # The net/control port's ID_PATH carries an interface suffix; rules built
+  # from it match neither the USB device nor its ports.
+  local brd="$BATS_TEST_TMPDIR/interface-slot-board.yaml"
+  cat > "$brd" <<'YAML'
+family: rk3588
+board_id: modem-interface-slot
+dtb_name: none
+description: interface path in a modem slot
+modem_ports:
+  status: verified
+  slots:
+    internal_4g: platform-fc800000.usb-usb-0:1.4:2.0
+YAML
+  run validate_manifest "$brd" "$BOARD_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"modem_ports"* ]]
 }
 
 @test "modem_ports schema: an out-of-enum status is REJECTED and names modem_ports" {
@@ -784,14 +803,14 @@ YAML
 }
 
 @test "modem generator MATRIX: a verified fixture EMITS a device and a port ID_MM_PHYSDEV_UID rule per slot" {
-  run_modem_generator verified "modem0=platform-fc000000.usb-usb-0:1:1.0 modem1=platform-fc400000.usb-usb-0:1:1.0"
+  run_modem_generator verified "modem0=platform-fc000000.usb-usb-0:1 modem1=platform-fc400000.usb-usb-0:1"
   [ "$MODEM_GEN_STATUS" -eq 0 ]
   [ -f "$MODEM_GEN_RULES" ]
-  grep -q 'ENV{ID_PATH}=="platform-fc000000.usb-usb-0:1:1.0", ENV{ID_MM_PHYSDEV_UID}="modem0"' "$MODEM_GEN_RULES"
-  grep -q 'ENV{ID_PATH}=="platform-fc400000.usb-usb-0:1:1.0", ENV{ID_MM_PHYSDEV_UID}="modem1"' "$MODEM_GEN_RULES"
+  grep -q 'ENV{ID_PATH}=="platform-fc000000.usb-usb-0:1", ENV{ID_MM_PHYSDEV_UID}="modem0"' "$MODEM_GEN_RULES"
+  grep -q 'ENV{ID_PATH}=="platform-fc400000.usb-usb-0:1", ENV{ID_MM_PHYSDEV_UID}="modem1"' "$MODEM_GEN_RULES"
   # and the same UID on each slot's port devices
-  grep -q 'ENV{ID_PATH}=="platform-fc000000.usb-usb-0:1:1.0:\*", ENV{ID_MM_PHYSDEV_UID}="modem0"' "$MODEM_GEN_RULES"
-  grep -q 'ENV{ID_PATH}=="platform-fc400000.usb-usb-0:1:1.0:\*", ENV{ID_MM_PHYSDEV_UID}="modem1"' "$MODEM_GEN_RULES"
+  grep -q 'ENV{ID_PATH}=="platform-fc000000.usb-usb-0:1:\*", ENV{ID_MM_PHYSDEV_UID}="modem0"' "$MODEM_GEN_RULES"
+  grep -q 'ENV{ID_PATH}=="platform-fc400000.usb-usb-0:1:\*", ENV{ID_MM_PHYSDEV_UID}="modem1"' "$MODEM_GEN_RULES"
   # exactly two emitted RULE lines per slot, device and ports (count ACTION
   # rules, not the header comment line that also mentions ID_MM_PHYSDEV_UID)
   [ "$(grep -c '^ACTION.*ID_MM_PHYSDEV_UID' "$MODEM_GEN_RULES")" -eq 4 ]

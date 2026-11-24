@@ -129,7 +129,7 @@ PYTEST
   [ "$status" -eq 0 ]
   run python3 "$PIPELINE_DIR/tests/modem-slot-uid-grouping.py" "$MODEM_SLOT_RULES_DIR/78-mm-ceralive-slot-uid.rules"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'one "internal 4G" modem in every ordering'* ]]
+  [[ "$output" == *'one "internal 4G" modem in all 130 orderings (128 boot)'* ]]
   # The replay detects the split: the previous usb_device-only rule fails it.
   printf '%s\n' \
     'ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", IMPORT{builtin}="path_id"' \
@@ -155,6 +155,19 @@ PYTEST
     [ "$status" -ne 0 ]
     [[ "$output" == *"has a character outside [A-Za-z0-9._:-]"* ]]
   done
+  # A net or control port's own ID_PATH (interface suffix) is not the slot.
+  for bad in 'platform-fc800000.usb-usb-0:1.4:2.0' 'platform-fc800000.usb' 'platform-fc800000.usb-usb-0'; do
+    run env CERALIVE_MODEM_PORTS_STATUS=verified CERALIVE_MODEM_PORTS_SLOTS="internal_4g=$bad" bash -c 'source "$1/mkosi/customize/postinst-lib.sh"; generate_modem_slot_uid_rules' _ "$PIPELINE_DIR"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"is not a USB device path"* ]]
+  done
+  # Checked before any shell globbing: a file that matches the pattern in the
+  # working directory must not turn it into a valid path.
+  mkdir -p "$BATS_TEST_TMPDIR/cwd"
+  : >"$BATS_TEST_TMPDIR/cwd/internal_4g=platform-fc800000.usb-usb-0:1.4"
+  run env CERALIVE_MODEM_PORTS_STATUS=verified CERALIVE_MODEM_PORTS_SLOTS='internal_4g=platform-fc800000.usb-usb-0:1.*' bash -c 'cd "$2" && source "$1/mkosi/customize/postinst-lib.sh" && generate_modem_slot_uid_rules' _ "$PIPELINE_DIR" "$BATS_TEST_TMPDIR/cwd"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"has a character outside [A-Za-z0-9._:-]"* ]]
 }
 
 @test "internal modem: generated slot UID rules pass udevadm verify" {

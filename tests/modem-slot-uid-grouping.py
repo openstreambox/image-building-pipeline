@@ -31,6 +31,9 @@ SLOT_PORTS = [
     ('tty', SLOT + '/3-1.4:2.3/ttyUSB1/tty/ttyUSB1'),
     ('tty', SLOT + '/3-1.4:2.4/ttyUSB2/tty/ttyUSB2'),
     ('tty', SLOT + '/3-1.4:2.5/ttyUSB3/tty/ttyUSB3'),
+    # Not on this Dell (cdc-wdm stays usbmisc); a WWAN-framework control port
+    # as other modems in the slot would register it.
+    ('wwan', SLOT + '/3-1.4:2.0/wwan0/wwan0mbim0'),
 ]
 OTHER_PORTS = [
     ('net', EXT + '/3-1.1.3:2.0/net/wwu1u1u3c2'),
@@ -128,7 +131,9 @@ def main():
     rules = parse(open(sys.argv[1]).read())
     expect_split = '--expect-split' in sys.argv[2:]
     split = []
+    total = 0
     for name, seen in scenarios(rules):
+        total += 1
         groups = set(seen.values())
         if len(groups) != 1 or groups != {'internal 4G'}:
             split.append((name, sorted(groups)))
@@ -139,12 +144,22 @@ def main():
         rec = run_event(rules, 'add', 'usb', path, 'usb_device')
         assert 'ID_MM_PHYSDEV_UID' not in rec, 'UID leaked onto %s' % path
     assert run_event(rules, 'add', 'usb', SLOT, 'usb_device').get('ID_MM_PHYSDEV_UID') == 'internal 4G'
+    boot = [s for s in split if s[0].startswith('boot-')]
+    mixed = [s for s in boot if len(s[1]) > 1]
     if expect_split:
-        assert split, 'expected the rule set to split or mislabel the slot modem'
-        print('split as expected: %d orderings, e.g. %s %s' % (len(split), *split[0]))
+        # A real split: some boot ordering leaves the ports under two UIDs,
+        # not merely one misnamed group.
+        assert mixed, 'expected two UID groups in some boot ordering, got %s' % split[:3]
+        print('split as expected: %d of %d orderings, %d boot orderings with two UID groups, e.g. %s %s'
+              % (len(split), total, len(mixed), *mixed[0]))
     else:
         assert not split, 'slot modem split or mislabelled: %s' % split[:3]
-        print('one "internal 4G" modem in every ordering')
+        # The parent keeps its own UID through unbind and change, where a port
+        # fallback could hide its loss.
+        for action in ('unbind', 'change', 'bind', 'add'):
+            rec = run_event(rules, action, 'usb', SLOT, 'usb_device')
+            assert rec.get('ID_MM_PHYSDEV_UID') == 'internal 4G', 'usb_device lost the UID on %s' % action
+        print('one "internal 4G" modem in all %d orderings (%d boot)' % (total, total - 2))
 
 
 if __name__ == '__main__':
