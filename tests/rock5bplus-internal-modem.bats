@@ -114,9 +114,68 @@ PYTEST
   [ "$status" -eq 0 ]
   rule="$MODEM_SLOT_RULES_DIR/78-mm-ceralive-slot-uid.rules"
   grep -Fq 'IMPORT{builtin}="path_id"' "$rule"
-  grep -Fxq 'ACTION=="add|bind", SUBSYSTEM=="usb", ENV{ID_PATH}=="platform-fc800000.usb-usb-0:1.4", ENV{ID_MM_PHYSDEV_UID}="internal 4G"' "$rule"
-  [ "$(grep -c 'ID_MM_PHYSDEV_UID}=' "$rule")" -eq 1 ]
+  grep -Fxq 'ACTION!="remove", SUBSYSTEM=="usb", ENV{ID_PATH}=="platform-fc800000.usb-usb-0:1.4", ENV{ID_MM_PHYSDEV_UID}="internal 4G"' "$rule"
+  grep -Fxq 'ACTION!="remove", SUBSYSTEM=="tty|usbmisc|net|wwan", ENV{ID_PATH}=="platform-fc800000.usb-usb-0:1.4:*", ENV{ID_MM_PHYSDEV_UID}="internal 4G"' "$rule"
+  [ "$(grep -c 'ID_MM_PHYSDEV_UID}=' "$rule")" -eq 2 ]
   ! grep -E 'wwan[0-9]|idVendor|1\.1"|NAME=' "$rule"
+}
+
+@test "internal modem: slot UID keeps every Dell port in one modem whatever the event order" {
+  # Replays the ROCK 5B+ slot Dell's udev tree (image 5.1) through the generated
+  # rules and groups ports as ModemManager does: physdev record, then the port's
+  # own record, then the sysfs path. Covers a rebind (ports added while the
+  # usb_device record is the unbind one) and every boot interleaving.
+  run env CERALIVE_MODEM_PORTS_STATUS=verified CERALIVE_MODEM_PORTS_SLOTS='internal_4g=platform-fc800000.usb-usb-0:1.4' bash -c 'source "$1/mkosi/customize/postinst-lib.sh"; generate_modem_slot_uid_rules' _ "$PIPELINE_DIR"
+  [ "$status" -eq 0 ]
+  run python3 "$PIPELINE_DIR/tests/modem-slot-uid-grouping.py" "$MODEM_SLOT_RULES_DIR/78-mm-ceralive-slot-uid.rules"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'one "internal 4G" modem in all 130 orderings (128 boot)'* ]]
+  # The replay detects the split: the previous usb_device-only rule fails it.
+  printf '%s\n' \
+    'ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", IMPORT{builtin}="path_id"' \
+    'ACTION=="add|bind", SUBSYSTEM=="usb", ENV{ID_PATH}=="platform-fc800000.usb-usb-0:1.4", ENV{ID_MM_PHYSDEV_UID}="internal 4G"' \
+    >"$BATS_TEST_TMPDIR/device-only.rules"
+  run python3 "$PIPELINE_DIR/tests/modem-slot-uid-grouping.py" "$BATS_TEST_TMPDIR/device-only.rules" --expect-split
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'split as expected'* ]]
+  # Keeping the device rule on every non-remove event fixes only the rebind;
+  # the boot orderings still split without the port rule.
+  sed -i 's/ACTION=="add|bind"/ACTION!="remove"/' "$BATS_TEST_TMPDIR/device-only.rules"
+  run python3 "$PIPELINE_DIR/tests/modem-slot-uid-grouping.py" "$BATS_TEST_TMPDIR/device-only.rules" --expect-split
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'split as expected'* && "$output" == *'boot-'* ]]
+}
+
+@test "internal modem: slot UID generator refuses an ID_PATH outside the path character allowlist" {
+  # The port rule appends ':*' to the slot path; a pattern or escape character
+  # in the manifest path would change what the match covers.
+  local bad
+  for bad in 'platform-x:1.*' 'platform-x:1.[4]' 'platform-x:1.4|platform-y' 'platform-x:1.?' 'platform-x\:1.4' 'platform-x:1.4"' 'platform-x:1.4/'; do
+    run env CERALIVE_MODEM_PORTS_STATUS=verified CERALIVE_MODEM_PORTS_SLOTS="internal_4g=$bad" bash -c 'source "$1/mkosi/customize/postinst-lib.sh"; generate_modem_slot_uid_rules' _ "$PIPELINE_DIR"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"has a character outside [A-Za-z0-9._:-]"* ]]
+  done
+  # A net or control port's own ID_PATH (interface suffix) is not the slot.
+  for bad in 'platform-fc800000.usb-usb-0:1.4:2.0' 'platform-fc800000.usb' 'platform-fc800000.usb-usb-0'; do
+    run env CERALIVE_MODEM_PORTS_STATUS=verified CERALIVE_MODEM_PORTS_SLOTS="internal_4g=$bad" bash -c 'source "$1/mkosi/customize/postinst-lib.sh"; generate_modem_slot_uid_rules' _ "$PIPELINE_DIR"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"is not a USB device path"* ]]
+  done
+  # Checked before any shell globbing: a file that matches the pattern in the
+  # working directory must not turn it into a valid path.
+  mkdir -p "$BATS_TEST_TMPDIR/cwd"
+  : >"$BATS_TEST_TMPDIR/cwd/internal_4g=platform-fc800000.usb-usb-0:1.4"
+  run env CERALIVE_MODEM_PORTS_STATUS=verified CERALIVE_MODEM_PORTS_SLOTS='internal_4g=platform-fc800000.usb-usb-0:1.*' bash -c 'cd "$2" && source "$1/mkosi/customize/postinst-lib.sh" && generate_modem_slot_uid_rules' _ "$PIPELINE_DIR" "$BATS_TEST_TMPDIR/cwd"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"has a character outside [A-Za-z0-9._:-]"* ]]
+}
+
+@test "internal modem: generated slot UID rules pass udevadm verify" {
+  command -v udevadm >/dev/null && udevadm verify --help >/dev/null 2>&1 || skip 'udevadm verify (systemd 254+) not available'
+  run env CERALIVE_MODEM_PORTS_STATUS=verified CERALIVE_MODEM_PORTS_SLOTS='internal_4g=platform-fc800000.usb-usb-0:1.4' bash -c 'source "$1/mkosi/customize/postinst-lib.sh"; generate_modem_slot_uid_rules' _ "$PIPELINE_DIR"
+  [ "$status" -eq 0 ]
+  run udevadm verify --resolve-names=never "$MODEM_SLOT_RULES_DIR/78-mm-ceralive-slot-uid.rules"
+  [ "$status" -eq 0 ]
 }
 
 @test "internal modem: both runtime installers invoke shared naming and rfkill policy" {

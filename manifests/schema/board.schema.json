@@ -77,7 +77,7 @@
       }
     },
     "modem_ports": {
-      "description": "Per-board physical modem-slot identity map for deterministic ModemManager slot-UID naming. Optional. `status` gates whether the udev generator (mkosi/customize/udev.sh generate_modem_slot_uid_rules) emits any generated 78-mm-ceralive-slot-uid.rules: while `unverified` (the default until a physical modem on this exact board model is used to read each slot's real ID_PATH) NO generated slot-uid rules are emitted — fail-closed, no permissive fallback; the permanent generic modem group-tag rules in setup_hardware_access are unaffected. When `verified`, `slots` maps each physical slot name (modemN) to the ID_PATH string read from `udevadm info` on hardware, and the generator emits one ENV{ID_MM_PHYSDEV_UID} rule per slot. Discovery runbook: docs/modem-matrix.md §7.",
+      "description": "Per-board physical modem-slot identity map for deterministic ModemManager slot-UID naming. Optional. `status` gates whether the udev generator (mkosi/customize/udev.sh generate_modem_slot_uid_rules) emits any generated 78-mm-ceralive-slot-uid.rules: while `unverified` (the default until a physical modem on this exact board model is used to read each slot's real ID_PATH) NO generated slot-uid rules are emitted — fail-closed, no permissive fallback; the permanent generic modem group-tag rules in setup_hardware_access are unaffected. When `verified`, `slots` maps each physical slot name (modemN or internal_4g) to the ID_PATH of the slot's parent USB device read on hardware (for example `platform-fc800000.usb-usb-0:1.4`, never an interface path with a `:C.I` suffix), and the generator emits two ENV{ID_MM_PHYSDEV_UID} rules per slot: one for the USB device and one for its tty/usbmisc/net/wwan ports. Discovery runbook: docs/modem-matrix.md §7.",
       "type": "object",
       "additionalProperties": false,
       "required": ["status"],
@@ -88,9 +88,9 @@
           "enum": ["unverified", "verified"]
         },
         "slots": {
-          "description": "Map of physical modem-slot name (internal_4g or modem0, modem1, …) to the udev ID_PATH of that slot (read from `udevadm info /sys/class/net/<iface>` or the modem's USB device). Only meaningful when status is `verified`.",
+          "description": "Map of physical modem-slot name (internal_4g or modem0, modem1, …) to the udev ID_PATH of the slot's parent USB device (`udevadm test-builtin path_id` on the usb_device, e.g. `platform-fc800000.usb-usb-0:1.4`; not a net or control port, whose ID_PATH carries an interface suffix). Only meaningful when status is `verified`.",
           "type": "object",
-          "additionalProperties": { "type": "string", "minLength": 1 },
+          "additionalProperties": { "type": "string", "pattern": "^[A-Za-z0-9._:-]*-usb-[0-9]+:[0-9]+(\\.[0-9]+)*$" },
           "propertyNames": { "pattern": "^(modem[0-9]+|internal_4g)$" }
         }
       }
