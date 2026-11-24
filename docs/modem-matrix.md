@@ -206,50 +206,64 @@ Whether an unlock survives a module restart has not been measured.
 `99-ceralive-modem-carrierlock.rules` starts `ceralive-modem-carrierlock@<usb device>.service`
 for every added `0e8d:7127` device. The script
 (`mkosi/runtime/ceralive-modem-carrierlock.py`, installed as
-`/usr/local/sbin/ceralive-modem-carrierlock`):
+`/usr/local/sbin/ceralive-modem-carrierlock`) is **off by default**: it acts
+only while `/data/ceralive/modem-carrierlock.enabled` exists, never while
+`/data/ceralive/modem-carrierlock.disabled` exists, and never without a
+writable `/data/ceralive` (where those files and its records live). The
+default flips (`DEFAULT_ENABLED`) once a hardware run has shown the unlock
+path. When on, it:
 
-- holds back while `srtla_send` runs or `/data/ceralive/modem-carrierlock.disabled`
-  exists, and checks both again before asking ModemManager for the modem and
-  before switching the radio off;
+- holds back while `srtla_send` runs, and checks the switch files, the stream
+  and its ModemManager hold again before asking for the modem, before
+  switching the radio off and before the unlock;
 - waits for ModemManager to list the modem with a SIM and accepts only model
   `FM350-GL`;
-- leaves a unit with a Verizon SIM alone: an unlocked unit selects the Verizon
-  profile, and this firmware crash-loops with a Verizon SIM. The Verizon home
-  PLMNs are CeraUI's carrier-table row (`subscription-policy.ts`); every other
-  SIM, known or not, may be unlocked, since the module then picks its own
-  profile;
-- acts once per unit and SIM per boot (markers in `/run/ceralive/modem-carrierlock/`)
-  and holds nothing for a unit its record shows unlocked on a boot after any
-  unlock by this service;
+- unlocks only for a SIM whose home network is AT&T (310280, 310410) or
+  T-Mobile (310240, 310260), the carriers an unlocked FM350-GL was measured
+  selecting (201, 203) and connecting on. The rows are CeraUI's carrier table
+  (`subscription-policy.ts`). A Verizon SIM (CeraUI's `verizon` row) is left
+  alone because an unlocked unit selects the Verizon profile and this firmware
+  crash-loops with a Verizon SIM; so is every other SIM;
+- acts once per unit and SIM per boot (markers in `/run/ceralive/modem-carrierlock/`).
+  It does not hold a unit whose record shows it unlocked, read on a host boot
+  after any unlock by this service, within the last 7 days;
 - holds the modem with `mmcli --inhibit-device` (ModemManager's polling would
   otherwise take answers on the same port), talks to ModemManager's `(at)` port
   on USB interface 6, checks `AT+CIMI` against ModemManager's IMSI and reads
   `AT+GTLOCKCAR?` and `AT+GTCURCAR?` (unsolicited `+CIEV`/`+EDSBP` lines and the
-  HTML-escaped `"AT&amp;T"` are expected);
+  HTML-escaped `"AT&amp;T"` are expected; an answer without its final `OK`
+  stops the run);
 - for a locked unit only: `AT+CFUN?` (1 or 4, anything else stops), `AT+CFUN=4`
   if the radio was on, `AT+GTLOCKCAR=0`, both reads again (the lock must read
   `0,65535`), then `AT+CFUN=1` if the radio was on. It never writes a lock and
-  never sends `AT+GTACT`;
-- if the module restarts on the unlock, records `restarted`; the instance
-  started by its return reads the lock back and writes nothing.
+  never sends `AT+GTACT`. A radio it switched off and cannot switch on again
+  is logged as an error and the unit is left alone from then on. A SIGTERM
+  during the unlock switches the radio back on before exit, and the unlock
+  does not start unless the run budget can finish it;
+- if the module restarts on the unlock, records `restarted` with the radio
+  state it found and exits at once (the module takes seconds to come back, so
+  its return starts a new instance). That instance reads the lock back,
+  writes nothing, and switches the radio on if it was on before and the
+  module left it off.
 
 The per-unit record is `/data/ceralive/modem-carrierlock/<unit>.json`
 (HMAC-SHA256 of `/etc/machine-id` and the IMEI, cut to 16 hex digits). It keeps
 the first lock and profile seen, the last ones, the SIM's home PLMN (never the
-IMSI), the last outcome and a short history. A refused or failed unlock leaves
-the unit alone on later boots; a lock that comes back after an unlock is
-unlocked again and the unit is read on every boot from then on.
+IMSI), the last outcome, the unlock count and a short history. A refused or
+failed unlock leaves the unit alone on later boots. A lock that comes back
+after an unlock is unlocked again (once per boot), the unit is read on every
+boot from then on, and it is left alone after 3 unlocks.
 `touch /data/ceralive/modem-carrierlock.retry` forgets every unit's recorded
-lock and last outcome once (a lock that came back keeps its unit read on every
-boot). A SIGTERM during the unlock switches the radio back on before exit, and
-the unlock does not start unless the run budget can finish it. Every decision is one journal line
-(`journalctl -u 'ceralive-modem-carrierlock@*'`). To put a lock back: create the
-`.disabled` file, then with ModemManager held send `AT+CFUN=4`,
+lock, last outcome and unlock count once. Every decision is one journal line
+(`journalctl -u 'ceralive-modem-carrierlock@*'`). To put a lock back: create
+the `.disabled` file, then with ModemManager held send `AT+CFUN=4`,
 `AT+GTLOCKCAR=1,<original id>`, `AT+CFUN=1`.
 
 Notes: holding the modem makes ModemManager drop it and probe it again, so a
-unit is held only while its state is unknown or locked. Mode 40 (`0e8d:7126`)
-has its AT port on interface 4 and is not handled. No hardware run of this
+unit is held only while its state is unknown, stale or locked. Mode 40
+(`0e8d:7126`) has its AT port on interface 4 and is not handled. An unlocked
+unit that later gets a Verizon SIM selects the Verizon profile by itself; that
+is the firmware's behaviour, not this service's. No hardware run of this
 service has been made; the decisions are tested against recorded answers
 (`tests/modem-carrierlock-test.py`).
 

@@ -87,7 +87,11 @@ FAKE_MMCLI = textwrap.dedent('''\
         print("successfully inhibited device with uid '%s'" % args[0].split('=', 1)[1], flush=True)
         print('type Ctrl+C to abort this program and remove the inhibition', flush=True)
         while True:
-            time.sleep(1)
+            time.sleep(0.05)
+            if state.get('drop_hold') and Path(state['drop_hold']).exists():
+                with open(os.environ['FAKE_MM_LOG'], 'a') as log:
+                    log.write('hold-ended\\n')
+                sys.exit(0)
     print('unexpected mmcli call', file=sys.stderr); sys.exit(64)
 ''')
 
@@ -111,6 +115,7 @@ class FakeFm350(threading.Thread):
         self.radio_on_reply = None
         self.read_error = None      # command whose answer is ERROR
         self.silent = set()         # commands that get no answer at all
+        self.no_final = set()       # commands answered without the final OK (as recorded once)
         self.hooks = {}             # command -> callable run after the reply
         self.before = {}            # command -> callable run before the reply
         self.commands, self.stop = [], threading.Event()
@@ -188,7 +193,10 @@ class FakeFm350(threading.Thread):
                     self.reply(command + '\r\n')
                 if command not in self.silent:
                     self.noise()
-                    self.reply(self.answer(command))
+                    answer = self.answer(command)
+                    if command in self.no_final:
+                        answer = answer.replace('\r\nOK\r\n', '')
+                    self.reply(answer)
                 hook = self.hooks.get(command)
                 if hook:
                     hook()
@@ -213,6 +221,10 @@ class CarrierLock(unittest.TestCase):
             d.mkdir(parents=True)
         self.machine_id = self.tmp / 'machine-id'
         self.machine_id.write_text(MACHINE_ID + '\n')
+        self.boot_id = self.tmp / 'boot_id'
+        self.boot_id.write_text('boot-1\n')
+        self.enabled = self.data / 'modem-carrierlock.enabled'
+        self.enabled.touch()
         self.device = self.sys / 'devices/platform/fcd00000.usb/xhci-hcd.9.auto/usb10/10-1' / PORT
         self.add_device()
         self.modem = FakeFm350()
@@ -248,9 +260,9 @@ class CarrierLock(unittest.TestCase):
         (self.sys / 'bus/usb/devices' / PORT).unlink()
         shutil.rmtree(self.device)
 
-    def restart_on(self, command, back=True):
+    def restart_on(self, command, back=True, radio_after='1'):
         """The module applies `command`, sends no answer and drops off the bus
-        (and comes back)."""
+        (and comes back, its radio as the module's own boot leaves it)."""
         self.modem.silent.add(command)
 
         def later():
@@ -259,6 +271,7 @@ class CarrierLock(unittest.TestCase):
             self.remove_device()
             if back:
                 time.sleep(0.3)
+                self.modem.radio = radio_after
                 self.add_device()
         self.modem.hooks[command] = lambda: threading.Thread(target=later, daemon=True).start()
 
@@ -296,6 +309,7 @@ class CarrierLock(unittest.TestCase):
                    CERALIVE_CARRIERLOCK_PROC=str(self.proc), CERALIVE_CARRIERLOCK_RUN=str(self.run_dir),
                    CERALIVE_CARRIERLOCK_DATA=str(self.data / 'modem-carrierlock'),
                    CERALIVE_CARRIERLOCK_MACHINE_ID=str(self.machine_id),
+                   CERALIVE_CARRIERLOCK_BOOT_ID=str(self.boot_id),
                    CERALIVE_CARRIERLOCK_MMCLI=str(self.mmcli), CERALIVE_CARRIERLOCK_MM_WAIT='0.5',
                    CERALIVE_CARRIERLOCK_POLL='0.05', CERALIVE_CARRIERLOCK_AT_TIMEOUT='0.5',
                    CERALIVE_CARRIERLOCK_LOCK_TIMEOUT='0.5', CERALIVE_CARRIERLOCK_PORT_WAIT='0.5',
@@ -309,6 +323,7 @@ class CarrierLock(unittest.TestCase):
         return subprocess.CompletedProcess(self.child.args, self.child.returncode, stdout, stderr)
 
     def new_boot(self):
+        self.boot_id.write_text(f'boot-{time.monotonic_ns()}\n')
         shutil.rmtree(self.run_dir)
         self.run_dir.mkdir()
         self.modem.commands.clear()
@@ -386,16 +401,23 @@ class CarrierLock(unittest.TestCase):
         self.invoke()
         self.assertEqual(self.marker()['phase'], 'unlocked-by-service')
 
-    def test_sims_outside_the_table_are_unlocked_too(self):
-        for imsi in ('310150123456789', '262011234567890'):
+    def test_sims_outside_the_measured_carriers_are_left_alone(self):
+        for imsi in ('310150123456789', '262011234567890', '311490123456789'):
+            with self.subTest(imsi=imsi):
+                self.sim(imsi)
+                done = self.invoke()
+                self.assertUntouched(done)
+                self.assertIn(f'SIM home network {imsi[:6]} is not one', done.stdout)
+
+    def test_every_qualified_row_unlocks(self):
+        for imsi in ('310280123456789', '310410123456789', '310240123456789', '310260123456789'):
             with self.subTest(imsi=imsi):
                 self.new_boot()
                 shutil.rmtree(self.data / 'modem-carrierlock', ignore_errors=True)
-                self.modem.lock, self.modem.profile = ('1', '203'), '203'
+                self.modem.lock, self.modem.profile = ('1', '101'), '101'
                 self.sim(imsi)
                 self.invoke()
                 self.assertEqual(self.modem.lock, ('0', '65535'))
-                self.assertEqual(self.marker()['plmn'], imsi[:6])
 
     def test_radio_already_off_is_left_off(self):
         self.modem.radio = '4'
@@ -411,7 +433,7 @@ class CarrierLock(unittest.TestCase):
         self.new_boot()
         done = self.invoke()
         self.assertEqual(self.modem.commands, READS)
-        self.assertIn("the unlock held across the restart", done.stdout, done.stderr)
+        self.assertIn("the unlock held across a restart", done.stdout, done.stderr)
         self.assertEqual(self.record()['status'], 'unlocked')
         self.new_boot()
         done = self.invoke()
@@ -419,7 +441,7 @@ class CarrierLock(unittest.TestCase):
         self.assertEqual(self.marker()['phase'], 'unlocked')
         self.assertIn('recorded as unlocked', done.stdout)
 
-    def test_unlocked_unit_is_read_once_and_never_held_again(self):
+    def test_unlocked_unit_is_read_once_and_trusted_after(self):
         self.modem.lock, self.modem.profile = ('0', '65535'), '201'
         self.sim(ATT_IMSI)
         done = self.invoke()
@@ -446,6 +468,42 @@ class CarrierLock(unittest.TestCase):
             self.invoke()
             self.assertEqual(self.modem.commands, READS)
 
+    def test_a_second_sim_in_the_same_boot_does_not_prove_the_unlock_held(self):
+        self.invoke()
+        self.modem.commands.clear()
+        self.sim(ATT_IMSI)
+        done = self.invoke()
+        self.assertEqual(self.modem.commands, READS)
+        self.assertEqual(self.record()['status'], 'unlocked-by-service')
+        self.assertIn('unlocked earlier this boot', done.stdout)
+        self.new_boot()
+        self.invoke()
+        self.assertEqual(self.modem.commands, READS)
+        self.assertEqual(self.record()['status'], 'unlocked')
+
+    def test_a_trusted_record_expires(self):
+        self.modem.lock = ('0', '65535')
+        self.invoke()
+        self.new_boot()
+        self.assertUntouched(self.invoke())
+        self.new_boot()
+        self.invoke(CERALIVE_CARRIERLOCK_RECHECK_DAYS='0')
+        self.assertEqual(self.modem.commands, READS)
+
+    def test_a_lock_that_keeps_returning_is_given_up(self):
+        for _ in range(3):
+            self.modem.lock = ('1', '203')
+            self.invoke()
+            self.assertEqual(self.modem.lock, ('0', '65535'))
+            self.new_boot()
+        self.modem.lock = ('1', '203')
+        done = self.invoke()
+        self.assertEqual(self.modem.commands, READS)
+        self.assertEqual(self.record()['status'], 'lock-keeps-returning')
+        self.assertIn('after 3 unlocks', done.stdout)
+        self.new_boot()
+        self.assertUntouched(self.invoke())
+
     def test_once_per_unit_and_sim_per_boot(self):
         self.invoke()
         sent = list(self.modem.commands)
@@ -469,14 +527,14 @@ class CarrierLock(unittest.TestCase):
     def test_restart_on_the_unlock_is_verified_read_only_by_the_return(self):
         self.restart_on('AT+GTLOCKCAR=0')
         done = self.invoke()
-        self.assertEqual(self.marker()['phase'], 'restarted')
+        self.assertEqual((self.marker()['phase'], self.marker()['radio']), ('restarted', '1'))
         self.assertIn('module restarted on AT+GTLOCKCAR=0', done.stdout)
         self.assertEqual(self.mm_calls()[-1], 'released')
         self.modem.commands.clear()
         self.modem.silent.clear()
         self.modem.hooks.clear()
         done = self.invoke()
-        self.assertEqual(self.modem.commands, READS, done.stdout + done.stderr)
+        self.assertEqual(self.modem.commands, READS + ['AT+CFUN?'], done.stdout + done.stderr)
         self.assertEqual(self.marker()['phase'], 'unlocked-by-service')
         self.assertEqual(self.record()['status'], 'unlocked-by-service')
 
@@ -488,7 +546,7 @@ class CarrierLock(unittest.TestCase):
         self.modem.silent.clear()
         self.modem.hooks.clear()
         done = self.invoke()
-        self.assertEqual(self.modem.commands, READS)
+        self.assertEqual(self.modem.commands, READS + ['AT+CFUN?'])
         self.assertEqual(self.record()['status'], 'failed')
         self.assertIn('recorded as failed', done.stdout)
         self.new_boot()
@@ -509,6 +567,40 @@ class CarrierLock(unittest.TestCase):
         self.assertEqual(self.marker()['phase'], 'restarted')
         self.assertEqual(self.record()['status'], 'unlocked-by-service')
 
+    def test_return_with_the_radio_left_off_switches_it_back_on(self):
+        self.restart_on('AT+GTLOCKCAR=0', radio_after='4')
+        self.invoke()
+        self.modem.commands.clear()
+        self.modem.silent.clear()
+        self.modem.hooks.clear()
+        done = self.invoke()
+        self.assertEqual(self.modem.commands, READS + ['AT+CFUN?', 'AT+CFUN=1'])
+        self.assertEqual(self.modem.radio, '1')
+        self.assertEqual(self.marker()['phase'], 'unlocked-by-service')
+        self.assertIn('switching it on', done.stdout)
+
+    def test_return_whose_radio_will_not_come_on_is_an_error(self):
+        self.restart_on('AT+GTLOCKCAR=0', radio_after='4')
+        self.invoke()
+        self.modem.commands.clear()
+        self.modem.silent.clear()
+        self.modem.hooks.clear()
+        self.modem.radio_on_reply = 'ERROR'
+        done = self.invoke()
+        self.assertEqual(self.record()['status'], 'radio-not-back')
+        self.assertIn('<3>', done.stdout)
+
+    def test_return_of_a_unit_that_was_off_leaves_its_radio_alone(self):
+        self.modem.radio = '4'
+        self.restart_on('AT+GTLOCKCAR=0', radio_after='4')
+        self.invoke()
+        self.modem.commands.clear()
+        self.modem.silent.clear()
+        self.modem.hooks.clear()
+        self.invoke()
+        self.assertEqual(self.modem.commands, READS)
+        self.assertEqual(self.modem.radio, '4')
+
     # --- refusals and odd answers ---------------------------------------------
 
     def test_refused_unlock_puts_the_radio_back_and_gives_up_until_retry(self):
@@ -528,6 +620,13 @@ class CarrierLock(unittest.TestCase):
         self.assertFalse((self.data / 'modem-carrierlock.retry').exists())
         self.assertEqual(self.modem.lock, ('0', '65535'))
         self.assertEqual(self.record()['original_lock'], '1,203')
+
+    def test_refused_unlock_whose_radio_will_not_come_back_is_an_error(self):
+        self.modem.unlock_reply = 'ERROR'
+        self.modem.radio_on_reply = 'ERROR'
+        done = self.invoke()
+        self.assertEqual(self.record()['status'], 'radio-not-back')
+        self.assertIn('<3>', done.stdout)
 
     def test_unlock_that_does_not_take_is_failed(self):
         self.modem.ignore_unlock = True
@@ -554,6 +653,13 @@ class CarrierLock(unittest.TestCase):
         self.assertEqual(self.modem.lock, ('0', '65535'))
         self.assertEqual(self.record()['status'], 'radio-not-back')
         self.assertIn('<3>', done.stdout)
+
+    def test_answer_without_its_final_ok_writes_nothing(self):
+        self.modem.unsolicited = True
+        self.modem.no_final.add('AT+GTLOCKCAR?')
+        self.invoke()
+        self.assertEqual(self.modem.commands, READS)
+        self.assertEqual(self.marker()['phase'], 'read-failed')
 
     def test_unexpected_lock_mode_writes_nothing(self):
         self.modem.lock = ('2', '5')
@@ -631,6 +737,66 @@ class CarrierLock(unittest.TestCase):
         self.assertEqual(self.mm_calls()[-1], 'released')
         self.assertIsNone(self.marker())
         self.assertIn('nothing written, released', done.stdout)
+
+    def test_off_by_default(self):
+        self.enabled.unlink()
+        done = self.invoke()
+        self.assertUntouched(done)
+        self.assertEqual(self.mm_calls(), [])
+        self.assertIn('off by default', done.stdout)
+
+    def test_kill_switch_wins_over_the_enable_file(self):
+        (self.data / 'modem-carrierlock.disabled').touch()
+        self.assertUntouched(self.invoke())
+        self.assertEqual(self.mm_calls(), [])
+
+    def test_no_data_dir_leaves_it_alone(self):
+        shutil.rmtree(self.data)
+        done = self.invoke()
+        self.assertUntouched(done)
+        self.assertEqual(self.mm_calls(), [])
+        self.assertIn('missing or not writable', done.stdout)
+
+    def test_read_only_data_dir_leaves_it_alone(self):
+        self.data.chmod(0o555)
+        self.addCleanup(self.data.chmod, 0o755)
+        if os.access(self.data, os.W_OK):
+            self.skipTest('running as root')
+        self.assertUntouched(self.invoke())
+
+    def test_stream_starting_during_the_radio_read_stops_before_the_radio(self):
+        self.modem.before['AT+CFUN?'] = self.stream_starts
+        self.invoke()
+        self.assertEqual(self.modem.commands, READS + ['AT+CFUN?'])
+        self.assertEqual(self.modem.radio, '1')
+        self.assertIsNone(self.marker())
+
+    def test_kill_switch_appearing_with_the_radio_off_stops_before_the_unlock(self):
+        self.modem.before['AT+CFUN=4'] = lambda: (self.data / 'modem-carrierlock.disabled').touch()
+        done = self.invoke()
+        self.assertNoWrite()
+        self.assertEqual(self.modem.commands[-1], 'AT+CFUN=1')
+        self.assertEqual((self.modem.radio, self.modem.lock), ('1', ('1', '203')))
+        self.assertEqual(self.marker()['phase'], 'interrupted')
+        self.assertIn('nothing written, radio put back', done.stdout)
+        self.new_boot()
+        (self.data / 'modem-carrierlock.disabled').unlink()
+        self.modem.before.clear()
+        done = self.invoke()
+        self.assertEqual(self.modem.lock, ('0', '65535'), done.stdout)
+
+    def test_a_hold_that_ends_stops_before_the_unlock(self):
+        drop = self.tmp / 'drop-hold'
+        self.mm(extra={'drop_hold': str(drop)})
+
+        def lose_hold():
+            drop.touch()
+            time.sleep(0.3)
+        self.modem.before['AT+CFUN=4'] = lose_hold
+        done = self.invoke()
+        self.assertNoWrite()
+        self.assertEqual(self.modem.radio, '1')
+        self.assertIn('the ModemManager hold ended', done.stdout)
 
     def test_kill_switch(self):
         (self.data / 'modem-carrierlock.disabled').touch()
@@ -715,7 +881,7 @@ class CarrierLock(unittest.TestCase):
     def test_no_unlock_starts_without_the_budget_to_finish_it(self):
         done = self.invoke(CERALIVE_CARRIERLOCK_BUDGET='30', CERALIVE_CARRIERLOCK_LOCK_TIMEOUT='10',
                            CERALIVE_CARRIERLOCK_LEAVE_WAIT='15')
-        self.assertEqual(self.modem.commands, READS + ['AT+CFUN?'])
+        self.assertEqual(self.modem.commands, READS)
         self.assertEqual(self.marker()['phase'], 'no-time')
         self.assertEqual(self.modem.radio, '1')
         self.assertIn('nothing written', done.stdout)
@@ -743,11 +909,6 @@ class CarrierLock(unittest.TestCase):
         self.assertNotIn(TMO_IMSI, stored)
         self.assertIn('310240', stored)
 
-    def test_no_record_dir_still_acts_and_logs(self):
-        shutil.rmtree(self.data)
-        done = self.invoke()
-        self.assertEqual(self.marker()['phase'], 'unlocked-by-service')
-        self.assertIn('only in the journal', done.stdout)
 
 
 class AtPortWrite(unittest.TestCase):
