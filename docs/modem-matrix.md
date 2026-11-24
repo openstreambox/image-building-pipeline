@@ -186,6 +186,100 @@ matches with `udevadm test` against a generated sysfs.
 
 ---
 
+### 3c. FM350-GL carrier unlock (`ceralive-modem-carrierlock`)
+
+A Fibocom FM350-GL with no carrier lock (`AT+GTLOCKCAR?` → `0,65535`) picks its
+carrier profile from the SIM. A unit locked with `AT+GTLOCKCAR=1,<id>` (Fibocom
+ids: Generic 1, Verizon 101, AT&T 201, T-Mobile 203) keeps that profile whatever
+SIM goes in, and the lock survived module restarts although Fibocom's AT manual
+V2.10 §3.27 calls it non-persistent. Measured on firmware
+`81600.0000.00.29.18.01`, USB mode 41 (`0e8d:7127`), with ModemManager held off:
+
+| Command | Radio on | Radio off (`AT+CFUN=4`) |
+|---|---|---|
+| `AT+GTLOCKCAR=0` | `ERROR` | `OK`; the lock then reads `0,65535` and the profile follows the SIM |
+| `AT+GTLOCKCAR=0,65535`, `=0,<id>` | `ERROR` | `+CME ERROR: 0` / `phone failure` |
+| `AT+GTLOCKCAR=1,<id>` equal to the current lock | `ERROR` | `ERROR` |
+
+Whether an unlock survives a module restart has not been measured.
+
+`99-ceralive-modem-carrierlock.rules` starts `ceralive-modem-carrierlock@<usb device>.service`
+for every added `0e8d:7127` device. The script
+(`mkosi/runtime/ceralive-modem-carrierlock.py`, installed as
+`/usr/local/sbin/ceralive-modem-carrierlock`) is **off by default**: it acts
+only while `/data/ceralive/modem-carrierlock.enabled` exists, never while
+`/data/ceralive/modem-carrierlock.disabled` exists, and never without a
+writable `/data/ceralive` (where those files and its records live). The
+default flips (`DEFAULT_ENABLED`) once a hardware run has shown the unlock
+path. When on, it:
+
+- holds back while `srtla_send` runs, and checks the switch files, the stream
+  and its ModemManager hold again before asking for the modem, before
+  switching the radio off and before the unlock;
+- waits for ModemManager to list the modem with a SIM and accepts only model
+  `FM350-GL` on firmware `81600.0000.00.29.18.01`, the one the answers were
+  recorded on;
+- unlocks only for a SIM whose home network is AT&T (310280, 310410) or
+  T-Mobile (310240, 310260), the carriers an unlocked FM350-GL was measured
+  selecting (201, 203) and connecting on. The rows are CeraUI's carrier table
+  (`subscription-policy.ts`). A Verizon SIM (CeraUI's `verizon` row) is left
+  alone because an unlocked unit selects the Verizon profile and this firmware
+  crash-loops with a Verizon SIM; so is every other SIM;
+- acts once per unit and SIM per boot (markers in `/run/ceralive/modem-carrierlock/`).
+  It does not hold a unit whose record shows it unlocked, read on a host boot
+  after any unlock by this service, within the last 7 days;
+- holds the modem with `mmcli --inhibit-device` (ModemManager's polling would
+  otherwise take answers on the same port), talks to ModemManager's `(at)` port
+  on USB interface 6, checks `AT+CIMI` against ModemManager's IMSI and reads
+  `AT+GTLOCKCAR?` and `AT+GTCURCAR?` (unsolicited `+CIEV`/`+EDSBP` lines and the
+  HTML-escaped `"AT&amp;T"` are expected; an answer without its final `OK`,
+  a carrier id outside Fibocom's list (1, 101, 201, 203) or a hold that ended
+  stops the run);
+- for a locked unit only: `AT+CFUN?` (1 or 4, anything else stops), `AT+CFUN=4`
+  if the radio was on, `AT+GTLOCKCAR=0`, both reads again (the lock must read
+  `0,65535`), then `AT+CFUN=1` if the radio was on, confirmed by `AT+CFUN?`
+  reading 1. It never writes a lock and never sends `AT+GTACT`. The attempt is
+  counted in the record before anything is sent (no record, no unlock), and
+  an answer that stops a run counts as a misread; after 3 misreads that no
+  recorded read has reset, the unit is left alone. A radio it switched off and cannot
+  switch on again is logged as an error and the unit is left alone from then
+  on. A SIGTERM during the unlock switches the radio back on before exit
+  (the unit has `KillMode=mixed`, so a stop signals the script first and the
+  ModemManager hold lasts meanwhile), and the unlock does not start unless
+  the run budget can finish it;
+- if the module restarts on the unlock, records `restarted` with the radio
+  state it found and exits at once (the module takes seconds to come back, so
+  its return starts a new instance; the module also switches its own radio on
+  a few seconds into every boot). That instance reads the lock back, writes
+  nothing, and switches the radio on if it was on before and the module left
+  it off. If it cannot read the unit (a refused hold, a busy port), the check
+  stays pending for a later appearance.
+
+The per-unit record is `/data/ceralive/modem-carrierlock/<unit>.json`
+(HMAC-SHA256 of `/etc/machine-id` and the IMEI, cut to 16 hex digits). It keeps
+the first lock and profile seen, the last ones, the SIM's home PLMN (never the
+IMSI), the last outcome, the unlock count and a short history. A refused or
+failed unlock leaves the unit alone on later boots. A lock that comes back
+after an unlock is unlocked again (once per boot), the unit is read on every
+boot from then on, and it is left alone after 3 unlocks.
+`touch /data/ceralive/modem-carrierlock.retry` forgets every unit's recorded
+lock, last outcome and unlock count once. Every decision is one journal line
+(`journalctl -u 'ceralive-modem-carrierlock@*'`). To put a lock back: create
+the `.disabled` file, then with ModemManager held send `AT+CFUN=4`,
+`AT+GTLOCKCAR=1,<original id>`, `AT+CFUN=1`.
+
+Notes: holding the modem makes ModemManager drop it and probe it again, so a
+unit is held only while its state is unknown, stale or locked. A later host
+boot is taken as evidence that an unlock survived a module restart; whether a
+warm reboot power-cycles the module is not measured, so the 7-day expiry
+bounds how long a relock that only a power cycle brings back would go
+unnoticed. Mode 40
+(`0e8d:7126`) has its AT port on interface 4 and is not handled. An unlocked
+unit that later gets a Verizon SIM selects the Verizon profile by itself; that
+is the firmware's behaviour, not this service's. No hardware run of this
+service has been made; the decisions are tested against recorded answers
+(`tests/modem-carrierlock-test.py`).
+
 ## 4. SRTLA modem source-routing — RETIRED
 
 **There is no per-modem source-routing layer any more.** Bonded streaming pins

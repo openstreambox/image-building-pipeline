@@ -1,0 +1,8 @@
+# CeraLive: unlock a carrier-locked Fibocom FM350-GL (AT+GTLOCKCAR=0) so its
+# carrier profile follows the SIM again; see the script's header.
+# One oneshot instance per added USB device (coldplug included), keyed by its
+# kernel name, e.g. ceralive-modem-carrierlock@10-1.4.service. 0e8d:7127 is the
+# FM350-GL's USB mode 41 (RNDIS); the model check and every decision are in the
+# script. add-only: a module that restarts on the unlock comes back as a new
+# device whose own instance reads the lock back.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="7127", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ceralive-modem-carrierlock@%k.service"

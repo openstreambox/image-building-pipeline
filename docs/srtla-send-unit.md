@@ -71,8 +71,8 @@ change, not for shipping the dormant unit:
   (ordering only; it neither starts the sender nor waits for readiness).
 - The legacy `ceralive-update` OTA guard refuses to install while
   `srtla-send.service` is active.
-- `ceralive-modem-usbspeed` holds back while a process named `srtla_send`
-  runs; the launcher's exec keeps that name.
+- `ceralive-modem-usbspeed` and `ceralive-modem-carrierlock` hold back while a
+  process named `srtla_send` runs; the launcher's exec keeps that name.
 
 Until CeraUI follows this contract the image behaves exactly as before: the
 unit stays inactive and CeraUI keeps spawning the sender itself.
