@@ -438,6 +438,16 @@ QUIRK_M2_SIM
 # ID_MM_PHYSDEV_UID so ModemManager reports a deterministic slot identity
 # regardless of ttyUSB enumeration order.
 #
+# The UID goes on the usb_device AND on every port under it (tty, usbmisc, net,
+# wwan). ModemManager reads the physdev's udev record first and falls back to the
+# port's own property, then to the physdev sysfs path; ports whose UIDs differ
+# become separate modems. A port added while the usb_device's record lacks the
+# UID (after an unbind, or before its event is processed during a boot-time
+# re-enumeration) would otherwise get the sysfs-path UID and split off from the
+# ports that saw "internal 4G". With the UID on each port's own event the
+# fallback is the same name, so grouping no longer depends on event order.
+# Ports match `<ID_PATH>:*`: the interface suffix, never a deeper hub port.
+#
 # FAIL-CLOSED (no permissive fallback): any status other than an explicit
 # `verified` — `unverified` (the shipped default), unset, or anything else —
 # emits ZERO generated slot-uid rules and removes any stale generated file, so an
@@ -464,8 +474,10 @@ generate_modem_slot_uid_rules() {
     printf '# CeraLive generated modem slot-UID rules — DO NOT EDIT.\n'
     printf '# Emitted from board modem_ports (status: verified). One stable\n'
     printf '# ID_MM_PHYSDEV_UID per hardware-verified physical modem slot.\n'
-    # USB-device events do not necessarily carry ID_PATH before MM probes.
-    printf 'ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", IMPORT{builtin}="path_id"\n'
+    # USB-device and usbmisc events do not carry ID_PATH at this point, and
+    # net gets it only in 80-net-setup-link; import it before matching.
+    printf 'ACTION!="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", IMPORT{builtin}="path_id"\n'
+    printf 'ACTION!="remove", SUBSYSTEM=="tty|usbmisc|net|wwan", SUBSYSTEMS=="usb", ENV{ID_PATH}=="", IMPORT{builtin}="path_id"\n'
     local pair name id_path
     for pair in ${slots}; do
       name="${pair%%=*}"
@@ -473,7 +485,11 @@ generate_modem_slot_uid_rules() {
       [[ -n "${name}" && -n "${id_path}" && "${name}" != "${id_path}" ]] \
         || die "malformed modem slot definition '${pair}' (expected <name>=<ID_PATH>)"
       [[ "$name" != internal_4g ]] || name="internal 4G"
-      printf 'ACTION=="add|bind", SUBSYSTEM=="usb", ENV{ID_PATH}=="%s", ENV{ID_MM_PHYSDEV_UID}="%s"\n' \
+      [[ "${id_path}" != *[][*?\|\"]* ]] \
+        || die "modem slot '${name}' ID_PATH '${id_path}' contains a udev pattern character"
+      printf 'ACTION!="remove", SUBSYSTEM=="usb", ENV{ID_PATH}=="%s", ENV{ID_MM_PHYSDEV_UID}="%s"\n' \
+        "${id_path}" "${name}"
+      printf 'ACTION!="remove", SUBSYSTEM=="tty|usbmisc|net|wwan", ENV{ID_PATH}=="%s:*", ENV{ID_MM_PHYSDEV_UID}="%s"\n' \
         "${id_path}" "${name}"
     done
   } >"${rules_file}"

@@ -407,18 +407,32 @@ modem_ports:
     # modem1: …                                  # add per additional slot
 ```
 
-The generator then emits one rule per slot:
+The generator then emits two rules per slot, one for the USB device and one for
+its port devices:
 
 ```
-ACTION=="add|bind", SUBSYSTEM=="usb", ENV{ID_PATH}=="<id_path>", ENV{ID_MM_PHYSDEV_UID}="modem0"
+ACTION!="remove", SUBSYSTEM=="usb", ENV{ID_PATH}=="<id_path>", ENV{ID_MM_PHYSDEV_UID}="modem0"
+ACTION!="remove", SUBSYSTEM=="tty|usbmisc|net|wwan", ENV{ID_PATH}=="<id_path>:*", ENV{ID_MM_PHYSDEV_UID}="modem0"
 ```
 
 `ID_MM_PHYSDEV_UID` gives ModemManager a stable per-slot identity regardless of
-ttyUSB enumeration order. The ROCK 5B+ map names its fixed B-key port "internal 4G"; other maps
+ttyUSB enumeration order. ModemManager reads it from the USB device's udev record
+first, then from the port's own record, and otherwise falls back to the sysfs
+path; ports with different UIDs become separate modems. udev rebuilds a record on
+every event, so a UID set only on the USB device is missing while that device's
+record is the one from an unbind, or before its add event is processed. Ports
+read in that window used to get the sysfs path: after a rebind the slot modem
+lost its name, and during a boot-time re-enumeration a DW5821e split into an
+MBIM modem named "internal 4G" and a second, AT-only modem. With the UID on each
+port's own record every fallback gives the same name. `<id_path>:*` matches the
+slot's interfaces only (`…:1.4:2.0`), never a port behind a hub on it (`…:1.4.1:…`).
+The ROCK 5B+ map names its fixed B-key port "internal 4G"; other maps
 require the same physical discovery before enabling them.
 
 Proof: `run-tests` — the generator matrix (unverified ⇒ zero generated rules;
-verified fixture ⇒ rules emitted) in `postinst-wiring.bats`.
+verified fixture ⇒ rules emitted) in `postinst-wiring.bats`, and the event-order
+replay of the ROCK 5B+ slot Dell's udev tree (`tests/modem-slot-uid-grouping.py`,
+run from `rock5bplus-internal-modem.bats`).
 
 The ROCK 5B+ has a position map for its internal B-key port and a separate
 [DW5821e candidate and qualification guide](rock5bplus-internal-modem.md).

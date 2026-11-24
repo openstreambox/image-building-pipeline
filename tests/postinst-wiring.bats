@@ -789,9 +789,12 @@ YAML
   [ -f "$MODEM_GEN_RULES" ]
   grep -q 'ENV{ID_PATH}=="platform-fc000000.usb-usb-0:1:1.0", ENV{ID_MM_PHYSDEV_UID}="modem0"' "$MODEM_GEN_RULES"
   grep -q 'ENV{ID_PATH}=="platform-fc400000.usb-usb-0:1:1.0", ENV{ID_MM_PHYSDEV_UID}="modem1"' "$MODEM_GEN_RULES"
-  # exactly two emitted RULE lines (count ACTION== rules, not the header comment
-  # line that also mentions ID_MM_PHYSDEV_UID)
-  [ "$(grep -c '^ACTION==.*ID_MM_PHYSDEV_UID' "$MODEM_GEN_RULES")" -eq 2 ]
+  # and the same UID on each slot's port devices
+  grep -q 'ENV{ID_PATH}=="platform-fc000000.usb-usb-0:1:1.0:\*", ENV{ID_MM_PHYSDEV_UID}="modem0"' "$MODEM_GEN_RULES"
+  grep -q 'ENV{ID_PATH}=="platform-fc400000.usb-usb-0:1:1.0:\*", ENV{ID_MM_PHYSDEV_UID}="modem1"' "$MODEM_GEN_RULES"
+  # exactly two emitted RULE lines per slot, device and ports (count ACTION
+  # rules, not the header comment line that also mentions ID_MM_PHYSDEV_UID)
+  [ "$(grep -c '^ACTION.*ID_MM_PHYSDEV_UID' "$MODEM_GEN_RULES")" -eq 4 ]
 }
 
 @test "modem generator MATRIX: a stale verified rule file is removed when status reverts to unverified" {
