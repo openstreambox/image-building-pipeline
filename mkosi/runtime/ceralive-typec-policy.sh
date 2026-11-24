@@ -15,6 +15,9 @@
 # with no partner rebinds the port's FUSB302 before any cycle. If that early
 # rebind finds nothing, the cycles run as before and, once they are used up, one
 # more rebind follows (a device plugged in after the early one).
+# A cycle that leaves the port with no partner is followed by one more cycle
+# with sink preferred: a reset with source preferred restarts tcpm in
+# SRC_UNATTACHED, from where the FUSB302 raises no attach for a later plug.
 #
 # udev starts the systemd oneshot on partner and port add events. The boot enable
 # is a second coldplug path, so every run inspects CURRENT sysfs state and is safe
@@ -45,6 +48,8 @@
 #   CERALIVE_TYPEC_REBIND_GAP         seconds between unbind and bind (default 1)
 #   CERALIVE_TYPEC_BIND_WAIT          seconds to wait for each driver-link change (default 3)
 #   CERALIVE_TYPEC_OTG_DEV            OTG controller (default /sys/bus/platform/devices/fc000000.usb)
+#   CERALIVE_TYPEC_SINK_RESET_SETTLE  seconds the sink-first reset may take before
+#                                     the source preference returns (default 2)
 
 set -uo pipefail
 
@@ -82,6 +87,8 @@ REARM_MAX="${CERALIVE_TYPEC_REARM_MAX:-3}"
 BIND_WAIT="${CERALIVE_TYPEC_BIND_WAIT:-3}"
 [[ "${BIND_WAIT}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_BIND_WAIT must be an unsigned integer"
 OTG_DEV="${CERALIVE_TYPEC_OTG_DEV:-/sys/bus/platform/devices/fc000000.usb}"
+SINK_RESET_SETTLE="${CERALIVE_TYPEC_SINK_RESET_SETTLE:-2}"
+[[ "${SINK_RESET_SETTLE}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "CERALIVE_TYPEC_SINK_RESET_SETTLE must be a non-negative number"
 
 PORT_DIR="${CLASS_DIR}/${PORT}"
 PARTNER_DIR="${PORT_DIR}-partner"
@@ -448,7 +455,7 @@ rock_reprobe_rearm() {
 rock_back_power_correction() {
   local adc first second decision=unknown previous="" retry deadline stamp=0
   local settled_power identity=unknown original_port_type rstate
-  local blind=0 tries=0 last=0 now
+  local blind=0 tries=0 last=0 now reset="" settle_failed=0
   retry="${CERALIVE_TYPEC_ADC_RETRY:-15}"
   [[ "${MODE}" != recheck ]] || retry=0
   [[ "${retry}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_ADC_RETRY must be an unsigned integer"
@@ -545,6 +552,12 @@ rock_back_power_correction() {
     [[ ! -r "${RUN_DIR}/nopartner" ]] || read -r tries last <"${RUN_DIR}/nopartner"
     [[ "${tries}" =~ ^[0-9]+$ && "${last}" =~ ^[0-9]+$ ]] || { tries=0; last=0; }
     now="$(date +%s)"
+    # A sink-first reset (below) runs up to CERALIVE_TYPEC_WAIT plus its settle
+    # after the cycle that nopartner dates; spacing and every rebind settle
+    # time count from whichever reset came last. A stamp from the future (the
+    # clock stepped back) is ignored rather than holding everything off.
+    [[ ! -r "${RUN_DIR}/last-reset" ]] || read -r reset <"${RUN_DIR}/last-reset"
+    [[ ! "${reset}" =~ ^[0-9]+$ ]] || (( reset <= last || reset > now )) || last="${reset}"
     ! rock_reprobe_rearm "${last}" "${now}" || return 0
     if (( tries >= NOPARTNER_MAX )); then
       rock_fusb302_reprobe "${last}" "${now}"
@@ -612,6 +625,10 @@ rock_back_power_correction() {
     fi
   fi
 
+  # Spacing and the rebind settle times count from the last reset of any kind.
+  printf '%s\n' "$(date +%s)" >"${RUN_DIR}/last-reset" \
+    || log "ERROR: cannot record the Rock port_type cycle time"
+
   # The cycle removes and re-adds the partner asynchronously. This wait and its
   # failure receipt also run under the periodic recheck, without any DR_SWAP.
   mono_now
@@ -630,6 +647,7 @@ rock_back_power_correction() {
             if [[ -r "${PARTNER_DIR}/identity/id_header" ]]; then
               identity="$(cat "${PARTNER_DIR}/identity/id_header")"
             fi
+            settle_failed=1
             break
           fi
           ;;
@@ -639,6 +657,61 @@ rock_back_power_correction() {
     (( MONO_NOW < deadline )) || break
     sleep "${POLL_INTERVAL}"
   done
+  # No partner after the cycle: tcpm chooses the state a port reset ends in
+  # from the try role, and with source preferred it restarts in SRC_UNATTACHED,
+  # from where the FUSB302 raises no attach for a device plugged in later (a
+  # hub or modem stays unseen until a rebind). The same reset with sink
+  # preferred restarts it in SNK_UNATTACHED, which attaches a later plug on its
+  # own, so reset once more that way. The source preference returns only after
+  # SINK_RESET_SETTLE seconds (tcpm picks the state about 100 ms after the
+  # write, up to about 1 s when VBUS was on); a preference write by itself does
+  # not reset the port. A camera this cycle made attach has a partner by now.
+  if [[ ! -e "${PARTNER_DIR}" ]]; then
+    # A partner the wait saw fail has left: whatever registers next is new.
+    settle_failed=0
+    if ! printf '%s\n' sink >"${PORT_DIR}/preferred_role" ||
+        [[ "$(active_role "${PORT_DIR}/preferred_role")" != sink ]]; then
+      log "ERROR: cannot set Rock sink preference — ${PORT} may miss a later plug until it is rebound"
+    elif [[ -e "${PARTNER_DIR}" ]]; then
+      # Registered since the settle wait ended: judged below, no second reset.
+      printf '%s\n' source >"${PORT_DIR}/preferred_role" \
+        || log "ERROR: cannot restore Rock source preference"
+    else
+      log "INFO: Rock ${PORT} has no partner after the cycle: cycling port_type=source then dual with sink preferred, so a later plug is seen"
+      if ! printf '%s\n' source >"${PORT_DIR}/port_type"; then
+        log "ERROR: Rock port_type=source write for the sink-first reset was rejected"
+      elif ! printf '%s\n' dual >"${PORT_DIR}/port_type" &&
+          ! printf '%s\n' dual >"${PORT_DIR}/port_type"; then
+        log "ERROR: Rock port_type=dual after the sink-first reset was rejected twice — restoring recorded port_type=${original_port_type}"
+        printf '%s\n' "${original_port_type}" >"${PORT_DIR}/port_type" \
+          || log "ERROR: Rock port_type=${original_port_type} restoration was rejected"
+      fi
+      sleep "${SINK_RESET_SETTLE}"
+      printf '%s\n' source >"${PORT_DIR}/preferred_role" \
+        || log "ERROR: cannot restore Rock source preference after the sink-first reset"
+      printf '%s\n' "$(date +%s)" >"${RUN_DIR}/last-reset" \
+        || log "ERROR: cannot record the Rock sink-first reset time"
+    fi
+  fi
+  # A partner the settle wait did not see fail (it registered after the wait's
+  # last look, or on the sink-first reset) is a new attach, not this cycle's
+  # failure. As source it is done. Any other is left to its own partner-add
+  # run (waiting for this lock) after a blind cycle, whose tries cap it; a
+  # partner-keyed correction keeps the receipt, so a flapping charger stops.
+  if (( ! settle_failed )) && [[ -e "${PARTNER_DIR}" ]]; then
+    note_partner_since_early
+    if [[ -r "${settled_power}" && "$(active_role "${settled_power}")" == source ]]; then
+      rock_settled_source=1
+      return 0
+    fi
+    (( blind == 0 )) || return 0
+    [[ ! -r "${PARTNER_DIR}/identity/id_header" ]] \
+      || identity="$(cat "${PARTNER_DIR}/identity/id_header")"
+  fi
+  # A blind try writes a receipt only for a partner the settle wait saw fail
+  # and that is still there. One that finds nothing spends only its nopartner
+  # count, so a partner that registers right after it still gets its correction.
+  (( blind == 0 || settle_failed )) || return 0
   printf '%s\n' "${identity}" >"${RUN_DIR}/failed" \
     || log "ERROR: cannot record failed Rock attachment"
 }

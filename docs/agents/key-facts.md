@@ -5961,6 +5961,56 @@ blind. Whether the camera then offers its webcam personality is the camera's own
 setting (the Pocket 3 enumerates `2ca3:0020` RNDIS/storage by default and `2ca3:0023` UVC
 in webcam mode); nothing in the image switches it.
 
+**Sink-first reset after a cycle that finds nothing (Rock 5B+, back power confirmed).**
+tcpm picks the state a port reset ends in from the try role: with `preferred_role=source`
+a `port_type` cycle on an empty J11 restarts it in `SRC_UNATTACHED` (`PORT_RESET_WAIT_OFF
+-> SRC_UNATTACHED`, "Start toggling"). On one board, an RM520N-GL in a USB-C carrier
+plugged in minutes later then raised no attach and no tcpm event at all, 2 of 2 times
+(the field symptom: a hub plugged into J11 after boot is never seen). `power_role` keeps
+reading `sink` there, so the rebind guards above never fire either. Each half alone left
+the port in `SNK_UNATTACHED`, and the later plug attached on its own: a fresh probe with
+only the source preference written (2 of 2, `TOGGLING -> SRC_ATTACH_WAIT -> SRC_ATTACHED`
+in 0.2 s), and a fresh probe followed by the same cycle with the DT's sink preference left
+in place (1 of 1). A hot unplug lands tcpm in `SNK_UNATTACHED` by itself
+(`SRC_READY -> SNK_UNATTACHED`); what stuck the port after an unplug was the no-partner
+cycle about 7 s later.
+
+So when a cycle's settle wait ends with no partner, the policy writes
+`preferred_role=sink`, cycles `port_type=source` then `dual` once more, waits
+`CERALIVE_TYPEC_SINK_RESET_SETTLE` (2 s; tcpm picks the state about 100 ms after the
+write, up to about 1 s more when VBUS was on) and writes `source` back. That write only
+sets the try role and does not reset the port. Every cycle that completes, and the
+sink-first reset, writes its time to `/run/ceralive-typec/last-reset` (a cycle whose
+`dual` write is rejected twice restores the recorded `port_type` and stops before that, as
+before, with no sink-first reset). Cycle spacing and the early, late and re-arm settle
+times count from whichever of it and `nopartner` is later; a stamp from the future (the
+clock stepped back) is ignored. A partner that the settle wait did not see fail (it
+registered after the wait's last look, or just before or on the sink-first reset) is judged
+as a new attach: as source it is settled, and any other is left to its own partner-add run after
+a blind cycle (whose tries cap it), while a partner-keyed correction keeps its failure
+receipt, so a flapping charger still stops. A blind try writes a receipt only for a partner
+the settle wait saw stay sink; one that finds nothing spends only its `nopartner` count, so
+a camera that registers right after it is still corrected. A refused or
+ignored sink preference skips the second cycle with an error line. A `dual` write rejected
+twice inside it restores the recorded `port_type` and the run still returns 0. The
+source-preferred cycle itself is unchanged, so a camera stuck in `SNK_DEBOUNCED` still gets
+it; one that attaches on it has a partner and gets no second reset.
+
+On the same board with this policy: a cold boot with J11 empty ran the three cycles, each
+followed by `SRC_UNATTACHED -> SNK_UNATTACHED` about 120 ms after the sink-first write, and
+a late plug at 134.6 s attached on its own. A hot unplug and a replug 3.6 min later
+attached on its own too, and a modem attached at power-on still came up 3 of 3 times
+through the early rebind. Known limit: tcpm sources VBUS and reads `power_role=source` for about
+5-7 s before it registers the partner (`SRC_SEND_CAPABILITIES` until `SRC_READY` for a
+modem without PD). A rebind that lands in that window cuts a working attach and redoes it.
+Seen once on the late plug (the late rebind 3 s after `SRC_ATTACHED`; partner 10 s later
+than without it), and in each of those three power-on boots, where the early rebind at
+8.4-9.9 s cut an attach tcpm had started at 6.3-6.4 s; all of them recovered. Why the
+FUSB302 misses the attach from `SRC_UNATTACHED` is not established, and no camera was
+tested. Guards: the "typec policy: … sink-first …" cases in `runtime-services.bats`,
+whose fake kernel records the state each reset rests in from the preference active when it
+resolves.
+
 **Source port that never sees its partner (Rock 5B+, back power confirmed).** With a
 plain USB device on J11 through a C-to-A adapter, the FUSB302 can sit toggling in the
 source role with no attach interrupt at all, through every `port_type` cycle and across
