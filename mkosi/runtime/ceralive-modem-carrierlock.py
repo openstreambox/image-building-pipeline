@@ -33,7 +33,8 @@ then, for that one device:
      and probe it again. Nothing on the image locks a unit, so that record
      only goes stale through a lock set by hand;
      `touch /data/ceralive/modem-carrierlock.retry` forgets every unit's
-     recorded state once (the first recorded values and the history stay).
+     recorded lock and last outcome once (the first recorded values, the
+     history and a "lock returned" mark stay).
   4. Takes the modem from ModemManager with `mmcli --inhibit-device` for the
      whole exchange (ModemManager's polling otherwise takes answers on the
      same port), then talks to ModemManager's `(at)` port on USB interface 6.
@@ -134,6 +135,15 @@ def remaining():
     return DEADLINE - time.monotonic()
 
 
+class Stopped(Exception):
+    """SIGTERM (systemd stopping the unit or its start timeout) as an exception,
+    so a radio this run switched off is switched on again on the way out."""
+
+
+def stop(signum, _frame):
+    raise Stopped(signal.Signals(signum).name)
+
+
 def log(level, message):
     # journald reads the <n> prefix as the syslog priority (6 info, 4 warning, 3 error).
     print(f'<{level}>{TAG}: {message}', flush=True)
@@ -223,7 +233,8 @@ def save_record(unit, port, event=None, **fields):
 def honour_retry():
     """`touch /data/ceralive/modem-carrierlock.retry` forgets every unit's
     recorded lock and last outcome, so each unit is read (and if needed
-    relocked) once more. The original values and the history stay."""
+    unlocked) once more. The original values, the history and the
+    `lock_returned` mark (read on every boot) stay."""
     if not RETRY.exists():
         return
     cleared = 0
@@ -719,6 +730,13 @@ def unlock(port, device_dir, key, at, base, lock, profile, seen, returned):
         save_marker(key, 'radio-unexpected', **base, **old, radio=radio)
         log(4, f'{port}: AT+CFUN? read {radio or "nothing clear"}, not 1 or 4; nothing written')
         return
+    # Radio off, unlock and both read-backs at their longest, plus the radio
+    # back on and a restart watch: never start what the budget can't finish.
+    needed = 5 * LOCK_TIMEOUT + LEAVE_WAIT
+    if remaining() < needed:
+        save_marker(key, 'no-time', **base, **old)
+        log(4, f'{port}: {remaining():.0f} s left of the run budget, {needed:g} s needed; nothing written')
+        return
     extra = dict(lock_returned=True) if returned else {}
     if returned:
         log(4, f'{port}: locked to {old["old_lock"]} again after an earlier unlock; unlocking again and '
@@ -728,6 +746,17 @@ def unlock(port, device_dir, key, at, base, lock, profile, seen, returned):
     save_marker(key, 'unlocking', **base, **old, radio=radio)
     save_record(unit, port, dict(seen, plmn=base['plmn'], outcome='unlocking'), status='unlocking',
                 original_lock=old['old_lock'], original_profile=profile[0], plmn=base['plmn'], **seen, **extra)
+    try:
+        unlock_steps(port, device_dir, key, at, base, profile, seen, old, radio)
+    except Stopped as signal_name:
+        put_radio_back(port, at, radio)
+        save_marker(key, 'stopped', **base, **old)
+        log(4, f'{port}: stopped ({signal_name}) during the unlock; radio put back as found')
+        raise
+
+
+def unlock_steps(port, device_dir, key, at, base, profile, seen, old, radio):
+    unit = base['unit']
     if radio == '1':
         final, _ = at.command('AT+CFUN=4', timeout=LOCK_TIMEOUT)
         after = parse_radio(*at.command('AT+CFUN?')) if final == 'OK' else None
@@ -805,7 +834,11 @@ def main(argv):
     if len(argv) != 2 or not KERNEL_NAME.fullmatch(argv[1]):
         print(f'usage: {TAG} <usb device kernel name, e.g. 10-1.4>', file=sys.stderr)
         return 2
-    return run(argv[1])
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        return run(argv[1])
+    except Stopped:
+        return 1
 
 
 if __name__ == '__main__':

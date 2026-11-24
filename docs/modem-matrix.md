@@ -240,7 +240,9 @@ IMSI), the last outcome and a short history. A refused or failed unlock leaves
 the unit alone on later boots; a lock that comes back after an unlock is
 unlocked again and the unit is read on every boot from then on.
 `touch /data/ceralive/modem-carrierlock.retry` forgets every unit's recorded
-state once. Every decision is one journal line
+lock and last outcome once (a lock that came back keeps its unit read on every
+boot). A SIGTERM during the unlock switches the radio back on before exit, and
+the unlock does not start unless the run budget can finish it. Every decision is one journal line
 (`journalctl -u 'ceralive-modem-carrierlock@*'`). To put a lock back: create the
 `.disabled` file, then with ModemManager held send `AT+CFUN=4`,
 `AT+GTLOCKCAR=1,<original id>`, `AT+CFUN=1`.

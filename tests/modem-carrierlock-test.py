@@ -148,7 +148,7 @@ class FakeFm350(threading.Thread):
             if self.unlock_reply:
                 return f'\r\n{self.unlock_reply}\r\n'
             if self.radio != '4':
-                return '\r\nERROR\r\n'          # session 38: refused with the radio on
+                return '\r\nERROR\r\n'          # measured: refused with the radio on
             if not self.ignore_unlock:
                 self.lock = ('0', '65535')
                 self.profile = SIM_PROFILE.get(self.imsi[:6], '1')
@@ -302,10 +302,11 @@ class CarrierLock(unittest.TestCase):
                    CERALIVE_CARRIERLOCK_LEAVE_WAIT='2',
                    FAKE_MM_STATE=str(self.state), FAKE_MM_LOG=str(self.mm_log))
         env.update(env_extra)
-        done = subprocess.run([sys.executable, str(SCRIPT), port], env=env, capture_output=True,
-                              text=True, timeout=60)
+        self.child = subprocess.Popen([sys.executable, str(SCRIPT), port], env=env, text=True,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = self.child.communicate(timeout=60)
         time.sleep(0.05)
-        return done
+        return subprocess.CompletedProcess(self.child.args, self.child.returncode, stdout, stderr)
 
     def new_boot(self):
         shutil.rmtree(self.run_dir)
@@ -687,6 +688,38 @@ class CarrierLock(unittest.TestCase):
             self.assertEqual(self.invoke(port=arg).returncode, 2)
         self.assertEqual(self.mm_calls(), [])
 
+    def test_slot_name_uid_is_matched_by_physdev_and_used_for_the_hold(self):
+        self.mm(device='internal_4g')
+        self.invoke()
+        self.assertEqual(self.inhibits(), ['--inhibit-device=internal_4g'])
+        self.assertEqual(self.marker()['phase'], 'unlocked-by-service')
+
+    def test_unreadable_process_list_counts_as_streaming(self):
+        shutil.rmtree(self.proc)
+        done = self.invoke()
+        self.assertUntouched(done)
+        self.assertIn('unreadable process list', done.stdout)
+
+    def test_sigterm_during_the_unlock_puts_the_radio_back(self):
+        import signal
+        self.modem.before['AT+GTLOCKCAR=0'] = lambda: self.child.send_signal(signal.SIGTERM)
+        self.modem.silent.add('AT+GTLOCKCAR=0')
+        done = self.invoke()
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertEqual(self.modem.commands[-2:], ['AT+GTLOCKCAR=0', 'AT+CFUN=1'])
+        self.assertEqual(self.modem.radio, '1')
+        self.assertEqual(self.marker()['phase'], 'stopped')
+        self.assertEqual(self.mm_calls()[-1], 'released')
+        self.assertIn('radio put back as found', done.stdout)
+
+    def test_no_unlock_starts_without_the_budget_to_finish_it(self):
+        done = self.invoke(CERALIVE_CARRIERLOCK_BUDGET='30', CERALIVE_CARRIERLOCK_LOCK_TIMEOUT='10',
+                           CERALIVE_CARRIERLOCK_LEAVE_WAIT='15')
+        self.assertEqual(self.modem.commands, READS + ['AT+CFUN?'])
+        self.assertEqual(self.marker()['phase'], 'no-time')
+        self.assertEqual(self.modem.radio, '1')
+        self.assertIn('nothing written', done.stdout)
+
     # --- what may reach the module and the disk -------------------------------
 
     def test_only_allowlisted_commands_ever_reach_the_module(self):
@@ -715,6 +748,37 @@ class CarrierLock(unittest.TestCase):
         done = self.invoke()
         self.assertEqual(self.marker()['phase'], 'unlocked-by-service')
         self.assertIn('only in the journal', done.stdout)
+
+
+class AtPortWrite(unittest.TestCase):
+    """The AT write never raises and never blocks past its deadline."""
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('carrierlock', SCRIPT)
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+        self.master, slave = os.openpty()
+        self.path = os.ttyname(slave)
+        os.close(slave)
+        self.port = self.module.AtPort(self.path)
+        self.addCleanup(self.port.close)
+
+    def test_hung_up_port_is_no_reply(self):
+        os.close(self.master)
+        self.assertEqual(self.port.command('AT+GTLOCKCAR?', timeout=0.5), (None, []))
+
+    def test_full_output_buffer_is_bounded(self):
+        self.addCleanup(os.close, self.master)
+        import errno as e
+        try:
+            while True:
+                os.write(self.port.fd, b'x' * 4096)
+        except OSError as error:
+            self.assertEqual(error.errno, e.EAGAIN)
+        started = time.monotonic()
+        self.assertEqual(self.port.command('AT+GTLOCKCAR?', timeout=0.5), (None, []))
+        self.assertLess(time.monotonic() - started, 2)
 
 
 if __name__ == '__main__':
