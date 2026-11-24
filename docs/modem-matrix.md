@@ -240,8 +240,8 @@ path. When on, it:
   `0,65535`), then `AT+CFUN=1` if the radio was on, confirmed by `AT+CFUN?`
   reading 1. It never writes a lock and never sends `AT+GTACT`. The attempt is
   counted in the record before anything is sent (no record, no unlock), and
-  an answer that stops a run counts as a misread; after 3 misreads since the
-  last full read the unit is left alone. A radio it switched off and cannot
+  an answer that stops a run counts as a misread; after 3 misreads that no
+  recorded read has reset, the unit is left alone. A radio it switched off and cannot
   switch on again is logged as an error and the unit is left alone from then
   on. A SIGTERM during the unlock switches the radio back on before exit
   (the unit has `KillMode=mixed`, so a stop signals the script first and the

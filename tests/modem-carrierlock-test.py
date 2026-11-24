@@ -675,8 +675,12 @@ class CarrierLock(unittest.TestCase):
         self.assertEqual(self.marker()['phase'], 'unlocked-by-service')
 
     def test_a_pending_check_survives_every_early_exit_of_the_return(self):
+        def not_a_tty():
+            (self.dev / 'ttyUSB6').unlink()
+            (self.dev / 'ttyUSB6').write_text('')
         cases = {
             'port-busy': lambda: self.process('picocom', holds=self.modem.path, pid=45000),
+            'port-failed': not_a_tty,
             'sim-mismatch': lambda: setattr(self.modem, 'imsi', ATT_IMSI),
             'read-failed': lambda: setattr(self.modem, 'read_error', 'AT+GTLOCKCAR?'),
         }
@@ -685,6 +689,8 @@ class CarrierLock(unittest.TestCase):
                 self.new_boot()
                 shutil.rmtree(self.data / 'modem-carrierlock', ignore_errors=True)
                 shutil.rmtree(self.proc / '45000', ignore_errors=True)
+                (self.dev / 'ttyUSB6').unlink()
+                (self.dev / 'ttyUSB6').symlink_to(self.modem.path)
                 self.modem.lock, self.modem.read_error = ('1', '203'), None
                 self.mm()
                 self.restart_on('AT+GTLOCKCAR=0')
@@ -730,7 +736,7 @@ class CarrierLock(unittest.TestCase):
     def test_every_misread_is_counted(self):
         cases = {
             'sim-mismatch': lambda: setattr(self.modem, 'imsi', ATT_IMSI),
-            'unexpected-lock': lambda: setattr(self.modem, 'lock', ('2', '5')),
+            'unexpected-lock': lambda: setattr(self.modem, 'lock', ('2', '203')),
             'radio-unexpected': lambda: setattr(self.modem, 'radio', '0'),
         }
         for phase, break_it in cases.items():
@@ -837,7 +843,7 @@ class CarrierLock(unittest.TestCase):
         self.assertEqual(self.marker()['phase'], 'read-failed')
 
     def test_unexpected_lock_mode_writes_nothing(self):
-        self.modem.lock = ('2', '5')
+        self.modem.lock = ('2', '203')
         self.invoke()
         self.assertEqual(self.modem.commands, READS)
         self.assertEqual(self.marker()['phase'], 'unexpected-lock')
