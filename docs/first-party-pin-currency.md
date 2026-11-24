@@ -356,6 +356,52 @@ the physical-device reconnect path is not qualified. The CeraUI PR pinning this
 sender in its own CI is separate. No image was built or flashed, and APT serving,
 installation and hardware were not checked for this combined pin change.
 
+## Downstream ModemManager rebuild — 2026-11-24
+
+On arm64 the image selects `modemmanager` and `libmm-glib0`
+`1.24.2-2~ceralive.3+osb1`. That is modem-stack v1.4.0's ModemManager source
+(released as `1.24.2-2~ceralive.3`) with one change: the fm350gl `+CGCONTRDP`
+parser fix, proposed upstream as
+[CERALIVE/modem-stack#36](https://github.com/CERALIVE/modem-stack/pull/36).
+Without it, an FM350-GL on a network that leaves the bearer id empty in that
+answer (seen on T-Mobile US) never connects: the first attempt fails to parse,
+and every retry gets `+CME ERROR: 5847`. amd64 keeps the released build.
+
+- **Source:** openstreambox/modem-stack `osb/release/v1.4.0-osb1` at
+  `c9aa6778fe95d9ff0e2f18e4934162edb4d4adf5`. This is tag `v1.4.0`, then a
+  cherry-pick of the fix (`3e932ea6`), then one build-tooling commit that lets
+  `inject-deb-version.sh` take an exact `~ceralive.N+osbM` suffix. Only
+  `libqrtr-glib`, `libmbim` and `libqmi` were carried from the v1.4.0 release
+  assets, sha256-checked against its release manifest. ModemManager was rebuilt
+  with `build-stack.sh arm64` in `debian:trixie@sha256:3cda3ca4…dafba2`.
+- **Ordering:** `~ceralive.3+osb1` sorts above `~ceralive.3` and below the
+  next upstream counter `~ceralive.4`, and upstream never uses `+`, so it can't
+  collide with a published version. `ci/pin_versions.py` accepts the `+osbN`
+  form and orders it. A newer upstream release still reads `STALE`, which is
+  the point to drop the rebuild or carry it forward.
+- **Not on apt.ceralive.tv.** A build that fetches only from the signed
+  first-party index stops with "not found" for these two packages. Supply them
+  with `--first-party-local-debs` (development builds only; the override is
+  refused in production mode), and the build's
+  `first-party-local-override.json` records their sha256:
+
+| Package (arm64) | sha256 |
+|---|---|
+| `modemmanager_1.24.2-2~ceralive.3+osb1_arm64.deb` | `bdb31a65decfe1e36dcc4a09890757c83705ba2be5862732c3c284ca525b92e4` |
+| `libmm-glib0_1.24.2-2~ceralive.3+osb1_arm64.deb` | `dbcb28fdd1a6332b64c829c01a0c708e4e2e70c0bc46180568c4e6fddc2060b8` |
+
+- **Content check:** a control rebuild of plain v1.4.0 in the same container
+  matched the published `ceralive.3` packages file for file. Only package
+  metadata and the changelog differed, and the dwz debug-link bytes
+  (`.gnu_debugaltlink`, `.gnu_debuglink`) were normalized. Against
+  `ceralive.3`, the rebuild has the same file list and maintainer scripts. The
+  only changed installed file is
+  `usr/lib/aarch64-linux-gnu/ModemManager/libmm-plugin-fm350gl.so`, plus the
+  version fields and libmm-glib0's `Recommends` version.
+- **Hardware:** the same plugin code connected an FM350-GL on T-Mobile US on
+  4 of 4 activations (boot, after a USB re-enumeration, and two
+  disconnect/reconnect cycles), with no 5847.
+
 ## Intentional rollback
 
 Edit `manifests/first-party-pin-overrides.json` in the **same reviewed PR** as

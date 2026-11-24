@@ -241,6 +241,26 @@ class PinCurrencyTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("STALE modem-stack libmbim", result.stdout)
 
+    def test_modem_downstream_rebuild_orders_between_upstream_counters(self) -> None:
+        self.assertEqual(release_version("1.24.2-2~ceralive.3+osb1"), "1.24.2-2~ceralive.3+osb1")
+        self.assertEqual(compare("1.24.2-2~ceralive.3+osb1", "1.24.2-2~ceralive.3"), 1)
+        self.assertEqual(compare("1.24.2-2~ceralive.3+osb1", "1.24.2-2~ceralive.4"), -1)
+        for bad in ("1.24.2-2~ceralive.3+osb0", "1.24.2-2~ceralive.3+local1", "1.24.2-2+osb1"):
+            with self.assertRaises(PinError, msg=bad):
+                release_version(bad)
+
+    def test_modem_downstream_rebuild_passes_and_newer_upstream_reads_stale(self) -> None:
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CURRENT modem-stack modemmanager[arm64]: pinned=1.24.2-2~ceralive.3+osb1", result.stdout)
+        release = next(row for row in self.data["releases"] if row["component"] == "modem-stack")
+        release["packages"] = {key: value.replace("1.24.2-2~ceralive.3", "1.24.2-2~ceralive.4")
+                               for key, value in release["packages"].items()}
+        self.save_catalog()
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("STALE modem-stack modemmanager[arm64]", result.stdout)
+
     def test_installed_drift_is_advisory(self) -> None:
         installed = self.root / "installed.tsv"
         installed.write_text("cerastream\tarm64\t2026.9.4\ngstreamer1.0-rockchip-ceralive\tarm64\t1.14.4+ceralive.4\n")
