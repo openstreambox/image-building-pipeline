@@ -131,33 +131,54 @@ while True:
     run('ip','addr','add','fd51:3::1/64','dev','cell.3','nodad');run('ip','link','set','cell.3','up')
     run(*ns(peer,'ip','addr','add','fd51:3::2/64','dev','srv3','nodad'));run(*ns(peer,'ip','link','set','srv3','up'))
     run(*ns(peer,'ip','addr','add','fd53::53/128','dev','lo'))
-    assert c.link_router('cell.3') == (None, 'none')
+    watch = c.RouterWatch()
+    assert c.link_router('cell.3', '', watch) == (None, 'none')
     assert sp.run(['ip','-6','route','get','fd53::53','oif','cell.3'],stdout=sp.DEVNULL,stderr=sp.DEVNULL).returncode != 0
     mac = json.loads(run(*ns(peer,'ip','-j','link','show','dev','srv3')))[0]['address']
-    advertise = """import socket,struct
+    advertise = """import socket,struct,sys
 s=socket.socket(socket.AF_INET6,socket.SOCK_RAW,socket.IPPROTO_ICMPV6)
 s.setsockopt(socket.SOL_SOCKET,socket.SO_BINDTODEVICE,b'srv3')
 s.setsockopt(socket.IPPROTO_IPV6,socket.IPV6_MULTICAST_HOPS,255)
-ra=struct.pack('!BBHBBHII',134,0,0,64,0,1800,0,0)+bytes([1,1])+bytes.fromhex(%r)
+ra=struct.pack('!BBHBBHII',134,0,0,64,0,int(sys.argv[1]),0,0)+bytes([1,1])+bytes.fromhex(%r)
 s.sendto(ra,('ff02::1',0,0,socket.if_nametoindex('srv3')))
 """ % mac.replace(':','')
+    def ra(lifetime):
+        run(*ns(peer,'python3','-c',advertise,str(lifetime)))
+        time.sleep(.1)
+        watch.poll()
     for attempt in range(20):
-        run(*ns(peer,'python3','-c',advertise))
-        router, origin = c.link_router('cell.3')
+        ra(1800)
+        router, origin = c.link_router('cell.3', '', watch)
         if router is not None:
             break
-        time.sleep(.1)
     assert router and router.startswith('fe80:') and origin == 'router advertisement', (router, origin)
     never_default = c.Link('cell.3','fd51:3::1',router,['fd53::53'])
     never_default.start()
     assert json.loads((c.RUN/f'{never_default.index}.json').read_text())['state']=='up', (c.RUN/f'{never_default.index}.json').read_text()
     probe(never_default.v4)
     assert not json.loads(run('ip','-j','-6','route','show','default','dev','cell.3'))
+    # An ordinary device-bound socket (as CeraUI's probes bind) keeps the main
+    # table: only the marked discovery socket may use the link table.
+    plain = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+    plain.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'cell.3')
+    try:
+        plain.connect(('fd53::53', 53))
+        raise AssertionError('device-bound socket used the CLAT discovery table')
+    except OSError as error:
+        assert error.errno == 101, error  # ENETUNREACH
+    finally:
+        plain.close()
     assert never_default.stop()
     assert not [r for r in json.loads(run('ip','-j','-6','rule')) if r.get('priority') in (10000+never_default.index,46000+never_default.index)]
     assert not json.loads(c.command('ip','-j','-6','route','show','table',never_default.table,check=False) or '[]')
+    # The router withdraws (lifetime 0): Linux keeps its neighbour router bit,
+    # but the link no longer has a router.
+    ra(0)
+    assert any('router' in n for n in json.loads(run('ip','-j','-6','neigh','show','dev','cell.3')))
+    assert c.link_router('cell.3', '', watch) == (None, 'none')
+    watch.sock.close()
     run('ip','link','del','cell.3')
-    print('PASS never-default link: router from the RA, DNS64 and translation through the link table only',flush=True)
+    print('PASS never-default link: router from the RA (withdrawal honoured over the kernel router bit), DNS64 and translation through the marked link table only',flush=True)
     run('ip','link','add','lan0','type','veth','peer','name','cli0');run('ip','link','set','cli0','netns',str(client.pid))
     run('ip','addr','add','10.42.0.1/24','dev','lan0');run('ip','link','set','lan0','up')
     run(*ns(client,'ip','addr','add','10.42.0.2/24','dev','cli0'));run(*ns(client,'ip','link','set','cli0','up'));run(*ns(client,'ip','route','add','default','via','10.42.0.1'))

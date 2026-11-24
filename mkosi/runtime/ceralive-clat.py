@@ -62,8 +62,8 @@ def undo_absent(args):
             rules = json.loads(command('ip', '-j', family, 'rule', 'show'))
             spec = dict(zip(args[4::2], args[5::2]))
             return not any(str(r.get('priority')) == spec['priority'] and
-                           r.get('src', '').split('/')[0] == spec['from'] and
-                           r.get('oif') == spec.get('oif') and
+                           r.get('src', '').split('/')[0] == spec.get('from', 'all') and
+                           r.get('fwmark') == spec.get('fwmark') and
                            str(r.get('table')) == spec['lookup'] for r in rules)
         if args[2:4] == ['route', 'flush']:
             routes = json.loads(command('ip', '-j', family, 'route', 'show', 'table', 'all'))
@@ -155,6 +155,12 @@ class DiscoveryError(ValueError):
     pass
 
 
+def discovery_mark(index):
+    # Per-link firewall mark that alone selects the link's table for RFC 7050
+    # discovery; no other socket carries it.
+    return 0xc1a70000 | index
+
+
 def discover(interface, source, resolvers):
     import dns.exception
     import dns.flags
@@ -170,6 +176,9 @@ def discover(interface, source, resolvers):
         try:
             with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as sock:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode() + b'\0')
+                # A u32 above INT_MAX: Python's int form of setsockopt refuses it.
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_MARK,
+                                discovery_mark(socket.if_nametoindex(interface)).to_bytes(4, sys.byteorder))
                 sock.bind((source, 0))
                 sock.settimeout(2)
                 sock.connect((resolver, 53, 0, socket.if_nametoindex(interface)))
@@ -212,38 +221,126 @@ def eligible(addresses):
             and not any(a.get(flag) for flag in ('tentative', 'deprecated', 'dadfailed', 'temporary')))
 
 
-def link_router(interface, gateway=''):
+PREFERENCE = {0b01: 2, 0b00: 1, 0b10: 1, 0b11: 0}  # RFC 4191: high, medium, reserved = medium, low
+
+
+class RouterWatch:
+    """Default routers per link from the Router Advertisements themselves.
+
+    NetworkManager keeps the kernel's accept_ra at 0 and, for a profile with
+    ipv6.never-default, publishes no gateway, so the controller reads RAs on
+    a raw ICMPv6 socket: router lifetime (0 withdraws), preference, and a
+    Router Solicitation when an Ethernet-like link has no router yet. The
+    kernel's neighbour router bit survives a withdrawal and is not used."""
+    SOLICIT_FIRST, SOLICIT_LATER = 4, 300
+
+    def __init__(self, sock=None):
+        self.routers = {}
+        self.solicited = {}
+        self.sock = sock
+        if sock is not None:
+            return
+        self.sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
+        self.sock.setblocking(False)
+        blocked = bytearray(b'\xff' * 32)
+        blocked[134 >> 3] &= ~(1 << (134 & 7)) & 0xff
+        self.sock.setsockopt(socket.IPPROTO_ICMPV6, 1, bytes(blocked))  # ICMP6_FILTER: RAs only
+        self.sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_RECVHOPLIMIT, 1)
+        self.sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_RECVPKTINFO, 1)
+        self.sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 255)
+
+    def fileno(self):
+        return self.sock.fileno()
+
+    def poll(self):
+        """Drain pending RAs; True when a link's router set changed."""
+        changed = False
+        while True:
+            try:
+                data, ancillary, _, address = self.sock.recvmsg(1500, 256)
+            except (BlockingIOError, InterruptedError):
+                return changed
+            hops = [int.from_bytes(d[:4], sys.byteorder) for level, kind, d in ancillary
+                    if level == socket.IPPROTO_IPV6 and kind == socket.IPV6_HOPLIMIT]
+            indexes = [int.from_bytes(d[16:20], sys.byteorder) for level, kind, d in ancillary
+                       if level == socket.IPPROTO_IPV6 and kind == socket.IPV6_PKTINFO]
+            if hops and indexes:
+                changed |= self.record(indexes[0], address[0].split('%')[0], hops[0], data)
+
+    def record(self, index, source, hops, data, now=None):
+        # RFC 4861 6.1.2: hop limit 255 from a link-local source, at least 16 bytes.
+        try:
+            source = ip.IPv6Address(source)
+        except ValueError:
+            return False
+        if hops != 255 or not source.is_link_local or len(data) < 16 or data[0] != 134 or data[1] != 0:
+            return False
+        lifetime = int.from_bytes(data[6:8], 'big')
+        preference = PREFERENCE[(data[5] >> 3) & 0b11]
+        now = boot_time() if now is None else now
+        routers = self.routers.setdefault(index, {})
+        before = {a: p for a, (_, p) in routers.items()}
+        if lifetime:
+            routers[str(source)] = (now + lifetime, preference)
+            self.solicited.pop(index, None)
+        else:
+            routers.pop(str(source), None)
+        return before != {a: p for a, (_, p) in routers.items()}
+
+    def router(self, index, failed=(), now=None):
+        """The preferred valid router: reachable first, then preference, then
+        the lowest address, so the choice holds while that router stays."""
+        now = boot_time() if now is None else now
+        routers = self.routers.get(index, {})
+        for address in [a for a, (expiry, _) in routers.items() if expiry <= now]:
+            del routers[address]
+        if not routers:
+            return None
+        return str(min(routers, key=lambda a: (a in failed, -routers[a][1], ip.IPv6Address(a))))
+
+    def solicit(self, index, now=None):
+        # RFC 4861 6.3.7 spacing: three solicitations, then a slow retry.
+        now = boot_time() if now is None else now
+        sent, count = self.solicited.get(index, (None, 0))
+        if sent is not None and now - sent < (self.SOLICIT_FIRST if count < 3 else self.SOLICIT_LATER):
+            return False
+        self.solicited[index] = (now, count + 1)
+        try:
+            self.sock.sendto(bytes([133, 0, 0, 0, 0, 0, 0, 0]), ('ff02::2', 0, 0, index))
+        except OSError as error:
+            print(f'CLAT router solicitation failed: {error}', file=sys.stderr, flush=True)
+        return True
+
+
+def link_router(interface, gateway='', watch=None):
     """The IPv6 next hop for the link's own table and where it came from:
     (address, source), ('', source) for a device route, or (None, 'none')
-    while no router is known.
-
-    A profile with ipv6.never-default makes NetworkManager publish no gateway
-    and add no main-table default, yet the kernel still records the RA's
-    sender as a router in the link's neighbour table (accept_ra=0 included)."""
+    while no router is known."""
     if gateway:
         return str(ip.IPv6Address(gateway)), 'NetworkManager gateway'
     for route in json.loads(command('ip', '-j', '-6', 'route', 'show', 'default', 'dev', interface) or '[]'):
         return (str(ip.IPv6Address(route['gateway'])) if route.get('gateway') else ''), 'main-table default'
-    routers = [n for n in json.loads(command('ip', '-j', '-6', 'neigh', 'show', 'dev', interface) or '[]')
-               if 'router' in n and n.get('dst')]
-    if routers:
-        # Stable while the router stays: a reachability flap of the only
-        # router must not change the grant signature and restart the link.
-        usable = [n for n in routers if 'FAILED' not in n.get('state', [])] or routers
-        return str(min((ip.IPv6Address(n['dst']) for n in usable),
-                       key=lambda a: (not a.is_link_local, a))), 'router advertisement'
-    # Raw-IP and other ARP-less links (qmi_wwan, cdc_mbim, mhi_net) have no
-    # neighbour entries and need no next hop.
+    # Raw-IP and other ARP-less links (qmi_wwan, cdc_mbim, mhi_net) need no
+    # next hop.
     link = json.loads(command('ip', '-j', 'link', 'show', 'dev', interface))[0]
     if 'NOARP' in link.get('flags', []):
         return '', 'ARP-less link'
-    return None, 'none'
+    if watch is None:
+        return None, 'none'
+    index = socket.if_nametoindex(interface)
+    failed = {n.get('dst') for n in json.loads(command('ip', '-j', '-6', 'neigh', 'show', 'dev', interface) or '[]')
+              if 'FAILED' in n.get('state', [])}
+    router = watch.router(index, failed)
+    if router is None:
+        watch.solicit(index)
+        return None, 'none'
+    return router, 'router advertisement'
 
 
 ROUTER_NOTES = {}
 
 
-def grant(interface, addresses, config):
+def grant(interface, addresses, config, watch=None):
     """Admission of one activated modem link: (source, router, dns) or None.
 
     Logs once per change which router source a link uses, or that an
@@ -252,7 +349,7 @@ def grant(interface, addresses, config):
     if not sources:
         ROUTER_NOTES.pop(interface, None)
         return None
-    router, origin = link_router(interface, str(config.get('Gateway', '')))
+    router, origin = link_router(interface, str(config.get('Gateway', '')), watch)
     if ROUTER_NOTES.get(interface) != (router, origin):
         if router is None:
             print(f'<4>CLAT {interface} has no known IPv6 router yet; not translated',
@@ -508,10 +605,11 @@ class Link:
         self.tun = f'clat{self.index}'
         self.table = str(46000 + self.index)
         self.priority = str(10000 + self.index)
-        # Discovery from the link's own source and device falls back to the
-        # link's table only after main (32766) and default (32767) found no
-        # route: never-default links have none there.
+        # Only discovery sockets (their firewall mark) use the link's table,
+        # and only after main (32766) and default (32767) found no route:
+        # never-default links have none there.
         self.discovery_priority = str(46000 + self.index)
+        self.mark = hex(discovery_mark(self.index))
         self.v6 = service_ipv6(self.index, source)
         self.nft = f'clat_{self.index}'
         self.process = None
@@ -562,8 +660,8 @@ class Link:
         return ['default'] + (['via', self.gateway, 'onlink'] if self.gateway else []) + ['dev', self.interface]
 
     def discovery_rule(self, action):
-        return ['ip', '-6', 'rule', action, 'priority', self.discovery_priority, 'from', self.source,
-                'oif', self.interface, 'lookup', self.table]
+        return ['ip', '-6', 'rule', action, 'priority', self.discovery_priority, 'fwmark', self.mark,
+                'lookup', self.table]
 
     def repair_routes(self):
         # Device down/up removes these routes without changing NM's grant.
@@ -604,6 +702,10 @@ class Link:
                 rules = json.loads(command('ip', '-j', family, 'rule'))
                 if any(str(rule.get('priority')) in (self.priority, self.discovery_priority) for rule in rules):
                     raise ValueError('CLAT rule priority already owned')
+                # A foreign rule at any priority would start using the table
+                # as soon as discovery fills it.
+                if any(str(rule.get('table')) == self.table for rule in rules):
+                    raise ValueError('CLAT routing table already referenced')
             tables = json.loads(command('nft', '-j', 'list', 'tables')).get('nftables', [])
             if any(t.get('table', {}).get('family') == 'inet' and
                    t['table'].get('name') == self.nft for t in tables):
@@ -712,6 +814,12 @@ def main():
     name = 'org.freedesktop.NetworkManager'
     controller = Controller()
     loop = GLib.MainLoop()
+    try:
+        watch = RouterWatch()
+    except OSError as error:
+        # Without RAs only gateways, main-table defaults and ARP-less links qualify.
+        print(f'CLAT router advertisement socket failed: {error}', file=sys.stderr, flush=True)
+        watch = None
     def props(path, interface):
         return dbus.Interface(bus.get_object(name, path), 'org.freedesktop.DBus.Properties').GetAll(interface)
     def reconcile():
@@ -728,7 +836,7 @@ def main():
                     addr = json.loads(command('ip', '-j', 'addr', 'show', 'dev', interface))[0]['addr_info']
                     if not eligible(addr):
                         continue
-                    admitted = grant(interface, addr, props(dev['Ip6Config'], name + '.IP6Config'))
+                    admitted = grant(interface, addr, props(dev['Ip6Config'], name + '.IP6Config'), watch)
                     if admitted:
                         wanted[interface] = admitted + ((str(path), str(dev['ActiveConnection'])),)
                 except Exception:
@@ -750,6 +858,15 @@ def main():
                 return False
             GLib.idle_add(once)
     bus.add_signal_receiver(changed, bus_name=name)
+    if watch is not None:
+        def advertised(*args):
+            try:
+                if watch.poll():
+                    changed()
+            except OSError as error:
+                print(f'CLAT router advertisement read failed: {error}', file=sys.stderr, flush=True)
+            return True
+        GLib.io_add_watch(watch.fileno(), GLib.IO_IN, advertised)
     stopping = [False]
     def shutdown(*args):
         # KillMode=mixed signals only this process: withdraw and stop the
