@@ -45,15 +45,15 @@ fi
 # The pinned RAUC 1.15.2 reports per-slot install/activation timestamps in the detailed
 # shell status. Never source that output: slot metadata may contain bundle text.
 status="$(rauc status --detailed --output-format=shell)" || die 'RAUC status unavailable'
-declare -A bootnames=() states=() installed=() activated=()
+declare -A bootnames=() states=() installed=() installed_counts=() activated=() install_results=()
 primary='' booted='' slot_names='' slot_indexes=''
 while IFS= read -r line; do
   key="${line%%=*}"
   value="${line#*=}"
   case "$key" in
     RAUC_BOOT_PRIMARY|RAUC_SYSTEM_BOOTED_BOOTNAME|RAUC_SYSTEM_SLOTS|RAUC_SLOTS|\
-    RAUC_SLOT_BOOTNAME_*|RAUC_SLOT_STATE_*|\
-    RAUC_SLOT_STATUS_INSTALLED_TIMESTAMP_*|RAUC_SLOT_STATUS_ACTIVATED_TIMESTAMP_*) ;;
+    RAUC_SLOT_BOOTNAME_*|RAUC_SLOT_STATE_*|RAUC_SLOT_STATUS_STATUS_*|\
+    RAUC_SLOT_STATUS_INSTALLED_TIMESTAMP_*|RAUC_SLOT_STATUS_INSTALLED_COUNT_*|RAUC_SLOT_STATUS_ACTIVATED_TIMESTAMP_*) ;;
     *) continue ;;
   esac
   [[ "$value" == "'"*"'" && ${#value} -ge 2 ]] || die "invalid RAUC shell value for $key"
@@ -66,7 +66,9 @@ while IFS= read -r line; do
     RAUC_SLOTS) slot_indexes="$value" ;;
     RAUC_SLOT_BOOTNAME_*) bootnames["${key##*_}"]="$value" ;;
     RAUC_SLOT_STATE_*) states["${key##*_}"]="$value" ;;
+    RAUC_SLOT_STATUS_STATUS_*) install_results["${key##*_}"]="$value" ;;
     RAUC_SLOT_STATUS_INSTALLED_TIMESTAMP_*) installed["${key##*_}"]="$value" ;;
+    RAUC_SLOT_STATUS_INSTALLED_COUNT_*) installed_counts["${key##*_}"]="$value" ;;
     RAUC_SLOT_STATUS_ACTIVATED_TIMESTAMP_*) activated["${key##*_}"]="$value" ;;
   esac
 done <<<"$status"
@@ -108,23 +110,31 @@ if [[ "${kernel_pending}" == 0 && -e "${STATE_DIR}/slot-overlay-${bootnames[$oth
 fi
 
 if [[ "${kernel_pending}" == 0 ]]; then
-stamp="${installed[$other_idx]:-}"
-previous="${activated[$other_idx]:-}"
-if [[ -z "$stamp" ]]; then
-  [[ "$action" == --arm ]] && die 'no installed other rootfs to arm'
-  log 'no installed other rootfs: activation deferred'
-  exit 0
-fi
-install_epoch="$(date -u -d "$stamp" +%s)" || die 'invalid RAUC installed timestamp'
-activation_epoch=0
-if [[ -n "$previous" ]]; then
-  activation_epoch="$(date -u -d "$previous" +%s)" || die 'invalid RAUC activated timestamp'
-fi
-if (( install_epoch <= activation_epoch )); then
-  [[ "$action" == --arm ]] && die 'other rootfs already activated; no pending install'
-  log 'other rootfs has no unactivated install'
-  exit 0
-fi
+  stamp="${installed[$other_idx]:-}"
+  previous="${activated[$other_idx]:-}"
+  if [[ -z "$stamp" ]]; then
+    [[ "$action" == --arm ]] && die 'no installed other rootfs to arm'
+    log 'no installed other rootfs: activation deferred'
+    exit 0
+  fi
+  install_epoch="$(date -u -d "$stamp" +%s)" || die 'invalid RAUC installed timestamp'
+  activation_epoch=0
+  if [[ -n "$previous" ]]; then
+    activation_epoch="$(date -u -d "$previous" +%s)" || die 'invalid RAUC activated timestamp'
+  fi
+  if (( install_epoch <= activation_epoch )); then
+    [[ "$action" == --arm ]] && die 'other rootfs already activated; no pending install'
+    log 'other rootfs has no unactivated install'
+    exit 0
+  fi
+  # RAUC timestamps failed writes, and two installs can share a timestamp.
+  [[ "${install_results[$other_idx]:-}" == ok ]] || die 'other rootfs has no successful installation result'
+  count="${installed_counts[$other_idx]:-}"
+  [[ "$count" =~ ^[0-9]+$ ]] || die 'invalid RAUC installed count'
+  arm_identity="$other $stamp $count"
+else
+  # Kernel arms keep the attempt and target in their validated state and overlay.
+  arm_identity=''
 fi
 
 if [[ "$action" == --arm ]]; then
@@ -132,12 +142,13 @@ if [[ "$action" == --arm ]]; then
   if [[ "${kernel_pending}" == 1 ]]; then
     kernel_transition armed || die 'cannot persist armed kernel state'
   fi
-  umask 077
-  : >"$ARMED" || die 'cannot arm activation'
+  kernel_atomic_write "$ARMED" "$arm_identity" || die 'cannot persist activation marker'
   log "armed pending $other"
   exit 0
 fi
 [[ -f "$ARMED" ]] || die 'activation is not armed'
+armed_identity=$(<"$ARMED") || die 'cannot read activation marker'
+[[ "$armed_identity" == "$arm_identity" ]] || die 'activation marker does not match this install; arm it again'
 [[ ! -e "$STREAMING" ]] || die 'streaming began during activation check'
 if [[ "${kernel_pending}" == 1 ]]; then
   boot_id="$(<"${CERALIVE_HEALTHCHECK_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}")" \
