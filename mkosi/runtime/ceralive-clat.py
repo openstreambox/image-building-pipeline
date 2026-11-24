@@ -59,17 +59,17 @@ def undo_absent(args):
     if args[0] == 'ip' and args[1] in ('-4', '-6'):
         family = args[1]
         if args[2:4] == ['rule', 'del']:
-            rules = json.loads(command('ip', '-j', family, 'rule', 'show'))
+            rules = json.loads(command('ip', '-N', '-j', family, 'rule', 'show'))
             spec = dict(zip(args[4::2], args[5::2]))
             return not any(str(r.get('priority')) == spec['priority'] and
                            r.get('src', '').split('/')[0] == spec.get('from', 'all') and
                            r.get('fwmark') == spec.get('fwmark') and
                            str(r.get('table')) == spec['lookup'] for r in rules)
         if args[2:4] == ['route', 'flush']:
-            routes = json.loads(command('ip', '-j', family, 'route', 'show', 'table', 'all'))
+            routes = json.loads(command('ip', '-N', '-j', family, 'route', 'show', 'table', 'all'))
             return not any(str(r.get('table')) == args[5] for r in routes)
         if args[2:4] == ['route', 'del']:
-            routes = json.loads(command('ip', '-j', family, 'route', 'show', 'table', 'all'))
+            routes = json.loads(command('ip', '-N', '-j', family, 'route', 'show', 'table', 'all'))
             default = '0.0.0.0/0' if family == '-4' else '::/0'
             def network(value):
                 return ip.ip_network(default if value == 'default' else value, strict=False)
@@ -232,7 +232,12 @@ class RouterWatch:
     a raw ICMPv6 socket: router lifetime (0 withdraws), preference, and a
     Router Solicitation when an Ethernet-like link has no router yet. The
     kernel's neighbour router bit survives a withdrawal and is not used."""
+    # Solicitations ride the 10 s reconciliation: three at least 4 s apart
+    # (about 10 s in practice), then one every 5 minutes.
     SOLICIT_FIRST, SOLICIT_LATER = 4, 300
+    # RFC 4861 lets a host bound its default router list; a flood of RAs from
+    # many link-local sources cannot grow it past this, nor evict known routers.
+    MAX_ROUTERS = 8
 
     def __init__(self, sock=None):
         self.routers = {}
@@ -281,11 +286,21 @@ class RouterWatch:
         routers = self.routers.setdefault(index, {})
         before = {a: p for a, (_, p) in routers.items()}
         if lifetime:
+            if str(source) not in routers and len(routers) >= self.MAX_ROUTERS:
+                return False
             routers[str(source)] = (now + lifetime, preference)
             self.solicited.pop(index, None)
         else:
             routers.pop(str(source), None)
         return before != {a: p for a, (_, p) in routers.items()}
+
+    def retain(self, indexes):
+        """Forget the routers and solicitation state of every link outside
+        indexes: a modem that detached or vanished (its ifindex may be reused)
+        must not keep a router it learnt before."""
+        for table in (self.routers, self.solicited):
+            for index in [i for i in table if i not in indexes]:
+                del table[index]
 
     def router(self, index, failed=(), now=None):
         """The preferred valid router: reachable first, then preference, then
@@ -699,7 +714,8 @@ class Link:
                 routes = command('ip', '-j', family, 'route', 'show', 'table', self.table, check=False)
                 if json.loads(routes or '[]'):
                     raise ValueError('CLAT routing table already owned')
-                rules = json.loads(command('ip', '-j', family, 'rule'))
+                # Numeric tables (-N): a name in rt_tables must not hide a reference.
+                rules = json.loads(command('ip', '-N', '-j', family, 'rule'))
                 if any(str(rule.get('priority')) in (self.priority, self.discovery_priority) for rule in rules):
                     raise ValueError('CLAT rule priority already owned')
                 # A foreign rule at any priority would start using the table
@@ -825,12 +841,18 @@ def main():
     def reconcile():
         observed_at = boot_time()
         wanted = {}
+        attached = set()
         try:
             manager = dbus.Interface(bus.get_object(name, '/org/freedesktop/NetworkManager'), name)
             for path in manager.GetDevices():
                 try:
                     dev = props(path, name + '.Device')
-                    if int(dev['DeviceType']) != 8 or int(dev['State']) != 100:
+                    if int(dev['DeviceType']) != 8:
+                        continue
+                    # Prepare (40) to activated: RAs from the activation stay.
+                    if 40 <= int(dev['State']) <= 100 and str(dev['IpInterface']):
+                        attached.add(socket.if_nametoindex(str(dev['IpInterface'])))
+                    if int(dev['State']) != 100:
                         continue
                     interface = str(dev['IpInterface'])
                     addr = json.loads(command('ip', '-j', 'addr', 'show', 'dev', interface))[0]['addr_info']
@@ -845,6 +867,8 @@ def main():
         except Exception:
             # Manager loss invalidates every previous grant; no stale translation.
             wanted = {}
+        if watch is not None:
+            watch.retain(attached)
         sharing = ipv6_sharing(bus)
         return retry(lambda: controller.sync(wanted, observed_at=observed_at, sharing=sharing))
     # D-Bus changes trigger reconciliation; periodic retry also recovers DNS/startup failures.

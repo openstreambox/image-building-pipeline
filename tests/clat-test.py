@@ -43,7 +43,7 @@ class FakeHost:
             return '[]'
         if args[:4] == ['ip', '-j', 'link', 'show']:
             return json.dumps([{'mtu': self.mtu}])
-        if args[:2] == ['ip', '-j']:
+        if args[:2] == ['ip', '-j'] or args[:3] == ['ip', '-N', '-j']:
             return '[]'
         if args == ['nft', '-j', 'list', 'tables']:
             return json.dumps({'nftables': [{'table': {'family': 'inet', 'name': n}} for n in sorted(self.tables)]})
@@ -327,7 +327,7 @@ class Recovery(Isolated):
                     return '[]'
                 if args[:4] == ('ip', '-j', 'link', 'show'):
                     return '[{"mtu": 1500}]'
-                if args[:2] == ('ip', '-j'):
+                if args[:2] == ('ip', '-j') or args[:3] == ('ip', '-N', '-j'):
                     return '[]'
                 if args == ('nft', '-j', 'list', 'tables'):
                     return '{"nftables": []}'
@@ -491,6 +491,50 @@ class NeverDefault(Isolated):
                 self.assertFalse(watch.record(3, source, hops, data))
         self.assertIsNone(watch.router(3))
 
+    def test_router_list_is_bounded_and_known_routers_stay(self):
+        watch = self.watch()
+        for n in range(1, clat.RouterWatch.MAX_ROUTERS + 1):
+            self.assertTrue(watch.record(3, f'fe80::{n:x}', 255, advertisement(), now=0))
+        self.assertFalse(watch.record(3, 'fe80::ff', 255, advertisement(preference=0b01), now=0))
+        self.assertEqual(len(watch.routers[3]), clat.RouterWatch.MAX_ROUTERS)
+        self.assertEqual(watch.router(3, now=1), 'fe80::1')
+        # A known router still refreshes or withdraws when the list is full.
+        self.assertTrue(watch.record(3, 'fe80::1', 255, advertisement(lifetime=0), now=1))
+        self.assertTrue(watch.record(3, 'fe80::ff', 255, advertisement(), now=1))
+
+    def test_detached_link_forgets_its_routers(self):
+        watch = self.watch()
+        watch.record(3, 'fe80::1', 255, advertisement(), now=0)
+        watch.record(4, 'fe80::2', 255, advertisement(), now=0)
+        watch.solicit(5, now=0)
+        watch.retain({4})
+        self.assertIsNone(watch.router(3, now=1))  # ifindex 3 may now belong to another link
+        self.assertEqual(watch.router(4, now=1), 'fe80::2')
+        self.assertNotIn(5, watch.solicited)
+        watch.retain(set())
+        self.assertEqual((watch.routers, watch.solicited), ({}, {}))
+
+    def test_table_references_are_read_numerically(self):
+        """With 46003 named in rt_tables, `ip -j rule` prints the name; the
+        ownership check and undo_absent ask for numbers (-N)."""
+        from unittest.mock import patch
+        host = FakeHost()
+        with host.patched():
+            clat.Link('wan1', '2001:db8::1', '', ('fd00:976a::9',)).start()
+        self.assertIn(['ip', '-N', '-j', '-6', 'rule'], host.commands())
+        self.assertNotIn(['ip', '-j', '-6', 'rule'], host.commands())
+        import subprocess
+        calls = []
+        def command(*args, **kwargs):
+            calls.append(list(args))
+            if 'rule' in args:
+                return json.dumps([{'priority': 46003, 'src': 'all', 'fwmark': '0xc1a70003', 'table': '46003'}])
+            return json.dumps([{'dst': 'default', 'dev': 'wan1', 'table': '46003'}])
+        with patch.object(clat, 'command', side_effect=command):
+            self.assertFalse(clat.undo_absent(['ip', '-6', 'rule', 'del'] + self.RULE))
+            self.assertFalse(clat.undo_absent(['ip', '-6', 'route', 'flush', 'table', '46003']))
+        self.assertEqual([c[:2] for c in calls], [['ip', '-N'], ['ip', '-N']])
+
     def test_solicitation_spacing(self):
         watch = self.watch()
         sent = [t for t in range(0, 700, 2) if watch.solicit(3, now=t)]
@@ -595,7 +639,7 @@ class NeverDefault(Isolated):
             with self.subTest(rule=rule):
                 host = FakeHost()
                 def command(*args, **kwargs):
-                    if list(args) == ['ip', '-j', '-6', 'rule']:
+                    if list(args) == ['ip', '-N', '-j', '-6', 'rule']:
                         return json.dumps([rule])
                     return host(*args, **kwargs)
                 with host.patched(), patch.object(clat, 'command', side_effect=command), \

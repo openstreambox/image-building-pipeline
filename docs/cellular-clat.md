@@ -17,7 +17,12 @@ the kernel's `accept_ra` at 0, so the service reads RAs itself on a raw ICMPv6
 socket (hop limit 255, link-local source). It honours the router lifetime
 (0 withdraws, expiry removes) and the RFC 4191 preference, prefers a router
 whose reachability has not failed, then the lowest address, and sends Router
-Solicitations to a link without one (three, 4 s apart, then every 5 minutes).
+Solicitations to a link without one, at the 10-second reconciliation (three,
+about 10 s apart, then every 5 minutes). It keeps at most eight routers per
+link and forgets a link's routers once its modem device leaves the
+prepare-to-activated states (detach, removal, ifindex reuse). Table
+references are compared numerically (`ip -N`), so a name in `rt_tables` does
+not hide one.
 The kernel's neighbour `router` flag is not used: it survives a withdrawal.
 An Ethernet-like link with no valid router is not used. The journal gets one
 line per change: the router and its source, or a warning that an IPv6-only
