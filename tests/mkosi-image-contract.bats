@@ -1186,6 +1186,7 @@ SH
       setup_cpu_governor() { :; }
       setup_hdmirx_edid() { :; }
       setup_pipewire_system_mode() { :; }
+      setup_srtla_send_unit() { :; }
       configure_services
     ' bash "$POSTINST_ENTRY"
 
