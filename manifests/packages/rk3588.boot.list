@@ -1,0 +1,2 @@
+# Debian tools installed only in bootable RK3588 platform images.
+dosfstools  # Read-only check of the shared U-Boot FAT volume.

@@ -231,6 +231,7 @@ MKOSI_INSTALL_CALLS="${RUN_DIR}/mkosi-install.calls" \
 	DTB_PACKAGES='linux-dtb-demo' \
 	UBOOT_PACKAGES='linux-u-boot-demo' \
 	FIRMWARE_PACKAGES='firmware-demo' \
+	BOOT_TOOLS_PACKAGES='dosfstools' \
 	bash "${PLATFORM_POSTINST}" >"${RUN_DIR}/platform-postinst.log" 2>&1 || {
 		cat "${RUN_DIR}/platform-postinst.log" >&2
 		printf 'FAIL platform BSP installer did not use the mkosi wrapper\n' >&2

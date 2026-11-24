@@ -21,7 +21,7 @@
 #                          - /usr/lib/rauc/ceralive-rauc-boot-adapter   (RAUC backend)
 #                          - /etc/rauc/system.conf                      (bootloader=custom)
 #                          - /etc/fstab                                 (shared p1 at /boot)
-#                          - systemd-fsck@ instance override            (shared FAT policy)
+#                          - ceralive-boot-fat-check.service             (shared FAT check)
 #                          Invoked from platform/mkosi.finalize via mkosi-chroot.
 #
 #   boot-partition <dir>   FAT BOOT PARTITION bits into <dir> (the mounted p1 boot).
@@ -199,9 +199,9 @@ EOF
   chmod 0644 "${root}/etc/rauc/system.conf"
 
   local fstab="${root}/etc/fstab"
-  local boot_label boot_mount boot_fsck
+  local boot_label boot_mount boot_device boot_device_unit
   boot_label="$(resolve_partlabel boot)"
-  boot_mount="PARTLABEL=${boot_label} /boot vfat rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro 0 2"
+  boot_mount="PARTLABEL=${boot_label} /boot vfat rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro,x-systemd.wants=ceralive-boot-fat-check.service 0 0"
   mkdir -p "${root}/etc" "${root}/boot"
   touch "${fstab}"
   if grep -qE '^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+/boot[[:space:]]+' "${fstab}"; then
@@ -211,18 +211,26 @@ EOF
     printf '%s\n' "${boot_mount}" >>"${fstab}"
   fi
 
-  # Retain the fstab generator's device and mount ordering. Override only the
-  # checker for the shared boot partition, using the same label as fstab.
-  boot_fsck="$(systemd-escape --path --template=systemd-fsck@.service "/dev/disk/by-partlabel/${boot_label}")"
+  # The mount waits for this check via Wants= and After=. A checker failure
+  # leaves the original mount path available to boot and update consumers.
+  boot_device="/dev/disk/by-partlabel/${boot_label}"
+  boot_device_unit="$(systemd-escape --path --suffix=device "${boot_device}")"
   install -D -m 0755 "${SCRIPT_DIR}/check-boot-fat.py" "${root}/usr/libexec/ceralive/check-boot-fat"
-  mkdir -p "${root}/etc/systemd/system/${boot_fsck}.d"
-  cat >"${root}/etc/systemd/system/${boot_fsck}.d/boot-fat.conf" <<'UNIT'
+  mkdir -p "${root}/etc/systemd/system"
+  cat >"${root}/etc/systemd/system/ceralive-boot-fat-check.service" <<UNIT
 [Unit]
+Description=Check the shared FAT boot partition
+DefaultDependencies=no
+After=${boot_device_unit} systemd-fsck-root.service local-fs-pre.target
+Before=shutdown.target
+Conflicts=shutdown.target
 ConditionKernelCommandLine=!fsck.mode=skip
 
 [Service]
-ExecStart=
-ExecStart=/usr/libexec/ceralive/check-boot-fat %f
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=20s
+ExecStart=-/usr/libexec/ceralive/check-boot-fat ${boot_device}
 UNIT
 
   log "rootfs bootloader integration installed"

@@ -316,6 +316,19 @@ PY
   [[ "$output" == *"shared /boot requires fsck.fat from dosfstools"* ]]
 }
 
+@test "mkosi-contract: RK3588 finalize rejects a dosfstools version outside the tested series" {
+  local platform="$MKOSI_DIR/mkosi.images/platform" root="$BATS_TEST_TMPDIR"
+  mkdir -p "$root/usr/sbin" "$root/var/lib/dpkg"
+  install -m 0755 /usr/bin/true "$root/usr/sbin/fsck.fat"
+  printf '%s\n' 'Package: dosfstools' 'Status: install ok installed' \
+    'Architecture: arm64' 'Version: 9.9-1' 'Maintainer: Fixture <fixture@example.invalid>' \
+    'Description: fixture' >"$root/var/lib/dpkg/status"
+  run env ARCH=arm64 INSTALL_BOOT_BSP=1 BUILDROOT="$root" CHROOT_SRCDIR=/source \
+    bash "$platform/mkosi.finalize"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"dosfstools 9.9-1 is outside the tested fsck.fat 4.2 series"* ]]
+}
+
 @test "mkosi-contract: the shipped doc prune keeps copyright and drops the rest" {
   local app_postinst="$MKOSI_DIR/mkosi.images/app/mkosi.postinst.chroot"
   local root="$BATS_TEST_TMPDIR/doc"

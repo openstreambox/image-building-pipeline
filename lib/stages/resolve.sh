@@ -180,6 +180,11 @@ stage_resolve() {
   family_manifest="${MKOSI_DIR}/../manifests/families/${FAMILY}.yaml"
   [[ -f "${family_manifest}" ]] || die "family manifest not found: ${family_manifest}"
 
+  local pkg_dir="${PIPELINE_DIR}/manifests/packages"
+  # Keep boot-only tools in the platform layer, outside runtime package parity.
+  BOOT_TOOLS_PACKAGES="$(read_pkg_list "${pkg_dir}/${FAMILY}.boot.list")"
+  export BOOT_TOOLS_PACKAGES
+
   # shared.list (+ resolved family delta, + the debug-only development delta when
   # CERALIVE_DEBUG_IMAGE=1) → $SHARED_PACKAGES for the runtime layer.
   #
@@ -187,7 +192,6 @@ stage_resolve() {
   # so it is deliberately NOT reachable through the ${FAMILY}.delta.list lookup —
   # it is appended only on the debug branch. With the flag unset/0 this resolves
   # byte-identically to before the file existed.
-  local pkg_dir="${PIPELINE_DIR}/manifests/packages"
   local shared_list="${pkg_dir}/shared.list" delta_list="${pkg_dir}/${FAMILY}.delta.list"
   local dev_delta_list="${pkg_dir}/${DEV_DELTA_BASENAME}"
   [[ -f "${shared_list}" ]] || die "canonical package list not found: ${shared_list}"

@@ -1,7 +1,9 @@
 #!/usr/bin/python3
 """Check the shared FAT32 partition and clear only Linux's dirty byte."""
 
+import argparse
 import os
+from pathlib import Path
 import re
 import stat
 import struct
@@ -9,6 +11,7 @@ import subprocess
 import sys
 
 DIRTY_OFFSET = 65
+FAULT_MARKER = Path("/run/ceralive/boot-fat-fault")
 FAT32_HEALTHY_FLAGS = (1 << 27) | (1 << 26)  # Clean shutdown and no hard error.
 # dosfstools 4.2 reports the Linux dirty byte as a difference from the backup
 # boot sector. Insist on precisely this difference and no other repairs.
@@ -59,20 +62,20 @@ def check(device):
         result = subprocess.run(
             ["/usr/sbin/fsck.fat", "-n", path],
             pass_fds=(fd,), env={**os.environ, "LC_ALL": "C"},
-            capture_output=True, text=True, errors="backslashreplace",
+            capture_output=True, text=True, errors="backslashreplace", timeout=12,
         )
         print(result.stdout, end="", flush=True)
         if result.stderr:
             print(result.stderr, end="", file=sys.stderr)
         report = re.fullmatch(
-            r"fsck\.fat 4\.2 \(\d{4}-\d{2}-\d{2}\)\n"
+            r"fsck\.fat [^\n]+\n"
             rf"(?P<dirty>{re.escape(DIRTY_REPORT)})?"
             rf"{FREE_SUMMARY}(?P<unchanged>\nLeaving filesystem unchanged\.\n)?"
             rf"{path}: \d+ files, \d+/\d+ clusters\n",
             result.stdout,
         )
         if result.stderr or report is None:
-            raise OSError(f"read-only fsck.fat reported an unexpected result (exit {result.returncode})")
+            raise OSError(f"read-only fsck.fat reported filesystem diagnostics (exit {result.returncode})")
         changes_proposed = bool(report["dirty"] or report["stale"])
         if result.returncode != int(changes_proposed) or bool(report["unchanged"]) != changes_proposed:
             raise OSError(f"read-only fsck.fat status disagreed with its report (exit {result.returncode})")
@@ -85,10 +88,27 @@ def check(device):
         os.close(fd)
 
 
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("Usage: check-boot-fat DEVICE")
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("device")
+    parser.add_argument("--fault-marker", type=Path, default=FAULT_MARKER)
+    args = parser.parse_args()
     try:
-        check(sys.argv[1])
-    except OSError as error:
-        sys.exit(f"Shared /boot FAT check failed for {sys.argv[1]}: {error}")
+        check(args.device)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        message = f"Shared /boot FAT check needs attention: {error}"
+        print(f"<4>{message}", file=sys.stderr)
+        try:
+            args.fault_marker.parent.mkdir(parents=True, exist_ok=True)
+            args.fault_marker.write_text(f"{message}\n")
+        except OSError as marker_error:
+            print(f"<4>Could not record the /boot FAT fault: {marker_error}", file=sys.stderr)
+    else:
+        try:
+            args.fault_marker.unlink(missing_ok=True)
+        except OSError as error:
+            print(f"<4>Could not clear the /boot FAT fault: {error}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
