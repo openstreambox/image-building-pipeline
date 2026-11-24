@@ -384,15 +384,21 @@ values and flips `status` to `verified`.
 ### Discovery runbook (run on the board with a modem attached)
 
 ```bash
-# 1. Find the modem's USB device (control port or net device):
+# 1. Find the modem's net interface or control port:
 mmcli -L                                   # lists modems once ModemManager sees one
 ip link show | grep -E 'wwan|usb[0-9]|enx' # the modem's net iface, if any
 
-# 2. Read the stable ID_PATH of the physical slot (the USB device, not ttyUSBn):
-udevadm info /sys/class/net/<modem-iface> | grep -E 'ID_PATH='
-#   or, for the control-port USB device:
-udevadm info /dev/<cdc-wdm-or-ttyUSB> | grep -E 'ID_PATH='
+# 2. Walk up to the parent USB device (net/control port -> interface -> usb_device):
+dev=$(readlink -f /sys/class/net/<modem-iface>/device/..)   # e.g. …/3-1.4
+cat "$dev/idVendor" "$dev/idProduct"                       # confirm it is the modem
+
+# 3. Read that USB device's ID_PATH:
+udevadm test-builtin path_id "$dev" | grep -E '^ID_PATH='
 ```
+
+Record the USB device's path (`…-usb-0:1.4`). The net and control ports' own
+`ID_PATH` carries an interface suffix (`…-usb-0:1.4:2.0`); that form matches
+neither the USB device nor its ports, so the generator and the schema refuse it.
 
 ### Flip to verified (a separate, hardware-gated change)
 
@@ -403,22 +409,49 @@ Once you have the real `ID_PATH` for each slot, populate `slots` and set
 modem_ports:
   status: verified
   slots:
-    modem0: platform-fc000000.usb-usb-0:1:1.0   # ← the ID_PATH you read
-    # modem1: …                                  # add per additional slot
+    modem0: platform-fc000000.usb-usb-0:1   # ← the USB device ID_PATH you read
+    # modem1: …                              # add per additional slot
 ```
 
-The generator then emits one rule per slot:
+The shipped ROCK 5B+ map is verified this way, from a DW5821e in the B-key slot:
+
+```yaml
+modem_ports:
+  status: verified
+  slots:
+    internal_4g: platform-fc800000.usb-usb-0:1.4
+```
+
+The generator then emits two rules per slot, one for the USB device and one for
+its port devices:
 
 ```
-ACTION=="add|bind", SUBSYSTEM=="usb", ENV{ID_PATH}=="<id_path>", ENV{ID_MM_PHYSDEV_UID}="modem0"
+ACTION!="remove", SUBSYSTEM=="usb", ENV{ID_PATH}=="<id_path>", ENV{ID_MM_PHYSDEV_UID}="modem0"
+ACTION!="remove", SUBSYSTEM=="tty|usbmisc|net|wwan", ENV{ID_PATH}=="<id_path>:*", ENV{ID_MM_PHYSDEV_UID}="modem0"
 ```
 
 `ID_MM_PHYSDEV_UID` gives ModemManager a stable per-slot identity regardless of
-ttyUSB enumeration order. The ROCK 5B+ map names its fixed B-key port "internal 4G"; other maps
+ttyUSB enumeration order. ModemManager reads it from the USB device's udev record
+first, then from the port's own record, and otherwise falls back to the sysfs
+path; ports with different UIDs become separate modems. udev rebuilds a record on
+every event, so a UID set only on the USB device is missing while that device's
+record is the one from an unbind, or before its add event is processed. At boot
+`systemd-udev-trigger` replays its prioritized subsystems (net and tty among
+them) before the USB device's add and usbmisc after it. Ports read in that
+window used to get the sysfs path: a DW5821e split into an AT-only modem (ttys
+and net) and an MBIM modem named "internal 4G", and after a rebind the slot
+modem lost its name. Keeping the device rule on every non-remove event closes
+only the rebind case. The port rule is what makes the boot order irrelevant:
+each port carries the UID from its own event, so every fallback gives the same
+name. Don't reduce it to a device-only rule. `<id_path>:*` matches the
+slot's interfaces only (`…:1.4:2.0`), never a port behind a hub on it (`…:1.4.1:…`).
+The ROCK 5B+ map names its fixed B-key port "internal 4G"; other maps
 require the same physical discovery before enabling them.
 
 Proof: `run-tests` — the generator matrix (unverified ⇒ zero generated rules;
-verified fixture ⇒ rules emitted) in `postinst-wiring.bats`.
+verified fixture ⇒ rules emitted) in `postinst-wiring.bats`, and the event-order
+replay of the ROCK 5B+ slot Dell's udev tree (`tests/modem-slot-uid-grouping.py`,
+run from `rock5bplus-internal-modem.bats`).
 
 The ROCK 5B+ has a position map for its internal B-key port and a separate
 [DW5821e candidate and qualification guide](rock5bplus-internal-modem.md).

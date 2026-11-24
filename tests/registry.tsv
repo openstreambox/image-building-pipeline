@@ -288,6 +288,7 @@ tests/fixtures/logind/mock-logind.sh	fixture	support	not-executed	private sysfs 
 tests/fixtures/logind/key.py	fixture	support	not-executed	short and long synthetic power-key events
 tests/rock5bplus-internal-modem.bats	bats	unit	default-bats	Internal B-key kernel pin, radio default, position identity, fastboot release and power-control boundary
 tests/slot-dell-fastboot-release.test.py	helper	support	invoked-by-suite	Shipped fastboot release against a fake sysfs and transport, driven by rock5bplus-internal-modem.bats
+tests/modem-slot-uid-grouping.py	helper	support	invoked-by-suite	Slot Dell udev event-order replay grouped as ModemManager does, driven by rock5bplus-internal-modem.bats
 tests/cellular-clat.bats	bats	unit	default-bats	RFC 7050, link lifecycle and image-owned service packaging
 tests/clat-test.py	helper	unit	invoked-by-suite	CLAT discovery and state regression tests
 tests/clat-netns.py	helper	privileged	opt-in	two synthetic cellular links, hotspot and real SRTLA through tayga
