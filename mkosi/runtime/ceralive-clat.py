@@ -242,6 +242,9 @@ class RouterWatch:
     def __init__(self, sock=None):
         self.routers = {}
         self.solicited = {}
+        # Modem links NetworkManager has attached (set by retain); RAs from
+        # any other link (a LAN router, our own shared-mode RAs) are ignored.
+        self.attached = None
         self.sock = sock
         if sock is not None:
             return
@@ -280,6 +283,8 @@ class RouterWatch:
             return False
         if hops != 255 or not source.is_link_local or len(data) < 16 or data[0] != 134 or data[1] != 0:
             return False
+        if self.attached is not None and index not in self.attached:
+            return False
         lifetime = int.from_bytes(data[6:8], 'big')
         preference = PREFERENCE[(data[5] >> 3) & 0b11]
         now = boot_time() if now is None else now
@@ -297,7 +302,9 @@ class RouterWatch:
     def retain(self, indexes):
         """Forget the routers and solicitation state of every link outside
         indexes: a modem that detached or vanished (its ifindex may be reused)
-        must not keep a router it learnt before."""
+        must not keep a router it learnt before. Until the next call, RAs
+        from links outside indexes are dropped."""
+        self.attached = set(indexes)
         for table in (self.routers, self.solicited):
             for index in [i for i in table if i not in indexes]:
                 del table[index]
@@ -821,6 +828,35 @@ add rule inet {self.nft} forward meta nfproto ipv6 oifname "{self.tun}" drop
         return self.status(self.final_state, self.final_error)
 
 
+def nm_grants(paths, props, watch=None):
+    """The wanted grants from NetworkManager's devices, and the attached
+    modem links for the RA watch (prepare (40) to activated, so the RAs of an
+    activation stay; everything else is forgotten and ignored)."""
+    wanted, attached = {}, set()
+    for path in paths:
+        try:
+            dev = props(path, NM + '.Device')
+            if int(dev['DeviceType']) != 8:
+                continue
+            if 40 <= int(dev['State']) <= 100 and str(dev['IpInterface']):
+                attached.add(socket.if_nametoindex(str(dev['IpInterface'])))
+            if int(dev['State']) != 100:
+                continue
+            interface = str(dev['IpInterface'])
+            addr = json.loads(command('ip', '-j', 'addr', 'show', 'dev', interface))[0]['addr_info']
+            if not eligible(addr):
+                continue
+            admitted = grant(interface, addr, props(dev['Ip6Config'], NM + '.IP6Config'), watch)
+            if admitted:
+                wanted[interface] = admitted + ((str(path), str(dev['ActiveConnection'])),)
+        except Exception:
+            # A disappearing/incomplete device must not withdraw its neighbours.
+            continue
+    if watch is not None:
+        watch.retain(attached)
+    return wanted
+
+
 def main():
     import dbus
     import dbus.mainloop.glib
@@ -841,34 +877,14 @@ def main():
     def reconcile():
         observed_at = boot_time()
         wanted = {}
-        attached = set()
         try:
             manager = dbus.Interface(bus.get_object(name, '/org/freedesktop/NetworkManager'), name)
-            for path in manager.GetDevices():
-                try:
-                    dev = props(path, name + '.Device')
-                    if int(dev['DeviceType']) != 8:
-                        continue
-                    # Prepare (40) to activated: RAs from the activation stay.
-                    if 40 <= int(dev['State']) <= 100 and str(dev['IpInterface']):
-                        attached.add(socket.if_nametoindex(str(dev['IpInterface'])))
-                    if int(dev['State']) != 100:
-                        continue
-                    interface = str(dev['IpInterface'])
-                    addr = json.loads(command('ip', '-j', 'addr', 'show', 'dev', interface))[0]['addr_info']
-                    if not eligible(addr):
-                        continue
-                    admitted = grant(interface, addr, props(dev['Ip6Config'], name + '.IP6Config'), watch)
-                    if admitted:
-                        wanted[interface] = admitted + ((str(path), str(dev['ActiveConnection'])),)
-                except Exception:
-                    # A disappearing/incomplete device must not withdraw its neighbours.
-                    continue
+            wanted = nm_grants(manager.GetDevices(), props, watch)
         except Exception:
             # Manager loss invalidates every previous grant; no stale translation.
             wanted = {}
-        if watch is not None:
-            watch.retain(attached)
+            if watch is not None:
+                watch.retain(set())
         sharing = ipv6_sharing(bus)
         return retry(lambda: controller.sync(wanted, observed_at=observed_at, sharing=sharing))
     # D-Bus changes trigger reconciliation; periodic retry also recovers DNS/startup failures.

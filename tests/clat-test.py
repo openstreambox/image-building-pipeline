@@ -535,6 +535,50 @@ class NeverDefault(Isolated):
             self.assertFalse(clat.undo_absent(['ip', '-6', 'route', 'flush', 'table', '46003']))
         self.assertEqual([c[:2] for c in calls], [['ip', '-N'], ['ip', '-N']])
 
+    def test_ras_from_links_that_are_not_attached_modems_are_ignored(self):
+        """A LAN router or our own shared-mode RAs never enter the state, so
+        they neither count as changes nor trigger reconciliations."""
+        watch = self.watch()
+        watch.retain({3})
+        self.assertEqual([watch.record(7, 'fe80::1', 255, advertisement(), now=t) for t in range(5)], [False] * 5)
+        self.assertIsNone(watch.router(7, now=5))
+        self.assertEqual([watch.record(3, 'fe80::1', 255, advertisement(), now=t) for t in range(3)],
+                         [True, False, False])
+
+    def test_nm_state_drives_the_ra_watch(self):
+        """main()'s reconciliation: attached modems (NM states 40-100) keep
+        their routers, detached modems and other devices lose theirs and their
+        later RAs are ignored; an activated never-default modem is admitted."""
+        from unittest.mock import patch
+        import socket
+        devices = {
+            '/d/1': dict(DeviceType=8, State=100, IpInterface='wan1', Ip6Config='/ip6/1', ActiveConnection='/a/1'),
+            '/d/2': dict(DeviceType=8, State=30, IpInterface='wan2', Ip6Config='/', ActiveConnection='/'),
+            '/d/3': dict(DeviceType=1, State=100, IpInterface='eth0', Ip6Config='/ip6/3', ActiveConnection='/a/3'),
+            '/d/4': dict(DeviceType=8, State=70, IpInterface='wan3', Ip6Config='/ip6/4', ActiveConnection='/a/4'),
+        }
+        indexes = {'wan1': 3, 'wan2': 4, 'eth0': 5, 'wan3': 6}
+        def props(path, interface):
+            if interface.endswith('.Device'):
+                return devices[path]
+            return {'Gateway': '', 'Nameservers': [list(socket.inet_pton(socket.AF_INET6, 'fd00:976a::9'))]}
+        command, _ = self.answers()
+        def answers(*args, **kwargs):
+            if args[:5] == ('ip', '-j', 'addr', 'show', 'dev'):
+                return json.dumps([{'addr_info': [dict(family='inet6', scope='global', local='2001:db8::1')]}])
+            return command(*args, **kwargs)
+        watch = self.watch()
+        for index in indexes.values():
+            watch.record(index, 'fe80::1', 255, advertisement())
+        with patch.object(clat, 'command', side_effect=answers), patch.dict(clat.ROUTER_NOTES, clear=True), \
+                patch.object(clat.socket, 'if_nametoindex', side_effect=indexes.__getitem__):
+            wanted = clat.nm_grants(list(devices), props, watch)
+        self.assertEqual(wanted, {'wan1': ('2001:db8::1', 'fe80::1', ('fd00:976a::9',), ('/d/1', '/a/1'))})
+        self.assertEqual(watch.attached, {3, 6})
+        self.assertEqual(sorted(watch.routers), [3, 6])
+        self.assertFalse(watch.record(5, 'fe80::2', 255, advertisement()))
+        self.assertFalse(watch.record(4, 'fe80::2', 255, advertisement()))
+
     def test_solicitation_spacing(self):
         watch = self.watch()
         sent = [t for t in range(0, 700, 2) if watch.solicit(3, now=t)]
