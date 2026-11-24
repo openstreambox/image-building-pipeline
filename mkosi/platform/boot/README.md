@@ -34,8 +34,10 @@ automatic XBOOTLDR mount. `install-boot.sh rootfs` writes an explicit writable
 has already loaded the selected slot's kernel.
 
 The bootable RK3588 platform layer installs `dosfstools` from the family boot
-package list. The build checks the installed version against the tested 4.2
-series. The fstab entry uses pass 0 and pulls in an ordered, optional checker
+package list. It comes from the Debian archive, so the layer's package-lock
+capture verifies it against the Debian index like any other archive package;
+only the staged BSP debs are left to the fetch stage's receipts. The build checks
+the installed version against the tested 4.2 series. The fstab entry uses pass 0 and pulls in an ordered, optional checker
 with `x-systemd.wants=`. It runs `fsck.fat -n` before `boot.mount` and logs
 the report to the journal. If the only issue is the Linux dirty byte in the
 FAT16 or FAT32 primary boot sector, the helper clears that byte on the unmounted device.

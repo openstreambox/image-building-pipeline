@@ -264,5 +264,15 @@ else
   log "INSTALL_BOOT_BSP!=1 — boot BSP (kernel/DTB/U-Boot/firmware) deferred to the bootable/HW build (task 17)."
 fi
 
-mkosi-chroot bash "${CHROOT_SRCDIR:?}/runtime/packages-lock-capture.sh" platform "${bsp_pkgs[@]}"
+# The capture verifies every installed package against the Debian index except the
+# ones named here, whose receipts come from the host-side fetch stage (staged
+# BSP/first-party debs). The family boot tools (dosfstools) are plain Debian
+# packages that apt installs from the archive, with no fetch receipt, so they
+# must be verified here like zstd and initramfs-tools; naming them would leave
+# them unaccounted and the final lock merge refuses the image.
+lock_excluded=()
+for pkg in "${bsp_pkgs[@]}"; do
+  [[ " ${BOOT_TOOLS_PACKAGES:-} " == *" ${pkg} "* ]] || lock_excluded+=("${pkg}")
+done
+mkosi-chroot bash "${CHROOT_SRCDIR:?}/runtime/packages-lock-capture.sh" platform "${lock_excluded[@]}"
 log "authenticated staged BSP layer complete."
