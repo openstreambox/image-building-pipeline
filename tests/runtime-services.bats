@@ -1357,6 +1357,117 @@ EOF
   [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
 }
 
+@test "typec policy: an ignored sink preference skips the sink-first reset and says so" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  printf 'sink [source]\n' >"$root/typec/port0/preferred_role"
+  : >"$root/iio/ignore-preferred"
+  export CERALIVE_TYPEC_MODE=recheck
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<3>ceralive-typec-policy: ERROR: cannot set Rock sink preference — port0 may miss a later plug until it is rebound"* ]]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+}
+
+@test "typec policy: a sink-first reset whose dual write is rejected twice restores port_type and still returns 0" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  : >"$root/iio/reject-sink-reset-dual"
+  export CERALIVE_TYPEC_MODE=recheck
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<3>ceralive-typec-policy: ERROR: Rock port_type=dual after the sink-first reset was rejected twice — restoring recorded port_type=dual"* ]]
+  [[ "$output" == *"<3>ceralive-typec-policy: ERROR: Rock port_type=dual restoration was rejected"* ]]
+  # The main cycle, then source, two rejected duals and the rejected restoration.
+  [ "$(cat "$root/iio/writes")" = $'source\ndual\nsource\ndual\ndual\ndual' ]
+  [ "$(cat "$root/typec/port0/preferred_role")" = source ]
+  [ "$(cat "$root/run/failed")" = unknown ]
+}
+
+@test "typec policy: a modem that attaches on the sink-first reset is a settled source attach, not a failure" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  printf '[source] sink\n' >"$root/iio/attach-on-sink-reset"
+  export CERALIVE_TYPEC_MODE=recheck
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual\nsource\ndual' ]
+  [ -e "$root/typec/port0-partner" ]
+  [ ! -e "$root/run/failed" ]
+  [ "$(cat "$root/typec/port0/preferred_role")" = source ]
+
+  # Same after a partner-keyed correction whose partner left: no receipt and
+  # no DR_SWAP on the settled source attach.
+  rm -rf "$root"
+  typec_rock_fixture "$root"
+  : >"$root/iio/detach"
+  printf '[source] sink\n' >"$root/iio/attach-on-sink-reset"
+  export CERALIVE_TYPEC_MODE=normal
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual\nsource\ndual' ]
+  [ ! -e "$root/run/failed" ]
+  [[ "$output" != *"DR_SWAP"* ]]
+}
+
+@test "typec policy: a sink partner on the sink-first reset is left to its own run after a blind cycle, but stays failed after a correction" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  # Blind no-partner cycle: no failure receipt, so the partner's own run can correct it.
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  printf 'source [sink]\n' >"$root/iio/attach-on-sink-reset"
+  export CERALIVE_TYPEC_MODE=recheck
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual\nsource\ndual' ]
+  [ -e "$root/typec/port0-partner" ]
+  [ ! -e "$root/run/failed" ]
+
+  # Partner-keyed correction whose partner leaves and returns as sink (a
+  # flapping charger): the receipt stays, so it cannot loop.
+  rm -rf "$root"
+  typec_rock_fixture "$root"
+  : >"$root/iio/detach"
+  printf 'source [sink]\n' >"$root/iio/attach-on-sink-reset"
+  export CERALIVE_TYPEC_MODE=normal
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual\nsource\ndual' ]
+  [ "$(cat "$root/run/failed")" = 0x5ec0ffee ]
+}
+
+@test "typec policy: spacing and rebind settle times count from the last sink-first reset" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  export CERALIVE_TYPEC_MODE=recheck
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$(cat "$root/run/last-reset")" =~ ^[0-9]+$ ]]
+
+  # All cycles used 30 s ago, but the sink-first reset ran 1 s ago: the late
+  # rebind waits out its settle time from the reset.
+  typec_rock_reprobe_fixture "$root"
+  printf '%s\n' "$(( $(date +%s) - 1 ))" >"$root/run/last-reset"
+  CERALIVE_TYPEC_REPROBE_SETTLE=20 run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -e "$root/iio/i2c-writes" ]
+  printf '%s\n' "$(( $(date +%s) - 25 ))" >"$root/run/last-reset"
+  CERALIVE_TYPEC_REPROBE_SETTLE=20 run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/i2c-writes")" = $'unbind 4-0022\nbind 4-0022' ]
+}
+
+@test "typec policy: the sink-first reset waits 2 s by default before the source preference returns" {
+  grep -Fxq 'SINK_RESET_SETTLE="${CERALIVE_TYPEC_SINK_RESET_SETTLE:-2}"' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
+}
+
 @test "typec policy: Rock no-partner cycles stop at the per-boot limit" {
   local root="$BATS_TEST_TMPDIR/rock" n
   typec_rock_fixture "$root"
@@ -1431,13 +1542,16 @@ EOF
   local root="$BATS_TEST_TMPDIR/rock" mode
   for mode in normal recheck; do
     typec_rock_fixture "$root"
-    rm -rf "$root/run"
+    rm -rf "$root/run" "$root/iio/writes" "$root/iio/rest-states" "$root/iio/reset-pending"
     touch "$root/iio/detach"
     export CERALIVE_TYPEC_MODE="$mode"
 
     run run_typec_rock
     [ "$status" -eq 0 ]
     [ "$(cat "$root/run/failed")" = unknown ]
+    # The partner left during the cycle, so the sink-first reset follows.
+    [ "$(cat "$root/iio/writes")" = $'source\ndual\nsource\ndual' ]
+    [ "$(typec_fake_rest_state "$root")" = SNK_UNATTACHED ]
     [ ! -e "$root/typec/port0-partner" ]
     [ "$(cat "$root/typec/port0/data_role")" = 'host [device]' ]
   done
@@ -1768,6 +1882,7 @@ typec_rock_early_fixture() {
   # ago is too soon for a 1000 s settle (and no cycle is due), and due for 50 s.
   printf '[source] sink\n' >"$root/typec/port0/power_role"
   printf '1 %s\n' "$(( $(date +%s) - 100 ))" >"$root/run/nopartner"
+  printf '%s\n' "$(( $(date +%s) - 100 ))" >"$root/run/last-reset"
   CERALIVE_TYPEC_EARLY_SETTLE=1000 CERALIVE_TYPEC_NOPARTNER_SPACING=1000 run run_typec_rock
   [ "$status" -eq 0 ]
   [ ! -e "$root/iio/i2c-writes" ]
@@ -1798,7 +1913,9 @@ typec_rock_early_fixture() {
   done
   # Three cycles, each followed by its sink-first reset.
   [ "$(grep -c '^source$' "$root/iio/writes")" -eq 6 ]
-  [ "$(typec_fake_rest_state "$root")" = SNK_UNATTACHED ]
+  # Every source-preferred cycle was followed by its sink-first reset before
+  # the port could rest in SRC_UNATTACHED.
+  [ "$(grep -c SRC_UNATTACHED "$root/iio/rest-states")" -eq 0 ]
   [ "$(cat "$root/iio/i2c-writes")" = $'unbind 4-0022\nbind 4-0022\nunbind 4-0022\nbind 4-0022' ]
   [ -e "$root/run/reprobe-late" ]
   [ "$(cut -d' ' -f1 "$root/run/reprobe")" = no-partner ]

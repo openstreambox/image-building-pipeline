@@ -455,7 +455,7 @@ rock_reprobe_rearm() {
 rock_back_power_correction() {
   local adc first second decision=unknown previous="" retry deadline stamp=0
   local settled_power identity=unknown original_port_type rstate
-  local blind=0 tries=0 last=0 now
+  local blind=0 tries=0 last=0 now reset=""
   retry="${CERALIVE_TYPEC_ADC_RETRY:-15}"
   [[ "${MODE}" != recheck ]] || retry=0
   [[ "${retry}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_ADC_RETRY must be an unsigned integer"
@@ -551,6 +551,11 @@ rock_back_power_correction() {
     [[ "${MODE}" == recheck ]] || return 0
     [[ ! -r "${RUN_DIR}/nopartner" ]] || read -r tries last <"${RUN_DIR}/nopartner"
     [[ "${tries}" =~ ^[0-9]+$ && "${last}" =~ ^[0-9]+$ ]] || { tries=0; last=0; }
+    # A sink-first reset (below) runs up to CERALIVE_TYPEC_WAIT plus its settle
+    # after the cycle that nopartner dates; spacing and every rebind settle
+    # time count from whichever reset came last.
+    [[ ! -r "${RUN_DIR}/last-reset" ]] || read -r reset <"${RUN_DIR}/last-reset"
+    [[ ! "${reset}" =~ ^[0-9]+$ ]] || (( reset <= last )) || last="${reset}"
     now="$(date +%s)"
     ! rock_reprobe_rearm "${last}" "${now}" || return 0
     if (( tries >= NOPARTNER_MAX )); then
@@ -672,6 +677,22 @@ rock_back_power_correction() {
       sleep "${SINK_RESET_SETTLE}"
       printf '%s\n' source >"${PORT_DIR}/preferred_role" \
         || log "ERROR: cannot restore Rock source preference after the sink-first reset"
+      printf '%s\n' "$(date +%s)" >"${RUN_DIR}/last-reset" \
+        || log "ERROR: cannot record the Rock sink-first reset time"
+      # A device that attached on this reset is a new attach, not this cycle's
+      # failure. As source it is done. Any other is left to its own partner-add
+      # run (waiting for this lock) after a blind cycle, whose tries cap it; a
+      # partner-keyed correction keeps the receipt, so a flapping charger stops.
+      if [[ -e "${PARTNER_DIR}" ]]; then
+        note_partner_since_early
+        if [[ -r "${settled_power}" && "$(active_role "${settled_power}")" == source ]]; then
+          rock_settled_source=1
+          return 0
+        fi
+        (( blind == 0 )) || return 0
+        [[ ! -r "${PARTNER_DIR}/identity/id_header" ]] \
+          || identity="$(cat "${PARTNER_DIR}/identity/id_header")"
+      fi
     fi
   fi
   printf '%s\n' "${identity}" >"${RUN_DIR}/failed" \

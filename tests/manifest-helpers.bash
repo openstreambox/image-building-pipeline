@@ -1181,6 +1181,18 @@ run_typec_rock() {
           if [[ "$2" == dual && -e "$CERALIVE_TYPEC_IIO_DIR/detach" ]]; then
             rm -rf "$CERALIVE_TYPEC_CLASS_DIR/port0-partner"
           fi
+          # The sink-first reset (dual written while sink is preferred): a
+          # kernel that rejects it, or a device that attaches on it as source
+          # (a modem) or as sink (a camera or charger).
+          if [[ "$2" == dual && "$(command cat "$CERALIVE_TYPEC_CLASS_DIR/port0/preferred_role" 2>/dev/null)" == sink ]]; then
+            [[ ! -e "$CERALIVE_TYPEC_IIO_DIR/reject-sink-reset-dual" ]] || return 1
+            if [[ -e "$CERALIVE_TYPEC_IIO_DIR/attach-on-sink-reset" ]]; then
+              mkdir -p "$CERALIVE_TYPEC_CLASS_DIR/port0-partner/identity"
+              builtin printf "0x5ec0ffee\n" >"$CERALIVE_TYPEC_CLASS_DIR/port0-partner/identity/id_header"
+              builtin printf "%s\n" "$(command cat "$CERALIVE_TYPEC_IIO_DIR/attach-on-sink-reset")" \
+                >"$CERALIVE_TYPEC_CLASS_DIR/port0/power_role"
+            fi
+          fi
           # A camera stuck in SNK_DEBOUNCED that the cycle makes charge: it
           # attaches with the board as source.
           if [[ "$2" == dual && -e "$CERALIVE_TYPEC_IIO_DIR/attach-on-cycle" ]]; then
