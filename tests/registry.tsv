@@ -199,6 +199,7 @@ tests/real-rauc-cleanup-contract.test.sh	shell	privileged	opt-in	same RAUC servi
 # --- driven by a default row, never standalone ---------------------------
 tests/manifest-helpers.bash	helper	support	invoked-by-suite	shared bats setup and fixture helpers; must never define an @test or the split counts stop summing
 tests/lib/assertions.sh	helper	support	invoked-by-suite	the one ok/bad/assert_eq/assert_contains library for the collecting shell harnesses
+tests/lib/migrate-data.sh	helper	support	invoked-by-suite	renders the shipped migrate-data body inside a fixture for release-preset.bats and migrate-data-recovery.bats
 tests/lib/kernel-stage-fixture.sh	helper	support	invoked-by-suite	directory-backed slots and real kernel archive for kernel staging
 tests/lib/modem-port-hints-udev.sh	helper	support	invoked-by-suite	fake-sysfs udevadm match proof for modem-port-hints.bats (runs inside a user + mount namespace)
 tests/kernel-stage-contract-fixtures.sh	tool	support	invoked-by-suite	real producer serialization for self-contained consumer fixture copies
