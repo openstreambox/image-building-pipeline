@@ -5961,6 +5961,28 @@ blind. Whether the camera then offers its webcam personality is the camera's own
 setting (the Pocket 3 enumerates `2ca3:0020` RNDIS/storage by default and `2ca3:0023` UVC
 in webcam mode); nothing in the image switches it.
 
+**Sink-first reset after a cycle that finds nothing (Rock 5B+, back power confirmed).**
+tcpm picks the state a port reset ends in from the try role: with `preferred_role=source`
+a `port_type` cycle on an empty J11 restarts it in `SRC_UNATTACHED` (`PORT_RESET_WAIT_OFF
+-> SRC_UNATTACHED`, "Start toggling"), and from there the FUSB302 raised no attach for a
+modem plugged in minutes later, with no tcpm event at all, in 2 of 2 tries on one board
+(the field symptom: a hub plugged into J11 after boot is never seen). `power_role` keeps
+reading `sink` there, so the rebind guards above never fire either. Either half alone was
+fine in 3 of 3: a fresh probe with only the source preference written, or the same cycle
+with the DT's sink preference left in place, ends in `SNK_UNATTACHED`, and a later plug
+attached on its own within 0.2 s. A hot unplug lands tcpm in `SNK_UNATTACHED` by itself;
+what stuck the port after an unplug was the no-partner cycle that followed. So when a
+cycle's settle wait ends with no partner, the policy writes `preferred_role=sink`, cycles
+`port_type=source` then `dual` once more, waits `CERALIVE_TYPEC_SINK_RESET_SETTLE` (2 s;
+tcpm picks the state about 100 ms after the write, up to about 1 s when VBUS was on) and
+writes `source` back, which only sets the try role and does not reset the port. The
+source-preferred cycle itself is unchanged, so a camera stuck in `SNK_DEBOUNCED` still
+gets it; one that attaches on it has a partner and gets no second reset. A refused or
+ignored sink preference skips the second cycle with an error line. Why the FUSB302 misses
+the attach from `SRC_UNATTACHED` is not established. Guards: the "typec policy: … sink-first
+…" cases in `runtime-services.bats`, whose fake kernel records the state each reset rests in
+from the preference active when it resolves.
+
 **Source port that never sees its partner (Rock 5B+, back power confirmed).** With a
 plain USB device on J11 through a C-to-A adapter, the FUSB302 can sit toggling in the
 source role with no attach interrupt at all, through every `port_type` cycle and across

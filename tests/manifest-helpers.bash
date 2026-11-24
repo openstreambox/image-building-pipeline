@@ -1089,7 +1089,7 @@ typec_rock_fixture() {
   export CERALIVE_TYPEC_IIO_DIR="$root/iio"
   export CERALIVE_TYPEC_RUN_DIR="$root/run"
   export CERALIVE_TYPEC_CLASS_DIR="$root/typec"
-  export CERALIVE_TYPEC_WAIT=0 CERALIVE_TYPEC_ADC_RETRY=0
+  export CERALIVE_TYPEC_WAIT=0 CERALIVE_TYPEC_ADC_RETRY=0 CERALIVE_TYPEC_SINK_RESET_SETTLE=0
 }
 
 # typec_rock_reprobe_fixture <root> — the field state the FUSB302 rebind targets:
@@ -1122,11 +1122,41 @@ typec_rock_reprobe_fixture() {
   export CERALIVE_TYPEC_REBIND_GAP=0 CERALIVE_TYPEC_BIND_WAIT=0
 }
 
+# typec_fake_rest_state <root> — the unattached state the fake tcpm rests in:
+# SRC_UNATTACHED or SNK_UNATTACHED, or `none` when no reset or probe has run.
+# A port_type write leaves a reset pending; the fake resolves it at the next
+# sleep from the preference active then (tcpm picks it about 100 ms after the
+# write), and a reset still pending when the policy exits resolves from the
+# final preference. A successful bind is a fresh probe and ends sink-first.
+typec_fake_rest_state() {
+  local iio="$1/iio" raw
+  if [[ -e "$iio/reset-pending" ]]; then
+    raw="$(cat "$1/typec/port0/preferred_role")"
+    [[ "$raw" != *'['* ]] || raw="$(printf '%s\n' "$raw" | sed -n 's/.*\[\([a-z]*\)\].*/\1/p')"
+    if [[ "${raw//[[:space:]]/}" == sink ]]; then echo SNK_UNATTACHED; else echo SRC_UNATTACHED; fi
+  elif [[ -s "$iio/rest-states" ]]; then
+    tail -n 1 "$iio/rest-states"
+  else
+    echo none
+  fi
+}
+
 # Observe the actual redirected writes; emulate only the kernel's post-cycle
-# detach, the FUSB302 rebind and ADC changes, which regular files cannot
-# produce themselves.
+# detach, the FUSB302 rebind, the reset's resting state and ADC changes, which
+# regular files cannot produce themselves.
 run_typec_rock() {
   bash -c '
+    typec_fake_resolve_reset() {
+      [[ -e "$CERALIVE_TYPEC_IIO_DIR/reset-pending" ]] || return 0
+      local raw
+      raw="$(command cat "$CERALIVE_TYPEC_CLASS_DIR/port0/preferred_role" 2>/dev/null)"
+      rm -f "$CERALIVE_TYPEC_IIO_DIR/reset-pending"
+      if [[ "$raw" == "sink" || "$raw" == *"[sink]"* ]]; then
+        builtin printf "SNK_UNATTACHED\n" >>"$CERALIVE_TYPEC_IIO_DIR/rest-states"
+      else
+        builtin printf "SRC_UNATTACHED\n" >>"$CERALIVE_TYPEC_IIO_DIR/rest-states"
+      fi
+    }
     printf() {
       local target
       target="$(readlink "/proc/$$/fd/1")"
@@ -1151,9 +1181,17 @@ run_typec_rock() {
           if [[ "$2" == dual && -e "$CERALIVE_TYPEC_IIO_DIR/detach" ]]; then
             rm -rf "$CERALIVE_TYPEC_CLASS_DIR/port0-partner"
           fi
+          # A camera stuck in SNK_DEBOUNCED that the cycle makes charge: it
+          # attaches with the board as source.
+          if [[ "$2" == dual && -e "$CERALIVE_TYPEC_IIO_DIR/attach-on-cycle" ]]; then
+            mkdir -p "$CERALIVE_TYPEC_CLASS_DIR/port0-partner"
+            builtin printf "[source] sink\n" >"$CERALIVE_TYPEC_CLASS_DIR/port0/power_role"
+          fi
           if [[ -f "$CERALIVE_TYPEC_IIO_DIR/accepted-port-type" ]]; then
             builtin printf "%s\n" "$2" >"$CERALIVE_TYPEC_IIO_DIR/accepted-port-type"
           fi
+          # An accepted write resets the port (a rejected one returned above).
+          : >"$CERALIVE_TYPEC_IIO_DIR/reset-pending"
           ;;
         "${TYPEC_FAKE_I2C:-/nonexistent}"/drivers/*/unbind)
           # Fake kernel: unbinding removes the driver link and the Type-C port.
@@ -1183,6 +1221,8 @@ run_typec_rock() {
             return 1  # EBUSY: already bound
           fi
           ln -s "$TYPEC_FAKE_I2C/drivers/typec_fusb302" "$TYPEC_FAKE_I2C/devices/$2/driver"
+          rm -f "$CERALIVE_TYPEC_IIO_DIR/reset-pending"
+          builtin printf "SNK_UNATTACHED\n" >>"$CERALIVE_TYPEC_IIO_DIR/rest-states"
           if [[ ! -e "$CERALIVE_TYPEC_IIO_DIR/port-not-back" ]]; then
             mv "$CERALIVE_TYPEC_IIO_DIR/port0.unbound" "$CERALIVE_TYPEC_CLASS_DIR/port0"
             builtin printf "[sink] source\n" >"$CERALIVE_TYPEC_CLASS_DIR/port0/preferred_role"
@@ -1197,6 +1237,7 @@ run_typec_rock() {
         "$CERALIVE_TYPEC_CLASS_DIR/port0/preferred_role")
           # A kernel that accepts the write but keeps reporting its own value.
           [[ ! -e "$CERALIVE_TYPEC_IIO_DIR/ignore-preferred" ]] || return 0
+          [[ "$2" != sink || ! -e "$CERALIVE_TYPEC_IIO_DIR/reject-preferred-sink" ]] || return 1
           ;;
         "$CERALIVE_TYPEC_RUN_DIR/reprobe")
           if [[ "$2" == attempted &&
@@ -1212,6 +1253,7 @@ run_typec_rock() {
     # SECONDS) two weeks ahead, as NTP does on a board without an RTC, and the
     # partner shows up on the third poll.
     sleep() {
+      typec_fake_resolve_reset
       if [[ -e "$CERALIVE_TYPEC_IIO_DIR/clock-armed" ]]; then
         local n=0
         [[ ! -r "$CERALIVE_TYPEC_IIO_DIR/sleeps" ]] || n="$(command cat "$CERALIVE_TYPEC_IIO_DIR/sleeps")"

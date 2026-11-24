@@ -15,6 +15,9 @@
 # with no partner rebinds the port's FUSB302 before any cycle. If that early
 # rebind finds nothing, the cycles run as before and, once they are used up, one
 # more rebind follows (a device plugged in after the early one).
+# A cycle that leaves the port with no partner is followed by one more cycle
+# with sink preferred: a reset with source preferred restarts tcpm in
+# SRC_UNATTACHED, from where the FUSB302 raises no attach for a later plug.
 #
 # udev starts the systemd oneshot on partner and port add events. The boot enable
 # is a second coldplug path, so every run inspects CURRENT sysfs state and is safe
@@ -45,6 +48,8 @@
 #   CERALIVE_TYPEC_REBIND_GAP         seconds between unbind and bind (default 1)
 #   CERALIVE_TYPEC_BIND_WAIT          seconds to wait for each driver-link change (default 3)
 #   CERALIVE_TYPEC_OTG_DEV            OTG controller (default /sys/bus/platform/devices/fc000000.usb)
+#   CERALIVE_TYPEC_SINK_RESET_SETTLE  seconds the sink-first reset may take before
+#                                     the source preference returns (default 2)
 
 set -uo pipefail
 
@@ -82,6 +87,8 @@ REARM_MAX="${CERALIVE_TYPEC_REARM_MAX:-3}"
 BIND_WAIT="${CERALIVE_TYPEC_BIND_WAIT:-3}"
 [[ "${BIND_WAIT}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_BIND_WAIT must be an unsigned integer"
 OTG_DEV="${CERALIVE_TYPEC_OTG_DEV:-/sys/bus/platform/devices/fc000000.usb}"
+SINK_RESET_SETTLE="${CERALIVE_TYPEC_SINK_RESET_SETTLE:-2}"
+[[ "${SINK_RESET_SETTLE}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "CERALIVE_TYPEC_SINK_RESET_SETTLE must be a non-negative number"
 
 PORT_DIR="${CLASS_DIR}/${PORT}"
 PARTNER_DIR="${PORT_DIR}-partner"
@@ -639,6 +646,34 @@ rock_back_power_correction() {
     (( MONO_NOW < deadline )) || break
     sleep "${POLL_INTERVAL}"
   done
+  # No partner after the cycle: tcpm chooses the state a port reset ends in
+  # from the try role, and with source preferred it restarts in SRC_UNATTACHED,
+  # from where the FUSB302 raises no attach for a device plugged in later (a
+  # hub or modem stays unseen until a rebind). The same reset with sink
+  # preferred restarts it in SNK_UNATTACHED, which attaches a later plug on its
+  # own, so reset once more that way. The source preference returns only after
+  # SINK_RESET_SETTLE seconds (tcpm picks the state about 100 ms after the
+  # write, up to about 1 s when VBUS was on); a preference write by itself does
+  # not reset the port. A camera this cycle made attach has a partner by now.
+  if [[ ! -e "${PARTNER_DIR}" ]]; then
+    if ! printf '%s\n' sink >"${PORT_DIR}/preferred_role" ||
+        [[ "$(active_role "${PORT_DIR}/preferred_role")" != sink ]]; then
+      log "ERROR: cannot set Rock sink preference — ${PORT} may miss a later plug until it is rebound"
+    else
+      log "INFO: Rock ${PORT} has no partner after the cycle: cycling port_type=source then dual with sink preferred, so a later plug is seen"
+      if ! printf '%s\n' source >"${PORT_DIR}/port_type"; then
+        log "ERROR: Rock port_type=source write for the sink-first reset was rejected"
+      elif ! printf '%s\n' dual >"${PORT_DIR}/port_type" &&
+          ! printf '%s\n' dual >"${PORT_DIR}/port_type"; then
+        log "ERROR: Rock port_type=dual after the sink-first reset was rejected twice — restoring recorded port_type=${original_port_type}"
+        printf '%s\n' "${original_port_type}" >"${PORT_DIR}/port_type" \
+          || log "ERROR: Rock port_type=${original_port_type} restoration was rejected"
+      fi
+      sleep "${SINK_RESET_SETTLE}"
+      printf '%s\n' source >"${PORT_DIR}/preferred_role" \
+        || log "ERROR: cannot restore Rock source preference after the sink-first reset"
+    fi
+  fi
   printf '%s\n' "${identity}" >"${RUN_DIR}/failed" \
     || log "ERROR: cannot record failed Rock attachment"
 }
