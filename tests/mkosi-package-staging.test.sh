@@ -237,7 +237,7 @@ MKOSI_INSTALL_CALLS="${RUN_DIR}/mkosi-install.calls" \
 		exit 1
 	}
 
-[[ "$(<"${RUN_DIR}/mkosi-chroot.calls")" == *'runtime/packages-lock-capture.sh platform gstreamer-bsp gstreamer-runtime linux-image-demo linux-dtb-demo linux-u-boot-demo firmware-demo'* ]] || {
+[[ "$(<"${RUN_DIR}/mkosi-chroot.calls")" == *'runtime/packages-lock-capture.sh platform gstreamer-bsp gstreamer-runtime linux-image-demo linux-dtb-demo linux-u-boot-demo firmware-demo dosfstools'* ]] || {
 	printf 'FAIL platform package-lock capture was not called after installing the BSP\n' >&2
 	exit 1
 }
@@ -251,7 +251,7 @@ mapfile -t install_calls <"${RUN_DIR}/mkosi-install.calls"
 [[ "${#install_calls[@]}" -eq 3 ]]
 [[ "${install_calls[0]}" == '-y --no-install-recommends gstreamer-bsp gstreamer-runtime' ]]
 [[ "${install_calls[1]}" == '-y --no-install-recommends zstd' ]]
-[[ "${install_calls[2]}" == '-y --no-install-recommends linux-image-demo linux-dtb-demo linux-u-boot-demo firmware-demo' ]]
+[[ "${install_calls[2]}" == '-y --no-install-recommends linux-image-demo linux-dtb-demo linux-u-boot-demo firmware-demo dosfstools' ]]
 
 # The prune now issues ONE removal per family it has proved has no consumer, in
 # candidate order, and must issue none at all for a preserved family. Asserting
