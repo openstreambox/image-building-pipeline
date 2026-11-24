@@ -6077,7 +6077,7 @@ before the next tick. The backoff resets only for a partner that stays up for 60
 a partner seen briefly after each rebind would otherwise hold the watch at its first wait. Lines are labelled `hot-plug watch k`;
 each watch rebind of an empty port logs two of them, and the udev-started policy run on the
 re-registered `port0` logs its own (back power, source preference, no partner) plus
-systemd's start and finish lines (not measured). The A509 plan's first option, testing
+systemd's start and finish lines (not measured). One open option, testing
 whether the policy's own `preferred_role=source` write on an empty port is what sticks the
 chip, is still unmeasured; the watch is its slow-rebind fallback.
 
