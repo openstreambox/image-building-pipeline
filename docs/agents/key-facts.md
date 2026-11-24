@@ -6023,7 +6023,7 @@ partner has been seen since. Any partner after the early rebind writes `partner-
 which closes the late rebind for the rest of the boot whatever the re-arm state (the re-arm
 clears its own files, and `CERALIVE_TYPEC_REARM_MAX=0` creates none). That keeps a device
 plugged in during the first minute or so covered as before. A partner seen after the early
-rebind hands over to the re-arm below instead. An empty J11 now costs two info-logged rebinds per boot (early and late). Every
+rebind hands over to the re-arm below instead. An empty J11 now costs two info-logged rebinds in the first minutes (early and late), then the hot-plug watch below. Every
 other outcome (`recovered`, `skipped`, `failed-*`, a crash that leaves `attempted`)
 keeps the once-per-boot rule.
 
@@ -6046,6 +6046,29 @@ re-arm. The boot-time and udev runs never re-arm. An empty port after an unplug 
 loop, because only a partner that appears again re-arms another. Known gap: a modem
 plugged in after that rebind has already run on the empty port (a swap slower than the
 settle time) is not recovered until the next boot.
+**Hot-plug watch, once the rebinds are spent.** A hub plugged into an empty J11 on a
+running 5.1 box stayed undetected (tcpm `SRC_UNATTACHED`) through the ten-second recheck,
+and one manual unbind/bind of `4-0022` found it in about 7 s. No partner had been seen
+that boot, so nothing re-armed, and the stuck chip raises no attach interrupt and changes
+nothing in sysfs or udev, so there is no event to start a rebind from. So when the late
+rebind (or the last re-arm) has nothing left to do, the recheck keeps a slow watch
+(`/run/ceralive-typec/watch`: count and due time in `/proc/uptime` seconds): the first
+rebind `CERALIVE_TYPEC_WATCH_FIRST` (60 s) after the watch starts, each later wait doubled
+up to `CERALIVE_TYPEC_WATCH_CEILING` (300 s), at most `CERALIVE_TYPEC_WATCH_MAX` (96, about
+eight hours; 0 disables it) per partnerless stretch, then one info line (`watch-done`).
+A device plugged in later is found within one wait plus the rebind's partner wait. The
+watch starts only after an outcome that left a working controller (`no-partner` or
+`recovered`) with no re-arm or late rebind pending; `attempted`, `skipped`, `failed-*` and
+`port-missing` never start it. Every rebind guard holds (back power, source preference, `power_role`
+source, nothing enumerated on `fc000000.usb`, the `typec_fusb302` driver link, the lock,
+recheck mode only), so a port with a partner, a sinking port or a working data path is
+never touched. The count is spent before the unbind; a deferral hands it back and the
+rebind is due again on the next tick. Any partner resets the watch. Lines are labelled
+`hot-plug watch k/96`; each watch rebind of an empty port logs two of them, and the
+udev-started policy run on the re-registered `port0` logs its own (back power, source
+preference, no partner) plus systemd's start and finish lines, so an empty back-powered
+J11 journals several lines every five minutes (not measured).
+
 Every decision is journaled with the `fusb302-reprobe:` tag and a syslog priority prefix,
 so `journalctl -p warning` shows failures; deferrals log once per reason. If `port0` is
 absent the Rock recheck logs that once per change and makes no connector writes until it

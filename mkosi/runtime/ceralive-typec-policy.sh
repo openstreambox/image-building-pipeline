@@ -14,7 +14,8 @@
 # interrupt until it is reset, so the first recheck that finds the port source
 # with no partner rebinds the port's FUSB302 before any cycle. If that early
 # rebind finds nothing, the cycles run as before and, once they are used up, one
-# more rebind follows (a device plugged in after the early one).
+# more rebind follows (a device plugged in after the early one). After that a
+# slow hot-plug watch rebinds an empty J11 with backoff (rock_hotplug_watch).
 #
 # udev starts the systemd oneshot on partner and port add events. The boot enable
 # is a second coldplug path, so every run inspects CURRENT sysfs state and is safe
@@ -43,6 +44,11 @@
 #                                     rebind before one more rebind (default 30)
 #   CERALIVE_TYPEC_REARM_MAX          such re-arm rebinds per boot (default 3)
 #   CERALIVE_TYPEC_REBIND_GAP         seconds between unbind and bind (default 1)
+#   CERALIVE_TYPEC_WATCH_FIRST        hot-plug watch: seconds before its first
+#                                     rebind, doubled after each (default 60)
+#   CERALIVE_TYPEC_WATCH_CEILING      hot-plug watch: longest wait (default 300)
+#   CERALIVE_TYPEC_WATCH_MAX          hot-plug watch rebinds per partnerless
+#                                     stretch; 0 disables it (default 96)
 #   CERALIVE_TYPEC_BIND_WAIT          seconds to wait for each driver-link change (default 3)
 #   CERALIVE_TYPEC_OTG_DEV            OTG controller (default /sys/bus/platform/devices/fc000000.usb)
 
@@ -81,6 +87,12 @@ REARM_MAX="${CERALIVE_TYPEC_REARM_MAX:-3}"
 [[ "${REBIND_GAP}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "CERALIVE_TYPEC_REBIND_GAP must be a non-negative number"
 BIND_WAIT="${CERALIVE_TYPEC_BIND_WAIT:-3}"
 [[ "${BIND_WAIT}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_BIND_WAIT must be an unsigned integer"
+WATCH_FIRST="${CERALIVE_TYPEC_WATCH_FIRST:-60}"
+WATCH_CEILING="${CERALIVE_TYPEC_WATCH_CEILING:-300}"
+WATCH_MAX="${CERALIVE_TYPEC_WATCH_MAX:-96}"
+WATCH_NEXT="${WATCH_FIRST}"
+[[ "${WATCH_FIRST}" =~ ^[0-9]+$ && "${WATCH_CEILING}" =~ ^[0-9]+$ && "${WATCH_MAX}" =~ ^[0-9]+$ ]] \
+  || die "CERALIVE_TYPEC_WATCH_FIRST, _CEILING and _MAX must be unsigned integers"
 OTG_DEV="${CERALIVE_TYPEC_OTG_DEV:-/sys/bus/platform/devices/fc000000.usb}"
 
 PORT_DIR="${CLASS_DIR}/${PORT}"
@@ -196,7 +208,7 @@ wait_bound() {
   done
 }
 
-# rock_fusb302_reprobe <last cycle epoch> <now epoch> [early | re-arm k/max] —
+# rock_fusb302_reprobe <last cycle epoch> <now epoch> [early | k/max | watch k/max] —
 # returns 2 when it did nothing (marker, settle time or a deferral), 3 when it
 # only recorded a driver or I2C skip, otherwise 0. Runs only from the Rock
 # recheck with back power present and no partner: early, before the no-partner
@@ -235,10 +247,17 @@ wait_bound() {
 # that run and bypasses only the once-per-boot marker; every other guard holds.
 # An empty port after an unplug costs one such rebind; it cannot loop, because
 # only a partner that appears again re-arms it.
+#
+# Watch (`watch k/max`, from rock_hotplug_watch): like a re-arm it bypasses only
+# the once-per-boot marker and keeps every other guard, but it counts in its own
+# state file and leaves the re-arm files alone.
 rock_fusb302_reprobe() {
   local last="$1" now="$2" rearm="${3:-}" power dev name driver bus deadline data label="" prev=""
-  local early=0
-  if [[ "${rearm}" == early ]]; then
+  local early=0 watch=""
+  if [[ "${rearm}" == watch\ * ]]; then
+    watch="${rearm#watch }" rearm=""
+    [[ ! -r "${RUN_DIR}/reprobe" ]] || read -r prev _ <"${RUN_DIR}/reprobe"
+  elif [[ "${rearm}" == early ]]; then
     early=1 rearm=""
     [[ ! -e "${RUN_DIR}/reprobe" ]] || return 2
     (( last == 0 || now - last >= EARLY_SETTLE )) || return 2
@@ -294,7 +313,7 @@ rock_fusb302_reprobe() {
   fi
   if (( early )); then
     : >"${RUN_DIR}/reprobe-early" || reprobe_log ERROR "cannot record the early rebind"
-  elif [[ -z "${rearm}" && -e "${RUN_DIR}/reprobe-early" ]]; then
+  elif [[ -z "${rearm}" && -z "${watch}" && -e "${RUN_DIR}/reprobe-early" ]]; then
     # Unrecorded, the marker stays `attempted`, which allows no further rebind.
     if ! : >"${RUN_DIR}/reprobe-late"; then
       reprobe_log ERROR "cannot record the late rebind — no rebind"
@@ -303,7 +322,7 @@ rock_fusb302_reprobe() {
   fi
   if [[ -e "${PARTNER_DIR}" ]]; then
     reprobe_log INFO "skipped: a partner appeared on ${PORT}"
-    if [[ -n "${rearm}" && -n "${prev}" ]]; then
+    if [[ -n "${rearm}${watch}" && -n "${prev}" ]]; then
       # The partner came back on its own: keep the earlier outcome so it re-arms
       # the next detach, and leave the count unspent.
       reprobe_record "${prev}" || reprobe_log ERROR "cannot restore the rebind outcome"
@@ -321,7 +340,10 @@ rock_fusb302_reprobe() {
     fi
     label="re-arm ${rearm}: "
   fi
-  if [[ -n "${rearm}" ]]; then
+  if [[ -n "${watch}" ]]; then
+    label="hot-plug watch ${watch}: "
+    reprobe_log INFO "${label}${PORT} is source with no partner: rebinding ${name} from ${driver##*/}"
+  elif [[ -n "${rearm}" ]]; then
     reprobe_log INFO "${label}${PORT} lost its partner and has had none for ${REARM_SETTLE}s or more: rebinding ${name} from ${driver##*/}"
   elif (( early )); then
     label="early: "
@@ -374,6 +396,8 @@ rock_fusb302_reprobe() {
   else
     if (( early )); then
       reprobe_log INFO "${label}no partner ${WAIT_SECONDS}s after rebinding ${name}: J11 is empty or the chip is still stuck — the no-partner cycles follow, then one late rebind"
+    elif [[ -n "${watch}" ]]; then
+      reprobe_log INFO "${label}no partner ${WAIT_SECONDS}s after rebinding ${name}: J11 is still empty or the chip is stuck — next watch rebind in ${WATCH_NEXT}s"
     else
       reprobe_log INFO "${label}no partner ${WAIT_SECONDS}s after rebinding ${name}: J11 is empty or the chip is still stuck — only a partner that appears again re-arms another rebind"
     fi
@@ -443,6 +467,62 @@ rock_reprobe_rearm() {
   # source again (e.g. after a charger or camera left it as sink).
   rock_fusb302_reprobe "${last}" "${now}" "$((count + 1))/${REARM_MAX}"
   (( $? != 2 ))
+}
+
+# rock_hotplug_watch <last cycle epoch> <now epoch> — the slow path for a device
+# plugged into an empty J11 once this boot's rebinds are spent (early and late,
+# or the re-arms after an unplug). The stuck FUSB302 raises no attach for it:
+# tcpm stays SRC_UNATTACHED and nothing in sysfs or udev changes, so no event can
+# start a rebind, and a single rebind finds the device within seconds. Runs only
+# where rock_fusb302_reprobe had nothing to do (recheck mode, back power, no
+# partner, no-partner cycles used up), and only after an outcome that left a
+# working controller (`no-partner` or `recovered`) with no re-arm or late rebind
+# pending.
+# The first rebind comes WATCH_FIRST seconds after the watch starts, each later
+# wait doubles up to WATCH_CEILING, and a partnerless stretch gets at most
+# WATCH_MAX of them; a partner resets the watch (rock_back_power_correction).
+# Waits count /proc/uptime. The count is spent before the rebind, and a deferral
+# hands it back. Every guard of rock_fusb302_reprobe holds.
+rock_hotplug_watch() {
+  local last="$1" now="$2" state="" count="" due="" wait i rc
+  (( WATCH_MAX > 0 )) || return 0
+  [[ ! -r "${RUN_DIR}/reprobe" ]] || read -r state _ <"${RUN_DIR}/reprobe"
+  case "${state}" in no-partner | recovered) ;; *) return 0 ;; esac
+  # A pending re-arm or late rebind goes first; the watch starts after it.
+  [[ ! -e "${RUN_DIR}/detached" ]] || return 0
+  ! rock_late_reprobe_allowed || return 0
+  mono_now
+  [[ ! -r "${RUN_DIR}/watch" ]] || read -r count due <"${RUN_DIR}/watch"
+  if [[ ! "${count}" =~ ^[0-9]+$ || ! "${due}" =~ ^[0-9]+$ ]]; then
+    # Start quietly: the first rebind's own lines say it is the watch.
+    printf '0 %s\n' "$((MONO_NOW + WATCH_FIRST))" >"${RUN_DIR}/watch" \
+      || reprobe_log ERROR "cannot record the hot-plug watch — no watch rebind"
+    return 0
+  fi
+  if (( count >= WATCH_MAX )); then
+    if [[ ! -e "${RUN_DIR}/watch-done" ]]; then
+      reprobe_log INFO "hot-plug watch: ${WATCH_MAX} rebinds found no partner — no further rebind until a partner appears on ${PORT}"
+      : >"${RUN_DIR}/watch-done" || reprobe_log ERROR "cannot record the end of the hot-plug watch"
+    fi
+    return 0
+  fi
+  (( MONO_NOW >= due )) || return 0
+  wait="${WATCH_FIRST}"
+  for (( i = 0; i <= count && wait < WATCH_CEILING; i++ )); do wait=$((wait * 2)); done
+  (( wait <= WATCH_CEILING )) || wait="${WATCH_CEILING}"
+  if ! printf '%s %s\n' "$((count + 1))" "$((MONO_NOW + wait))" >"${RUN_DIR}/watch"; then
+    reprobe_log ERROR "cannot record the hot-plug watch count — no watch rebind"
+    return 0
+  fi
+  WATCH_NEXT="${wait}"
+  rock_fusb302_reprobe "${last}" "${now}" "watch $((count + 1))/${WATCH_MAX}"
+  rc=$?
+  if (( rc == 2 )); then
+    # Deferred on a guard: unspent, and due again on the next tick.
+    printf '%s %s\n' "${count}" "${MONO_NOW}" >"${RUN_DIR}/watch" \
+      || reprobe_log ERROR "cannot return the deferred hot-plug watch rebind"
+  fi
+  return 0
 }
 
 rock_back_power_correction() {
@@ -517,7 +597,7 @@ rock_back_power_correction() {
     # A partner seen after this boot's rebind arms one more rebind for when it
     # leaves (rock_reprobe_rearm). Only outcomes that left a working controller
     # qualify; skipped and failed rebinds never re-arm.
-    rm -f "${RUN_DIR}/detached"
+    rm -f "${RUN_DIR}/detached" "${RUN_DIR}/watch" "${RUN_DIR}/watch-done"
     note_partner_since_early
     if [[ ! -e "${RUN_DIR}/partner-seen" && -r "${RUN_DIR}/reprobe" ]]; then
       read -r rstate _ <"${RUN_DIR}/reprobe"
@@ -548,6 +628,7 @@ rock_back_power_correction() {
     ! rock_reprobe_rearm "${last}" "${now}" || return 0
     if (( tries >= NOPARTNER_MAX )); then
       rock_fusb302_reprobe "${last}" "${now}"
+      (( $? != 2 )) || rock_hotplug_watch "${last}" "${now}"
       return 0
     fi
     # The early rebind goes first; a deferral, a skip that touched nothing or a

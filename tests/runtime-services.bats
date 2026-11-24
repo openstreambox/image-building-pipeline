@@ -1768,6 +1768,227 @@ typec_rock_early_fixture() {
   [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 2 ]
 }
 
+# typec_rock_watch_fixture <root> — J11 empty and this boot's rebind spent: the
+# rebind fixture after its one rebind found no partner.
+typec_rock_watch_fixture() {
+  typec_rock_reprobe_fixture "$1"
+  run_typec_rock >/dev/null
+  [ "$(cut -d' ' -f1 "$1/run/reprobe")" = no-partner ]
+}
+
+# watch_due_now <root> — make the pending hot-plug watch rebind due, keeping its count.
+watch_due_now() {
+  local count
+  read -r count _ <"$1/run/watch"
+  printf '%s 0\n' "${count}" >"$1/run/watch"
+}
+
+# watch_wait <root> — seconds from now (uptime) until the next watch rebind.
+watch_wait() {
+  local due
+  read -r _ due <"$1/run/watch"
+  echo $(( due - $(cut -d. -f1 /proc/uptime) ))
+}
+
+@test "typec policy: an empty J11 with this boot's rebinds spent gets the hot-plug watch, with backoff" {
+  local root="$BATS_TEST_TMPDIR/rock" n w expect
+  typec_rock_watch_fixture "$root"
+
+  # The watch starts quietly on the next tick.
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"fusb302-reprobe"* ]]
+  [ "$(cut -d' ' -f1 "$root/run/watch")" = 0 ]
+  w="$(watch_wait "$root")"; (( w >= 58 && w <= 61 ))
+  # Not due yet: nothing happens and nothing is journaled.
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"fusb302-reprobe"* ]]
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 1 ]
+
+  n=0
+  for expect in 120 240 300 300; do
+    n=$((n + 1))
+    watch_due_now "$root"
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"<5>ceralive-typec-policy: INFO: fusb302-reprobe: hot-plug watch $n/96: port0 is source with no partner: rebinding 4-0022 from typec_fusb302"* ]]
+    [[ "$output" == *"INFO: fusb302-reprobe: hot-plug watch $n/96: no partner 0s after rebinding 4-0022: J11 is still empty or the chip is stuck — next watch rebind in ${expect}s"* ]]
+    [[ "$output" != *"WARNING"* && "$output" != *"<4>"* && "$output" != *"<3>"* ]]
+    [ "$(cut -d' ' -f1 "$root/run/watch")" = "$n" ]
+    w="$(watch_wait "$root")"; (( w >= expect - 2 && w <= expect + 1 ))
+    [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq $((n + 1)) ]
+  done
+  # Rebinds only: never a port_type write, never the re-arm files.
+  [ ! -e "$root/iio/writes" ]
+  [ ! -e "$root/run/rearm" ]
+  [ ! -e "$root/run/detached" ]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = no-partner ]
+}
+
+@test "typec policy: a device plugged into J11 after boot is found by the hot-plug watch, which then resets" {
+  local root="$BATS_TEST_TMPDIR/rock" w
+  typec_rock_watch_fixture "$root"
+  run run_typec_rock
+  [ -e "$root/run/watch" ]
+
+  # The hub goes in; the stuck chip raises no attach until it is rebound.
+  touch "$root/iio/reprobe-attaches"
+  watch_due_now "$root"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INFO: fusb302-reprobe: hot-plug watch 1/96: partner found after rebinding 4-0022: power_role=source data_role=host"* ]]
+  [ "$(cut -d' ' -f1 "$root/run/reprobe")" = recovered ]
+
+  # Partner present: the watch resets and the re-arm is armed as after any rebind.
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -e "$root/run/watch" ]
+  [ -e "$root/run/partner-seen" ]
+
+  # Unplugged for good: the re-arm goes first (here due at once), then the
+  # watch starts afresh from its first wait.
+  rm -f "$root/iio/reprobe-attaches"
+  rm -rf "$root/typec/port0-partner"
+  export CERALIVE_TYPEC_REARM_SETTLE=0
+  run run_typec_rock
+  [[ "$output" == *"re-arm 1/3: no partner"* ]]
+  [ ! -e "$root/run/watch" ]
+  run run_typec_rock
+  [ "$(cut -d' ' -f1 "$root/run/watch")" = 0 ]
+  w="$(watch_wait "$root")"; (( w >= 58 && w <= 61 ))
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 3 ]
+}
+
+@test "typec policy: the hot-plug watch stops at its cap until a partner appears" {
+  local root="$BATS_TEST_TMPDIR/rock" n
+  export CERALIVE_TYPEC_WATCH_MAX=2
+  typec_rock_watch_fixture "$root"
+  run run_typec_rock
+  for n in 1 2; do
+    watch_due_now "$root"
+    run run_typec_rock
+    [[ "$output" == *"hot-plug watch $n/2: no partner"* ]]
+  done
+  watch_due_now "$root"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<5>ceralive-typec-policy: INFO: fusb302-reprobe: hot-plug watch: 2 rebinds found no partner — no further rebind until a partner appears on port0"* ]]
+  for n in 1 2 3; do
+    watch_due_now "$root"
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"fusb302-reprobe"* ]]
+  done
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 3 ]
+
+  mkdir -p "$root/typec/port0-partner"
+  run run_typec_rock
+  [ ! -e "$root/run/watch" ]
+  [ ! -e "$root/run/watch-done" ]
+}
+
+@test "typec policy: the hot-plug watch keeps every rebind guard, and a deferral spends nothing" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_watch_fixture "$root"
+  run run_typec_rock
+  watch_due_now "$root"
+
+  # Sinking: deferred, count unspent, due again on the next tick.
+  printf 'source [sink]\n' >"$root/typec/port0/power_role"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INFO: fusb302-reprobe: deferred: port0 power_role=sink, not source"* ]]
+  [ "$(cut -d' ' -f1 "$root/run/watch")" = 0 ]
+  printf '[source] sink\n' >"$root/typec/port0/power_role"
+
+  # A device already enumerated on the OTG controller: deferred.
+  mkdir -p "$root/otg/fc000000.usb/xhci-hcd.3.auto/usb3/3-1"
+  run run_typec_rock
+  [[ "$output" == *"deferred: a USB device is enumerated under fc000000.usb"* ]]
+  [ "$(cut -d' ' -f1 "$root/run/watch")" = 0 ]
+  rmdir "$root/otg/fc000000.usb/xhci-hcd.3.auto/usb3/3-1"
+
+  # No confirmed back power, or not the recheck: no connector action at all.
+  printf '3\n' >"$root/iio/iio:device7/in_voltage6_raw"
+  run run_typec_rock
+  printf '910\n' >"$root/iio/iio:device7/in_voltage6_raw"
+  CERALIVE_TYPEC_MODE=normal run run_typec_rock
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 1 ]
+  [ "$(cut -d' ' -f1 "$root/run/watch")" = 0 ]
+
+  # With every guard met again the same due rebind runs.
+  run run_typec_rock
+  [[ "$output" == *"hot-plug watch 1/96: port0 is source with no partner: rebinding 4-0022"* ]]
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 2 ]
+
+  # A partner present never reaches the watch and resets it.
+  mkdir -p "$root/typec/port0-partner"
+  watch_due_now "$root"
+  run run_typec_rock
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 2 ]
+  [ ! -e "$root/run/watch" ]
+  [ ! -e "$root/iio/writes" ]
+}
+
+@test "typec policy: no hot-plug watch after a skipped or failed rebind, with a re-arm pending, or with WATCH_MAX=0" {
+  local root="$BATS_TEST_TMPDIR/rock" state
+  for state in attempted skipped failed-unbind failed-bind port-missing; do
+    typec_rock_watch_fixture "$root"
+    printf '%s 1\n' "$state" >"$root/run/reprobe"
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [ ! -e "$root/run/watch" ]
+    [[ "$output" != *"hot-plug watch"* ]]
+  done
+
+  typec_rock_watch_fixture "$root"
+  printf '%s\n' "$(date +%s)" >"$root/run/detached"
+  export CERALIVE_TYPEC_REARM_SETTLE=1000
+  run run_typec_rock
+  [ ! -e "$root/run/watch" ]
+  unset CERALIVE_TYPEC_REARM_SETTLE
+
+  typec_rock_watch_fixture "$root"
+  CERALIVE_TYPEC_WATCH_MAX=0 run run_typec_rock
+  [ ! -e "$root/run/watch" ]
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 1 ]
+}
+
+@test "typec policy: the hot-plug watch starts only after a pending late rebind has run" {
+  local root="$BATS_TEST_TMPDIR/rock" n w
+  typec_rock_early_fixture "$root"
+  export CERALIVE_TYPEC_NOPARTNER_SPACING=0 CERALIVE_TYPEC_REPROBE_SETTLE=1000
+  for n in 1 2 3 4 5 6; do
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+  done
+  # Early rebind and the three cycles done; the late rebind waits its settle.
+  [ "$(grep -c '^source$' "$root/iio/writes")" -eq 3 ]
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 1 ]
+  [ ! -e "$root/run/reprobe-late" ]
+  [ ! -e "$root/run/watch" ]
+
+  export CERALIVE_TYPEC_REPROBE_SETTLE=0
+  run run_typec_rock
+  [ -e "$root/run/reprobe-late" ]
+  [ "$(grep -c '^unbind' "$root/iio/i2c-writes")" -eq 2 ]
+  [ ! -e "$root/run/watch" ]
+  run run_typec_rock
+  [ "$(cut -d' ' -f1 "$root/run/watch")" = 0 ]
+  w="$(watch_wait "$root")"; (( w >= 58 && w <= 61 ))
+}
+
+@test "typec policy: hot-plug watch settings must be unsigned integers" {
+  local root="$BATS_TEST_TMPDIR/rock" var
+  typec_rock_watch_fixture "$root"
+  for var in CERALIVE_TYPEC_WATCH_FIRST CERALIVE_TYPEC_WATCH_CEILING CERALIVE_TYPEC_WATCH_MAX; do
+    run env "$var=-1" bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CERALIVE_TYPEC_WATCH_FIRST, _CEILING and _MAX must be unsigned integers"* ]]
+  done
+}
+
 @test "typec policy: a partner seen after an empty early rebind hands over to the re-arm, never the late rebind" {
   local root="$BATS_TEST_TMPDIR/rock" n
   typec_rock_early_fixture "$root"
@@ -2407,15 +2628,19 @@ SH
   ' "$script" >"$outside"
   run grep -E '>.*(unbind|bind)\}?"' "$outside"
   [ "$status" -ne 0 ]
-  # The rebind has exactly three callers: the Rock correction (early and late
-  # rebind) and the re-arm, which only the Rock correction calls.
-  [ "$(grep -c 'rock_fusb302_reprobe "' "$script")" -eq 3 ]
+  # The rebind has exactly four callers: the Rock correction (early and late
+  # rebind), the re-arm and the hot-plug watch, which only the Rock correction
+  # calls, right after a late-rebind call that had nothing to do.
+  [ "$(grep -c 'rock_fusb302_reprobe "' "$script")" -eq 4 ]
   [ "$(grep -c 'rock_reprobe_rearm "' "$script")" -eq 1 ]
+  [ "$(grep -c 'rock_hotplug_watch "' "$script")" -eq 1 ]
   body() { awk -v f="$1" '$0 ~ "^"f"\\(\\) \\{" { inside=1 } inside { print } inside && /^}/ { inside=0 }' "$script"; }
   body rock_back_power_correction | grep -Fxq '      rock_fusb302_reprobe "${last}" "${now}"'
   body rock_back_power_correction | grep -Fxq '    rock_fusb302_reprobe "${last}" "${now}" early'
   body rock_back_power_correction | grep -Fq 'rock_reprobe_rearm "${last}" "${now}"'
   body rock_reprobe_rearm | grep -Fq 'rock_fusb302_reprobe "${last}" "${now}" "$((count + 1))/${REARM_MAX}"'
+  body rock_back_power_correction | grep -Fxq '      (( $? != 2 )) || rock_hotplug_watch "${last}" "${now}"'
+  body rock_hotplug_watch | grep -Fq 'rock_fusb302_reprobe "${last}" "${now}" "watch $((count + 1))/${WATCH_MAX}"'
 }
 
 @test "typec policy: absent partner and unsettled role attributes are bounded clean no-ops" {
