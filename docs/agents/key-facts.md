@@ -6061,16 +6061,20 @@ stays stuck and a cap would bring back the gap for a device plugged in later.
 on where the watch is in its backoff, the ten-second timer, any deferral and the rebind's
 partner wait; no recovery time is promised. The watch starts only after an outcome that left
 a working controller (`no-partner` or `recovered`) with no re-arm or late rebind pending;
-`attempted`, `skipped`, `failed-*` and `port-missing` never start it. A watch rebind that
-ends in `failed-unbind`, `failed-bind` or `port-missing` stops the watch for the boot
-(`watch-stopped`, one warning saying J11 needs a reboot), since only a reboot recovers the
-controller then. Every rebind guard holds (back power, source preference, `power_role`
+`attempted`, `skipped`, `failed-*` and `port-missing` never start it. Any of those outcomes
+while a watch is kept stops it for the boot (`watch-stopped`) with one warning that says what
+happened: the unbind did not take and the chip is still bound (`failed-unbind`); the chip
+stayed unbound, so J11 has no controller until a reboot (`failed-bind`); `port0` did not come
+back, and the watch stays off even if it returns later (`port-missing`); the rebind was
+skipped (`skipped`); or a run was stopped mid-rebind (`attempted`). Every rebind guard holds (back power, source preference, `power_role`
 source, nothing enumerated on `fc000000.usb`, the `typec_fusb302` driver link, the lock,
 recheck mode only), so a port with a partner, a sinking port or a working data path is never
 touched. The count is spent before the unbind; a deferral hands it back and the rebind is due
-again on the next tick. A partner resets the watch, including one the watch's own rebind sees
-(before the unbind or after the bind), which is recorded in the same run and arms the re-arm,
-so it counts even if it leaves before the next tick. Lines are labelled `hot-plug watch k`;
+again on the next tick; so does a partner that races the unbind. A partner the watch's own
+rebind sees is recorded in the same run and arms the re-arm, so it counts even if it leaves
+before the next tick. The backoff resets only for a partner that stays up for 60 s
+(`watch-partner` holds its first sighting), as the no-partner tries ignore a flapping charger;
+a partner seen briefly after each rebind would otherwise hold the watch at its first wait. Lines are labelled `hot-plug watch k`;
 each watch rebind of an empty port logs two of them, and the udev-started policy run on the
 re-registered `port0` logs its own (back power, source preference, no partner) plus
 systemd's start and finish lines (not measured). The A509 plan's first option, testing
