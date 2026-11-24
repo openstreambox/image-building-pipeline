@@ -33,6 +33,17 @@ automatic XBOOTLDR mount. `install-boot.sh rootfs` writes an explicit writable
 `nodev,nosuid,noexec` limit the shared FAT surface. Linux mounts it only after U-Boot
 has already loaded the selected slot's kernel.
 
+The bootable RK3588 platform layer installs `dosfstools` from the family boot
+package list. The build checks the installed version against the tested 4.2
+series. The fstab entry uses pass 0 and pulls in an ordered, optional checker
+with `x-systemd.wants=`. It runs `fsck.fat -n` before `boot.mount` and logs
+the report to the journal. If the only issue is the Linux dirty byte in the
+FAT16 or FAT32 primary boot sector, the helper clears that byte on the unmounted device.
+A stale or unknown FSINFO free-cluster count is informational. Other findings,
+including lost clusters, leave the volume untouched by the checker and record
+a warning in the journal and in `/run/ceralive/boot-fat-fault`. The existing
+writable mount and update path proceed independently of the check result.
+
 ## State file format (`boot_state.txt`)
 
 Newline `KEY=VALUE`, importable by U-Boot `env import -t` **and** trivially parsed by

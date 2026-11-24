@@ -588,7 +588,8 @@ resolve_initrd_path() {
 # ---------------------------------------------------------------------------
 check_rootfs_populated() {
   local img="$1" part="$2" label="$3" expected_keyring="$4" start_sector size_sectors tmp
-  local fstab boot_mount='PARTLABEL=boot /boot vfat rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro 0 2'
+  local fstab boot_mount='PARTLABEL=boot /boot vfat rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro'
+  local boot_mount_ok=0
   require_tool sgdisk  || { fail "${label} populated + shared /boot mount present"; return; }
   require_tool debugfs || { fail "${label} populated + shared /boot mount present"; return; }
   require_tool fdtdump || { fail "${label} populated + kernel + board DTB + initrd + shared /boot mount"; return; }
@@ -616,6 +617,11 @@ check_rootfs_populated() {
     fi
   done
   fstab="$(debugfs -R 'cat /etc/fstab' "${tmp}" 2>/dev/null || true)"
+  # Factory images from before the optional checker used fstab pass 2.
+  if grep -Fxq -e "${boot_mount} 0 2" \
+      -e "${boot_mount},x-systemd.wants=ceralive-boot-fat-check.service 0 0" <<<"${fstab}"; then
+    boot_mount_ok=1
+  fi
   local artifacts_ok=1 artifact_dir kernel dtb initrd initrd_path embedded_keyring kernel_magic dtb_magic initrd_magic
   artifact_dir="$(mktemp -d)"
   kernel="${artifact_dir}/Image"; dtb="${artifact_dir}/board.dtb"; initrd="${artifact_dir}/initrd.img"
@@ -641,14 +647,13 @@ check_rootfs_populated() {
        == "$(openssl x509 -in "${expected_keyring}" -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)" ]] \
     || artifacts_ok=0
   rm -rf "${artifact_dir}" "${tmp}"
-  if [[ -n "${found}" ]] && grep -Fxq "${boot_mount}" <<<"${fstab}" && (( artifacts_ok == 1 )); then
+  if [[ -n "${found}" ]] && (( boot_mount_ok == 1 && artifacts_ok == 1 )); then
     pass "${label} populated + kernel + board DTB + initrd + shared /boot mount"
     info "${label} (p${part} @ sector ${start_sector}): complete arm64 boot artifact set"
   else
     fail "${label} populated + kernel + board DTB + initrd + shared /boot mount"
     [[ -n "${found}" ]] || info "${label} (p${part} @ sector ${start_sector}) has no init"
-    grep -Fxq "${boot_mount}" <<<"${fstab}" \
-      || info "${label} lacks the explicit writable PARTLABEL=boot /boot mount"
+    (( boot_mount_ok == 1 )) || info "${label} lacks the explicit writable PARTLABEL=boot /boot mount"
     (( artifacts_ok == 1 )) || info "${label} lacks a coherent kernel + board DTB + initrd artifact set"
   fi
 }

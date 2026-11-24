@@ -308,6 +308,52 @@ PY
   grep -Eq '^zstd\b' "$PIPELINE_DIR/manifests/packages/shared.list"
 }
 
+@test "mkosi-contract: the bootable RK3588 platform requires fsck.fat at finalize" {
+  local platform="$MKOSI_DIR/mkosi.images/platform"
+  run env ARCH=arm64 INSTALL_BOOT_BSP=1 BUILDROOT="$BATS_TEST_TMPDIR" CHROOT_SRCDIR=/source \
+    bash "$platform/mkosi.finalize"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"shared /boot requires fsck.fat from dosfstools"* ]]
+}
+
+@test "mkosi-contract: RK3588 resolves dosfstools from the family boot list when bootable" {
+  run env DRY_RUN=1 INSTALL_BOOT_BSP=1 "$PIPELINE_DIR/build" rock-5b-plus
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"boot tools from rk3588.boot.list: dosfstools"* ]]
+
+  run env DRY_RUN=1 INSTALL_BOOT_BSP=0 "$PIPELINE_DIR/build" rock-5b-plus
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"boot tools from"* ]]
+}
+
+@test "mkosi-contract: RK3588 finalize rejects a dosfstools version outside the tested series" {
+  local platform="$MKOSI_DIR/mkosi.images/platform" root="$BATS_TEST_TMPDIR"
+  mkdir -p "$root/usr/sbin" "$root/var/lib/dpkg"
+  install -m 0755 /usr/bin/true "$root/usr/sbin/fsck.fat"
+  printf '%s\n' 'Package: dosfstools' 'Status: install ok installed' \
+    'Architecture: arm64' 'Version: 9.9-1' 'Maintainer: Fixture <fixture@example.invalid>' \
+    'Description: fixture' >"$root/var/lib/dpkg/status"
+  run env ARCH=arm64 INSTALL_BOOT_BSP=1 BUILDROOT="$root" CHROOT_SRCDIR=/source \
+    bash "$platform/mkosi.finalize"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"dosfstools 9.9-1 is outside the tested fsck.fat 4.2 series"* ]]
+}
+
+@test "mkosi-contract: RK3588 finalize installs boot integration with tested dosfstools" {
+  local platform="$MKOSI_DIR/mkosi.images/platform" root="$BATS_TEST_TMPDIR"
+  mkdir -p "$root/usr/sbin" "$root/var/lib/dpkg" "$root/bin"
+  install -m 0755 /usr/bin/true "$root/usr/sbin/fsck.fat"
+  printf '%s\n' 'Package: dosfstools' 'Status: install ok installed' \
+    'Architecture: arm64' 'Version: 4.2-1.2' 'Maintainer: Fixture <fixture@example.invalid>' \
+    'Description: fixture' >"$root/var/lib/dpkg/status"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*"\n' >"$root/bin/mkosi-chroot"
+  chmod 0755 "$root/bin/mkosi-chroot"
+  run env PATH="$root/bin:$PATH" ARCH=arm64 INSTALL_BOOT_BSP=1 BUILDROOT="$root" CHROOT_SRCDIR=/source \
+    bash "$platform/mkosi.finalize"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"bash /source/platform/boot/install-boot.sh rootfs"* ]]
+}
+
 @test "mkosi-contract: the shipped doc prune keeps copyright and drops the rest" {
   local app_postinst="$MKOSI_DIR/mkosi.images/app/mkosi.postinst.chroot"
   local root="$BATS_TEST_TMPDIR/doc"
