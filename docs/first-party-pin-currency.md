@@ -356,6 +356,68 @@ the physical-device reconnect path is not qualified. The CeraUI PR pinning this
 sender in its own CI is separate. No image was built or flashed, and APT serving,
 installation and hardware were not checked for this combined pin change.
 
+## Downstream ModemManager rebuild — 2026-11-24
+
+On arm64 the image selects `modemmanager` and `libmm-glib0`
+`1.24.2-2~ceralive.3+osb1`. That is modem-stack v1.4.0's ModemManager source
+(released as `1.24.2-2~ceralive.3`) with one change: the fm350gl `+CGCONTRDP`
+parser fix, proposed upstream as
+[CERALIVE/modem-stack#36](https://github.com/CERALIVE/modem-stack/pull/36).
+Without it, an FM350-GL on a network that leaves the bearer id empty in that
+answer (seen on T-Mobile US) never connects: the first attempt fails to parse,
+and every retry gets `+CME ERROR: 5847`. amd64 keeps the released build.
+
+- **Source:** openstreambox/modem-stack `osb/release/v1.4.0-osb1` at
+  `c9aa6778fe95d9ff0e2f18e4934162edb4d4adf5`. This is tag `v1.4.0`, then a
+  cherry-pick of the fix (`3e932ea6`), then one build-tooling commit that lets
+  `inject-deb-version.sh` take an exact `~ceralive.N+osbM` suffix. Only
+  `libqrtr-glib`, `libmbim` and `libqmi` were carried from the v1.4.0 release
+  assets, sha256-checked against its release manifest. ModemManager was rebuilt
+  with `build-stack.sh arm64` in `debian:trixie@sha256:3cda3ca4…dafba2`.
+- **Ordering:** `~ceralive.3+osb1` sorts above `~ceralive.3` and below the
+  next upstream counter `~ceralive.4`, and upstream never uses `+`, so it can't
+  collide with a published version. `ci/pin_versions.py` accepts the `+osbN`
+  form and orders it. A newer upstream release still reads `STALE`, which is
+  the point to drop the rebuild or carry it forward.
+- **Not on apt.ceralive.tv.** Supply exactly these two debs with
+  `--first-party-local-debs`. That flag works in development builds only;
+  production mode and GitHub Actions refuse it. Their sha256 values are in
+  `manifests/first-party-local-sha256.txt`. For a package pinned to a `+osbN`
+  version, the fetch accepts only an override with that version and the one
+  sha256 listed for it. A missing manifest, a missing or duplicate row, or a
+  malformed digest refuses it. A different version
+  (for example the released `ceralive.3`) or different bytes is refused.
+  Without the override the fetch fails, because the signed index has no such
+  version. Other overrides keep their existing behaviour. The build's
+  `first-party-local-override.json` and lock record the sha256:
+
+| Package (arm64) | sha256 |
+|---|---|
+| `modemmanager_1.24.2-2~ceralive.3+osb1_arm64.deb` | `bdb31a65decfe1e36dcc4a09890757c83705ba2be5862732c3c284ca525b92e4` |
+| `libmm-glib0_1.24.2-2~ceralive.3+osb1_arm64.deb` | `dbcb28fdd1a6332b64c829c01a0c708e4e2e70c0bc46180568c4e6fddc2060b8` |
+
+- **Production builds:** an arm64 build in production mode can't select these
+  pins, because the override is refused there and the signed index doesn't carry
+  them. That needs the pair in a signed first-party index. This line builds
+  development-mode release candidates, like its other local packages.
+- **Content check:** a control rebuild of plain v1.4.0 in the same container,
+  under the development version string, matched the published `ceralive.3`
+  packages file for file, leaving aside version metadata, the changelog and the
+  masked debug-link bytes below. The rebuild compared with `ceralive.3`:
+  - Installed paths, modes, ownership and maintainer scripts are identical.
+  - The changelog entry and version metadata differ, including libmm-glib0's
+    `Recommends` version.
+  - 56 of the 57 ELF files are byte-identical once only `.gnu_debugaltlink` and
+    `.gnu_debuglink` are masked. Those hold the dwz multifile build-id and the
+    debug CRC, and change because the shared dwz file includes the plugin's
+    debug info. Every debug CRC and dwz reference resolves within its own build.
+  - The only changed runtime binary is
+    `usr/lib/aarch64-linux-gnu/ModemManager/libmm-plugin-fm350gl.so`.
+  - The debug packages differ in DWARF, as expected.
+- **Hardware:** the same plugin code connected an FM350-GL on T-Mobile US on
+  4 of 4 activations (boot, after a USB re-enumeration, and two
+  disconnect/reconnect cycles), with no 5847.
+
 ## Intentional rollback
 
 Edit `manifests/first-party-pin-overrides.json` in the **same reviewed PR** as

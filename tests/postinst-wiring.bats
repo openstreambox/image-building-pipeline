@@ -610,6 +610,26 @@ NM_MM_DROPIN_SRC="mkosi/runtime/ceralive-nm-after-modemmanager.dropin.conf"
   [ "$(awk -F= '$1=="libqrtr-glib0"{print $2}' "$pins")" = "1.4.0-1~ceralive.3" ]
 }
 
+@test "modem closure: arm64 ModemManager is the downstream +osb1 rebuild, nothing else is overridden" {
+  local pins="$PIPELINE_DIR/manifests/first-party-deb-versions.txt"
+  # 1.24.2-2~ceralive.3 plus the fm350gl +CGCONTRDP fix, built from the same source package.
+  # It is not on apt.ceralive.tv, so a build must supply it through --first-party-local-debs.
+  [ "$(awk -F= '$1=="modemmanager[arm64]"{print $2}' "$pins")" = "1.24.2-2~ceralive.3+osb1" ]
+  [ "$(awk -F= '$1=="libmm-glib0[arm64]"{print $2}' "$pins")" = "1.24.2-2~ceralive.3+osb1" ]
+  [ "$(grep -c '+osb' "$pins")" -eq 2 ]
+  # Each downstream pin has exactly one reviewed sha256 row, and the manifest lists nothing else.
+  local shas="$PIPELINE_DIR/manifests/first-party-local-sha256.txt" row
+  [ "$(awk '$1 !~ /^#/ && NF' "$shas" | wc -l)" -eq 2 ]
+  for row in modemmanager libmm-glib0; do
+    [ "$(awk -v f="${row}_1.24.2-2~ceralive.3+osb1_arm64.deb" '$1 !~ /^#/ && $2 == f && $1 ~ /^[0-9a-f]{64}$/' "$shas" | wc -l)" -eq 1 ]
+  done
+  local pkg
+  for pkg in $MODEM_CLOSURE_PKGS; do
+    case "$pkg" in modemmanager|libmm-glib0) continue ;; esac
+    ! grep -q "^${pkg}\[" "$pins" || { echo "unexpected arch row for $pkg"; false; }
+  done
+}
+
 @test "modem closure: the app postinst classifies all nine as RUNTIME_APP_PKGS (never sysext/appfs)" {
   local app="$PIPELINE_DIR/mkosi/mkosi.images/app/mkosi.postinst.chroot"
   local runtime_line sysext_line appfs_line pkg

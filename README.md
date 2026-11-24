@@ -856,7 +856,12 @@ First-party package versions are selected from
 to both architectures. When release builds produce different Debian versions per
 architecture, `package[amd64]=version` and `package[arm64]=version` override that
 generic entry. Resolution remains exact: the selected version is matched against
-the GPG-verified architecture index before its `.deb` is downloaded.
+the GPG-verified architecture index before its `.deb` is downloaded. The one
+exception is arm64 `modemmanager`/`libmm-glib0` `1.24.2-2~ceralive.3+osb1`, a
+downstream rebuild with the fm350gl `+CGCONTRDP` fix. It is not in that index,
+so a build supplies it through `--first-party-local-debs`, and the fetch accepts
+only the bytes listed in `manifests/first-party-local-sha256.txt`
+([receipt](docs/first-party-pin-currency.md#downstream-modemmanager-rebuild--2026-11-24)).
 
 The engine pin is `cerastream=2026.9.8`. It retains the audio-meter,
 idle-preview and teardown ownership of 2026.9.6, plus capture standby

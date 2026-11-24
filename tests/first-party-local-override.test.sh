@@ -253,5 +253,66 @@ elif grep -Fq 'verified digest identity mismatch for ceralive-device=99.2/arm64'
 else
   bad "sidecar rejected tampering for the wrong reason: $(<"${WORK}/tampered-lock.log")"
 fi
+# Reviewed downstream rebuild: a package pinned to a version listed in the sha256 manifest
+# accepts only that version and those bytes.
+mkdir -p "${WORK}/rebuild" "${WORK}/rebuild-in"
+make_deb modemmanager 1.0+osb1 arm64 "${WORK}/rebuild/reviewed.deb"
+make_deb modemmanager 1.0 arm64 "${WORK}/rebuild/released.deb"
+printf 'modemmanager[arm64]=1.0+osb1\nmodemmanager=1.0\n' >"${WORK}/rebuild-pins"
+printf '# comment line\n%s  modemmanager_1.0+osb1_arm64.deb\n' \
+  "$(sha256sum "${WORK}/rebuild/reviewed.deb" | cut -d' ' -f1)" >"${WORK}/rebuild-sha"
+export TEST_REBUILD_PINS="${WORK}/rebuild-pins" TEST_REBUILD_SHA="${WORK}/rebuild-sha"
+rebuild_case() {
+  local name="$1" deb="$2" dest="${WORK}/rebuild-${1}"
+  rm -rf "${WORK}/rebuild-in" && mkdir -p "${WORK}/rebuild-in" "${dest}/debs"
+  [[ -z "${deb}" ]] || cp "${deb}" "${WORK}/rebuild-in/x.deb"
+  env DEST="${dest}" ARCH=arm64 CERALIVE_DEBCACHE=0 CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR="${WORK}/rebuild-in" bash -c '
+    source "$1"
+    FIRST_PARTY_APT_PKGS=(modemmanager)
+    FIRST_PARTY_DEB_VERSIONS_FILE="$TEST_REBUILD_PINS"
+    FIRST_PARTY_LOCAL_SHA256_FILE="$TEST_REBUILD_SHA"
+    fetch_first_party "$DEST/debs"
+  ' _ "${ROOT}/lib/fetch-debs.sh" >"${WORK}/rebuild-${name}.log" 2>&1
+}
+if rebuild_case reviewed "${WORK}/rebuild/reviewed.deb"; then
+  ok 'reviewed rebuild override with the listed version and sha256 is accepted'
+else
+  bad "reviewed rebuild override rejected: $(<"${WORK}/rebuild-reviewed.log")"
+fi
+if ! rebuild_case released "${WORK}/rebuild/released.deb" \
+   && grep -Fq 'is not the reviewed rebuild modemmanager=1.0+osb1' "${WORK}/rebuild-released.log"; then
+  ok 'override with the released version instead of the reviewed rebuild is refused'
+else
+  bad "released-version override not refused: $(<"${WORK}/rebuild-released.log")"
+fi
+dpkg-deb -R "${WORK}/rebuild/reviewed.deb" "${WORK}/rebuild-x2"
+printf 'other\n' >"${WORK}/rebuild-x2/usr/share/ceralive/fixture"
+dpkg-deb --root-owner-group -b "${WORK}/rebuild-x2" "${WORK}/rebuild/other.deb" >/dev/null 2>&1
+if ! rebuild_case other-bytes "${WORK}/rebuild/other.deb" \
+   && grep -Fq 'not the reviewed' "${WORK}/rebuild-other-bytes.log" \
+   && grep -Fq 'has sha256' "${WORK}/rebuild-other-bytes.log"; then
+  ok 'override with the reviewed version but other bytes is refused'
+else
+  bad "other-bytes override not refused: $(<"${WORK}/rebuild-other-bytes.log")"
+fi
+
+for broken in missing duplicate malformed; do
+  case "${broken}" in
+    missing) export TEST_REBUILD_SHA="${WORK}/no-such-sha256.txt" ;;
+    duplicate) cat "${WORK}/rebuild-sha" "${WORK}/rebuild-sha" >"${WORK}/sha-${broken}.txt"
+               export TEST_REBUILD_SHA="${WORK}/sha-${broken}.txt" ;;
+    malformed) printf 'abc  modemmanager_1.0+osb1_arm64.deb\n' >"${WORK}/sha-${broken}.txt"
+               export TEST_REBUILD_SHA="${WORK}/sha-${broken}.txt" ;;
+  esac
+  if ! rebuild_case "sha-${broken}" "${WORK}/rebuild/released.deb" \
+     && ! rebuild_case "sha-${broken}-reviewed" "${WORK}/rebuild/reviewed.deb" \
+     && grep -Fq 'no single reviewed sha256' "${WORK}/rebuild-sha-${broken}-reviewed.log"; then
+    ok "${broken} reviewed sha256 row refuses every override of a +osb pin"
+  else
+    bad "${broken} reviewed sha256 row did not fail closed: $(<"${WORK}/rebuild-sha-${broken}.log")"
+  fi
+done
+export TEST_REBUILD_SHA="${WORK}/rebuild-sha"
+
 printf '\n== %d passed, %d failed\n' "${PASS}" "${FAIL}"
 [[ "${FAIL}" -eq 0 ]]
