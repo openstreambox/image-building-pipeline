@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Check the shared FAT32 partition and clear only Linux's dirty byte."""
+"""Check the shared FAT partition and clear only Linux's dirty byte."""
 
 import argparse
 import os
@@ -10,16 +10,16 @@ import struct
 import subprocess
 import sys
 
-DIRTY_OFFSET = 65
 FAULT_MARKER = Path("/run/ceralive/boot-fat-fault")
-FAT32_HEALTHY_FLAGS = (1 << 27) | (1 << 26)  # Clean shutdown and no hard error.
 # dosfstools 4.2 reports the Linux dirty byte as a difference from the backup
 # boot sector. Insist on precisely this difference and no other repairs.
-DIRTY_REPORT = (
+FAT32_BACKUP_DIFF = (
     "There are differences between boot sector and its backup.\n"
     "This is mostly harmless. Differences: (offset:original/backup)\n"
     "  65:01/00\n"
     "  Not automatically fixing this.\n"
+)
+DIRTY_REPORT = (
     "Dirty bit is set. Fs was not properly unmounted and some data may be corrupt.\n"
     " Automatically removing dirty bit.\n"
 )
@@ -30,22 +30,38 @@ FREE_SUMMARY = (
 )
 
 
-def clear_dirty_byte(fd):
+def clear_dirty_byte(fd, fat32_backup_diff):
     # A FAT entry can also record a dirty shutdown or an I/O error. fsck.fat
     # reports the shutdown flag with the same message as the boot-sector byte.
     boot = os.pread(fd, 512, 0)
-    if len(boot) != 512 or boot[DIRTY_OFFSET] != 1:
+    if len(boot) != 512 or boot[510:] != b"\x55\xaa":
+        raise OSError("invalid FAT boot sector")
+    sector_size, cluster_sectors, reserved, tables, root_entries, total16 = struct.unpack_from(
+        "<HBHBHH", boot, 11
+    )
+    fat16_sectors, = struct.unpack_from("<H", boot, 22)
+    total32, fat32_sectors = struct.unpack_from("<II", boot, 32)
+    if sector_size not in (512, 1024, 2048, 4096) or not reserved or tables not in (1, 2):
+        raise OSError("unexpected FAT geometry")
+    # FAT entry 1 carries the clean-shutdown and no-I/O-error bits in each format.
+    if fat32_backup_diff and fat32_sectors and not fat16_sectors and not root_entries:
+        dirty_offset, fat_sectors, entry_size, healthy_flags = 65, fat32_sectors, 4, 0x0c000000
+    elif not fat32_backup_diff and fat16_sectors and root_entries and cluster_sectors:
+        root_sectors = (root_entries * 32 + sector_size - 1) // sector_size
+        data_sectors = (total16 or total32) - reserved - tables * fat16_sectors - root_sectors
+        if not 4085 <= data_sectors // cluster_sectors < 65525:
+            raise OSError("unexpected FAT16 cluster count")
+        dirty_offset, fat_sectors, entry_size, healthy_flags = 37, fat16_sectors, 2, 0xc000
+    else:
+        raise OSError("dirty report did not match the FAT geometry")
+    if boot[dirty_offset] != 1:
         raise OSError("dirty byte did not match the read-only check")
-    sector_size, _, reserved, tables = struct.unpack_from("<HBHB", boot, 11)
-    fat_sectors, = struct.unpack_from("<I", boot, 36)
-    if sector_size not in (512, 1024, 2048, 4096) or not reserved or not fat_sectors or tables not in (1, 2):
-        raise OSError("unexpected FAT32 geometry")
     for table in range(tables):
-        offset = (reserved + table * fat_sectors) * sector_size + 4
-        flags = int.from_bytes(os.pread(fd, 4, offset), "little")
-        if flags & FAT32_HEALTHY_FLAGS != FAT32_HEALTHY_FLAGS:
+        offset = (reserved + table * fat_sectors) * sector_size + entry_size
+        flags = int.from_bytes(os.pread(fd, entry_size, offset), "little")
+        if flags & healthy_flags != healthy_flags:
             raise OSError("FAT table reports a dirty shutdown or an I/O error")
-    if os.pwrite(fd, b"\x00", DIRTY_OFFSET) != 1:
+    if os.pwrite(fd, b"\x00", dirty_offset) != 1:
         raise OSError("short write while clearing the dirty byte")
     os.fsync(fd)
 
@@ -69,7 +85,7 @@ def check(device):
             print(result.stderr, end="", file=sys.stderr)
         report = re.fullmatch(
             r"fsck\.fat [^\n]+\n"
-            rf"(?P<dirty>{re.escape(DIRTY_REPORT)})?"
+            rf"(?P<dirty>(?P<backup>{re.escape(FAT32_BACKUP_DIFF)})?{re.escape(DIRTY_REPORT)})?"
             rf"{FREE_SUMMARY}(?P<unchanged>\nLeaving filesystem unchanged\.\n)?"
             rf"{path}: \d+ files, \d+/\d+ clusters\n",
             result.stdout,
@@ -80,7 +96,7 @@ def check(device):
         if result.returncode != int(changes_proposed) or bool(report["unchanged"]) != changes_proposed:
             raise OSError(f"read-only fsck.fat status disagreed with its report (exit {result.returncode})")
         if report["dirty"]:
-            clear_dirty_byte(fd)
+            clear_dirty_byte(fd, bool(report["backup"]))
             print("Shared /boot FAT check passed and cleared the dirty byte.")
         else:
             print("Shared /boot FAT check passed without writes.")
@@ -95,7 +111,7 @@ def main():
     args = parser.parse_args()
     try:
         check(args.device)
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except Exception as error:
         message = f"Shared /boot FAT check needs attention: {error}"
         print(f"<4>{message}", file=sys.stderr)
         try:

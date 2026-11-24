@@ -336,9 +336,9 @@ build_missing_artifact_image() {
 }
 
 make_fat_fixture() {
-  local disk="$1"
+  local disk="$1" fat_bits="${2:-32}"
   truncate -s 256M "$disk"
-  mkfs.fat -F 32 -n BOOT "$disk"
+  mkfs.fat -F "$fat_bits" -n BOOT "$disk"
   printf 'BOOT_ORDER=A B\n' >"$BATS_TEST_TMPDIR/boot_state.txt"
   printf 'synthetic boot selector\n' >"$BATS_TEST_TMPDIR/boot.scr"
   mcopy -i "$disk" "$BATS_TEST_TMPDIR/boot_state.txt" "$BATS_TEST_TMPDIR/boot.scr" ::
@@ -381,6 +381,18 @@ fat_check() {
   [[ "$output" == *"Free cluster summary wrong"* ]]
   [[ "$output" == *"cleared the dirty byte"* ]]
   cmp "$before" "$disk"
+}
+
+@test "RK3588 FAT check clears the Linux dirty byte on factory FAT16 volumes" {
+  local disk="$BATS_TEST_TMPDIR/boot.fat" clean="$BATS_TEST_TMPDIR/clean.fat"
+  make_fat_fixture "$disk" 16
+  cp --sparse=always "$disk" "$clean"
+  printf '\001' | dd of="$disk" bs=1 seek=37 conv=notrunc status=none
+  run fat_check "$disk"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cleared the dirty byte"* ]]
+  cmp "$clean" "$disk"
+  [ ! -e "$BATS_TEST_TMPDIR/fat-fault" ]
 }
 
 @test "RK3588 FAT check flags damaged metadata on clean and dirty filesystems and returns success" {
@@ -491,6 +503,22 @@ with patch.object(checker.subprocess, "run", side_effect=future_fsck):
   [ "$status" -eq 0 ]
   [[ "$output" == *"Shared /boot FAT check needs attention"* ]]
   grep -Fq 'No such file or directory' "$BATS_TEST_TMPDIR/fat-fault"
+}
+
+@test "RK3588 FAT check records unexpected checker exceptions and returns success" {
+  local marker="$BATS_TEST_TMPDIR/fat-fault" disk="$BATS_TEST_TMPDIR/boot.fat"
+  touch "$disk"
+  run python3 -c '
+import runpy
+import sys
+from unittest.mock import patch
+
+sys.argv = sys.argv[1:]
+with patch("subprocess.run", side_effect=ValueError("unexpected checker error")):
+    runpy.run_path(sys.argv[0], run_name="__main__")
+' "$BOOT_DIR/check-boot-fat.py" "$disk" --fault-marker "$marker"
+  [ "$status" -eq 0 ]
+  grep -Fq 'unexpected checker error' "$marker"
 }
 
 @test "Rock preflash gate requires A/B, both factory slots, and sufficient target media" {

@@ -38,7 +38,7 @@ package list. The build checks the installed version against the tested 4.2
 series. The fstab entry uses pass 0 and pulls in an ordered, optional checker
 with `x-systemd.wants=`. It runs `fsck.fat -n` before `boot.mount` and logs
 the report to the journal. If the only issue is the Linux dirty byte in the
-primary FAT32 boot sector, the helper clears that byte on the unmounted device.
+FAT16 or FAT32 primary boot sector, the helper clears that byte on the unmounted device.
 A stale or unknown FSINFO free-cluster count is informational. Other findings,
 including lost clusters, leave the volume untouched by the checker and record
 a warning in the journal and in `/run/ceralive/boot-fat-fault`. The existing

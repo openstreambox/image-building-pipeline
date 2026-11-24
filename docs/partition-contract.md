@@ -57,7 +57,7 @@ GPT, 1 MiB alignment. Sizes in **MB (= MiB, 2^20 bytes)**.
 | # | Partition label | Role | Size (MB) | FS | Mount |
 |---|-----------------|------|-----------|----|----|
 | — | *(reserved gap)* | RK3588 idbloader + U-Boot + ATF (raw, no GPT entry) | **16** | raw | — |
-| p1 | `boot` | compiled automatic selector, manual recovery script, durable state | **256** | vfat (FAT32) | `/boot` (rw, explicit fstab) |
+| p1 | `boot` | compiled automatic selector, manual recovery script, durable state | **256** | vfat (FAT16 or FAT32) | `/boot` (rw, explicit fstab) |
 | p2 | `rootfs_a` | RAUC rootfs **slot A** (incl. `/boot` kernel/DTB/initrd) | **4096** | ext4 | `/` (when A active) |
 | p3 | `rootfs_b` | RAUC rootfs **slot B** | **4096** | ext4 | `/` (when B active) |
 | p4 | `data` | Persistent mutable state (survives A/B) | **remainder** (≥ 2048 floor) | ext4 | `/data` |
