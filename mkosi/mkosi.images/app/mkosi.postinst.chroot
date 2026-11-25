@@ -125,28 +125,29 @@ local_override_rows() {
 
 # ---------------------------------------------------------------------------
 # pin_first_party_local_overrides: keep every first-party package this build took
-# from a local override (fetch's first-party-local-override.json) at exactly that
-# version. Such a package is not on apt.ceralive.tv; when apt.ceralive.tv later
+# from a local override (fetch's first-party-local-override.json) at the version it
+# installed. Such a package is not on apt.ceralive.tv; when apt.ceralive.tv later
 # publishes a newer build under the same name, the origin pin (990) makes that the
 # candidate, the device offers it as a package update and installing it replaces
-# the reviewed local build. A name+version pin at 1001 keeps the installed version
-# the candidate, so nothing is offered. Not a dpkg hold: CeraUI's package check
-# refuses to run at all while a first-party package is held.
+# the reviewed local build. Pinning that name's installed version (the dpkg status
+# source, `release a=now`) at 1001 keeps it the candidate, so nothing is offered.
+# Not `Pin: version`: APT matches that without regard to case, so a newer version
+# that differs only in letter case would get 1001 too. Not a dpkg hold: CeraUI's
+# package check refuses to run at all while a first-party package is held.
 #
 # The file sorts before ceralive-origin, because APT takes the first specific pin
 # that matches a version. Each image carries its own pin for its own overrides,
-# so an A/B update brings the new image's pin with its packages. A build without
-# local overrides writes no file.
+# so an A/B update brings the new image's pin with its packages. Fetch writes the
+# record on every build that stages debs ([] without overrides, then no file is
+# written); a missing record fails the build instead of shipping unpinned.
 # ---------------------------------------------------------------------------
 pin_first_party_local_overrides() {
   local record="${1:-${SRCDIR:+${SRCDIR%/}/.staging/${CERALIVE_BOARD:-}/first-party-local-override.json}}"
   local dir="${CERALIVE_APT_PREFERENCES_DIR:-/etc/apt/preferences.d}"
   local pin="${dir}/ceralive-local-override" rows name version arch got tmp
   rm -f -- "${pin}"
-  if [[ -z "${record}" || ! -e "${record}" ]]; then
-    log "no first-party local override record, so no local override pin"
-    return 0
-  fi
+  [[ -n "${record}" && -e "${record}" ]] \
+    || die "first-party debs are installed but the build's local override record is missing: ${record:-no SRCDIR}"
   rows="$(local_override_rows "${record}")" || die "unreadable first-party local override record: ${record}"
   if [[ -z "${rows}" ]]; then
     log "first-party local override record is empty, so no local override pin"
@@ -154,15 +155,15 @@ pin_first_party_local_overrides() {
   fi
   mkdir -p "${dir}"
   tmp="$(mktemp "${dir}/.ceralive-local-override.XXXXXXXX")"
-  printf '# First-party packages this image installed from a reviewed local override,\n# pinned to that version (pin_first_party_local_overrides, app layer).\n' >"${tmp}"
+  printf '# First-party packages this image installed from a reviewed local override,\n# pinned to their installed version (pin_first_party_local_overrides, app layer).\n' >"${tmp}"
   while IFS=$'\t' read -r name version arch; do
-    got="$(dpkg-query -W -f='${Version}\t${Architecture}' "${name}" 2>/dev/null)" || got=""
-    if [[ "${got}" != "${version}"$'\t'"${arch}" ]]; then
+    got="$(dpkg-query -W -f='${db:Status-Status}\t${Version}\t${Architecture}' "${name}" 2>/dev/null)" || got=""
+    if [[ "${got}" != "installed"$'\t'"${version}"$'\t'"${arch}" ]]; then
       rm -f -- "${tmp}"
-      die "local override ${name}=${version} (${arch}) is not what is installed: ${got:-absent}"
+      die "local override ${name}=${version} (${arch}) is not what is installed: ${got:+${got//$'\t'/ }}${got:-absent}"
     fi
-    printf '\nPackage: %s\nPin: version %s\nPin-Priority: 1001\n' "${name}" "${version}" >>"${tmp}"
-    log "local override pin: ${name}=${version} at 1001"
+    printf '\nPackage: %s\nPin: release a=now\nPin-Priority: 1001\n' "${name}" >>"${tmp}"
+    log "local override pin: ${name} (installed ${version}) at 1001"
   done <<<"${rows}"
   chmod 0644 "${tmp}"
   mv -f -- "${tmp}" "${pin}"

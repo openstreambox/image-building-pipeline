@@ -31,21 +31,27 @@ work="$(mktemp -d)"; chmod 0755 "$work"  # the _apt sandbox reads the file: arch
 rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*
 mkdir -p "${work}/ours" "${work}/debian"
 
-# Installed state: two packages from a local override and one ordinary first-party
-# package that came from apt.ceralive.tv.
-make_deb() { # name version
+# Installed state: three packages from a local override (srtla's newer CeraLive
+# build differs from it only in letter case), one ordinary first-party package
+# from apt.ceralive.tv, and one removed package whose conffile is left (state rc).
+make_deb() { # name version [conffile]
   local d="${work}/build/$1"
   mkdir -p "$d/DEBIAN"
   printf 'Package: %s\nVersion: %s\nArchitecture: all\nMaintainer: Fixture <fixture@example.invalid>\nDescription: fixture\n' "$1" "$2" >"$d/DEBIAN/control"
+  if [[ -n "${3:-}" ]]; then mkdir -p "$d/etc"; : >"$d$3"; printf '%s\n' "$3" >"$d/DEBIAN/conffiles"; fi
   dpkg-deb --root-owner-group -b "$d" "${work}/$1_$2_all.deb" >/dev/null
 }
 make_deb ceralive-device 2.0-local1
 make_deb modemmanager 1.0+osb2
+make_deb srtla 2.0-T1
 make_deb cerastream 1.0
-dpkg -i "${work}"/ceralive-device_*.deb "${work}"/modemmanager_*.deb "${work}"/cerastream_*.deb >/dev/null
+make_deb libqrtr-glib0 1.0 /etc/fixture-qrtr.conf
+dpkg -i "${work}"/*.deb >/dev/null
+dpkg -r libqrtr-glib0 >/dev/null
 
 package() { printf 'Package: %s\nVersion: %s\nArchitecture: all\nFilename: pool/%s_%s_all.deb\nSize: 100\nMaintainer: Fixture <fixture@example.invalid>\nDescription: %s\n\n' "$1" "$2" "$1" "$2" "$3"; }
-{ package ceralive-device 3.0 'newer upstream build'; package modemmanager 1.1 'newer upstream build'; package cerastream 1.1 'first-party update'; } >"${work}/ours/Packages"
+{ package ceralive-device 3.0 'newer upstream build'; package modemmanager 1.1 'newer upstream build'
+  package srtla 2.0-t1 'newer build, case-only difference'; package cerastream 1.1 'first-party update'; } >"${work}/ours/Packages"
 package modemmanager 1.5 'same-name Debian build' >"${work}/debian/Packages"
 for origin in ours debian; do
   bytes="$(stat -c %s "${work}/${origin}/Packages")"; digest="$(sha256sum "${work}/${origin}/Packages")"
@@ -81,12 +87,18 @@ source "${ROOT}/mkosi/customize/apt-ceralive-repo.sh"
 install_apt_preferences >/dev/null 2>&1 || { bad 'origin pin writer failed'; exit 1; }
 
 candidate() { apt-cache policy "$1" | perl -0777 -ne 'print "$1\n" if /^\s*Candidate: (.+)$/m'; }
+# The device's two package checks: CeraUI's capable mode simulates
+# `upgrade --with-new-pkgs`; its legacy mode reads `dist-upgrade --assume-no`.
 upgrades() { apt-get -s -o Debug::NoLocking=1 upgrade --with-new-pkgs 2>/dev/null | awk '$1 == "Inst" {print $2}' | sort | tr '\n' ' '; }
+legacy() { apt-get -o Debug::NoLocking=1 dist-upgrade --assume-no 2>/dev/null | perl -0777 -ne 'print join(" ", sort split " ", $1), " " if /upgraded:\n((?:  .*\n)+)/'; }
+kept_back() { apt-get -o Debug::NoLocking=1 dist-upgrade --assume-no 2>/dev/null | grep -c 'kept back'; }
 
 # Without the local override pin (non-vacuity): the newer CeraLive builds win.
 assert_eq 'without the pin: ceralive-device candidate is CeraLive 3.0' 3.0 "$(candidate ceralive-device)"
 assert_eq 'without the pin: modemmanager candidate is CeraLive 1.1' 1.1 "$(candidate modemmanager)"
-assert_eq 'without the pin: the package check would offer both' 'ceralive-device cerastream modemmanager ' "$(upgrades)"
+assert_eq 'without the pin: srtla candidate is the case-only CeraLive 2.0-t1' 2.0-t1 "$(candidate srtla)"
+assert_eq 'without the pin: capable mode would offer all three' 'ceralive-device cerastream modemmanager srtla ' "$(upgrades)"
+assert_eq 'without the pin: legacy mode would offer all three' 'ceralive-device cerastream modemmanager srtla ' "$(legacy)"
 
 # The app layer's real function, extracted without reimplementing it.
 for fn in local_override_rows pin_first_party_local_overrides; do
@@ -98,15 +110,19 @@ die() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
 pin=/etc/apt/preferences.d/ceralive-local-override
 record() { printf '%s\n' "$1" >"${work}/record.json"; }
 
-record '[{"package": "ceralive-device", "version": "2.0-local1", "arch": "all", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "filename": "f.deb"}, {"package": "modemmanager", "version": "1.0+osb2", "arch": "all", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "filename": "f.deb"}]'
+record '[{"package": "ceralive-device", "version": "2.0-local1", "arch": "all", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "filename": "f.deb"}, {"package": "modemmanager", "version": "1.0+osb2", "arch": "all", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "filename": "f.deb"}, {"package": "srtla", "version": "2.0-T1", "arch": "all", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "filename": "f.deb"}]'
 check pin_first_party_local_overrides "${work}/record.json"
 check test -f "$pin"
 assert_eq 'pin file sorts before the origin pin' ceralive-local-override "$(cd /etc/apt/preferences.d && printf '%s\n' * | sort | head -1)"
 assert_eq 'pinned: ceralive-device stays at the local build' 2.0-local1 "$(candidate ceralive-device)"
 assert_eq 'pinned: modemmanager stays at the local build' 1.0+osb2 "$(candidate modemmanager)"
-assert_eq 'pinned: only the ordinary first-party update is offered' 'cerastream ' "$(upgrades)"
+assert_eq 'pinned: srtla stays at the local build, not its case-only twin' 2.0-T1 "$(candidate srtla)"
+assert_eq 'pinned: capable mode offers only the ordinary first-party update' 'cerastream ' "$(upgrades)"
+assert_eq 'pinned: legacy mode offers only the ordinary first-party update' 'cerastream ' "$(legacy)"
+assert_eq 'pinned: nothing reported as kept back' 0 "$(kept_back)"
 assert_eq 'pinned: no dpkg hold (the package check refuses held first-party packages)' '' "$(apt-mark showhold)"
 check grep -qxF 'Pin-Priority: 1001' "$pin"
+check grep -qxF 'Pin: release a=now' "$pin"
 
 # Refusals leave no pin behind; an empty or missing record writes none.
 refused() { # label record-json reason
@@ -121,9 +137,10 @@ refused() { # label record-json reason
     ok "refused $1"
   fi
 }
-refused 'a version that is not installed' '[{"package": "modemmanager", "version": "1.1", "arch": "all", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "filename": "f.deb"}]' 'is not what is installed: 1.0+osb2'
+refused 'a version that is not installed' '[{"package": "modemmanager", "version": "1.1", "arch": "all", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "filename": "f.deb"}]' 'is not what is installed: installed 1.0+osb2 all'
 refused 'an architecture that is not installed' '[{"package": "modemmanager", "version": "1.0+osb2", "arch": "arm64", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "filename": "f.deb"}]' 'is not what is installed'
-refused 'a package that is not installed' '[{"package": "srtla", "version": "1.0", "arch": "all", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "filename": "f.deb"}]' 'is not what is installed: absent'
+refused 'a package that is not installed' '[{"package": "libqmi-utils", "version": "1.0", "arch": "all", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "filename": "f.deb"}]' 'is not what is installed: absent'
+refused 'a removed package with its conffile left' '[{"package": "libqrtr-glib0", "version": "1.0", "arch": "all", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "filename": "f.deb"}]' 'is not what is installed: config-files'
 refused 'a repeated package' '[{"package": "modemmanager", "version": "1.0+osb2", "arch": "all", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "filename": "f.deb"}, {"package": "modemmanager", "version": "1.0+osb2", "arch": "all", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "filename": "f.deb"}]' 'unreadable first-party local override record'
 refused 'a glob in the version' '[{"package": "modemmanager", "version": "1.*", "arch": "all", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "filename": "f.deb"}]' 'unreadable first-party local override record'
 refused 'a record that is not a list' '{"package": "modemmanager"}' 'unreadable first-party local override record'
@@ -135,8 +152,13 @@ assert_eq "the fetch writer's record parses" $'ceralive-device\t2.0-local1\tall\
 record '[]'
 check pin_first_party_local_overrides "${work}/record.json"
 check test ! -e "$pin"
-check pin_first_party_local_overrides "${work}/absent.json"
-check test ! -e "$pin"
+if (pin_first_party_local_overrides "${work}/absent.json") >"${work}/absent.log" 2>&1; then
+  bad 'accepted a missing record'
+elif grep -Fq "local override record is missing" "${work}/absent.log" && [[ ! -e "$pin" ]]; then
+  ok 'refused a missing record, no pin left'
+else
+  bad 'missing record refusal'; cat "${work}/absent.log" >&2
+fi
 assert_eq 'no pin: the CeraLive build is the candidate again' 3.0 "$(candidate ceralive-device)"
 
 # The build calls it once the staged debs are installed.
