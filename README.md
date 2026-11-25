@@ -241,6 +241,52 @@ leftover CI access before sshd starts. Legacy single-slot images require a full
 re-flash because their data partition overlaps the new B-slot extent; they cannot
 be converted by OTA.
 
+### Single signed image apt source (fork release, opt-in)
+
+Set `CERALIVE_IMAGE_APT_SOURCE=1` on a fork release
+(`CERALIVE_FORK_RELEASE=1` with an update-channel preset,
+`CERALIVE_OS_RELEASE_VERSION` and `CERALIVE_DEBIAN_SNAPSHOT`). Also set
+`CERALIVE_IMAGE_APT_KEYRING_FILE` (public OpenPGP keyring) and
+`CERALIVE_EXPECT_IMAGE_APT_FPRS` (its exact primary fingerprints). The
+image then ships one apt source, `<channelUrl>/apt/`, with two suites:
+
+- `<board>-<os version>` carries exactly the packages in the image's
+  lock;
+- `<board>-<os version>-emergency` is normally empty.
+
+The build keeps its Debian and first-party sources through the
+application layer's last apt transaction. Then
+`mkosi/runtime/image-apt-source.sh` writes the following and asserts
+that nothing else ships:
+
+- `openstreambox.sources`;
+- the keyring;
+- `preferences.d/openstreambox-origin`: first-party names 990, that
+  host 500, installed versions 100, any other source -1;
+- `/usr/lib/ceralive/image-apt-source.json`.
+
+The legacy origin and local-override pins are replaced. The update
+capabilities are derived again from the new pin and leave out
+`kernel-apt-stage`. The first-party archive's client credentials stay
+installed for the add-on downloader, which does not use apt. They are never
+exported or served by the image apt source, so they get no origin stanza.
+Boot-package holds and the reprune hook are unchanged. Normal builds are
+unaffected.
+
+The build also writes `<stamp>.debs.tar` next to the lock, before any
+artifact is assembled. It holds every `.deb` the image installed except the
+credentials:
+- the staged non-Debian files, matched to their lock rows by SHA-256 and
+  control fields;
+- the Debian rows from the build's own dated snapshot pockets, with each
+  pocket's `InRelease` verified against the image's Debian archive keyring
+  and each file matched to the lock by digest.
+
+The tar also keeps each pocket's `InRelease` and `Packages.xz`, plus
+`SHA256SUMS` and `export.json`, which records the pocket and `Filename`
+per row. The published image suite can then be byte-identical to what the
+image runs, without refetching anything later.
+
 ### Dated Debian build inputs and image SBOM
 
 Set `CERALIVE_DEBIAN_SNAPSHOT=YYYYMMDDTHHMMSSZ` for a build with
