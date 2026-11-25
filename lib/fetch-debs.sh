@@ -190,7 +190,8 @@ assert_repos_integrity
 # libmm-glib0, and the libmbim/libqmi/libqrtr packages provide the QMI/MBIM
 # transport its glib libs bind to — all nine carry the v1.4.0 release's
 # per-source `~ceralive.3` rebuild counter. On arm64, modemmanager and libmm-glib0
-# are the downstream `~ceralive.3+osb1` rebuild (fm350gl +CGCONTRDP fix), which is
+# are the downstream `~ceralive.3+osb2` rebuild (fm350gl +CGCONTRDP fix and two-digit
+# AcT in +CREG/+CGREG/+CEREG), which is
 # not on apt.ceralive.tv and comes in through --first-party-local-debs
 # (docs/first-party-pin-currency.md).
 # The companion is separately versioned at bare SemVer. They are staged like every

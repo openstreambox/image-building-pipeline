@@ -610,18 +610,19 @@ NM_MM_DROPIN_SRC="mkosi/runtime/ceralive-nm-after-modemmanager.dropin.conf"
   [ "$(awk -F= '$1=="libqrtr-glib0"{print $2}' "$pins")" = "1.4.0-1~ceralive.3" ]
 }
 
-@test "modem closure: arm64 ModemManager is the downstream +osb1 rebuild, nothing else is overridden" {
+@test "modem closure: arm64 ModemManager is the downstream +osb2 rebuild, nothing else is overridden" {
   local pins="$PIPELINE_DIR/manifests/first-party-deb-versions.txt"
-  # 1.24.2-2~ceralive.3 plus the fm350gl +CGCONTRDP fix, built from the same source package.
+  # 1.24.2-2~ceralive.3 plus the fm350gl +CGCONTRDP fix and the two-digit AcT +CREG/+CGREG/+CEREG
+  # parser fix, built from the same source package.
   # It is not on apt.ceralive.tv, so a build must supply it through --first-party-local-debs.
-  [ "$(awk -F= '$1=="modemmanager[arm64]"{print $2}' "$pins")" = "1.24.2-2~ceralive.3+osb1" ]
-  [ "$(awk -F= '$1=="libmm-glib0[arm64]"{print $2}' "$pins")" = "1.24.2-2~ceralive.3+osb1" ]
+  [ "$(awk -F= '$1=="modemmanager[arm64]"{print $2}' "$pins")" = "1.24.2-2~ceralive.3+osb2" ]
+  [ "$(awk -F= '$1=="libmm-glib0[arm64]"{print $2}' "$pins")" = "1.24.2-2~ceralive.3+osb2" ]
   [ "$(grep -c '+osb' "$pins")" -eq 2 ]
   # Each downstream pin has exactly one reviewed sha256 row, and the manifest lists nothing else.
   local shas="$PIPELINE_DIR/manifests/first-party-local-sha256.txt" row
   [ "$(awk '$1 !~ /^#/ && NF' "$shas" | wc -l)" -eq 2 ]
   for row in modemmanager libmm-glib0; do
-    [ "$(awk -v f="${row}_1.24.2-2~ceralive.3+osb1_arm64.deb" '$1 !~ /^#/ && $2 == f && $1 ~ /^[0-9a-f]{64}$/' "$shas" | wc -l)" -eq 1 ]
+    [ "$(awk -v f="${row}_1.24.2-2~ceralive.3+osb2_arm64.deb" '$1 !~ /^#/ && $2 == f && $1 ~ /^[0-9a-f]{64}$/' "$shas" | wc -l)" -eq 1 ]
   done
   local pkg
   for pkg in $MODEM_CLOSURE_PKGS; do
