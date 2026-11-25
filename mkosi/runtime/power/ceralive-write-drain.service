@@ -4,7 +4,7 @@ Description=Hold shutdown until running system writes finish
 # after this unit's ExecStop returned, i.e. after RAUC and the update units are
 # idle, and with networking still up for a streamed RAUC install. Any shutdown
 # path gets this, including logind's own power-key handling.
-After=rauc.service ceralive-software-update.service ceralive-os-stage-guard.service ceralive-slot-sync.service
+After=rauc.service ceralive-software-update.service ceralive-slot-sync.service
 After=ceralive-rauc-activate.service
 # Nothing slow at boot: a shutdown queued while this unit's start job still
 # waits cancels it, and then no ExecStop runs. The boot-only oneshots
@@ -14,7 +14,11 @@ After=ceralive-rauc-activate.service
 # its writer check cover deliberate power-offs, and their own writes are
 # journaled (dpkg) or atomic (boot.scr sync).
 # Per-attempt units order themselves: ceralive-rauc-arm@.service and CeraUI's
-# ceralive-kernel-stage-<id>.service carry Before=ceralive-write-drain.service.
+# ceralive-kernel-stage-<id>.service carry Before=ceralive-write-drain.service,
+# and so does CeraUI's transient ceralive-os-stage-guard.service. Never name a
+# transient unit here: this reference keeps systemd from unloading it once it
+# stops, so CeraUI can't prove its OS stage released (every owner OS update then
+# ended unsafe) and can't start the guard again until the next boot.
 # NetworkManager and ModemManager stop after the drain, so a streamed RAUC
 # install keeps its network. No network-online.target: nothing on this image
 # waits for it at boot.
