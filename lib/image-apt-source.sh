@@ -60,14 +60,17 @@ image_apt_source_resolve() {
   ((${#fprs[@]} >= 2)) || { image_apt_source_die "CERALIVE_EXPECT_IMAGE_APT_FPRS needs the active and the standby key"; return 1; }
   [[ "$(printf '%s\n' "${fprs[@]}" | sort -u | wc -l)" == "${#fprs[@]}" ]] \
     || { image_apt_source_die "CERALIVE_EXPECT_IMAGE_APT_FPRS repeats a fingerprint"; return 1; }
+  local packets
+  packets="$(gpg --batch --list-packets -- "$keyring" 2>/dev/null)" \
+    || { image_apt_source_die "cannot inspect the keyring's OpenPGP packets"; return 1; }
+  if grep -q '^:secret' <<<"$packets"; then
+    image_apt_source_die "the keyring holds secret key material"; return 1
+  fi
   here="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
   # shellcheck source=lib/fetch-debs-auth.sh
   source "${here}/fetch-debs-auth.sh"
   auth_keyring_has_exact_fingerprints "$keyring" "${fprs[@]}" \
     || { image_apt_source_die "the keyring does not hold exactly the expected primary keys (or holds a secret, revoked or expired key)"; return 1; }
-  if gpg --batch --list-packets -- "$keyring" 2>/dev/null | grep -q '^:secret'; then
-    image_apt_source_die "the keyring holds secret key material"; return 1
-  fi
   CERALIVE_IMAGE_APT_URI_B64="$(printf '%s/apt/' "$base" | base64 -w0)"
   CERALIVE_IMAGE_APT_KEYRING_B64="$(base64 -w0 <"$keyring")"
   export CERALIVE_IMAGE_APT_SOURCE CERALIVE_IMAGE_APT_URI_B64 CERALIVE_IMAGE_APT_KEYRING_B64

@@ -12,8 +12,9 @@ Debian rows are taken from the build's own dated snapshot (the pockets the build
 resolved from: the base and security suites, component main). For each pocket the
 signed InRelease is verified with gpgv against the image's own Debian archive
 keyring, its Packages.xz is checked against InRelease, and the row's
-(name, version, arch, SHA-256) must name one Filename across the pockets. That file
-is downloaded and checked against the lock digest and control fields.
+(name, version, arch, SHA-256) must be listed in at least one pocket. Identical
+digests listed in both pockets are the same bytes: the first pocket is used and
+every listing is recorded. The file is checked against the lock digest and control.
 
 The tar holds files/<name>_<version>_<arch>.deb for every exported row, the
 InRelease and Packages.xz of each pocket under indexes/<archive>/<suite>/,
@@ -21,7 +22,7 @@ SHA256SUMS and export.json (per row: digest, file, and either where it was stage
 or the pocket and Filename it came from). Members are sorted, owned by root and
 dated SOURCE_DATE_EPOCH (or 0), so the same inputs give the same tar.
 
-Fails, writing nothing, when a row has no file, is ambiguous across pockets, or a
+Fails, writing nothing, when a row has no file, is in no pocket, or a
 file's control fields differ from its row. The first-party archive's client
 credentials are never exported. The output must not exist yet.
 Test hook: CERALIVE_EXPORT_SNAPSHOT_BASE replaces https://snapshot.debian.org/archive.
@@ -224,19 +225,23 @@ def main() -> None:
         for r in debian:
             key = (r["name"], r["version"], r["arch"], r["sha256"])
             hits = [(archive, suite, root, idx[key]) for archive, suite, root, idx in indexes if key in idx]
-            if len({h[3] for h in hits}) != 1:
-                unresolved.append((r, len(hits)))
+            if not hits:
+                unresolved.append((r, 0))
                 continue
+            # The same digest may be listed in both pockets (security republishes base
+            # packages, sometimes at another pool path): identical bytes either way.
+            # Take the first pocket in the build's own order and record every listing.
             archive, suite, root, filename = hits[0]
             dest = pathlib.Path(work.name) / r["sha256"]
             dest.write_bytes(fetch(f"{root}/{filename}"))
             if sha256(dest) != r["sha256"] or control(dest) != (r["name"], r["version"], r["arch"]):
                 die(f"{r['name']} {r['version']}: the snapshot file differs from the lock")
-            chosen.append((r, dest, {"archive": archive, "pocket": suite, "filename": filename}))
+            chosen.append((r, dest, {"archive": archive, "pocket": suite, "filename": filename,
+                                     "listed_in": [{"archive": h[0], "pocket": h[1], "filename": h[3]} for h in hits]}))
         for r, n in unresolved:
-            print(f"export-debs: {r['name']} {r['version']} {r['arch']}: {n} snapshot pockets match", file=sys.stderr)
+            print(f"export-debs: {r['name']} {r['version']} {r['arch']}: in no snapshot pocket", file=sys.stderr)
         if unresolved:
-            die(f"{len(unresolved)} of {len(debian)} Debian rows are not in exactly one pocket of snapshot {a.snapshot}")
+            die(f"{len(unresolved)} of {len(debian)} Debian rows are in no pocket of snapshot {a.snapshot}")
         write_tar(lock, out, chosen, meta, a.snapshot)
     finally:
         work.cleanup()

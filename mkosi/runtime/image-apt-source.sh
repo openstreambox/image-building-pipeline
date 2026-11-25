@@ -143,12 +143,16 @@ image_apt_source_assert() {
   done
   [[ -s "${root}/etc/apt/preferences.d/openstreambox-origin" && -s "${root}/usr/share/keyrings/openstreambox-archive-keyring.pgp" ]] \
     || { image_apt_die 'pin file or keyring missing'; return 1; }
-  if ! grep -Fxq 'Dir::Etc::SourceList "/etc/apt/sources.list.d/openstreambox.sources";' "${root}/etc/apt/apt.conf.d/10openstreambox-source" 2>/dev/null \
-     || ! grep -Fxq 'Dir::Etc::SourceParts "/dev/null";' "${root}/etc/apt/apt.conf.d/10openstreambox-source"; then
-    image_apt_die 'apt is not restricted to the one source file'; return 1
+  # What apt itself resolves (main apt.conf and every drop-in, nested syntax
+  # included), not what a grep of one file says.
+  local cfg effective
+  cfg="$(mktemp)"
+  printf 'Dir::Etc::main "%s/etc/apt/apt.conf";\nDir::Etc::parts "%s/etc/apt/apt.conf.d";\n' "$root" "$root" >"$cfg"
+  if ! effective="$(APT_CONFIG="$cfg" apt-config shell SL Dir::Etc::sourcelist SP Dir::Etc::sourceparts 2>/dev/null)"; then
+    rm -f -- "$cfg"; image_apt_die 'apt-config cannot read the image apt configuration'; return 1
   fi
-  if grep -rhsE '^[[:space:]]*Dir::Etc::(SourceList|SourceParts|sourcelist|sourceparts)' "${root}/etc/apt/apt.conf.d" \
-       | grep -vqE '^Dir::Etc::Source(List "/etc/apt/sources.list.d/openstreambox.sources"|Parts "/dev/null");$'; then
-    image_apt_die 'another apt.conf file redirects the source list'; return 1
+  rm -f -- "$cfg"
+  if [[ "$effective" != $'SL=\'/etc/apt/sources.list.d/openstreambox.sources\'\nSP=\'/dev/null\'' ]]; then
+    image_apt_die "apt is not restricted to the one source file (effective: ${effective//$'\n'/, })"; return 1
   fi
 }

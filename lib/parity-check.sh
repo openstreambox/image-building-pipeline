@@ -291,15 +291,29 @@ main() {
   else
     fail "udev hardware-access rules missing"
   fi
-  if [[ -f "${root}/etc/apt/sources.list.d/debian.sources" ]]; then
-    pass "deb822 Debian apt sources present"
+  if [[ -e "${root}/usr/lib/ceralive/image-apt-source.json" ]]; then
+    # A single-source fork release (lib/image-apt-source.sh): exactly one signed
+    # image source and nothing else, checked by the same assertion the build ran.
+    # shellcheck disable=SC2016  # the inner script expands its own argument
+    if IMAGE_APT_ROOT="${root}" CERALIVE_IMAGE_APT_SOURCE=1 bash -c 'source "$1"; image_apt_source_assert' _ \
+         "${BASH_SOURCE[0]%/*}/../mkosi/runtime/image-apt-source.sh"; then
+      pass "single signed image apt source (no Debian or apt.ceralive.tv source)"
+    else
+      fail "single image apt source assertion failed"
+    fi
+  elif [[ "${CERALIVE_IMAGE_APT_SOURCE:-0}" == 1 ]]; then
+    fail "CERALIVE_IMAGE_APT_SOURCE=1 but the image has no image-apt-source.json"
   else
-    fail "deb822 Debian apt sources missing"
-  fi
-  if [[ -f "${root}/etc/apt/sources.list.d/ceralive.sources" ]]; then
-    pass "apt.ceralive.tv repository configured"
-  else
-    fail "apt.ceralive.tv repository missing"
+    if [[ -f "${root}/etc/apt/sources.list.d/debian.sources" ]]; then
+      pass "deb822 Debian apt sources present"
+    else
+      fail "deb822 Debian apt sources missing"
+    fi
+    if [[ -f "${root}/etc/apt/sources.list.d/ceralive.sources" ]]; then
+      pass "apt.ceralive.tv repository configured"
+    else
+      fail "apt.ceralive.tv repository missing"
+    fi
   fi
   # The build-time Armbian pool must NOT leak into the final image.
   if [[ -f "${root}/etc/apt/sources.list.d/armbian.sources" ]]; then

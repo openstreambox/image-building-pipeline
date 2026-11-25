@@ -31,7 +31,7 @@ G=(gpg --homedir "$WORK/gnupg" --batch --quiet --pinentry-mode loopback --passph
 mapfile -t FPRS < <(gpg --homedir "$WORK/gnupg" --batch --with-colons --list-keys | awk -F: '$1=="fpr"{print $10}')
 gpg --homedir "$WORK/gnupg" --batch --export "${FPRS[@]}" >"$WORK/keyring.pgp"
 gpg --homedir "$WORK/gnupg" --batch --export "${FPRS[0]}" >"$WORK/only-a.pgp"
-"${G[@]}" --export-secret-keys "${FPRS[0]}" >"$WORK/secret.pgp"
+"${G[@]}" --export-secret-keys "${FPRS[@]}" >"$WORK/secret.pgp"
 check test "${#FPRS[@]}" -eq 2
 
 # --- host side: lib/image-apt-source.sh -----------------------------------------------
@@ -64,7 +64,11 @@ refused 'keyring missing the standby key' resolve CERALIVE_IMAGE_APT_SOURCE=1 CE
 refused 'wrong fingerprint list' resolve CERALIVE_IMAGE_APT_SOURCE=1 CERALIVE_FORK_RELEASE=1 CERALIVE_UPDATE_PRESET_CHANNEL_B64="$CHANNEL_B64" \
   CERALIVE_OS_RELEASE_VERSION=2026.12.1 CERALIVE_DEBIAN_SNAPSHOT=20261120T000000Z CERALIVE_IMAGE_APT_KEYRING_FILE="$WORK/keyring.pgp" CERALIVE_EXPECT_IMAGE_APT_FPRS="${FPRS[0]}"
 refused 'secret key material' resolve CERALIVE_IMAGE_APT_SOURCE=1 CERALIVE_FORK_RELEASE=1 CERALIVE_UPDATE_PRESET_CHANNEL_B64="$CHANNEL_B64" \
-  CERALIVE_OS_RELEASE_VERSION=2026.12.1 CERALIVE_DEBIAN_SNAPSHOT=20261120T000000Z CERALIVE_IMAGE_APT_KEYRING_FILE="$WORK/secret.pgp" CERALIVE_EXPECT_IMAGE_APT_FPRS="${FPRS[0]}"
+  CERALIVE_OS_RELEASE_VERSION=2026.12.1 CERALIVE_DEBIAN_SNAPSHOT=20261120T000000Z CERALIVE_IMAGE_APT_KEYRING_FILE="$WORK/secret.pgp" CERALIVE_EXPECT_IMAGE_APT_FPRS="${FPRS[*]}"
+check grep -Fq 'the keyring holds secret key material' "$WORK/refused.log"
+printf 'not an OpenPGP keyring\n' >"$WORK/garbage.pgp"
+refused 'a keyring gpg cannot read' resolve CERALIVE_IMAGE_APT_SOURCE=1 CERALIVE_FORK_RELEASE=1 CERALIVE_UPDATE_PRESET_CHANNEL_B64="$CHANNEL_B64" \
+  CERALIVE_OS_RELEASE_VERSION=2026.12.1 CERALIVE_DEBIAN_SNAPSHOT=20261120T000000Z CERALIVE_IMAGE_APT_KEYRING_FILE="$WORK/garbage.pgp" CERALIVE_EXPECT_IMAGE_APT_FPRS="${FPRS[*]}"
 
 # --- chroot side: the files in a scratch root ----------------------------------------
 NAMES_B64="$(grep -Ev '^[[:space:]]*(#|$)' "$ROOT/mkosi/runtime/first-party-origin-names.txt" | base64 -w0)"
@@ -141,6 +145,22 @@ cp -a "$R" "$WORK/r9"; printf 'Dir::Etc::SourceParts "/etc/apt/sources.list.d";\
 refused 'another apt.conf that re-enables source parts' assert_root "$WORK/r9"
 cp -a "$R" "$WORK/r10"; rm -f "$WORK/r10/etc/apt/apt.conf.d/10openstreambox-source"
 refused 'the source restriction missing' assert_root "$WORK/r10"
+cp -a "$R" "$WORK/r11"; printf 'Dir { Etc { SourceParts "/etc/apt/sources.list.d"; }; };\n' >"$WORK/r11/etc/apt/apt.conf.d/99nested"
+refused 'a nested redirect in a drop-in' assert_root "$WORK/r11"
+cp -a "$R" "$WORK/r12"; printf 'Dir::Etc::SourceList "/etc/apt/sources.list";\n' >"$WORK/r12/etc/apt/apt.conf"
+refused 'a redirect in the main apt.conf' assert_root "$WORK/r12"
+
+# --- parity on both paths (the E section of lib/parity-check.sh) ---------------------
+parity_e() { env -i PATH="$PATH" "${@:2}" bash "$ROOT/lib/parity-check.sh" "$1" 2>&1 | sed -n '/--- E\./,/--- F\./p'; }
+out="$(parity_e "$R")"
+check grep -Fq 'single signed image apt source' <<<"$out"
+if grep -Eq 'FAIL.*(Debian apt sources|apt.ceralive.tv)|single image apt source assertion failed' <<<"$out"; then bad 'parity rejects the single-source root'; else ok 'parity accepts the single-source root'; fi
+out="$(parity_e "$WORK/r11")"
+check grep -Fq 'single image apt source assertion failed' <<<"$out"
+out="$(parity_e "$R0" CERALIVE_IMAGE_APT_SOURCE=1)"
+check grep -Fq 'CERALIVE_IMAGE_APT_SOURCE=1 but the image has no image-apt-source.json' <<<"$out"
+out="$(parity_e "$R0")"
+if grep -Eq 'FAIL.*(Debian apt sources|apt.ceralive.tv)' <<<"$out"; then bad 'parity default path broke'; else ok 'parity default path still checks both legacy sources'; fi
 
 # --- update capabilities from the single-source root -------------------------------
 mkdir -p "$WORK/bin"
@@ -153,7 +173,23 @@ case "$2" in
 esac
 EOF
 chmod +x "$WORK/bin/getent"
-caps() { env PATH="$WORK/bin:$PATH" KERNEL_STAGE_MIN_CERAUI= "$ROOT/mkosi/runtime/rauc/install-update-capabilities.sh" "$1"; }
+# An eligible kernel stage: the runtime files and a pin at or above the minimum CeraUI.
+printf 'ceralive-device[%s]=2026.11.5\n' "$(dpkg --print-architecture)" >"$WORK/kernel-pins.txt"
+kernel_files() {
+  mkdir -p "$1/usr/lib/ceralive" "$1/usr/libexec/ceralive"
+  local f; for f in usr/lib/ceralive/ceralive-kernel-stage usr/libexec/ceralive/ceralive-slot-sync \
+    usr/lib/ceralive/ceralive-kernel-boot-staging usr/lib/ceralive/verify-boot-artifacts.sh \
+    usr/lib/ceralive/ceralive-kernel-state-lib.sh usr/lib/ceralive/ceralive-slot-mirror-lib.sh; do
+    printf '#!/bin/sh\n' >"$1/$f"; chmod +x "$1/$f"; done
+}
+caps() { env PATH="$WORK/bin:$PATH" CERALIVE_KERNEL_STAGE_PIN_FILE="$WORK/kernel-pins.txt" "$ROOT/mkosi/runtime/rauc/install-update-capabilities.sh" "$1"; }
+D="$WORK/root.default-caps"; mkdir -p "$D/etc/apt/preferences.d"; kernel_files "$D"; kernel_files "$R"
+awk '!/^[[:space:]]*(#|$)/ {
+  print "Package: " $0 "\nPin: origin apt.ceralive.tv\nPin-Priority: 990"
+  print "Package: " $0 "\nPin: origin *\nPin-Priority: -1"
+}' "$ROOT/mkosi/runtime/first-party-origin-names.txt" >"$D/etc/apt/preferences.d/ceralive-origin"
+check caps "$D"
+check grep -Fq '"apt-credentials","transport-uidrange","kernel-apt-stage"]' "$D/usr/lib/ceralive/update-capabilities.json"
 check caps "$R"
 C="$R/usr/lib/ceralive/update-capabilities.json"
 check grep -Fq '"origin-protection","apt-all-packages","reprune-hook","apt-credentials","transport-uidrange"]' "$C"

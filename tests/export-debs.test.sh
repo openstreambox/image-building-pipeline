@@ -42,8 +42,8 @@ pocket() { # archive suite deb...
   local root="$M/$1/$SNAP" suite="$2" d stanza=''; shift 2
   mkdir -p "$root/dists/$suite/main/binary-arm64"
   for d in "$@"; do
-    local n; n="$(basename "$d")"; mkdir -p "$root/pool/main/${n:0:1}"; cp "$d" "$root/pool/main/${n:0:1}/$n"
-    stanza+="$(dpkg-deb -f "$d")"$'\n'"Filename: pool/main/${n:0:1}/$n"$'\n'"Size: $(stat -c %s "$d")"$'\n'"SHA256: $(sha256sum "$d" | cut -d' ' -f1)"$'\n\n'
+    local n c="${POOL_COMPONENT:-main}"; n="$(basename "$d")"; mkdir -p "$root/pool/$c/${n:0:1}"; cp "$d" "$root/pool/$c/${n:0:1}/$n"
+    stanza+="$(dpkg-deb -f "$d")"$'\n'"Filename: pool/$c/${n:0:1}/$n"$'\n'"Size: $(stat -c %s "$d")"$'\n'"SHA256: $(sha256sum "$d" | cut -d' ' -f1)"$'\n\n'
   done
   printf '%s' "$stanza" | xz -c >"$root/dists/$suite/main/binary-arm64/Packages.xz"
   printf 'Suite: %s\nSHA256:\n %s %s main/binary-arm64/Packages.xz\n' "$suite" \
@@ -51,26 +51,29 @@ pocket() { # archive suite deb...
   gpg --homedir "$WORK/gnupg" --batch --yes --quiet --pinentry-mode loopback --passphrase '' --clearsign \
     --output "$root/dists/$suite/InRelease" "$root/dists/$suite/Release" 2>/dev/null
 }
-pocket debian trixie "$WORK/debs/adduser_3.152_all.deb"
-pocket debian-security trixie-security "$WORK/debs/libfoo1_1.0-1+deb13u1_arm64.deb"
+deb_d="$(mkdeb "$WORK/debs" libdup1 2.0-1 arm64)"
+pocket debian trixie "$WORK/debs/adduser_3.152_all.deb" "$WORK/debs/libdup1_2.0-1_arm64.deb"
+# security republishes libdup1 byte for byte under another pool path
+POOL_COMPONENT=updates/main pocket debian-security trixie-security "$WORK/debs/libfoo1_1.0-1+deb13u1_arm64.deb" "$WORK/debs/libdup1_2.0-1_arm64.deb"
 export CERALIVE_EXPORT_SNAPSHOT_BASE="file://$M"
 SNAPARGS=(--snapshot "$SNAP" --debian-keyring "$WORK/debian-keyring.gpg")
 
 lock() { # out extra-rows-json
-  printf '{"packages":[{"name":"adduser","version":"3.152","arch":"all","origin":"debian","sha256":"%s"},{"name":"libfoo1","version":"1.0-1+deb13u1","arch":"arm64","origin":"debian","sha256":"%s"},{"name":"ceralive-device","version":"2026.12.1-1","arch":"arm64","origin":"first-party-local-override","sha256":"%s"},{"name":"armbian-firmware-full","version":"26.8.3","arch":"all","origin":"bsp","sha256":"%s"},{"name":"linux-image-test","version":"7.2.0-1","arch":"arm64","origin":"source-built","artifact":{"sha256":{"linux-image-test_7.2.0-1_arm64.deb":"%s"}}},{"name":"rauc","version":"1.15.2-1","arch":"arm64","origin":"generated-locally","sha256":"%s"}%s]}' \
-    "$deb_a" "$deb_b" "$fp" "$bsp" "$krn" "$rau" "${2:-}" >"$1"
+  printf '{"packages":[{"name":"adduser","version":"3.152","arch":"all","origin":"debian","sha256":"%s"},{"name":"libfoo1","version":"1.0-1+deb13u1","arch":"arm64","origin":"debian","sha256":"%s"},{"name":"libdup1","version":"2.0-1","arch":"arm64","origin":"debian","sha256":"%s"},{"name":"ceralive-device","version":"2026.12.1-1","arch":"arm64","origin":"first-party-local-override","sha256":"%s"},{"name":"armbian-firmware-full","version":"26.8.3","arch":"all","origin":"bsp","sha256":"%s"},{"name":"linux-image-test","version":"7.2.0-1","arch":"arm64","origin":"source-built","artifact":{"sha256":{"linux-image-test_7.2.0-1_arm64.deb":"%s"}}},{"name":"rauc","version":"1.15.2-1","arch":"arm64","origin":"generated-locally","sha256":"%s"}%s]}' \
+    "$deb_a" "$deb_b" "$deb_d" "$fp" "$bsp" "$krn" "$rau" "${2:-}" >"$1"
 }
 lock "$WORK/lock.json"
 X=(python3 "$ROOT/lib/export-debs.py")
 x() { "${X[@]}" "$@" "${SNAPARGS[@]}"; }
 check env SOURCE_DATE_EPOCH=1794083621 bash -c '"$@"' _ "${X[@]}" "$WORK/lock.json" "$S" "$WORK/a.debs.tar" "${SNAPARGS[@]}"
-check test "$(tar -tf "$WORK/a.debs.tar" | grep '^files/' | tr '\n' ' ')" = 'files/adduser_3.152_all.deb files/armbian-firmware-full_26.8.3_all.deb files/ceralive-device_2026.12.1-1_arm64.deb files/libfoo1_1.0-1+deb13u1_arm64.deb files/linux-image-test_7.2.0-1_arm64.deb files/rauc_1.15.2-1_arm64.deb '
+check test "$(tar -tf "$WORK/a.debs.tar" | grep '^files/' | tr '\n' ' ')" = 'files/adduser_3.152_all.deb files/armbian-firmware-full_26.8.3_all.deb files/ceralive-device_2026.12.1-1_arm64.deb files/libdup1_2.0-1_arm64.deb files/libfoo1_1.0-1+deb13u1_arm64.deb files/linux-image-test_7.2.0-1_arm64.deb files/rauc_1.15.2-1_arm64.deb '
 mkdir "$WORK/x" && tar -xf "$WORK/a.debs.tar" -C "$WORK/x"
 check bash -c "cd '$WORK/x' && sha256sum -c --quiet SHA256SUMS"
 check test -s "$WORK/x/indexes/debian-security/trixie-security/InRelease"
 check test -s "$WORK/x/indexes/debian/trixie/main/binary-arm64/Packages.xz"
 check grep -q '"staged_as": "kernel-build/linux-image-test_7.2.0-1_arm64.deb"' "$WORK/x/export.json"
-check python3 -c 'import json,sys; p={x["name"]:x for x in json.load(open(sys.argv[1]))["packages"]}; f=p["libfoo1"]; sys.exit(not (f["pocket"]=="trixie-security" and f["archive"]=="debian-security" and f["filename"]=="pool/main/l/libfoo1_1.0-1+deb13u1_arm64.deb"))' "$WORK/x/export.json"
+check python3 -c 'import json,sys; p={x["name"]:x for x in json.load(open(sys.argv[1]))["packages"]}; f=p["libfoo1"]; sys.exit(not (f["pocket"]=="trixie-security" and f["archive"]=="debian-security" and f["filename"]=="pool/updates/main/l/libfoo1_1.0-1+deb13u1_arm64.deb"))' "$WORK/x/export.json"
+check python3 -c 'import json,sys; p={x["name"]:x for x in json.load(open(sys.argv[1]))["packages"]}; d=p["libdup1"]; sys.exit(not (d["pocket"]=="trixie" and [l["filename"] for l in d["listed_in"]]==["pool/main/l/libdup1_2.0-1_arm64.deb","pool/updates/main/l/libdup1_2.0-1_arm64.deb"]))' "$WORK/x/export.json"
 check env SOURCE_DATE_EPOCH=1794083621 bash -c '"$@"' _ "${X[@]}" "$WORK/lock.json" "$S" "$WORK/b.debs.tar" "${SNAPARGS[@]}"
 check cmp -s "$WORK/a.debs.tar" "$WORK/b.debs.tar"
 refused 'an existing output' x "$WORK/lock.json" "$S" "$WORK/a.debs.tar"
@@ -82,7 +85,7 @@ refused 'a snapshot signed by another key' "${X[@]}" "$WORK/lock.json" "$S" "$WO
 check grep -q 'gpgv refused' "$WORK/refused.log"
 lock "$WORK/nodeb.json" ',{"name":"libbar2","version":"2.0","arch":"arm64","origin":"debian","sha256":"2222222222222222222222222222222222222222222222222222222222222222"}'
 refused 'a Debian row in no pocket' x "$WORK/nodeb.json" "$S" "$WORK/n.debs.tar"
-check grep -q 'not in exactly one pocket' "$WORK/refused.log"
+check grep -q 'in no pocket of snapshot' "$WORK/refused.log"
 check test ! -e "$WORK/n.debs.tar"
 cp "$M/debian/$SNAP/dists/trixie/main/binary-arm64/Packages.xz" "$WORK/px.keep"
 printf 'x' >>"$M/debian/$SNAP/dists/trixie/main/binary-arm64/Packages.xz"
