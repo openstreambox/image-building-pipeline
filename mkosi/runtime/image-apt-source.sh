@@ -88,6 +88,15 @@ Architectures: ${arch}
 Signed-By: /usr/share/keyrings/openstreambox-archive-keyring.pgp
 EOF
   chmod 0644 "${root}/etc/apt/sources.list.d/openstreambox.sources"
+  # apt itself reads only this file: a source added later (by hand, or by an older
+  # device UI) is never fetched or installed from, for every apt client on the box.
+  mkdir -p "${root}/etc/apt/apt.conf.d"
+  cat >"${root}/etc/apt/apt.conf.d/10openstreambox-source" <<'EOF2'
+// Single image apt source (runtime/image-apt-source.sh): no other source is read.
+Dir::Etc::SourceList "/etc/apt/sources.list.d/openstreambox.sources";
+Dir::Etc::SourceParts "/dev/null";
+EOF2
+  chmod 0644 "${root}/etc/apt/apt.conf.d/10openstreambox-source"
 
   rm -f -- "${root}/etc/apt/preferences.d/ceralive-origin" "${root}/etc/apt/preferences.d/ceralive-local-override"
   {
@@ -134,4 +143,12 @@ image_apt_source_assert() {
   done
   [[ -s "${root}/etc/apt/preferences.d/openstreambox-origin" && -s "${root}/usr/share/keyrings/openstreambox-archive-keyring.pgp" ]] \
     || { image_apt_die 'pin file or keyring missing'; return 1; }
+  if ! grep -Fxq 'Dir::Etc::SourceList "/etc/apt/sources.list.d/openstreambox.sources";' "${root}/etc/apt/apt.conf.d/10openstreambox-source" 2>/dev/null \
+     || ! grep -Fxq 'Dir::Etc::SourceParts "/dev/null";' "${root}/etc/apt/apt.conf.d/10openstreambox-source"; then
+    image_apt_die 'apt is not restricted to the one source file'; return 1
+  fi
+  if grep -rhsE '^[[:space:]]*Dir::Etc::(SourceList|SourceParts|sourcelist|sourceparts)' "${root}/etc/apt/apt.conf.d" \
+       | grep -vqE '^Dir::Etc::Source(List "/etc/apt/sources.list.d/openstreambox.sources"|Parts "/dev/null");$'; then
+    image_apt_die 'another apt.conf file redirects the source list'; return 1
+  fi
 }

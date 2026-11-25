@@ -89,6 +89,8 @@ check grep -Fxq 'Types: deb' "$R/etc/apt/sources.list.d/openstreambox.sources"
 check grep -Fxq 'Signed-By: /usr/share/keyrings/openstreambox-archive-keyring.pgp' "$R/etc/apt/sources.list.d/openstreambox.sources"
 if grep -q 'Check-Date' "$R/etc/apt/sources.list.d/openstreambox.sources"; then bad 'Check-Date set (it would disable Valid-Until)'; else ok 'no Check-Date override'; fi
 check cmp -s "$WORK/keyring.pgp" "$R/usr/share/keyrings/openstreambox-archive-keyring.pgp"
+check grep -Fxq 'Dir::Etc::SourceParts "/dev/null";' "$R/etc/apt/apt.conf.d/10openstreambox-source"
+check grep -Fxq 'Dir::Etc::SourceList "/etc/apt/sources.list.d/openstreambox.sources";' "$R/etc/apt/apt.conf.d/10openstreambox-source"
 check test "$(ls "$R/etc/apt/preferences.d")" = 'openstreambox-origin'
 P="$R/etc/apt/preferences.d/openstreambox-origin"
 check test "$(grep -c '^Package: ' "$P")" -eq "$(( $(printf '%s' "$NAMES_B64" | base64 -d | grep -c .) - 1 + 3 ))"
@@ -127,6 +129,10 @@ cp -a "$R" "$WORK/r5"; printf '\nTypes: deb\nURIs: https://x.example/\nSuites: .
 refused 'a second stanza in the one file' assert_root "$WORK/r5"
 cp -a "$R" "$WORK/r6"; printf 'x\n' >"$WORK/r6/etc/apt/preferences.d/ceralive-origin"
 refused 'a legacy pin' assert_root "$WORK/r6"
+cp -a "$R" "$WORK/r9"; printf 'Dir::Etc::SourceParts "/etc/apt/sources.list.d";\n' >"$WORK/r9/etc/apt/apt.conf.d/99other"
+refused 'another apt.conf that re-enables source parts' assert_root "$WORK/r9"
+cp -a "$R" "$WORK/r10"; rm -f "$WORK/r10/etc/apt/apt.conf.d/10openstreambox-source"
+refused 'the source restriction missing' assert_root "$WORK/r10"
 
 # --- update capabilities from the single-source root -------------------------------
 mkdir -p "$WORK/bin"
