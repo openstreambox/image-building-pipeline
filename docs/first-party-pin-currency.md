@@ -377,17 +377,23 @@ an AcT of 11 that the one-digit patterns don't match, so the modem stays at
   `patches/series` line. Built the same way as `+osb1`: `libqrtr-glib`,
   `libmbim` and `libqmi` carried from the v1.4.0 release assets (the same 20
   arm64 debs, byte for byte), ModemManager rebuilt with
-  `EXACT_SUFFIX='~ceralive.3+osb2' build-stack.sh arm64` in
+  `BUILD_SOURCES=modemmanager EXACT_SUFFIX='~ceralive.3+osb2' build-stack.sh arm64` in
   `debian:trixie@sha256:3cda3ca4…dafba2`. The `.buildinfo` build dependencies
   equal `+osb1`'s.
 - **Ordering:** `~ceralive.3+osb1` < `~ceralive.3+osb2` < `~ceralive.3+osb10`
   < `~ceralive.4` in `ci/pin_versions.py` and `dpkg --compare-versions`, so an
   installed `+osb1` upgrades to `+osb2` and a newer upstream counter still reads
   `STALE`.
-- **Delivery:** unchanged from `+osb1`: `--first-party-local-debs`,
-  development builds only, exactly the bytes in
-  `manifests/first-party-local-sha256.txt`. The `+osb1` rows are gone, so an
-  override with the old bytes is now refused like any other mismatch.
+- **Not on apt.ceralive.tv.** Supply exactly these two debs with
+  `--first-party-local-debs`. That flag works in development builds only;
+  production mode and GitHub Actions refuse it. Their sha256 values are in
+  `manifests/first-party-local-sha256.txt`. For a package pinned to a `+osbN`
+  version, the fetch accepts only an override with that version and the one
+  sha256 listed for it. A missing manifest, a missing or duplicate row, or a
+  malformed digest refuses it. A different version (for example the released
+  `ceralive.3` or the earlier `+osb1`) or different bytes is refused. Without
+  the override the fetch fails, because the signed index has no such version.
+  The build's `first-party-local-override.json` and lock record the sha256:
 
 | Package (arm64) | sha256 |
 |---|---|
@@ -406,8 +412,8 @@ an AcT of 11 that the one-digit patterns don't match, so the modem stays at
     is smaller only because one fewer Cortex-A53 erratum-843419 stub page is
     needed.
   - 18 plugin and shared `.so` files differ only in `.note.gnu.build-id`, since
-    the patched header shifts DWARF line numbers. Every loaded section is
-    byte-identical.
+    the patched header shifts DWARF line numbers. Apart from that build-ID note,
+    which sits in a loadable segment, every loaded section is byte-identical.
 - **Tests:** the ModemManager meson suite with the patch passes (30/30, helper
   tests 214/214).
 - **Hardware:** not yet proven on an FM350-GL on 5G SA.
@@ -435,27 +441,23 @@ and every retry gets `+CME ERROR: 5847`. amd64 keeps the released build.
   collide with a published version. `ci/pin_versions.py` accepts the `+osbN`
   form and orders it. A newer upstream release still reads `STALE`, which is
   the point to drop the rebuild or carry it forward.
-- **Not on apt.ceralive.tv.** Supply exactly these two debs with
-  `--first-party-local-debs`. That flag works in development builds only;
-  production mode and GitHub Actions refuse it. Their sha256 values are in
-  `manifests/first-party-local-sha256.txt`. For a package pinned to a `+osbN`
-  version, the fetch accepts only an override with that version and the one
-  sha256 listed for it. A missing manifest, a missing or duplicate row, or a
-  malformed digest refuses it. A different version
-  (for example the released `ceralive.3`) or different bytes is refused.
-  Without the override the fetch fails, because the signed index has no such
-  version. Other overrides keep their existing behaviour. The build's
-  `first-party-local-override.json` and lock record the sha256:
+- **Not on apt.ceralive.tv.** These two debs were supplied with
+  `--first-party-local-debs` under the rules in the `+osb2` receipt above, and
+  their sha256 rows were in `manifests/first-party-local-sha256.txt` until
+  `+osb2` replaced them. This change also made the fetch accept a `+osbN` pin
+  only with its one listed sha256; other overrides kept their existing
+  behaviour. The `+osb1` hashes were:
 
 | Package (arm64) | sha256 |
 |---|---|
 | `modemmanager_1.24.2-2~ceralive.3+osb1_arm64.deb` | `bdb31a65decfe1e36dcc4a09890757c83705ba2be5862732c3c284ca525b92e4` |
 | `libmm-glib0_1.24.2-2~ceralive.3+osb1_arm64.deb` | `dbcb28fdd1a6332b64c829c01a0c708e4e2e70c0bc46180568c4e6fddc2060b8` |
 
-- **Production builds:** an arm64 build in production mode can't select these
-  pins, because the override is refused there and the signed index doesn't carry
-  them. That needs the pair in a signed first-party index. This line builds
-  development-mode release candidates, like its other local packages.
+- **Production builds:** an arm64 build in production mode can't select a
+  `+osbN` pin, because the override is refused there and the signed index
+  doesn't carry it. That needs the pair in a signed first-party index. This
+  line builds development-mode release candidates, like its other local
+  packages.
 - **Content check:** a control rebuild of plain v1.4.0 in the same container,
   under the development version string, matched the published `ceralive.3`
   packages file for file, leaving aside version metadata, the changelog and the
