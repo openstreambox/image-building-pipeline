@@ -310,10 +310,13 @@ class PinCurrencyTest(unittest.TestCase):
         pins = self.root / "manifests/rk3588-userspace-deb-versions.txt"
         original = pins.read_text()
         self.assertIn("1.10.1+ceralive.1", original)
-        pins.write_text(original.replace("1.10.1+ceralive.1", "1.10.1+osb1").replace("1.10.1%2Bceralive.1", "1.10.1%2Bosb1"))
-        result = self.run_guard()
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("downstream rebuild pin not allowed for platform package librga2-ceralive", result.stdout + result.stderr)
+        for version in ("1.10.1+osb1", "1.10.1+osb1+deadbee"):
+            with self.subTest(version):
+                tag = version.replace("+", "%2B")
+                pins.write_text(original.replace("1.10.1+ceralive.1", version).replace("1.10.1%2Bceralive.1", tag))
+                result = self.run_guard()
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("downstream rebuild pin not allowed for platform package librga2-ceralive", result.stdout + result.stderr)
         pins.write_text(original)
         self.assertEqual(self.run_guard().returncode, 0)
 
