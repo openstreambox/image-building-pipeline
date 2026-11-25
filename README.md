@@ -271,6 +271,13 @@ capabilities are derived again from the new pin and leave out
 credentials package is neither fetched nor installed. Boot-package holds
 and the reprune hook are unchanged. Normal builds are unaffected.
 
+The build also writes `<stamp>.debs.tar` next to the lock. It holds every
+non-Debian `.deb` the image installed (first-party, overrides, BSP,
+userspace pins, generated and source-built), matched to its lock row by
+SHA-256, with `SHA256SUMS` and `export.json`. Debian rows are fetched
+again by digest from the dated snapshot, so the published image suite can
+be byte-exact.
+
 ### Dated Debian build inputs and image SBOM
 
 Set `CERALIVE_DEBIAN_SNAPSHOT=YYYYMMDDTHHMMSSZ` for a build with

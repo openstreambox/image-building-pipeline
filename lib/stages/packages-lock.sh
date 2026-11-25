@@ -12,6 +12,17 @@ stage_packages_lock() {
   log_success "[6d/9] package lock: ${output}"
 }
 
+# A single-source image (lib/image-apt-source.sh) republishes exactly its lock, so
+# the build keeps the non-Debian .debs it installed; Debian rows are fetched again
+# by digest from the dated snapshot.
+stage_export_debs() {
+  [[ "${CERALIVE_IMAGE_APT_SOURCE:-0}" == 1 ]] || return 0
+  local output="${out_dir}/${ts}.debs.tar"
+  python3 "${HERE}/export-debs.py" "${out_dir}/${ts}.packages.lock.json" "${staging}" "${output}" \
+    || die "cannot export the image's non-Debian packages for board '${board}'"
+  log_success "[6d/9] non-Debian packages: ${output}"
+}
+
 stage_image_sbom() {
   [[ -n "${CERALIVE_DEBIAN_SNAPSHOT:-}" ]] || return 0
   local stem="${out_dir}/${ts}" boot_blobs="" mediamtx_version

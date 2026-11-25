@@ -345,6 +345,7 @@ main() {
   stage_boot_verify
   stage_size_gate
   stage_packages_lock
+  stage_export_debs
   stage_parity
   stage_assemble
 
