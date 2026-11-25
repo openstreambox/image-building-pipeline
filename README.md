@@ -244,8 +244,8 @@ be converted by OTA.
 ### Single signed image apt source (fork release, opt-in)
 
 Set `CERALIVE_IMAGE_APT_SOURCE=1` on a fork release
-(`CERALIVE_FORK_RELEASE=1` with an update-channel preset and
-`CERALIVE_OS_RELEASE_VERSION`). Also set
+(`CERALIVE_FORK_RELEASE=1` with an update-channel preset,
+`CERALIVE_OS_RELEASE_VERSION` and `CERALIVE_DEBIAN_SNAPSHOT`). Also set
 `CERALIVE_IMAGE_APT_KEYRING_FILE` (public OpenPGP keyring) and
 `CERALIVE_EXPECT_IMAGE_APT_FPRS` (its exact primary fingerprints). The
 image then ships one apt source, `<channelUrl>/apt/`, with two suites:

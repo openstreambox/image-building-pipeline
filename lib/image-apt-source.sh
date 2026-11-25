@@ -16,7 +16,8 @@
 # Only a fork release (CERALIVE_FORK_RELEASE=1, so with an update-channel preset)
 # can enable it: the apt base is derived from the preset's channelUrl, so the
 # packages and the OS images come from the same place. The build also needs
-# CERALIVE_OS_RELEASE_VERSION, which names the suites.
+# CERALIVE_OS_RELEASE_VERSION, which names the suites, and CERALIVE_DEBIAN_SNAPSHOT,
+# so every Debian package in the lock stays retrievable by its digest.
 #
 # Usage (sourced by orchestrate.sh, after release_preset_resolve):
 #   image_apt_source_resolve   # exports CERALIVE_IMAGE_APT_{SOURCE,URI_B64,KEYRING_B64}
@@ -41,6 +42,10 @@ image_apt_source_resolve() {
     || { image_apt_source_die "needs CERALIVE_FORK_RELEASE=1 with an update-channel preset"; return 1; }
   [[ "${CERALIVE_OS_RELEASE_VERSION:-}" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]] \
     || { image_apt_source_die "needs CERALIVE_OS_RELEASE_VERSION=YYYY.M.N (it names the suites)"; return 1; }
+  # The image suite republishes exactly the Debian packages this build installed;
+  # a dated snapshot keeps every one of them retrievable by its locked digest.
+  [[ -n "${CERALIVE_DEBIAN_SNAPSHOT:-}" ]] \
+    || { image_apt_source_die "needs CERALIVE_DEBIAN_SNAPSHOT (a dated Debian snapshot build)"; return 1; }
   channel="$(printf '%s' "${CERALIVE_UPDATE_PRESET_CHANNEL_B64}" | base64 -d)"
   # release_preset_validate already proved channelUrl is a plain https URL without
   # query, fragment or credentials; it is read the same way here.
