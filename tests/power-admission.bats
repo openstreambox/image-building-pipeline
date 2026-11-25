@@ -64,10 +64,14 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; P="$ROOT/mkosi/runtime/po
 
 @test "power admission: the shutdown drain stops before writers and networking, with no deadline" {
   local u="$P/ceralive-write-drain.service"
-  for writer in rauc.service ceralive-software-update.service ceralive-os-stage-guard.service ceralive-slot-sync.service \
+  for writer in rauc.service ceralive-software-update.service ceralive-slot-sync.service \
       NetworkManager.service ModemManager.service; do
     grep -E '^After=' "$u" | grep -qw "$writer"
   done
+  # CeraUI's transient OS-stage guard orders itself Before= the drain. Naming it
+  # here pins the stopped unit: release can't be proven and the guard can't start
+  # again in that boot.
+  [ "$(grep -E '^(After|Before|Requires|Wants|BindsTo|PartOf)=' "$u" | grep -cw ceralive-os-stage-guard.service)" -eq 0 ]
   grep -qx 'TimeoutStopSec=infinity' "$u"
   grep -qx 'ExecStop=/usr/bin/python3 -I /usr/libexec/ceralive/ceralive-power-broker drain' "$u"
   grep -qx 'RemainAfterExit=yes' "$u"
