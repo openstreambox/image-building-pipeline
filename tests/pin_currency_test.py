@@ -245,6 +245,9 @@ class PinCurrencyTest(unittest.TestCase):
         self.assertEqual(release_version("1.24.2-2~ceralive.3+osb1"), "1.24.2-2~ceralive.3+osb1")
         self.assertEqual(compare("1.24.2-2~ceralive.3+osb1", "1.24.2-2~ceralive.3"), 1)
         self.assertEqual(compare("1.24.2-2~ceralive.3+osb1", "1.24.2-2~ceralive.4"), -1)
+        self.assertEqual(compare("1.24.2-2~ceralive.3+osb2", "1.24.2-2~ceralive.3+osb1"), 1)
+        self.assertEqual(compare("1.24.2-2~ceralive.3+osb10", "1.24.2-2~ceralive.3+osb2"), 1)
+        self.assertEqual(compare("1.24.2-2~ceralive.3+osb2", "1.24.2-2~ceralive.4"), -1)
         for bad in ("1.24.2-2~ceralive.3+osb0", "1.24.2-2~ceralive.3+local1", "1.24.2-2+osb1"):
             with self.assertRaises(PinError, msg=bad):
                 release_version(bad)
@@ -252,7 +255,7 @@ class PinCurrencyTest(unittest.TestCase):
     def test_modem_downstream_rebuild_passes_and_newer_upstream_reads_stale(self) -> None:
         result = self.run_guard()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("CURRENT modem-stack modemmanager[arm64]: pinned=1.24.2-2~ceralive.3+osb1", result.stdout)
+        self.assertIn("CURRENT modem-stack modemmanager[arm64]: pinned=1.24.2-2~ceralive.3+osb2", result.stdout)
         release = next(row for row in self.data["releases"] if row["component"] == "modem-stack")
         release["packages"] = {key: value.replace("1.24.2-2~ceralive.3", "1.24.2-2~ceralive.4")
                                for key, value in release["packages"].items()}

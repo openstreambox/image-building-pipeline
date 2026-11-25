@@ -2,5 +2,5 @@
 # A build supplies each one with --first-party-local-debs, and the override must be exactly
 # these bytes; an override of the same package with another version or other bytes is refused.
 # sha256  filename (package_version_arch.deb, the version as pinned in first-party-deb-versions.txt)
-bdb31a65decfe1e36dcc4a09890757c83705ba2be5862732c3c284ca525b92e4  modemmanager_1.24.2-2~ceralive.3+osb1_arm64.deb
-dbcb28fdd1a6332b64c829c01a0c708e4e2e70c0bc46180568c4e6fddc2060b8  libmm-glib0_1.24.2-2~ceralive.3+osb1_arm64.deb
+a464c1b34464160447b19a49fe83c05d4510f3616b139406e35e1a05239148d3  modemmanager_1.24.2-2~ceralive.3+osb2_arm64.deb
+452984c27e35ced36034e00eabc9af543b47eb158a7ea05845b1c22cf232086c  libmm-glib0_1.24.2-2~ceralive.3+osb2_arm64.deb

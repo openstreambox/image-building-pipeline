@@ -356,12 +356,68 @@ the physical-device reconnect path is not qualified. The CeraUI PR pinning this
 sender in its own CI is separate. No image was built or flashed, and APT serving,
 installation and hardware were not checked for this combined pin change.
 
+## Downstream ModemManager rebuild +osb2 — 2026-11-25
+
+On arm64 the image now selects `modemmanager` and `libmm-glib0`
+`1.24.2-2~ceralive.3+osb2`. That is the `+osb1` rebuild below plus one quilt
+patch from
+[openstreambox/modem-stack#12](https://github.com/openstreambox/modem-stack/pull/12):
+the generic `+CREG`/`+CGREG`/`+CEREG` parsers in `mm-modem-helpers.c` accept a
+two-digit AcT (10 to 13), and on NR the `<lac>` field of `+CREG`/`+CGREG` is
+read as a TAC. Without it, an FM350-GL that registers on 5G SA after
+ModemManager's first registration check (for example after a replug) reports
+an AcT of 11 that the one-digit patterns don't match, so the modem stays at
+`searching` and doesn't connect until someone runs
+`mmcli -m <n> --3gpp-register-home`. amd64 keeps the released build.
+
+- **Source:** openstreambox/modem-stack `osb/release/v1.4.0-osb1` at
+  `e12cc0712ad1411daa7988602b194c8a76c235e0`, the merge of #12 onto `+osb1`'s
+  `c9aa6778`. In `packaging/ModemManager/debian` it adds only
+  `patches/0004-modem-helpers-accept-two-digit-act-in-creg.patch` and its
+  `patches/series` line. Built the same way as `+osb1`: `libqrtr-glib`,
+  `libmbim` and `libqmi` carried from the v1.4.0 release assets (the same 20
+  arm64 debs, byte for byte), ModemManager rebuilt with
+  `EXACT_SUFFIX='~ceralive.3+osb2' build-stack.sh arm64` in
+  `debian:trixie@sha256:3cda3ca4…dafba2`. The `.buildinfo` build dependencies
+  equal `+osb1`'s.
+- **Ordering:** `~ceralive.3+osb1` < `~ceralive.3+osb2` < `~ceralive.3+osb10`
+  < `~ceralive.4` in `ci/pin_versions.py` and `dpkg --compare-versions`, so an
+  installed `+osb1` upgrades to `+osb2` and a newer upstream counter still reads
+  `STALE`.
+- **Delivery:** unchanged from `+osb1`: `--first-party-local-debs`,
+  development builds only, exactly the bytes in
+  `manifests/first-party-local-sha256.txt`. The `+osb1` rows are gone, so an
+  override with the old bytes is now refused like any other mismatch.
+
+| Package (arm64) | sha256 |
+|---|---|
+| `modemmanager_1.24.2-2~ceralive.3+osb2_arm64.deb` | `a464c1b34464160447b19a49fe83c05d4510f3616b139406e35e1a05239148d3` |
+| `libmm-glib0_1.24.2-2~ceralive.3+osb2_arm64.deb` | `452984c27e35ced36034e00eabc9af543b47eb158a7ea05845b1c22cf232086c` |
+
+- **Content check against `+osb1`** (per-file sha256, `.gnu_debugaltlink` and
+  `.gnu_debuglink` masked as before):
+  - File lists, maintainer scripts, conffiles, triggers, shlibs and symbols are
+    identical. Control (version, libmm-glib0's `Recommends`), md5sums and the
+    changelog differ.
+  - `libmm-glib.so.0.11.0` is identical.
+  - `/usr/sbin/ModemManager` carries the patch: a new `mm_3gpp_creg_lac_is_tac`,
+    and `registration_state_changed` and `registration_status_check_ready`
+    grow. `.rodata` grows by the six rewritten `creg_regex[]` patterns. `.text`
+    is smaller only because one fewer Cortex-A53 erratum-843419 stub page is
+    needed.
+  - 18 plugin and shared `.so` files differ only in `.note.gnu.build-id`, since
+    the patched header shifts DWARF line numbers. Every loaded section is
+    byte-identical.
+- **Tests:** the ModemManager meson suite with the patch passes (30/30, helper
+  tests 214/214).
+- **Hardware:** not yet proven on an FM350-GL on 5G SA.
+
 ## Downstream ModemManager rebuild — 2026-11-24
 
-On arm64 the image selects `modemmanager` and `libmm-glib0`
-`1.24.2-2~ceralive.3+osb1`. That is modem-stack v1.4.0's ModemManager source
-(released as `1.24.2-2~ceralive.3`) with one change: the fm350gl `+CGCONTRDP`
-parser fix, proposed upstream as
+Superseded by `+osb2` above. Until then, on arm64 the image selected
+`modemmanager` and `libmm-glib0` `1.24.2-2~ceralive.3+osb1`. That is
+modem-stack v1.4.0's ModemManager source (released as `1.24.2-2~ceralive.3`)
+with one change: the fm350gl `+CGCONTRDP` parser fix, proposed upstream as
 [CERALIVE/modem-stack#36](https://github.com/CERALIVE/modem-stack/pull/36).
 Without it, an FM350-GL on a network that leaves the bearer id empty in that
 answer (seen on T-Mobile US) never connects: the first attempt fails to parse,
