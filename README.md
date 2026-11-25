@@ -241,6 +241,36 @@ leftover CI access before sshd starts. Legacy single-slot images require a full
 re-flash because their data partition overlaps the new B-slot extent; they cannot
 be converted by OTA.
 
+### Single signed image apt source (fork release, opt-in)
+
+Set `CERALIVE_IMAGE_APT_SOURCE=1` on a fork release
+(`CERALIVE_FORK_RELEASE=1` with an update-channel preset and
+`CERALIVE_OS_RELEASE_VERSION`). Also set
+`CERALIVE_IMAGE_APT_KEYRING_FILE` (public OpenPGP keyring) and
+`CERALIVE_EXPECT_IMAGE_APT_FPRS` (its exact primary fingerprints). The
+image then ships one apt source, `<channelUrl>/apt/`, with two suites:
+
+- `<board>-<os version>` carries exactly the packages in the image's
+  lock;
+- `<board>-<os version>-emergency` is normally empty.
+
+The build keeps its Debian and first-party sources through the
+application layer's last apt transaction. Then
+`mkosi/runtime/image-apt-source.sh` writes the following and asserts
+that nothing else ships:
+
+- `openstreambox.sources`;
+- the keyring;
+- `preferences.d/openstreambox-origin`: first-party names 990, that
+  host 500, installed versions 100, any other source -1;
+- `/usr/lib/ceralive/image-apt-source.json`.
+
+The legacy origin and local-override pins are replaced. The update
+capabilities are derived again from the new pin and leave out
+`apt-credentials` and `kernel-apt-stage`. The first-party archive's
+credentials package is neither fetched nor installed. Boot-package holds
+and the reprune hook are unchanged. Normal builds are unaffected.
+
 ### Dated Debian build inputs and image SBOM
 
 Set `CERALIVE_DEBIAN_SNAPSHOT=YYYYMMDDTHHMMSSZ` for a build with

@@ -117,6 +117,7 @@ tests/bundle-version.test.sh	shell	unit	default-shell	bundle version is the OS C
 tests/rauc-bundle-arch.test.sh	shell	unit	default-shell	Stage-4 bundle install uses a host-native rauc pair, never the target-arch one, on both Stage-4 adapters
 tests/rauc-post-install-label.test.sh	shell	unit	default-shell	post-install relabel reads each target's own GPT label and fails closed on missing metadata
 tests/update-capabilities.test.sh	shell	unit	default-shell	build-generated update capability schema, UID identities and complete feature set
+tests/image-apt-source.test.sh	shell	unit	default-shell	optional single signed image apt source: host resolution, written files, one-source assertion, derived capabilities
 tests/release-candidate-contract.test.sh	shell	integration	default-shell	candidate sealing, loader handoff, bounded cleanup, interrupt safety
 tests/publish-release.test.sh	shell	integration	default-shell	stubbed R2 publisher and CMS signature, serial, promotion, refresh, retention contracts
 tests/publisher-dry-run.test.sh	shell	integration	default-shell	recording R2 fixture: every dry-run mode is read-only, authenticated interruption plans recovery, real JSON CAS unchanged

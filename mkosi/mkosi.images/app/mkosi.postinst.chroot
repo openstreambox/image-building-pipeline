@@ -545,6 +545,21 @@ gate_ceralive_watchdog_margin() {
   log "removed ${CERALIVE_WATCHDOG_MARGIN_DROPIN}: the installed ceralive.service has no plain watchdog under ${CERALIVE_WATCHDOG_MARGIN_SEC} s to widen"
 }
 
+# ---------------------------------------------------------------------------
+# finalize_image_apt_source — optional single signed apt source (fork release,
+# CERALIVE_IMAGE_APT_SOURCE=1). Runs after this layer's last apt transaction and
+# lock capture: the build-time Debian and first-party sources are replaced by the
+# one image source, and the update capabilities are derived again from it.
+# ---------------------------------------------------------------------------
+finalize_image_apt_source() {
+  [[ "${CERALIVE_IMAGE_APT_SOURCE:-}" == 1 ]] || return 0
+  # shellcheck source=mkosi/runtime/image-apt-source.sh
+  source "${SRCDIR:?}/runtime/image-apt-source.sh"
+  image_apt_source_finalize || die "single image apt source could not be written"
+  bash "${SRCDIR:?}/runtime/rauc/install-update-capabilities.sh" / \
+    || die "update capabilities do not accept the single image apt source"
+}
+
 main() {
   log "APPLICATION layer (Stage 3) — installing first-party CeraLive apps"
   install_chroot_service_policy
@@ -563,6 +578,7 @@ main() {
   # consumes it (local .deb install above) BEFORE removing it.
   rm -rf "${FIRST_PARTY_DIR}"
   bash "${SRCDIR:?}/runtime/packages-lock-capture.sh" app ${SYSEXT_APP_PKGS} ${APPFS_APP_PKGS} ${RUNTIME_APP_PKGS}
+  finalize_image_apt_source
   clean_package_download_metadata
   prune_final_image_payload
   remove_chroot_service_policy

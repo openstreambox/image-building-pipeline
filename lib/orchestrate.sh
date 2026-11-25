@@ -94,6 +94,8 @@ INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-1}"
 source "${RAUC_PKI_CONTRACT_SH}"
 # shellcheck source=lib/release-preset.sh
 source "${HERE}/release-preset.sh"
+# shellcheck source=lib/image-apt-source.sh
+source "${HERE}/image-apt-source.sh"
 # shellcheck source=lib/release-remote-access.sh
 source "${HERE}/release-remote-access.sh"
 CERALIVE_BUILD_MODE="${CERALIVE_BUILD_MODE:-development}"
@@ -276,6 +278,8 @@ main() {
     esac
     # Release builds: optional root pin + update-channel preset (lib/release-preset.sh).
     release_preset_resolve
+    # Optional single signed apt source (needs the preset above): lib/image-apt-source.sh.
+    image_apt_source_resolve
     # Opt-in remote access (Tailscale, seeded SSH keys, key-only SSH): lib/release-remote-access.sh.
     release_remote_access_resolve
     acquire_board_lock "${board}"
@@ -414,6 +418,7 @@ run_mkosi_build() {
     CERALIVE_DTB_KEEP_OVERLAYS
     CERALIVE_PRUNE_PATHS_B64 CERALIVE_FIRST_PARTY_NAMES_B64
     CERALIVE_UPDATE_PRESET_SETTINGS_B64 CERALIVE_UPDATE_PRESET_CHANNEL_B64
+    CERALIVE_IMAGE_APT_SOURCE CERALIVE_IMAGE_APT_URI_B64 CERALIVE_IMAGE_APT_KEYRING_B64
     CERALIVE_TAILSCALE CERALIVE_SSH_ROOT_KEYS_B64 CERALIVE_SSH_PASSWORD_AUTH
     SOURCE_DATE_EPOCH
   )
@@ -489,6 +494,10 @@ run_mkosi_build() {
   # Release update-channel preset (lib/release-preset.sh); empty on a normal build.
   export CERALIVE_UPDATE_PRESET_SETTINGS_B64="${CERALIVE_UPDATE_PRESET_SETTINGS_B64:-}"
   export CERALIVE_UPDATE_PRESET_CHANNEL_B64="${CERALIVE_UPDATE_PRESET_CHANNEL_B64:-}"
+  # Single image apt source (lib/image-apt-source.sh); off on a normal build.
+  export CERALIVE_IMAGE_APT_SOURCE="${CERALIVE_IMAGE_APT_SOURCE:-0}"
+  export CERALIVE_IMAGE_APT_URI_B64="${CERALIVE_IMAGE_APT_URI_B64:-}"
+  export CERALIVE_IMAGE_APT_KEYRING_B64="${CERALIVE_IMAGE_APT_KEYRING_B64:-}"
   # Remote-access options (lib/release-remote-access.sh); off on a normal build.
   export CERALIVE_TAILSCALE="${CERALIVE_TAILSCALE:-0}"
   export CERALIVE_SSH_ROOT_KEYS_B64="${CERALIVE_SSH_ROOT_KEYS_B64:-}"
