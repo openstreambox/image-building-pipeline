@@ -323,26 +323,37 @@ done
 export TEST_REBUILD_SHA="${WORK}/rebuild-sha"
 
 # A +osb pin with no local file is refused before any transport is asked for it, with an
-# empty override directory and with no override directory at all.
-if ! rebuild_case no-local "" \
+# empty override directory and with no override directory at all. Both transports are
+# stubs on PATH that only record a call, so a regression can never reach a real index.
+STUB="${WORK}/transport-stub"; CALLS="${WORK}/transport-calls"
+mkdir -p "${STUB}"
+for tool in apt-get curl; do
+  printf '#!/bin/sh\nprintf "%%s %%s\\n" "${0##*/}" "$*" >>"%s"\nexit 97\n' "${CALLS}" >"${STUB}/${tool}"
+  chmod +x "${STUB}/${tool}"
+done
+rm -f "${CALLS}"
+if ! PATH="${STUB}:${PATH}" rebuild_case no-local "" \
    && grep -Fq 'modemmanager=1.0+osb1 is a reviewed downstream rebuild' "${WORK}/rebuild-no-local.log" \
-   && ! grep -Eq 'apt-get|curl' "${WORK}/rebuild-no-local.log"; then
+   && ! grep -Eq 'apt-get|curl' "${WORK}/rebuild-no-local.log" \
+   && [[ ! -e "${CALLS}" ]]; then
   ok 'a +osb pin without its local file is refused before any download'
 else
-  bad "+osb pin without a local file was not refused up front: $(<"${WORK}/rebuild-no-local.log")"
+  bad "+osb pin without a local file was not refused up front: $(<"${WORK}/rebuild-no-local.log") $(cat "${CALLS}" 2>/dev/null)"
 fi
+rm -f "${CALLS}"
 mkdir -p "${WORK}/rebuild-unset/debs"
-if ! env -u CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR DEST="${WORK}/rebuild-unset" ARCH=arm64 CERALIVE_DEBCACHE=0 bash -c '
+if ! env -u CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR PATH="${STUB}:${PATH}" DEST="${WORK}/rebuild-unset" ARCH=arm64 CERALIVE_DEBCACHE=0 bash -c '
     source "$1"
     FIRST_PARTY_APT_PKGS=(modemmanager)
     FIRST_PARTY_DEB_VERSIONS_FILE="$TEST_REBUILD_PINS"
     FIRST_PARTY_LOCAL_SHA256_FILE="$TEST_REBUILD_SHA"
     fetch_first_party "$DEST/debs"
   ' _ "${ROOT}/lib/fetch-debs.sh" >"${WORK}/rebuild-unset.log" 2>&1 \
-   && grep -Fq 'is a reviewed downstream rebuild' "${WORK}/rebuild-unset.log"; then
+   && grep -Fq 'is a reviewed downstream rebuild' "${WORK}/rebuild-unset.log" \
+   && [[ ! -e "${CALLS}" ]]; then
   ok 'a +osb pin is refused when no local override directory is given'
 else
-  bad "+osb pin without an override directory was not refused: $(<"${WORK}/rebuild-unset.log")"
+  bad "+osb pin without an override directory was not refused: $(<"${WORK}/rebuild-unset.log") $(cat "${CALLS}" 2>/dev/null)"
 fi
 
 printf '\n== %d passed, %d failed\n' "${PASS}" "${FAIL}"

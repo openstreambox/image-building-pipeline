@@ -61,7 +61,7 @@ def release_version(value: str) -> str:
 
 
 # The only package pins that may name a bare downstream rebuild (X.Y.Z+osbN). Any other
-# package, architecture or registry pin with that form is refused, so the guard's
+# package, architecture, platform row or registry pin with that form is refused, so the guard's
 # rebuilt-from comparison cannot quietly accept an unreviewed fork build.
 BARE_REBUILD_PINS: Final = frozenset({("srtla", "arm64")})
 _BARE_REBUILD = re.compile(r"(\d+\.\d+\.\d+)\+osb[1-9]\d*")
@@ -168,6 +168,11 @@ def image_pins(root: Path) -> tuple[Pin, ...]:
         if not match or parsed.scheme != "https" or unquote(parsed.path.split("/")[-1]) != filename:
             raise PinError(f"platform filename/URL mismatch: {package}")
         replacement = package in PREDECESSORS
+        # First-party rows are compared as release_version() normalizes them (a trailing
+        # +<hash> is dropped), so the refusal must see that same form; predecessor rows keep
+        # their Debian versions, which release_version() does not parse.
+        if _BARE_REBUILD.fullmatch(match[1] if replacement else release_version(match[1])):
+            raise PinError(f"downstream rebuild pin not allowed for platform package {package}: {match[1]}")
         if not replacement:
             parts = unquote(parsed.path).split("/")
             if parsed.netloc != "github.com" or len(parts) != 7 or parts[1:5] != ["CERALIVE", COMPONENT_REPOS[component], "releases", "download"]:

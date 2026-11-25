@@ -306,6 +306,20 @@ class PinCurrencyTest(unittest.TestCase):
         pins.write_text(original)
         self.assertEqual(self.run_guard().returncode, 0)
 
+    def test_bare_rebuild_platform_rows_are_refused(self) -> None:
+        pins = self.root / "manifests/rk3588-userspace-deb-versions.txt"
+        original = pins.read_text()
+        self.assertIn("1.10.1+ceralive.1", original)
+        for version in ("1.10.1+osb1", "1.10.1+osb1+deadbee"):
+            with self.subTest(version):
+                tag = version.replace("+", "%2B")
+                pins.write_text(original.replace("1.10.1+ceralive.1", version).replace("1.10.1%2Bceralive.1", tag))
+                result = self.run_guard()
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("downstream rebuild pin not allowed for platform package librga2-ceralive", result.stdout + result.stderr)
+        pins.write_text(original)
+        self.assertEqual(self.run_guard().returncode, 0)
+
     def test_sender_rebuild_must_name_the_registry_release(self) -> None:
         pins = self.root / "manifests/first-party-deb-versions.txt"
         pins.write_text(pins.read_text().replace("srtla[arm64]=4.2.0+osb1", "srtla[arm64]=4.1.0+osb1"))
