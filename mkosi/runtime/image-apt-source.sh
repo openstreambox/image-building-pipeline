@@ -19,8 +19,10 @@
 # The legacy origin pins (ceralive-origin, ceralive-local-override) are replaced:
 # a version-only override pin would block an emergency fix for that name, and the
 # apt.ceralive.tv stanzas name a source the image no longer has. Boot-package holds
-# and the reprune hook are untouched. The credentials package for the first-party
-# archive must not be installed in this mode.
+# and the reprune hook are untouched. The first-party archive's client credentials
+# stay installed (the device UI's add-on downloader uses them without apt), but the
+# image apt source never carries them, so they get no origin stanza and keep their
+# installed version at priority 100.
 #
 # Inputs (environment, forwarded by lib/orchestrate.sh + mkosi.conf PassEnvironment=):
 #   CERALIVE_IMAGE_APT_SOURCE        1 to enable; anything else is a no-op
@@ -34,7 +36,8 @@
 #
 # shellcheck shell=bash
 
-IMAGE_APT_REFUSED_NAMES=(ceralive-apt-credentials)
+# Never served by the image apt source (see above), so never pinned to it.
+IMAGE_APT_UNSERVED_NAMES=(ceralive-apt-credentials)
 
 image_apt_die() { printf 'image-apt-source: %s\n' "$*" >&2; return 1; }
 
@@ -59,13 +62,6 @@ image_apt_source_finalize() {
   arch="${IMAGE_APT_ARCH:-$(dpkg --print-architecture)}"
   suite="${board}-${version}"
   emergency="${suite}-emergency"
-
-  for name in "${IMAGE_APT_REFUSED_NAMES[@]}"; do
-    if dpkg-query --admindir="${root}/var/lib/dpkg" -W -f='${db:Status-Status}' "$name" 2>/dev/null | grep -qx installed; then
-      image_apt_die "${name} is installed; a single-source image must not carry the first-party archive credentials"
-      return 1
-    fi
-  done
 
   names="$(printf '%s' "${CERALIVE_FIRST_PARTY_NAMES_B64:-}" | base64 -d 2>/dev/null)" || { image_apt_die 'first-party names do not decode'; return 1; }
   # shellcheck source=mkosi/runtime/first-party-origin-policy.sh
@@ -98,7 +94,7 @@ EOF
     printf '# Single image apt source (runtime/image-apt-source.sh). Generated; never edited on the device.\n'
     printf '# Packages come only from %s; installed versions keep priority 100; any other source is refused.\n' "$host"
     for name in "${FIRST_PARTY_NAMES[@]}"; do
-      [[ " ${IMAGE_APT_REFUSED_NAMES[*]} " == *" ${name} "* ]] && continue
+      [[ " ${IMAGE_APT_UNSERVED_NAMES[*]} " == *" ${name} "* ]] && continue
       printf '\nPackage: %s\nPin: origin "%s"\nPin-Priority: 990\n' "$name" "$host"
     done
     printf '\nPackage: *\nPin: origin "%s"\nPin-Priority: 500\n' "$host"

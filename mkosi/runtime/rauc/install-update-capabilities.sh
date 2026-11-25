@@ -71,8 +71,8 @@ if [[ -n "${KERNEL_STAGE_MIN_CERAUI}" && -r "${kernel_pins}" &&
 fi
 credentials_feature=',"apt-credentials"'
 if [[ -e "$image_source" ]]; then
-  # Kernels arrive only in images, and nothing on the image talks to the first-party archive.
-  kernel_feature="" credentials_feature=""
+  # Kernels arrive only in images, never through the image apt source.
+  kernel_feature=""
 fi
 printf '{"schema":1,"features":["rauc-verity-streaming","rauc-activate-on-shutdown","slot-sync","origin-protection","apt-all-packages","reprune-hook"%s,"transport-uidrange"%s],"ota_uid":%s,"apt_uid":%s}\n' \
   "$credentials_feature" "$kernel_feature" "$ota_uid" "$apt_uid" >"$dest"

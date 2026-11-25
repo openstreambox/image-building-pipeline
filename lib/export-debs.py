@@ -11,8 +11,9 @@ and dated SOURCE_DATE_EPOCH (or 0), so the tar is reproducible. Debian rows are 
 build can fetch each one again by its locked digest from Debian's signed index.
 
 Fails, writing nothing, when a row has no staged file, when two staged files claim
-one row, when a staged file's control fields differ from its row, or when the lock
-names the first-party archive's client credentials. The output must not exist yet.
+one row, or when a staged file's control fields differ from its row. The
+first-party archive's client credentials are never exported. The output must not
+exist yet.
 """
 import hashlib
 import json
@@ -23,7 +24,9 @@ import io
 import sys
 import tarfile
 
-REFUSED_NAMES = {"ceralive-apt-credentials"}
+# Installed from the image, but never republished: the first-party archive's client
+# credentials (a private key) stay out of the export and out of the image apt source.
+UNSERVED_NAMES = {"ceralive-apt-credentials"}
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -56,10 +59,8 @@ def main() -> None:
     lock, staging, out = (pathlib.Path(a) for a in sys.argv[1:])
     if out.exists() or not out.name.endswith(".debs.tar"):
         raise SystemExit(f"export-debs: {out} already exists or does not end in .debs.tar")
-    rows = [r for r in json.loads(lock.read_text())["packages"] if r.get("origin") != "debian"]
-    for r in rows:
-        if r["name"] in REFUSED_NAMES:
-            raise SystemExit(f"export-debs: the lock names {r['name']}; a single-source image must not carry it")
+    rows = [r for r in json.loads(lock.read_text())["packages"]
+            if r.get("origin") != "debian" and r["name"] not in UNSERVED_NAMES]
     by_sha: dict = {}
     for deb in sorted(staging.rglob("*.deb")):
         if deb.is_file():

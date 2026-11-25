@@ -209,14 +209,6 @@ FIRST_PARTY_APT_PKGS=(
   "ceralive-modem-support"
   "ceralive-apt-credentials"
 )
-# A single-source image (lib/image-apt-source.sh) never talks to apt.ceralive.tv,
-# so it does not carry that archive's client credentials either.
-if [[ "${CERALIVE_IMAGE_APT_SOURCE:-}" == 1 ]]; then
-  for i in "${!FIRST_PARTY_APT_PKGS[@]}"; do
-    [[ "${FIRST_PARTY_APT_PKGS[$i]}" != ceralive-apt-credentials ]] || unset 'FIRST_PARTY_APT_PKGS[i]'
-  done
-  FIRST_PARTY_APT_PKGS=("${FIRST_PARTY_APT_PKGS[@]}")
-fi
 usage() {
   cat >&2 <<EOF
 Usage:

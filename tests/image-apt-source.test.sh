@@ -107,8 +107,7 @@ check test -e "$R0/etc/apt/sources.list.d/ceralive.sources"
 # refusals
 R1="$(new_root cred)"
 printf 'Package: ceralive-apt-credentials\nStatus: install ok installed\nVersion: 1.0.1\nArchitecture: all\n\n' >"$R1/var/lib/dpkg/status"
-refused 'credentials installed' finalize "$R1"
-check grep -Fq 'must not carry the first-party archive credentials' "$WORK/refused.log"
+check finalize "$R1"
 refused 'http base' finalize "$(new_root http)" CERALIVE_IMAGE_APT_URI_B64="$(printf 'http://x.example/apt/' | base64 -w0)"
 refused 'base with a query' finalize "$(new_root q)" CERALIVE_IMAGE_APT_URI_B64="$(printf 'https://x.example/apt/?a=1' | base64 -w0)"
 refused 'version not CalVer' finalize "$(new_root v)" CERALIVE_OS_RELEASE_VERSION=7
@@ -143,8 +142,8 @@ chmod +x "$WORK/bin/getent"
 caps() { env PATH="$WORK/bin:$PATH" KERNEL_STAGE_MIN_CERAUI= "$ROOT/mkosi/runtime/rauc/install-update-capabilities.sh" "$1"; }
 check caps "$R"
 C="$R/usr/lib/ceralive/update-capabilities.json"
-check grep -Fq '"origin-protection","apt-all-packages","reprune-hook","transport-uidrange"]' "$C"
-if grep -Eq 'apt-credentials|kernel-apt-stage' "$C"; then bad 'credentials or kernel stage advertised'; else ok 'no apt-credentials, no kernel-apt-stage'; fi
+check grep -Fq '"origin-protection","apt-all-packages","reprune-hook","apt-credentials","transport-uidrange"]' "$C"
+if grep -Fq 'kernel-apt-stage' "$C"; then bad 'kernel stage advertised'; else ok 'no kernel-apt-stage'; fi
 cp -a "$R" "$WORK/r7"
 sed -i '0,/Pin-Priority: 990/s//Pin-Priority: 500/' "$WORK/r7/etc/apt/preferences.d/openstreambox-origin"
 refused 'a changed single-source pin' caps "$WORK/r7"
