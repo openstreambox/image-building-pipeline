@@ -367,8 +367,9 @@ two fork changes,
 carries only paced duplicate copies until its own SRTLA ACK proves the path, and
 a link that registers but never delivers backs off its retries. Without it, a
 newly added modem that registers but drops media takes original packets from the
-first moment, and the receiver late-drops them. Nothing changes on the receiver,
-so it works with any SRTLA receiver. amd64 keeps the released build.
+first moment, and the receiver late-drops them. It needs nothing from the
+receiver; the bench below used a stock BELABOX `srtla_rec` and a variant with
+early per-link ACKs. amd64 keeps the released build.
 
 - **Source:** openstreambox/srtla-send-rs `osb/release/v4.2.0-osb1` at
   `0ae0dcebbb019192370104383af6de388320a866`: tag v4.2.0 (`1b5febb7`), one
@@ -377,17 +378,22 @@ so it works with any SRTLA receiver. amd64 keeps the released build.
   `Cargo.lock`. The dependency closure is 4.2.0's.
 - **Build:** the toolchain, Debian packages, crates, environment and
   `SOURCE_DATE_EPOCH` values that rebuild CeraLive's `srtla_4.2.0_arm64.deb`
-  byte for byte, with only the source pin changed. A control rebuild of v4.2.0 in
-  the same run matched the release deb exactly, and a second build of `+osb1`
+  byte for byte. The build lock changes the source pin, the release tag name the
+  packaging script checks (`v4.2.0+osb1`) and the output file name, and the
+  build tool takes that file name. In the same build session, a control rebuild
+  of v4.2.0 matched the release deb exactly and a second build of `+osb1`
   matched the first. The package is produced by the source's own
   `ci/build-deb.sh`.
-- **Against 4.2.0's deb:** paths, modes, ownership and member metadata are
-  identical. `DEBIAN/control` differs in `Version` and `Installed-Size` (5000 to
+- **Against 4.2.0's deb:** paths, modes, ownership and timestamps are
+  identical (sizes and archive header checksums follow the content). `DEBIAN/control` differs in `Version` and `Installed-Size` (5000 to
   5064), and `/usr/bin/srtla_send` differs. `srtla_send -v` prints
   `4.2.0+osb1 [srtla_send]`.
-- **CeraUI contract:** no file that defines the command line, the capability
-  document, the stats file, the control socket, `SIGHUP` reload or receiver
-  address handling changed. On a ROCK 5B+ with CeraUI 2026.11.5 (`1dbec5e62`),
+- **CeraUI contract:** the command line, the capability document, the stats
+  file, the control socket and receiver address handling are unchanged. The
+  reload interface (`SIGHUP` with the ips file and bind map) is unchanged; the
+  handling behind it changed in #12. On a ROCK 5B+ with CeraUI 2026.11.5
+  (`1dbec5e62`, the train build that this line's development builds take through
+  the local override; the manifest's released pin is 2026.11.2),
   CeraUI's capability probe accepted the sender and spawned it with
   `--conn-timeout-ms 15000 --stats-file … --control-socket … --bind-map …`, its
   per-link telemetry read the stats file, and it reloaded the sender as a second
@@ -397,8 +403,12 @@ so it works with any SRTLA receiver. amd64 keeps the released build.
   pin-currency check compares a `X.Y.Z+osbN` pin with the `versions.yaml`
   release it was rebuilt from (`4.2.0`).
 - **Not on apt.ceralive.tv.** Supply this deb with `--first-party-local-debs`
-  under the same rules as the ModemManager rebuild below. The installed version
-  is pinned in the image like every local override.
+  under the same rules as the ModemManager rebuild below. Production mode and
+  GitHub Actions refuse local overrides, so this pin works in development-mode
+  builds only. A fetch never asks apt or curl for a `+osbN` pin: without the
+  local file it stops before any download, so a signed index carrying the same
+  version under other bytes can't stand in for the reviewed deb. The installed
+  version is pinned in the image like every local override.
 
 | Package (arm64) | sha256 |
 |---|---|
@@ -469,7 +479,8 @@ an AcT of 11 that the one-digit patterns don't match, so the modem stays at
   sha256 listed for it. A missing manifest, a missing or duplicate row, or a
   malformed digest refuses it. A different version (for example the released
   `ceralive.3` or the earlier `+osb1`) or different bytes is refused. Without
-  the override the fetch fails, because the signed index has no such version.
+  the override the fetch fails before any download: a `+osbN` pin is never
+  requested from apt or curl.
   The build's `first-party-local-override.json` and lock record the sha256:
 
 | Package (arm64) | sha256 |

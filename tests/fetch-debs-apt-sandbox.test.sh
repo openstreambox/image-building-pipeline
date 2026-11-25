@@ -195,6 +195,12 @@ build_fixture_deb() {
 	rm -rf "${tmp}"
 }
 
+# Downstream rebuilds (+osbN rows) never come through a transport: the fetch refuses them
+# unless the reviewed local file is supplied (first-party-local-override.test.sh). This suite
+# exercises the released pins, so it reads the manifest without those rows.
+grep -v '+osb' "${PIPELINE_DIR}/manifests/first-party-deb-versions.txt" >"${RUN_DIR}/first-party-deb-versions.txt"
+export FIRST_PARTY_DEB_VERSIONS_FILE="${RUN_DIR}/first-party-deb-versions.txt"
+
 EXPECTED_COUNT=0
 while IFS= read -r spec; do
 	build_fixture_deb "${spec%%=*}" "${spec#*=}"
@@ -240,6 +246,7 @@ chmod -R a+rX "${FIXTURE}"
 CTX="${RUN_DIR}/ctx"
 mkdir -p "${CTX}/repo/tests/fixtures"
 cp -a "${PIPELINE_DIR}/lib" "${PIPELINE_DIR}/manifests" "${CTX}/repo/"
+cp "${FIRST_PARTY_DEB_VERSIONS_FILE}" "${CTX}/repo/manifests/first-party-deb-versions.txt"
 cp -a "${TESTS_DIR}/fixtures/apt-sandbox" "${CTX}/repo/tests/fixtures/"
 cp -a "${REPO_ROOT}/versions.yaml" "${CTX}/repo/"
 

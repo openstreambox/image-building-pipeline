@@ -312,6 +312,14 @@ fetch_first_party() {
     else
       printf '[]\n' >"${DEST}/first-party-local-override.json"
     fi
+    # A downstream rebuild (+osbN) exists only as the reviewed local file. Never ask a
+    # transport for it: a signed index carrying that version under another digest would
+    # otherwise stand in for the reviewed bytes.
+    local remote_spec
+    for remote_spec in "${download_specs[@]}"; do
+      [[ "${remote_spec#*=}" != *+osb* ]] \
+        || die "first-party ${remote_spec} is a reviewed downstream rebuild; supply it with --first-party-local-debs, it is never fetched from ${APT_CERALIVE_URL}"
+    done
   fi
 
   # mTLS pair must be whole (both or neither) — apt-ceralive-repo.sh contract.

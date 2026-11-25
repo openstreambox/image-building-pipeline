@@ -290,6 +290,22 @@ class PinCurrencyTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("STALE srtla srtla[arm64]", result.stdout)
 
+    def test_bare_rebuild_pins_are_limited_to_arm64_srtla(self) -> None:
+        pins = self.root / "manifests/first-party-deb-versions.txt"
+        original = pins.read_text()
+        for line, old, new in (
+            ("cerastream", "cerastream=2026.9.3", "cerastream=2026.9.3+osb1"),
+            ("srtla[amd64]", "srtla=4.2.0\n", "srtla=4.2.0\nsrtla[amd64]=4.2.0+osb1\n"),
+        ):
+            with self.subTest(line):
+                self.assertIn(old, original)
+                pins.write_text(original.replace(old, new, 1))
+                result = self.run_guard()
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(f"downstream rebuild pin not allowed for {line.split('[')[0]}", result.stdout + result.stderr)
+        pins.write_text(original)
+        self.assertEqual(self.run_guard().returncode, 0)
+
     def test_sender_rebuild_must_name_the_registry_release(self) -> None:
         pins = self.root / "manifests/first-party-deb-versions.txt"
         pins.write_text(pins.read_text().replace("srtla[arm64]=4.2.0+osb1", "srtla[arm64]=4.1.0+osb1"))
