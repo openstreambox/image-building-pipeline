@@ -91,6 +91,11 @@ cp "$M/debian/$SNAP/dists/trixie/main/binary-arm64/Packages.xz" "$WORK/px.keep"
 printf 'x' >>"$M/debian/$SNAP/dists/trixie/main/binary-arm64/Packages.xz"
 refused 'an index that differs from its InRelease' x "$WORK/lock.json" "$S" "$WORK/i.debs.tar"
 cp "$WORK/px.keep" "$M/debian/$SNAP/dists/trixie/main/binary-arm64/Packages.xz"
+# the first listing of a digest that is listed twice is gone: the other signed listing serves it
+mv "$M/debian/$SNAP/pool/main/l/libdup1_2.0-1_arm64.deb" "$WORK/libdup.keep"
+check x "$WORK/lock.json" "$S" "$WORK/g.debs.tar"
+check bash -c "tar -xOf '$WORK/g.debs.tar' files/libdup1_2.0-1_arm64.deb | sha256sum | grep -q '^$deb_d '"
+mv "$WORK/libdup.keep" "$M/debian/$SNAP/pool/main/l/libdup1_2.0-1_arm64.deb"
 refused 'a bad snapshot stamp' "${X[@]}" "$WORK/lock.json" "$S" "$WORK/s.debs.tar" --snapshot 2026 --debian-keyring "$WORK/debian-keyring.gpg"
 lock "$WORK/missing.json" ',{"name":"srtla","version":"4.2.0","arch":"arm64","origin":"first-party","sha256":"1111111111111111111111111111111111111111111111111111111111111111"}'
 refused 'a row without a staged file' x "$WORK/missing.json" "$S" "$WORK/d.debs.tar"

@@ -144,11 +144,12 @@ image_apt_source_assert() {
   [[ -s "${root}/etc/apt/preferences.d/openstreambox-origin" && -s "${root}/usr/share/keyrings/openstreambox-archive-keyring.pgp" ]] \
     || { image_apt_die 'pin file or keyring missing'; return 1; }
   # What apt itself resolves (main apt.conf and every drop-in, nested syntax
-  # included), not what a grep of one file says.
+  # included; resolved file and directory paths; no RootDir prefix), not what a
+  # grep of one file says. A set RootDir adds a line (or an error) and fails.
   local cfg effective
   cfg="$(mktemp)"
   printf 'Dir::Etc::main "%s/etc/apt/apt.conf";\nDir::Etc::parts "%s/etc/apt/apt.conf.d";\n' "$root" "$root" >"$cfg"
-  if ! effective="$(APT_CONFIG="$cfg" apt-config shell SL Dir::Etc::sourcelist SP Dir::Etc::sourceparts 2>/dev/null)"; then
+  if ! effective="$(APT_CONFIG="$cfg" apt-config shell SL Dir::Etc::sourcelist/f SP Dir::Etc::sourceparts/d RD RootDir 2>/dev/null)"; then
     rm -f -- "$cfg"; image_apt_die 'apt-config cannot read the image apt configuration'; return 1
   fi
   rm -f -- "$cfg"

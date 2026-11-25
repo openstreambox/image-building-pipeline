@@ -230,12 +230,19 @@ def main() -> None:
                 continue
             # The same digest may be listed in both pockets (security republishes base
             # packages, sometimes at another pool path): identical bytes either way.
-            # Take the first pocket in the build's own order and record every listing.
-            archive, suite, root, filename = hits[0]
+            # Take the first listing that serves it, in the build's own pocket order, and record
+            # every listing.
             dest = pathlib.Path(work.name) / r["sha256"]
-            dest.write_bytes(fetch(f"{root}/{filename}"))
-            if sha256(dest) != r["sha256"] or control(dest) != (r["name"], r["version"], r["arch"]):
-                die(f"{r['name']} {r['version']}: the snapshot file differs from the lock")
+            for n, (archive, suite, root, filename) in enumerate(hits):
+                try:
+                    dest.write_bytes(fetch(f"{root}/{filename}"))
+                except SystemExit:
+                    if n == len(hits) - 1:
+                        raise
+                    continue  # another signed listing of the same digest
+                if sha256(dest) != r["sha256"] or control(dest) != (r["name"], r["version"], r["arch"]):
+                    die(f"{r['name']} {r['version']}: the snapshot file differs from the lock")
+                break
             chosen.append((r, dest, {"archive": archive, "pocket": suite, "filename": filename,
                                      "listed_in": [{"archive": h[0], "pocket": h[1], "filename": h[3]} for h in hits]}))
         for r, n in unresolved:

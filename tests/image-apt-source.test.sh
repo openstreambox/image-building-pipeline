@@ -149,6 +149,8 @@ cp -a "$R" "$WORK/r11"; printf 'Dir { Etc { SourceParts "/etc/apt/sources.list.d
 refused 'a nested redirect in a drop-in' assert_root "$WORK/r11"
 cp -a "$R" "$WORK/r12"; printf 'Dir::Etc::SourceList "/etc/apt/sources.list";\n' >"$WORK/r12/etc/apt/apt.conf"
 refused 'a redirect in the main apt.conf' assert_root "$WORK/r12"
+cp -a "$R" "$WORK/r13"; printf 'RootDir "/srv/other/";\n' >"$WORK/r13/etc/apt/apt.conf.d/50rootdir"
+refused 'a RootDir that moves the resolved source paths' assert_root "$WORK/r13"
 
 # --- parity on both paths (the E section of lib/parity-check.sh) ---------------------
 parity_e() { env -i PATH="$PATH" "${@:2}" bash "$ROOT/lib/parity-check.sh" "$1" 2>&1 | sed -n '/--- E\./,/--- F\./p'; }
