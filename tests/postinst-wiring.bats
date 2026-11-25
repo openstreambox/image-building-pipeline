@@ -617,10 +617,11 @@ NM_MM_DROPIN_SRC="mkosi/runtime/ceralive-nm-after-modemmanager.dropin.conf"
   # It is not on apt.ceralive.tv, so a build must supply it through --first-party-local-debs.
   [ "$(awk -F= '$1=="modemmanager[arm64]"{print $2}' "$pins")" = "1.24.2-2~ceralive.3+osb2" ]
   [ "$(awk -F= '$1=="libmm-glib0[arm64]"{print $2}' "$pins")" = "1.24.2-2~ceralive.3+osb2" ]
-  [ "$(grep -c '+osb' "$pins")" -eq 2 ]
+  # The third +osb pin is the arm64 srtla sender (its own test below).
+  [ "$(grep -c '+osb' "$pins")" -eq 3 ]
   # Each downstream pin has exactly one reviewed sha256 row, and the manifest lists nothing else.
   local shas="$PIPELINE_DIR/manifests/first-party-local-sha256.txt" row
-  [ "$(awk '$1 !~ /^#/ && NF' "$shas" | wc -l)" -eq 2 ]
+  [ "$(awk '$1 !~ /^#/ && NF' "$shas" | wc -l)" -eq 3 ]
   for row in modemmanager libmm-glib0; do
     [ "$(awk -v f="${row}_1.24.2-2~ceralive.3+osb2_arm64.deb" '$1 !~ /^#/ && $2 == f && $1 ~ /^[0-9a-f]{64}$/' "$shas" | wc -l)" -eq 1 ]
   done
@@ -629,6 +630,17 @@ NM_MM_DROPIN_SRC="mkosi/runtime/ceralive-nm-after-modemmanager.dropin.conf"
     case "$pkg" in modemmanager|libmm-glib0) continue ;; esac
     ! grep -q "^${pkg}\[" "$pins" || { echo "unexpected arch row for $pkg"; false; }
   done
+}
+
+@test "srtla: arm64 sender is the downstream +osb1 rebuild with link probation, amd64 keeps 4.2.0" {
+  local pins="$PIPELINE_DIR/manifests/first-party-deb-versions.txt"
+  # CeraLive's 4.2.0 plus the reloaded-uplink registration and fresh-link probation changes.
+  # It is not on apt.ceralive.tv, so a build must supply it through --first-party-local-debs.
+  [ "$(awk -F= '$1=="srtla[arm64]"{print $2}' "$pins")" = "4.2.0+osb1" ]
+  [ "$(awk -F= '$1=="srtla"{print $2}' "$pins")" = "4.2.0" ]
+  ! grep -q '^srtla\[amd64\]' "$pins"
+  local shas="$PIPELINE_DIR/manifests/first-party-local-sha256.txt"
+  [ "$(awk -v f="srtla_4.2.0+osb1_arm64.deb" '$1 !~ /^#/ && $2 == f && $1 ~ /^[0-9a-f]{64}$/' "$shas" | wc -l)" -eq 1 ]
 }
 
 @test "modem closure: the app postinst classifies all nine as RUNTIME_APP_PKGS (never sysext/appfs)" {

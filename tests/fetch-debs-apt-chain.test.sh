@@ -25,6 +25,12 @@ trap cleanup EXIT
 FETCH_OUT="${RUN_DIR}/out"
 mkdir -p "${FAKE_BIN}" "${FAKE_CURL_BIN}" "${ARTIFACT_DIR}" "${FETCH_OUT}"
 
+# Downstream rebuilds (+osbN rows) never come through a transport: the fetch refuses them
+# unless the reviewed local file is supplied (first-party-local-override.test.sh). This chain
+# exercises the released pins, so it reads the manifest without those rows.
+grep -v '+osb' "${PIPELINE_DIR}/manifests/first-party-deb-versions.txt" >"${RUN_DIR}/first-party-deb-versions.txt"
+export FIRST_PARTY_DEB_VERSIONS_FILE="${RUN_DIR}/first-party-deb-versions.txt"
+
 cat >"${FAKE_BIN}/apt-get" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail

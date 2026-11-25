@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from pin_releases import Catalog, parse_catalog, refresh_catalog, require_fresh, unique_object
-from pin_versions import Pin, PinError, compare, image_pins, release_version
+from pin_versions import Pin, PinError, compare, image_pins, rebuilt_from, release_version
 
 
 def report_installed(pins: tuple[Pin, ...], path: Path) -> None:
@@ -78,7 +78,8 @@ def check(pins: tuple[Pin, ...], catalog: Catalog, overrides_path: Path) -> int:
               (f" reason={override['reason']} expires={override['expires']}" if label == "ROLLBACK" else ""))
         if pin.package and not pin.replacement and pin.component != "modem-stack":
             registry = next((p for p in pins if p.subject == f"versions.yaml:{pin.component}"), None)
-            if registry and release_version(registry.version) != release_version(pin.version):
+            # A downstream rebuild (X.Y.Z+osbM) names the release it was rebuilt from.
+            if registry and release_version(registry.version) != rebuilt_from(pin.version):
                 raise PinError(f"registry/package mismatch: {pin.component} {pin.subject}")
         if pin.package == "ceralive-modem-support":
             registry = next(p for p in pins if p.subject == "versions.yaml:modem-stack")

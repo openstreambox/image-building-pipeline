@@ -51,11 +51,27 @@ def release_version(value: str) -> str:
     version = value.removeprefix("apt-credentials-v").removeprefix("srt-v").removeprefix("v")
     # Only known observation/build suffixes are discarded; +ceralive.N is ordered.
     version = re.sub(r"(?:\+[0-9a-f]{7,40}|-\d{8}T\d{6}\.[0-9a-f]{7,40})$", "", version)
-    # A downstream rebuild of a released modem-stack source, ~ceralive.N+osbM, is ordered too:
-    # above ~ceralive.N and below the next upstream counter, so a newer release still reads STALE.
-    if not re.fullmatch(r"\d+\.\d+\.\d+(?:\+ceralive\.\d+|-\d+~ceralive\.\d+(?:\+osb[1-9]\d*)?)?", version):
+    # A downstream rebuild is ordered too: ~ceralive.N+osbM of a released modem-stack source,
+    # and X.Y.Z+osbM of a bare release (the srtla sender). Each sorts above the release it was
+    # rebuilt from and below the next upstream version, so a newer release still reads STALE.
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:\+osb[1-9]\d*|\+ceralive\.\d+|-\d+~ceralive\.\d+(?:\+osb[1-9]\d*)?)?",
+                        version):
         raise PinError(f"unsupported version: {value!r}")
     return version
+
+
+# The only package pins that may name a bare downstream rebuild (X.Y.Z+osbN). Any other
+# package, architecture or registry pin with that form is refused, so the guard's
+# rebuilt-from comparison cannot quietly accept an unreviewed fork build.
+BARE_REBUILD_PINS: Final = frozenset({("srtla", "arm64")})
+_BARE_REBUILD = re.compile(r"(\d+\.\d+\.\d+)\+osb[1-9]\d*")
+
+
+def rebuilt_from(value: str) -> str:
+    """The release a downstream X.Y.Z+osbM rebuild was made from; any other version as is."""
+    version = release_version(value)
+    match = _BARE_REBUILD.fullmatch(version)
+    return match[1] if match else version
 
 
 def compare(left: str, right: str) -> int:
@@ -114,7 +130,8 @@ def image_pins(root: Path) -> tuple[Pin, ...]:
             version = entries.get(f"{package}[{arch}]", entries.get(package))
             if version is None:
                 raise PinError(f"missing pin: {package}[{arch}]")
-            release_version(version)
+            if _BARE_REBUILD.fullmatch(release_version(version)) and (package, arch) not in BARE_REBUILD_PINS:
+                raise PinError(f"downstream rebuild pin not allowed for {package}[{arch}]: {version}")
             pins.append(Pin(component, f"{package}[{arch}]", version, package, arch))
 
     registry = root / "versions.yaml"
@@ -128,7 +145,8 @@ def image_pins(root: Path) -> tuple[Pin, ...]:
             str(root / "lib/shared/versions-lib.sh"), component, str(registry),
         ], text=True, capture_output=True, check=True, timeout=10)
         version = result.stdout.strip()
-        release_version(version)
+        if _BARE_REBUILD.fullmatch(release_version(version)):
+            raise PinError(f"registry pin names a downstream rebuild: {component} {version}")
         pins.append(Pin(component, f"versions.yaml:{component}", version))
 
     seen: set[str] = set()

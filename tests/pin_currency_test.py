@@ -13,7 +13,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "ci"))
 from pin_releases import Release, discover_release, github, refresh_catalog  # noqa: E402 - standalone CLI module path
-from pin_versions import PinError, compare, release_version  # noqa: E402 - standalone CLI module path
+from pin_versions import PinError, compare, rebuilt_from, release_version  # noqa: E402 - standalone CLI module path
 
 
 class PinCurrencyTest(unittest.TestCase):
@@ -263,6 +263,55 @@ class PinCurrencyTest(unittest.TestCase):
         result = self.run_guard()
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("STALE modem-stack modemmanager[arm64]", result.stdout)
+
+    def test_sender_downstream_rebuild_orders_between_releases(self) -> None:
+        self.assertEqual(release_version("4.2.0+osb1"), "4.2.0+osb1")
+        self.assertEqual(release_version("v4.2.0+osb1"), "4.2.0+osb1")
+        self.assertEqual(compare("4.2.0+osb1", "4.2.0"), 1)
+        self.assertEqual(compare("4.2.0+osb2", "4.2.0+osb1"), 1)
+        self.assertEqual(compare("4.2.0+osb10", "4.2.0+osb2"), 1)
+        self.assertEqual(compare("4.2.0+osb1", "4.2.1"), -1)
+        self.assertEqual(rebuilt_from("4.2.0+osb1"), "4.2.0")
+        self.assertEqual(rebuilt_from("4.2.0"), "4.2.0")
+        self.assertEqual(rebuilt_from("1.24.2-2~ceralive.3+osb2"), "1.24.2-2~ceralive.3+osb2")
+        for bad in ("4.2.0+osb0", "4.2.0+local1", "4.2.0+osb1+osb2", "4.2.0~osb1"):
+            with self.assertRaises(PinError, msg=bad):
+                release_version(bad)
+
+    def test_sender_downstream_rebuild_passes_and_newer_release_reads_stale(self) -> None:
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CURRENT srtla srtla[arm64]: pinned=4.2.0+osb1", result.stdout)
+        release = next(row for row in self.data["releases"] if row["component"] == "srtla")
+        release["tag"] = "v4.2.1"
+        release["packages"] = {key: "4.2.1" for key in release["packages"]}
+        self.save_catalog()
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("STALE srtla srtla[arm64]", result.stdout)
+
+    def test_bare_rebuild_pins_are_limited_to_arm64_srtla(self) -> None:
+        pins = self.root / "manifests/first-party-deb-versions.txt"
+        original = pins.read_text()
+        for line, old, new in (
+            ("cerastream", "cerastream=2026.9.3", "cerastream=2026.9.3+osb1"),
+            ("srtla[amd64]", "srtla=4.2.0\n", "srtla=4.2.0\nsrtla[amd64]=4.2.0+osb1\n"),
+        ):
+            with self.subTest(line):
+                self.assertIn(old, original)
+                pins.write_text(original.replace(old, new, 1))
+                result = self.run_guard()
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(f"downstream rebuild pin not allowed for {line.split('[')[0]}", result.stdout + result.stderr)
+        pins.write_text(original)
+        self.assertEqual(self.run_guard().returncode, 0)
+
+    def test_sender_rebuild_must_name_the_registry_release(self) -> None:
+        pins = self.root / "manifests/first-party-deb-versions.txt"
+        pins.write_text(pins.read_text().replace("srtla[arm64]=4.2.0+osb1", "srtla[arm64]=4.1.0+osb1"))
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("registry/package mismatch: srtla srtla[arm64]", result.stdout + result.stderr)
 
     def test_installed_drift_is_advisory(self) -> None:
         installed = self.root / "installed.tsv"
