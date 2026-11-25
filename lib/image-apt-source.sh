@@ -11,7 +11,9 @@
 #   CERALIVE_IMAGE_APT_KEYRING_FILE
 #       Binary OpenPGP keyring with the archive's public keys (active and standby).
 #   CERALIVE_EXPECT_IMAGE_APT_FPRS
-#       Space-separated primary fingerprints the keyring must hold, exactly.
+#       Space-separated primary fingerprints the keyring must hold, exactly: at
+#       least two distinct signing keys (active and standby).
+# With the flag unset or 0 the other two are ignored.
 #
 # Only a fork release (CERALIVE_FORK_RELEASE=1, so with an update-channel preset)
 # can enable it: the apt base is derived from the preset's channelUrl, so the
@@ -28,11 +30,10 @@ image_apt_source_die() { printf 'image apt source: %s\n' "$*" >&2; return 1; }
 
 image_apt_source_resolve() {
   local flag="${CERALIVE_IMAGE_APT_SOURCE:-}" keyring="${CERALIVE_IMAGE_APT_KEYRING_FILE:-}"
-  local fprs="${CERALIVE_EXPECT_IMAGE_APT_FPRS:-}" channel base here
+  local fprs="${CERALIVE_EXPECT_IMAGE_APT_FPRS:-}" base here
   CERALIVE_IMAGE_APT_URI_B64="" CERALIVE_IMAGE_APT_KEYRING_B64=""
   if [[ -z "$flag" || "$flag" == 0 ]]; then
-    [[ -z "$keyring" && -z "$fprs" ]] \
-      || { image_apt_source_die "a keyring or fingerprints were given without CERALIVE_IMAGE_APT_SOURCE=1"; return 1; }
+    # One switch turns the feature off: companion inputs left in the environment are ignored.
     CERALIVE_IMAGE_APT_SOURCE=0
     export CERALIVE_IMAGE_APT_SOURCE CERALIVE_IMAGE_APT_URI_B64 CERALIVE_IMAGE_APT_KEYRING_B64
     return 0
@@ -46,15 +47,19 @@ image_apt_source_resolve() {
   # a dated snapshot keeps every one of them retrievable by its locked digest.
   [[ -n "${CERALIVE_DEBIAN_SNAPSHOT:-}" ]] \
     || { image_apt_source_die "needs CERALIVE_DEBIAN_SNAPSHOT (a dated Debian snapshot build)"; return 1; }
-  channel="$(printf '%s' "${CERALIVE_UPDATE_PRESET_CHANNEL_B64}" | base64 -d)"
   # release_preset_validate already proved channelUrl is a plain https URL without
-  # query, fragment or credentials; it is read the same way here.
-  base="$(sed -n 's/.*"channelUrl":"\([^"]*\)".*/\1/p' <<<"$channel")"
+  # query, fragment or credentials; read it from the same JSON payload.
+  base="$(printf '%s' "${CERALIVE_UPDATE_PRESET_CHANNEL_B64}" | base64 -d \
+    | python3 -c 'import json, sys; v = json.load(sys.stdin).get("channelUrl"); print(v if isinstance(v, str) else "")' 2>/dev/null)" \
+    || { image_apt_source_die "the preset's channel file is not JSON"; return 1; }
   [[ "$base" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~-]+)*$ ]] \
     || { image_apt_source_die "the preset's channelUrl is not a plain https base"; return 1; }
   [[ -r "$keyring" && -s "$keyring" ]] || { image_apt_source_die "CERALIVE_IMAGE_APT_KEYRING_FILE is not readable"; return 1; }
   read -r -a fprs <<<"$fprs"
-  ((${#fprs[@]} > 0)) || { image_apt_source_die "CERALIVE_EXPECT_IMAGE_APT_FPRS is empty"; return 1; }
+  # An active and a standby key, so a signing-key rotation never needs a box change.
+  ((${#fprs[@]} >= 2)) || { image_apt_source_die "CERALIVE_EXPECT_IMAGE_APT_FPRS needs the active and the standby key"; return 1; }
+  [[ "$(printf '%s\n' "${fprs[@]}" | sort -u | wc -l)" == "${#fprs[@]}" ]] \
+    || { image_apt_source_die "CERALIVE_EXPECT_IMAGE_APT_FPRS repeats a fingerprint"; return 1; }
   here="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
   # shellcheck source=lib/fetch-debs-auth.sh
   source "${here}/fetch-debs-auth.sh"

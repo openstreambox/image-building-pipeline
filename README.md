@@ -273,12 +273,19 @@ exported or served by the image apt source, so they get no origin stanza.
 Boot-package holds and the reprune hook are unchanged. Normal builds are
 unaffected.
 
-The build also writes `<stamp>.debs.tar` next to the lock. It holds every
-non-Debian `.deb` the image installed (first-party, overrides, BSP,
-userspace pins, generated and source-built) except the credentials, matched to its lock row by
-SHA-256, with `SHA256SUMS` and `export.json`. Debian rows are fetched
-again by digest from the dated snapshot, so the published image suite can
-be byte-exact.
+The build also writes `<stamp>.debs.tar` next to the lock, before any
+artifact is assembled. It holds every `.deb` the image installed except the
+credentials:
+- the staged non-Debian files, matched to their lock rows by SHA-256 and
+  control fields;
+- the Debian rows from the build's own dated snapshot pockets, with each
+  pocket's `InRelease` verified against the image's Debian archive keyring
+  and each file matched to the lock by digest.
+
+The tar also keeps each pocket's `InRelease` and `Packages.xz`, plus
+`SHA256SUMS` and `export.json`, which records the pocket and `Filename`
+per row. The published image suite can then be byte-identical to what the
+image runs, without refetching anything later.
 
 ### Dated Debian build inputs and image SBOM
 
