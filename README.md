@@ -856,13 +856,15 @@ First-party package versions are selected from
 to both architectures. When release builds produce different Debian versions per
 architecture, `package[amd64]=version` and `package[arm64]=version` override that
 generic entry. Resolution remains exact: the selected version is matched against
-the GPG-verified architecture index before its `.deb` is downloaded. The one
-exception is arm64 `modemmanager`/`libmm-glib0` `1.24.2-2~ceralive.3+osb2`, a
-downstream rebuild with the fm350gl `+CGCONTRDP` fix and the two-digit AcT
-`+CREG`/`+CGREG`/`+CEREG` fix. It is not in that index,
-so a build supplies it through `--first-party-local-debs`, and the fetch accepts
-only the bytes listed in `manifests/first-party-local-sha256.txt`
-([receipt](docs/first-party-pin-currency.md#downstream-modemmanager-rebuild-osb2--2026-11-25)).
+the GPG-verified architecture index before its `.deb` is downloaded. The
+exceptions are two arm64 downstream rebuilds: `modemmanager`/`libmm-glib0`
+`1.24.2-2~ceralive.3+osb2`, with the fm350gl `+CGCONTRDP` fix and the two-digit AcT
+`+CREG`/`+CGREG`/`+CEREG` fix
+([receipt](docs/first-party-pin-currency.md#downstream-modemmanager-rebuild-osb2--2026-11-25)),
+and the sender `srtla` `4.2.0+osb1`, with reloaded-uplink registration and fresh-link
+probation ([receipt](docs/first-party-pin-currency.md#downstream-srtla-sender-rebuild-osb1-2026-11-25)).
+They are not in that index, so a build supplies them through `--first-party-local-debs`,
+and the fetch accepts only the bytes listed in `manifests/first-party-local-sha256.txt`.
 Every package a build takes from `--first-party-local-debs` is pinned in the
 image to the version it installed (`/etc/apt/preferences.d/ceralive-local-override`,
 priority 1001), so a newer apt.ceralive.tv build of the same name never becomes

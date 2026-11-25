@@ -4,3 +4,4 @@
 # sha256  filename (package_version_arch.deb, the version as pinned in first-party-deb-versions.txt)
 a464c1b34464160447b19a49fe83c05d4510f3616b139406e35e1a05239148d3  modemmanager_1.24.2-2~ceralive.3+osb2_arm64.deb
 452984c27e35ced36034e00eabc9af543b47eb158a7ea05845b1c22cf232086c  libmm-glib0_1.24.2-2~ceralive.3+osb2_arm64.deb
+fc09abd4103c3e52f33dd9da6428ef6d9910b6fea95b07bb0fd12f0a62b995d7  srtla_4.2.0+osb1_arm64.deb

@@ -51,11 +51,20 @@ def release_version(value: str) -> str:
     version = value.removeprefix("apt-credentials-v").removeprefix("srt-v").removeprefix("v")
     # Only known observation/build suffixes are discarded; +ceralive.N is ordered.
     version = re.sub(r"(?:\+[0-9a-f]{7,40}|-\d{8}T\d{6}\.[0-9a-f]{7,40})$", "", version)
-    # A downstream rebuild of a released modem-stack source, ~ceralive.N+osbM, is ordered too:
-    # above ~ceralive.N and below the next upstream counter, so a newer release still reads STALE.
-    if not re.fullmatch(r"\d+\.\d+\.\d+(?:\+ceralive\.\d+|-\d+~ceralive\.\d+(?:\+osb[1-9]\d*)?)?", version):
+    # A downstream rebuild is ordered too: ~ceralive.N+osbM of a released modem-stack source,
+    # and X.Y.Z+osbM of a bare release (the srtla sender). Each sorts above the release it was
+    # rebuilt from and below the next upstream version, so a newer release still reads STALE.
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:\+osb[1-9]\d*|\+ceralive\.\d+|-\d+~ceralive\.\d+(?:\+osb[1-9]\d*)?)?",
+                        version):
         raise PinError(f"unsupported version: {value!r}")
     return version
+
+
+def rebuilt_from(value: str) -> str:
+    """The release a downstream X.Y.Z+osbM rebuild was made from; any other version as is."""
+    version = release_version(value)
+    match = re.fullmatch(r"(\d+\.\d+\.\d+)\+osb[1-9]\d*", version)
+    return match[1] if match else version
 
 
 def compare(left: str, right: str) -> int:

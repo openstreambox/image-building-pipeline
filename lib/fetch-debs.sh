@@ -193,7 +193,8 @@ assert_repos_integrity
 # are the downstream `~ceralive.3+osb2` rebuild (fm350gl +CGCONTRDP fix and two-digit
 # AcT in +CREG/+CGREG/+CEREG), which is
 # not on apt.ceralive.tv and comes in through --first-party-local-debs
-# (docs/first-party-pin-currency.md).
+# (docs/first-party-pin-currency.md). The same holds for the arm64 sender
+# `srtla` 4.2.0+osb1 (4.2.0 plus fresh-link probation).
 # The companion is separately versioned at bare SemVer. They are staged like every
 # other first-party .deb (exact pins in
 # first-party-deb-versions.txt) and installed by the app layer (RUNTIME_APP_PKGS).

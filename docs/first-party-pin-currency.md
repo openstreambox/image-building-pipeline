@@ -356,6 +356,83 @@ the physical-device reconnect path is not qualified. The CeraUI PR pinning this
 sender in its own CI is separate. No image was built or flashed, and APT serving,
 installation and hardware were not checked for this combined pin change.
 
+## Downstream srtla sender rebuild +osb1 (2026-11-25)
+
+On arm64 the image now selects `srtla` `4.2.0+osb1`: CeraLive's v4.2.0 sender plus
+two fork changes,
+[openstreambox/srtla-send-rs#12](https://github.com/openstreambox/srtla-send-rs/pull/12)
+(register a replacement uplink socket as soon as a reload opens it) and
+[openstreambox/srtla-send-rs#15](https://github.com/openstreambox/srtla-send-rs/pull/15)
+(fresh-link probation). A link that registers while another link is delivering
+carries only paced duplicate copies until its own SRTLA ACK proves the path, and
+a link that registers but never delivers backs off its retries. Without it, a
+newly added modem that registers but drops media takes original packets from the
+first moment, and the receiver late-drops them. Nothing changes on the receiver,
+so it works with any SRTLA receiver. amd64 keeps the released build.
+
+- **Source:** openstreambox/srtla-send-rs `osb/release/v4.2.0-osb1` at
+  `0ae0dcebbb019192370104383af6de388320a866`: tag v4.2.0 (`1b5febb7`), one
+  docs-only commit from CeraLive's main, #12 (`ddfbe963`), #15 (`9ea1ee54`), and
+  one commit that sets the crate version to `4.2.0+osb1` in `Cargo.toml` and
+  `Cargo.lock`. The dependency closure is 4.2.0's.
+- **Build:** the toolchain, Debian packages, crates, environment and
+  `SOURCE_DATE_EPOCH` values that rebuild CeraLive's `srtla_4.2.0_arm64.deb`
+  byte for byte, with only the source pin changed. A control rebuild of v4.2.0 in
+  the same run matched the release deb exactly, and a second build of `+osb1`
+  matched the first. The package is produced by the source's own
+  `ci/build-deb.sh`.
+- **Against 4.2.0's deb:** paths, modes, ownership and member metadata are
+  identical. `DEBIAN/control` differs in `Version` and `Installed-Size` (5000 to
+  5064), and `/usr/bin/srtla_send` differs. `srtla_send -v` prints
+  `4.2.0+osb1 [srtla_send]`.
+- **CeraUI contract:** no file that defines the command line, the capability
+  document, the stats file, the control socket, `SIGHUP` reload or receiver
+  address handling changed. On a ROCK 5B+ with CeraUI 2026.11.5 (`1dbec5e62`),
+  CeraUI's capability probe accepted the sender and spawned it with
+  `--conn-timeout-ms 15000 --stats-file … --control-socket … --bind-map …`, its
+  per-link telemetry read the stats file, and it reloaded the sender as a second
+  uplink came and went, with the same sender process throughout a 20-minute stream.
+- **Ordering:** `4.2.0 < 4.2.0+osb1 < 4.2.1` in `ci/pin_versions.py` and
+  `dpkg --compare-versions`, so CeraLive's next release reads `STALE`. The
+  pin-currency check compares a `X.Y.Z+osbN` pin with the `versions.yaml`
+  release it was rebuilt from (`4.2.0`).
+- **Not on apt.ceralive.tv.** Supply this deb with `--first-party-local-debs`
+  under the same rules as the ModemManager rebuild below. The installed version
+  is pinned in the image like every local override.
+
+| Package (arm64) | sha256 |
+|---|---|
+| `srtla_4.2.0+osb1_arm64.deb` | `fc09abd4103c3e52f33dd9da6428ef6d9910b6fea95b07bb0fd12f0a62b995d7` |
+
+Executable `usr/bin/srtla_send`:
+`6d76ad554c5ceccdb9c26359d24ab267c848becd2b87d794f7baada5ba268574`.
+
+**Bench (the installed package on a ROCK 5B+, 9 V, two sockets on one Ethernet
+cable, a stock BELABOX `srtla_rec` and a copy with early per-link ACKs on the
+receiving host).** Join time is from the receiver's REG3 to the first original
+DATA on the new socket.
+
+| Input | Stock receiver | Early-ACK receiver |
+|---|---:|---:|
+| 6 Mbit/s replay, LAN (5 runs) | 318–335 ms | 33–54 ms |
+| same, +50 ms RTT on the new socket (2 runs) | 405–406 ms | 101–118 ms |
+| same, +100 ms RTT (2 runs) | 477 ms | 205–206 ms |
+| 0.3 Mbit/s replay | 765 ms | 105 ms |
+| CeraUI test pattern, hardware encoder (3 joins) | 370 ms | not run |
+
+Probe copies left at a median spacing of 30 ms, not the 20 ms pacing floor,
+because a 30 fps source delivers packets in per-frame bursts. A ten-sequence ACK
+batch therefore costs about 0.27 s plus the path's round trip.
+With all SRTLA ACKs on the new socket withheld for 4 s, it carried no original
+before the ACKs returned, with either receiver. Streaming through CeraUI with
+the hardware encoder, the new socket's media was dropped at the receiving host
+for 60 s after each of five joins (control and keepalives passed). It carried no
+originals in any of them; all of its 1,157 to 1,686 copies per cycle matched
+sequences already sent on the delivering socket, and its first ACK came 290 to
+317 ms after the drop ended. A 20-minute stream with joins and leaves kept one
+sender process and ended with 38,622 packets received, 10 losses (all
+retransmitted in time) and no late drops at the receiver.
+
 ## Downstream ModemManager rebuild +osb2 — 2026-11-25
 
 On arm64 the image now selects `modemmanager` and `libmm-glib0`
