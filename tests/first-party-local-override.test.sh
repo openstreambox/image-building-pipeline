@@ -53,6 +53,14 @@ assert rows == [{'package': 'ceralive-device', 'version': '99.2', 'arch': 'arm64
                  'sha256': sys.argv[2], 'filename': 'ceralive-device_99.2_arm64.deb'}]
 PY
 then ok 'manifest has exact control identity, digest and staged filename'; else bad 'manifest shape/content'; fi
+# The app layer pins what this record names; its reader takes only this writer's shape.
+rows="$(bash -c 'eval "$(perl -0777 -ne '"'"'print $1 if /(^local_override_rows\(\) \{.*?^\})/ms'"'"' "$1")"; local_override_rows "$2"' \
+  _ "${ROOT}/mkosi/mkosi.images/app/mkosi.postinst.chroot" "${WORK}/accepted/first-party-local-override.json" 2>&1)"
+if [[ "${rows}" == $'ceralive-device\t99.2\tarm64' ]]; then
+  ok "the app layer's local override reader parses the fetch record"
+else
+  bad "app layer reader on the fetch record: ${rows}"
+fi
 staged="${WORK}/accepted/debs/ceralive-device_99.2_arm64.deb"
 if [[ -f "${staged}" && "$(stat -c %a "${staged}")" == 644 ]]; then
   ok 'local bytes stage atomically as mode 0644'

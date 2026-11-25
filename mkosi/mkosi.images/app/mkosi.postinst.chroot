@@ -101,6 +101,74 @@ stage_first_party_from_source_mount() {
   cp -a "${src}"/*.deb "${FIRST_PARTY_DIR}/"
 }
 
+# local_override_rows <record>: "name<TAB>version<TAB>arch" per row of fetch's
+# first-party-local-override.json. Accepts only the exact one-line shape its writer
+# (lib/fetch/firstparty.sh) produces, so a changed format fails the build here.
+local_override_rows() {
+  local text rest name version arch
+  local obj='^\{"package": "([a-z0-9][a-z0-9+.-]+)", "version": "((([0-9]+):)?[0-9][A-Za-z0-9.+~-]*)", "arch": "([a-z0-9]+)", "sha256": "[0-9a-f]{64}", "filename": "[A-Za-z0-9.+~:_-]+\.deb"\}(, )?'
+  local -A seen=()
+  text="$(<"$1")" || return 1
+  [[ "${text}" == '['*']' ]] || return 1
+  rest="${text:1:${#text}-2}"
+  while [[ -n "${rest}" ]]; do
+    [[ "${rest}" =~ ${obj} ]] || return 1
+    name="${BASH_REMATCH[1]}" version="${BASH_REMATCH[2]}" arch="${BASH_REMATCH[5]}"
+    [[ -z "${seen[${name}]:-}" ]] || return 1
+    seen[${name}]=1
+    rest="${rest:${#BASH_REMATCH[0]}}"
+    # A ", " separator needs another row after it; no separator ends the list.
+    if [[ -n "${BASH_REMATCH[6]}" ]]; then [[ -n "${rest}" ]] || return 1; else [[ -z "${rest}" ]] || return 1; fi
+    printf '%s\t%s\t%s\n' "${name}" "${version}" "${arch}"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# pin_first_party_local_overrides: keep every first-party package this build took
+# from a local override (fetch's first-party-local-override.json) at the version it
+# installed. Such a package is not on apt.ceralive.tv; when apt.ceralive.tv later
+# publishes a newer build under the same name, the origin pin (990) makes that the
+# candidate, the device offers it as a package update and installing it replaces
+# the reviewed local build. Pinning that name's installed version (the dpkg status
+# source, `release a=now`) at 1001 keeps it the candidate, so nothing is offered.
+# Not `Pin: version`: APT matches that without regard to case, so a newer version
+# that differs only in letter case would get 1001 too. Not a dpkg hold: CeraUI's
+# package check refuses to run at all while a first-party package is held.
+#
+# The file sorts before ceralive-origin, because APT takes the first specific pin
+# that matches a version. Each image carries its own pin for its own overrides,
+# so an A/B update brings the new image's pin with its packages. Fetch writes the
+# record on every build that stages debs ([] without overrides, then no file is
+# written); a missing record fails the build instead of shipping unpinned.
+# ---------------------------------------------------------------------------
+pin_first_party_local_overrides() {
+  local record="${1:-${SRCDIR:+${SRCDIR%/}/.staging/${CERALIVE_BOARD:-}/first-party-local-override.json}}"
+  local dir="${CERALIVE_APT_PREFERENCES_DIR:-/etc/apt/preferences.d}"
+  local pin="${dir}/ceralive-local-override" rows name version arch got tmp
+  rm -f -- "${pin}"
+  [[ -n "${record}" && -e "${record}" ]] \
+    || die "first-party debs are installed but the build's local override record is missing: ${record:-no SRCDIR}"
+  rows="$(local_override_rows "${record}")" || die "unreadable first-party local override record: ${record}"
+  if [[ -z "${rows}" ]]; then
+    log "first-party local override record is empty, so no local override pin"
+    return 0
+  fi
+  mkdir -p "${dir}"
+  tmp="$(mktemp "${dir}/.ceralive-local-override.XXXXXXXX")"
+  printf '# First-party packages this image installed from a reviewed local override,\n# pinned to their installed version (pin_first_party_local_overrides, app layer).\n' >"${tmp}"
+  while IFS=$'\t' read -r name version arch; do
+    got="$(dpkg-query -W -f='${db:Status-Status}\t${Version}\t${Architecture}' "${name}" 2>/dev/null)" || got=""
+    if [[ "${got}" != "installed"$'\t'"${version}"$'\t'"${arch}" ]]; then
+      rm -f -- "${tmp}"
+      die "local override ${name}=${version} (${arch}) is not what is installed: ${got:+${got//$'\t'/ }}${got:-absent}"
+    fi
+    printf '\nPackage: %s\nPin: release a=now\nPin-Priority: 1001\n' "${name}" >>"${tmp}"
+    log "local override pin: ${name} (installed ${version}) at 1001"
+  done <<<"${rows}"
+  chmod 0644 "${tmp}"
+  mv -f -- "${tmp}" "${pin}"
+}
+
 # ---------------------------------------------------------------------------
 # install_first_party_apps — classify + install every staged first-party .deb in
 # ONE local transaction, then assert the sysext-class binaries actually landed.
@@ -485,6 +553,7 @@ main() {
   if compgen -G "${FIRST_PARTY_DIR}/*.deb" >/dev/null 2>&1; then
     install_first_party_apps
     keep_ceraui_build_stamps
+    pin_first_party_local_overrides
   else
     log "no first-party .debs staged at ${FIRST_PARTY_DIR} (offline/dev build) — installing nothing"
   fi

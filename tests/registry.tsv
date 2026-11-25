@@ -128,6 +128,7 @@ tests/flash-remote-guard.test.sh	shell	integration	default-shell	remote-destruct
 tests/maskrom-first-realhw.test.sh	shell	integration	default-shell	maskrom-first flash sequencing and one-use retention markers
 tests/hardware-candidate-bench-labels.test.sh	shell	integration	default-shell	--bench-labels is required, exported to ./build and recorded in the artifact tuple
 tests/first-party-local-override.test.sh	shell	integration	default-shell	bench-only local Debian overrides preserve identity, cache isolation, production refusal and plan parity
+tests/first-party-local-override-pin.test.sh	shell	integration	default-shell	real offline APT keeps a locally overridden first-party package at its version when apt.ceralive.tv publishes a newer one
 tests/uart-console-path.test.sh	shell	unit	default-shell	CI-UART bootstrap targets ttyFIQ0 while serial_console stays ttyS2
 tests/uart-bootstrap-tty.test.sh	shell	unit	default-shell	tty-class-aware stty: tolerant on FIQ, fatal on a real UART
 tests/postinst-module-contract.test.sh	shell	unit	default-shell	every postinst registry function resolves from a bare source

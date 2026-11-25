@@ -863,6 +863,10 @@ downstream rebuild with the fm350gl `+CGCONTRDP` fix and the two-digit AcT
 so a build supplies it through `--first-party-local-debs`, and the fetch accepts
 only the bytes listed in `manifests/first-party-local-sha256.txt`
 ([receipt](docs/first-party-pin-currency.md#downstream-modemmanager-rebuild-osb2--2026-11-25)).
+Every package a build takes from `--first-party-local-debs` is pinned in the
+image to the version it installed (`/etc/apt/preferences.d/ceralive-local-override`,
+priority 1001), so a newer apt.ceralive.tv build of the same name never becomes
+the candidate and the device never offers it as a package update.
 
 The engine pin is `cerastream=2026.9.8`. It retains the audio-meter,
 idle-preview and teardown ownership of 2026.9.6, plus capture standby
