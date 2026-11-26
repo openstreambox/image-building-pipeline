@@ -69,10 +69,10 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; P="$ROOT/mkosi/runtime/po
     grep -E '^After=' "$u" | grep -qw "$writer"
   done
   # CeraUI's transient units (the OS-stage guard and the package-install unit)
-  # order themselves Before= the drain. Naming one here pins the stopped unit:
-  # it can't start again by its name in that boot.
+  # order themselves Before= the drain. Naming one in any directive here pins
+  # the stopped unit: it can't start again by its name in that boot.
   for transient in ceralive-os-stage-guard.service ceralive-software-update.service; do
-    [ "$(grep -E '^(After|Before|Requires|Wants|BindsTo|PartOf)=' "$u" | grep -cw "$transient")" -eq 0 ]
+    [ "$(grep -Ev '^[[:space:]]*([#;]|$)' "$u" | grep -cw "$transient")" -eq 0 ]
   done
   grep -qx 'TimeoutStopSec=infinity' "$u"
   grep -qx 'ExecStop=/usr/bin/python3 -I /usr/libexec/ceralive/ceralive-power-broker drain' "$u"
