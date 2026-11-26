@@ -196,7 +196,7 @@ waits for running writes.
 ## Every shutdown waits for writes
 
 `ceralive-write-drain.service` is active within seconds of boot and ordered after
-`rauc.service`, the update and slot units, slot activation, NetworkManager and
+`rauc.service`, the slot sync unit, slot activation, NetworkManager and
 ModemManager. NetworkManager is itself ordered after ModemManager
 (`NetworkManager.service.d/20-ceralive-after-modemmanager.conf`), so once the
 drain is done a shutdown stops CeraUI, then NetworkManager, then ModemManager.
@@ -209,8 +209,11 @@ chain. While they run, deliberate power-offs go through the broker's update and
 dpkg locks and writer check; the drain still counts boot-script sync as a writer,
 dpkg recovery is journaled and re-runs on the next boot, and the boot.scr sync
 replaces its file atomically. Per-attempt units order themselves before it: CeraUI's
-`ceralive-kernel-stage-<id>.service` and the image's `ceralive-rauc-arm@.service`
-carry `Before=ceralive-write-drain.service`. Stop order is the reverse, so during
+`ceralive-kernel-stage-<id>.service`, its transient `ceralive-os-stage-guard.service`
+and `ceralive-software-update.service`, and the image's `ceralive-rauc-arm@.service`
+carry `Before=ceralive-write-drain.service`. The drain never names a transient unit:
+that reference would keep systemd from unloading it after it stops, and a unit by
+that name couldn't start again until the next boot. Stop order is the reverse, so during
 any shutdown its `ExecStop` runs first. It writes its own fence,
 `fence.d/shutdown`, and doesn't continue until that write has succeeded (until
 then it counts as busy and retries). Then it returns only when no write runs (the same checks as above, plus dpkg's lock holder). That
